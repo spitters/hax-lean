@@ -1,0 +1,139 @@
+/-
+Copyright (c) 2025 SSProve-Lean4 Contributors. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: SSProve-Lean4 Contributors
+-/
+
+/-!
+# Imperative Expression AST
+
+This file defines `ImpExpr`, an imperative expression language modelling
+the Hax-supported subset of Rust. Each verified compiler phase consumes
+certain constructors, progressively lowering the program into a pure
+functional form that maps to SSProve's `RawCode`.
+
+## Constructors by phase
+
+| Phase             | Consumed constructors                        |
+|-------------------|----------------------------------------------|
+| dropReferences    | `borrow`, `deref`                            |
+| localMutation     | `assign`                                     |
+| functionalizeLoops| `forLoop`, `whileLoop`, `break_`, `continue_`|
+| cfIntoMonads      | `earlyReturn`, `questionMark`                |
+
+After all four phases, only the *core* constructors survive.
+-/
+
+namespace SSProve.Hax
+
+/-- Literal values in the imperative language. -/
+inductive ImpLit where
+  | bool (b : Bool)
+  | int (n : Int)
+  | unit
+  deriving Inhabited, BEq, Repr
+
+/-- Pattern matching arms. -/
+inductive ImpPat where
+  | wildcard
+  | litPat (l : ImpLit)
+  | varPat (name : String)
+  | tuplePat (pats : List ImpPat)
+  | somePat (p : ImpPat)
+  | nonePat
+  | okPat (p : ImpPat)
+  | errPat (p : ImpPat)
+  deriving Inhabited, BEq, Repr
+
+/-- Imperative expression AST.
+
+    This is a separate type from `RawCode`, keeping the existing SSProve
+    evaluation pipeline untouched. It is rich enough to express mutation,
+    loops, and control flow — features consumed by the verified phases. -/
+inductive ImpExpr where
+  -- Core (survive all phases)
+  | lit (v : ImpLit)
+  | var (name : String)
+  | letBind (name : String) (val body : ImpExpr)
+  | app (f : String) (args : List ImpExpr)
+  | tuple (elems : List ImpExpr)
+  | proj (e : ImpExpr) (i : Nat)
+  | ifThenElse (cond thn els : ImpExpr)
+  | match_ (scrut : ImpExpr) (arms : List (ImpPat × ImpExpr))
+  | unitVal
+  | seq (e1 e2 : ImpExpr)
+  -- Consumed by dropReferences (Phase 1)
+  | borrow (e : ImpExpr)
+  | deref (e : ImpExpr)
+  -- Consumed by localMutation (Phase 2)
+  | assign (name : String) (rhs : ImpExpr)
+  -- Consumed by functionalizeLoops (Phase 3)
+  | forLoop (var : String) (lo hi : ImpExpr) (body : ImpExpr)
+  | whileLoop (cond body : ImpExpr)
+  | break_ (e : Option ImpExpr)
+  | continue_
+  -- Consumed by cfIntoMonads (Phase 4)
+  | earlyReturn (e : ImpExpr)
+  | questionMark (e : ImpExpr)
+  deriving Inhabited
+
+/-- Custom induction principle for `ImpExpr` that handles nested lists.
+    The built-in `induction` tactic cannot handle `ImpExpr` because it is
+    a nested inductive type (contains `List ImpExpr` and `List (ImpPat × ImpExpr)`).
+    This principle provides proper induction hypotheses for list elements. -/
+@[elab_as_elim]
+def ImpExpr.ind {motive : ImpExpr → Prop}
+    (lit : ∀ v, motive (.lit v))
+    (var : ∀ n, motive (.var n))
+    (letBind : ∀ n val body, motive val → motive body → motive (.letBind n val body))
+    (app : ∀ f args, (∀ a, a ∈ args → motive a) → motive (.app f args))
+    (tuple : ∀ elems, (∀ a, a ∈ elems → motive a) → motive (.tuple elems))
+    (proj : ∀ e i, motive e → motive (.proj e i))
+    (ifThenElse : ∀ c t e, motive c → motive t → motive e → motive (.ifThenElse c t e))
+    (match_ : ∀ scrut arms, motive scrut → (∀ pa, pa ∈ arms → motive pa.2) →
+        motive (.match_ scrut arms))
+    (unitVal : motive .unitVal)
+    (seq : ∀ e1 e2, motive e1 → motive e2 → motive (.seq e1 e2))
+    (borrow : ∀ e, motive e → motive (.borrow e))
+    (deref : ∀ e, motive e → motive (.deref e))
+    (assign : ∀ n rhs, motive rhs → motive (.assign n rhs))
+    (forLoop : ∀ v lo hi body, motive lo → motive hi → motive body →
+        motive (.forLoop v lo hi body))
+    (whileLoop : ∀ c body, motive c → motive body → motive (.whileLoop c body))
+    (break_none : motive (.break_ none))
+    (break_some : ∀ e, motive e → motive (.break_ (some e)))
+    (continue_ : motive .continue_)
+    (earlyReturn : ∀ e, motive e → motive (.earlyReturn e))
+    (questionMark : ∀ e, motive e → motive (.questionMark e))
+    (e : ImpExpr) : motive e :=
+  go e
+where
+  go : (e : ImpExpr) → motive e
+    | .lit v => lit v
+    | .var n => var n
+    | .letBind n v b => letBind n v b (go v) (go b)
+    | .app f args => app f args (goList args)
+    | .tuple elems => tuple elems (goList elems)
+    | .proj e i => proj e i (go e)
+    | .ifThenElse c t e => ifThenElse c t e (go c) (go t) (go e)
+    | .match_ scrut arms => match_ scrut arms (go scrut) (goArms arms)
+    | .unitVal => unitVal
+    | .seq e1 e2 => seq e1 e2 (go e1) (go e2)
+    | .borrow e => borrow e (go e)
+    | .deref e => deref e (go e)
+    | .assign n rhs => assign n rhs (go rhs)
+    | .forLoop v lo hi body => forLoop v lo hi body (go lo) (go hi) (go body)
+    | .whileLoop c body => whileLoop c body (go c) (go body)
+    | .break_ none => break_none
+    | .break_ (some e) => break_some e (go e)
+    | .continue_ => continue_
+    | .earlyReturn e => earlyReturn e (go e)
+    | .questionMark e => questionMark e (go e)
+  goList : (es : List ImpExpr) → ∀ a, a ∈ es → motive a
+    | _ :: _, _, .head _ => go _
+    | _ :: es, a, .tail _ h => goList es a h
+  goArms : (arms : List (ImpPat × ImpExpr)) → ∀ pa, pa ∈ arms → motive pa.2
+    | _ :: _, _, .head _ => go _
+    | _ :: rest, pa, .tail _ h => goArms rest pa h
+
+end SSProve.Hax
