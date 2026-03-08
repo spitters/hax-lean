@@ -7,3 +7,6 @@ package «hax-lean» where
 @[default_target]
 lean_lib SSProve where
   srcDir := "."
+
+lean_exe haxpipe where
+  root := `SSProve.Hax.Main

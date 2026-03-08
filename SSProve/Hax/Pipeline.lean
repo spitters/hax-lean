@@ -12,12 +12,13 @@ import SSProve.Hax.Phase.DropReferences
 import SSProve.Hax.Phase.LocalMutation
 import SSProve.Hax.Phase.FunctionalizeLoops
 import SSProve.Hax.Phase.CfIntoMonads
+import SSProve.Hax.Phase.ExplicitMonadic
 import SSProve.Hax.ToRawCode
 
 /-!
 # End-to-End Pipeline
 
-Compose all four phases and translate to `RawCode`.
+Compose all five phases and translate to `RawCode`.
 
 ```
 ImpExpr
@@ -25,12 +26,14 @@ ImpExpr
   --[localMutation]-->     ImpExpr  (NoMutation)
   --[functionalizeLoops]-> ImpExpr  (NoLoops)
   --[cfIntoMonads]-------> ImpExpr  (NoEarlyExit)
+  --[explicitMonadic]----> ImpExpr  (FullyFunctional, explicit CF encoding)
   --[toRawCode]----------> RawCode
 ```
 
 ## Main definitions
 
-* `pipeline` — full phase composition
+* `pipeline` — full phase composition (4 core phases)
+* `pipelineExt` — extended pipeline with explicit monadic encoding (5 phases)
 * `pipelineToRawCode` — pipeline + translation to RawCode
 * `pipeline_fullyFunctional` — all feature predicates hold after pipeline
 -/
@@ -92,5 +95,20 @@ theorem pipeline_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr)
   have hfl := functionalizeLoops_correct _ hNoLoops
   rw [cfIntoMonads_correct _ (by rw [hfl]; exact hNoEE), hfl,
       localMutation_correct, dropReferences_correct]
+
+/-! ## Extended Pipeline with Explicit Monadic Encoding -/
+
+/-- The extended 5-phase pipeline: core pipeline + explicit monadic encoding. -/
+def pipelineExt (e : ImpExpr) : ImpExpr :=
+  explicitMonadic (pipeline e)
+
+/-- The extended pipeline output is fully functional. -/
+theorem pipelineExt_fullyFunctional (e : ImpExpr) : FullyFunctional (pipelineExt e) := by
+  unfold pipelineExt
+  have hff := pipeline_fullyFunctional e
+  exact ⟨explicitMonadic_preserves_noRefs _ hff.1,
+         explicitMonadic_preserves_noMut _ hff.2.1,
+         explicitMonadic_preserves_noLoops _ hff.2.2.1,
+         explicitMonadic_preserves_noEarlyExit _ hff.2.2.2⟩
 
 end SSProve.Hax

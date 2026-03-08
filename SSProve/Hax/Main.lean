@@ -1,0 +1,150 @@
+/-
+Copyright (c) 2025 SSProve-Lean4 Contributors. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: SSProve-Lean4 Contributors
+-/
+import SSProve.Hax.Json
+import SSProve.Hax.HaxAdapter
+import SSProve.Hax.PrettyPrint
+import SSProve.Hax.Pipeline
+
+/-!
+# haxpipe CLI — Verified Hax Pipeline
+
+A command-line tool that reads hax AST (JSON), runs the verified 5-phase
+pipeline, and outputs Lean 4 source code or transformed JSON.
+
+## Usage
+
+```
+haxpipe [OPTIONS] [INPUT_FILE]
+
+Options:
+  --emit-lean     Output Lean 4 source code (default)
+  --emit-json     Output transformed AST as JSON
+  --validate FILE Compare pipeline output with expected output from FILE
+  --extended      Use the 5-phase pipeline (with ExplicitMonadic)
+  --hax           Input is in hax's native JSON format (Decorated<ExprKind>)
+  --help          Show this help message
+
+If INPUT_FILE is omitted or "-", reads from stdin.
+```
+-/
+
+open SSProve.Hax
+open Lean (Json ToJson FromJson toJson fromJson?)
+
+/-- Read input from file or stdin. -/
+def readInput (path : Option String) : IO String := do
+  match path with
+  | none | some "-" => do
+    let stdin ← IO.getStdin
+    stdin.readToEnd
+  | some p => IO.FS.readFile p
+
+/-- Parse JSON string into ImpExpr (our native format). -/
+def parseExpr (input : String) : IO ImpExpr := do
+  let json ← IO.ofExcept (Json.parse input)
+  IO.ofExcept (fromJson? json : Except String ImpExpr)
+
+/-- Parse JSON string from hax's native format into ImpExpr. -/
+def parseHaxExpr (input : String) : IO ImpExpr := do
+  let json ← IO.ofExcept (Json.parse input)
+  IO.ofExcept (HaxAdapter.parseHaxExpr json)
+
+/-- Command-line options. -/
+structure Options where
+  emitMode : String := "lean"  -- "lean" | "json"
+  inputFile : Option String := none
+  validateFile : Option String := none
+  extended : Bool := false
+  haxFormat : Bool := false
+  help : Bool := false
+  name : String := "result"
+
+/-- Parse command-line arguments. -/
+def parseArgs (args : List String) : Options :=
+  go args {}
+where
+  go : List String → Options → Options
+    | [], opts => opts
+    | "--emit-lean" :: rest, opts => go rest { opts with emitMode := "lean" }
+    | "--emit-json" :: rest, opts => go rest { opts with emitMode := "json" }
+    | "--validate" :: file :: rest, opts =>
+      go rest { opts with validateFile := some file }
+    | "--extended" :: rest, opts => go rest { opts with extended := true }
+    | "--hax" :: rest, opts => go rest { opts with haxFormat := true }
+    | "--help" :: _, opts => { opts with help := true }
+    | "--name" :: n :: rest, opts => go rest { opts with name := n }
+    | arg :: rest, opts =>
+      if arg.startsWith "--" then go rest opts  -- skip unknown flags
+      else go rest { opts with inputFile := some arg }
+
+def helpText : String :=
+"haxpipe — Verified Hax Pipeline (Lean 4)
+
+USAGE:
+  haxpipe [OPTIONS] [INPUT_FILE]
+
+OPTIONS:
+  --emit-lean       Output Lean 4 source code (default)
+  --emit-json       Output transformed AST as JSON
+  --validate FILE   Compare pipeline output with expected output from FILE
+  --extended        Use 5-phase pipeline (with ExplicitMonadic)
+  --hax             Input is in hax's native JSON format (Decorated<ExprKind>)
+  --name NAME       Name for the generated definition (default: result)
+  --help            Show this help message
+
+INPUT:
+  JSON-encoded ImpExpr (default) or hax Decorated<ExprKind> (with --hax).
+  Reads from stdin if no file specified (or \"-\").
+
+EXAMPLES:
+  echo '{\"var\": \"x\"}' | haxpipe
+  haxpipe --emit-json input.json
+  haxpipe --validate expected.json input.json
+  haxpipe --extended --name my_fn input.json
+  haxpipe --hax hax_dump.json
+"
+
+/-- Compare two ImpExprs structurally and report first difference. -/
+partial def diffExpr (path : String) (e1 e2 : ImpExpr) : Option String :=
+  let j1 := toJson e1
+  let j2 := toJson e2
+  if j1 == j2 then none
+  else some s!"Mismatch at {path}:\n  pipeline: {j1.pretty}\n  expected: {j2.pretty}"
+
+def main (args : List String) : IO UInt32 := do
+  let opts := parseArgs args
+
+  if opts.help then
+    IO.println helpText
+    return 0
+
+  -- Read and parse input
+  let input ← readInput opts.inputFile
+  let expr ← if opts.haxFormat then parseHaxExpr input else parseExpr input
+
+  -- Run the verified pipeline
+  let result := if opts.extended then pipelineExt expr else pipeline expr
+
+  -- Handle output mode
+  match opts.validateFile with
+  | some vfile =>
+    -- Validation mode: compare with expected output
+    let expectedInput ← IO.FS.readFile vfile
+    let expected ← if opts.haxFormat then parseHaxExpr expectedInput else parseExpr expectedInput
+    match diffExpr "" result expected with
+    | none =>
+      IO.println "PASS: Pipeline output matches expected output."
+      return 0
+    | some diff =>
+      IO.eprintln s!"FAIL: {diff}"
+      return 1
+  | none =>
+    match opts.emitMode with
+    | "json" =>
+      IO.println ((toJson result).pretty)
+    | _ =>
+      IO.println (toLeanDef opts.name result)
+    return 0
