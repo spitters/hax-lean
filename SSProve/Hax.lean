@@ -7,5 +7,18 @@ import SSProve.Hax.Phase.DropReferences
 import SSProve.Hax.Phase.LocalMutation
 import SSProve.Hax.Phase.FunctionalizeLoops
 import SSProve.Hax.Phase.CfIntoMonads
+import SSProve.Hax.Phase.ExplicitMonadic
 import SSProve.Hax.ToRawCode
 import SSProve.Hax.Pipeline
+import SSProve.Hax.PipelineCF
+import SSProve.Hax.Tests
+-- Typed layer
+import SSProve.Hax.ImpType
+import SSProve.Hax.TExpr
+import SSProve.Hax.TFeatures
+import SSProve.Hax.TPhase.DropReferences
+import SSProve.Hax.TPhase.LocalMutation
+import SSProve.Hax.TPhase.FunctionalizeLoops
+import SSProve.Hax.TPhase.CfIntoMonads
+import SSProve.Hax.TPhase.ExplicitMonadic
+import SSProve.Hax.TPipeline

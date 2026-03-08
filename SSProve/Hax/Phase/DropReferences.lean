@@ -48,6 +48,15 @@ def dropReferences : ImpExpr → ImpExpr
   | .continue_ => .continue_
   | .earlyReturn e => .earlyReturn (dropReferences e)
   | .questionMark e => .questionMark (dropReferences e)
+  | .forFold v lo hi body =>
+    .forFold v (dropReferences lo) (dropReferences hi) (dropReferences body)
+  | .whileFold c body => .whileFold (dropReferences c) (dropReferences body)
+  | .forFoldReturn v lo hi body =>
+    .forFoldReturn v (dropReferences lo) (dropReferences hi) (dropReferences body)
+  | .whileFoldReturn c body => .whileFoldReturn (dropReferences c) (dropReferences body)
+  | .cfBreak e => .cfBreak (dropReferences e)
+  | .cfContinue e => .cfContinue (dropReferences e)
+  | .cfBreakContinue e => .cfBreakContinue (dropReferences e)
 where
   mapExpr : List ImpExpr → List ImpExpr
     | [] => []
@@ -103,6 +112,13 @@ theorem dropReferences_noRefs (e : ImpExpr) : NoReferences (dropReferences e) :=
   | continue_ => exact .continue_
   | earlyReturn _ ih => exact .earlyReturn ih
   | questionMark _ ih => exact .questionMark ih
+  | forFold _ _ _ _ ih1 ih2 ih3 => exact .forFold ih1 ih2 ih3
+  | whileFold _ _ ih1 ih2 => exact .whileFold ih1 ih2
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn ih1 ih2 ih3
+  | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn ih1 ih2
+  | cfBreak _ ih => exact .cfBreak ih
+  | cfContinue _ ih => exact .cfContinue ih
+  | cfBreakContinue _ ih => exact .cfBreakContinue ih
 
 /-- Semantics preservation: `denote` commutes with `dropReferences`.
 
@@ -201,5 +217,13 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
     simp only [dropReferences]
     unfold denote
     exact denoteWhile_congr bi fuel c (dropReferences c) body (dropReferences body) ih1 ih2
+  -- Phase 3/4 output constructors: denote returns error for all
+  | forFold _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [dropReferences, denote]
+  | whileFold _ _ ih1 ih2 => intro fuel; simp [dropReferences, denote]
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [dropReferences, denote]
+  | whileFoldReturn _ _ ih1 ih2 => intro fuel; simp [dropReferences, denote]
+  | cfBreak _ ih => intro fuel; simp [dropReferences, denote]
+  | cfContinue _ ih => intro fuel; simp [dropReferences, denote]
+  | cfBreakContinue _ ih => intro fuel; simp [dropReferences, denote]
 
 end SSProve.Hax

@@ -42,6 +42,15 @@ where
     | .continue_, acc => acc
     | .earlyReturn e, acc => go e acc
     | .questionMark e, acc => go e acc
+    | .forFold v lo hi body, acc =>
+      go lo (go hi (go body acc |>.filter (· != v)))
+    | .whileFold c body, acc => go c (go body acc)
+    | .forFoldReturn v lo hi body, acc =>
+      go lo (go hi (go body acc |>.filter (· != v)))
+    | .whileFoldReturn c body, acc => go c (go body acc)
+    | .cfBreak e, acc => go e acc
+    | .cfContinue e, acc => go e acc
+    | .cfBreakContinue e, acc => go e acc
   goList : List ImpExpr → List String → List String
     | [], acc => acc
     | e :: es, acc => go e (goList es acc)
@@ -71,6 +80,13 @@ where
     | .break_ none, acc => acc
     | .earlyReturn e, acc => go e acc
     | .questionMark e, acc => go e acc
+    | .forFold _ lo hi body, acc => go lo (go hi (go body acc))
+    | .whileFold c body, acc => go c (go body acc)
+    | .forFoldReturn _ lo hi body, acc => go lo (go hi (go body acc))
+    | .whileFoldReturn c body, acc => go c (go body acc)
+    | .cfBreak e, acc => go e acc
+    | .cfContinue e, acc => go e acc
+    | .cfBreakContinue e, acc => go e acc
   goList : List ImpExpr → List String → List String
     | [], acc => acc
     | e :: es, acc => go e (goList es acc)

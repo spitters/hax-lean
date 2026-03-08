@@ -49,13 +49,25 @@ def cfIntoMonads : ImpExpr → ImpExpr
   | .break_ none => .break_ none
   | .continue_ => .continue_
   | .earlyReturn e =>
-    .app "ControlFlow.Break" [cfIntoMonads e]
+    .cfBreak (cfIntoMonads e)
   | .questionMark e =>
     .match_ (cfIntoMonads e) [
       (.okPat (.varPat "__ok_val"), .var "__ok_val"),
       (.errPat (.varPat "__err_val"),
-        .app "ControlFlow.Break" [.app "Err" [.var "__err_val"]])
+        .cfBreak (.app "Err" [.var "__err_val"]))
     ]
+  -- Phase 3 output constructors: pass through
+  | .forFold v lo hi body =>
+    .forFold v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
+  | .whileFold c body =>
+    .whileFold (cfIntoMonads c) (cfIntoMonads body)
+  | .forFoldReturn v lo hi body =>
+    .forFoldReturn v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
+  | .whileFoldReturn c body =>
+    .whileFoldReturn (cfIntoMonads c) (cfIntoMonads body)
+  | .cfBreak e => .cfBreak (cfIntoMonads e)
+  | .cfContinue e => .cfContinue (cfIntoMonads e)
+  | .cfBreakContinue e => .cfBreakContinue (cfIntoMonads e)
 where
   mapExpr : List ImpExpr → List ImpExpr
     | [] => []
@@ -110,16 +122,81 @@ theorem cfIntoMonads_noEarlyExit (e : ImpExpr) :
   | break_none => exact .break_none
   | break_some _ ih => exact .break_some ih
   | continue_ => exact .continue_
-  | earlyReturn _ ih =>
-    exact .app (fun a ha => by simp at ha; subst ha; exact ih)
+  | earlyReturn _ ih => exact .cfBreak ih
   | questionMark _ ih =>
     exact .match_ ih (fun pa hpa => by
       simp at hpa
       rcases hpa with ⟨_, rfl⟩ | ⟨_, rfl⟩
       · exact .var
-      · exact .app (fun a ha => by
-          simp at ha; subst ha
-          exact .app (fun a ha => by simp at ha; subst ha; exact .var)))
+      · exact .cfBreak (.app (fun a ha => by simp at ha; subst ha; exact .var)))
+  | forFold _ _ _ _ ih1 ih2 ih3 => exact .forFold ih1 ih2 ih3
+  | whileFold _ _ ih1 ih2 => exact .whileFold ih1 ih2
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn ih1 ih2 ih3
+  | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn ih1 ih2
+  | cfBreak _ ih => exact .cfBreak ih
+  | cfContinue _ ih => exact .cfContinue ih
+  | cfBreakContinue _ ih => exact .cfBreakContinue ih
+
+/-- When an expression has no early exit nodes, `cfIntoMonads` is the identity. -/
+theorem cfIntoMonads_identity (e : ImpExpr) (h : NoEarlyExit e) :
+    cfIntoMonads e = e := by
+  induction e using ImpExpr.ind with
+  | lit | var | unitVal | continue_ => rfl
+  | letBind _ _ _ ih1 ih2 =>
+    cases h with | letBind h1 h2 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | app _ args ih =>
+    cases h with | app hargs =>
+    simp only [cfIntoMonads, cfIntoMonads.mapExpr_eq]
+    congr 1
+    rw [show args.map cfIntoMonads = args.map id from
+      List.map_congr_left (fun a ha => ih a ha (hargs a ha)), List.map_id]
+  | tuple elems ih =>
+    cases h with | tuple helems =>
+    simp only [cfIntoMonads, cfIntoMonads.mapExpr_eq]
+    congr 1
+    rw [show elems.map cfIntoMonads = elems.map id from
+      List.map_congr_left (fun a ha => ih a ha (helems a ha)), List.map_id]
+  | proj _ _ ih => cases h with | proj he => simp only [cfIntoMonads, ih he]
+  | ifThenElse _ _ _ ih1 ih2 ih3 =>
+    cases h with | ifThenElse h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | match_ _ arms ih1 ih2 =>
+    cases h with | match_ hs harms =>
+    simp only [cfIntoMonads, cfIntoMonads.mapArms_eq, ih1 hs]
+    congr 1
+    have : arms.map (fun (p, e) => (p, cfIntoMonads e)) = arms.map id :=
+      List.map_congr_left (fun ⟨p, b⟩ hpb => by
+        simp only [id, ih2 (p, b) hpb (harms (p, b) hpb)])
+    rw [this, List.map_id]
+  | seq _ _ ih1 ih2 =>
+    cases h with | seq h1 h2 => simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | borrow _ ih => cases h with | borrow he => simp only [cfIntoMonads, ih he]
+  | deref _ ih => cases h with | deref he => simp only [cfIntoMonads, ih he]
+  | assign _ _ ih => cases h with | assign hrhs => simp only [cfIntoMonads, ih hrhs]
+  | forLoop _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoop h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | whileLoop _ _ ih1 ih2 =>
+    cases h with | whileLoop h1 h2 => simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | break_none => rfl
+  | break_some _ ih =>
+    cases h with | break_some he => simp only [cfIntoMonads, ih he]
+  | earlyReturn => exact absurd h NoEarlyExit.not_earlyReturn
+  | questionMark => exact absurd h NoEarlyExit.not_questionMark
+  | forFold _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFold h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | whileFold _ _ ih1 ih2 =>
+    cases h with | whileFold h1 h2 => simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldReturn h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | whileFoldReturn _ _ ih1 ih2 =>
+    cases h with | whileFoldReturn h1 h2 => simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | cfBreak _ ih => cases h with | cfBreak he => simp only [cfIntoMonads, ih he]
+  | cfContinue _ ih => cases h with | cfContinue he => simp only [cfIntoMonads, ih he]
+  | cfBreakContinue _ ih => cases h with | cfBreakContinue he => simp only [cfIntoMonads, ih he]
 
 /-- `cfIntoMonads` preserves `NoReferences`. -/
 theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
@@ -161,17 +238,25 @@ theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
   | break_some _ ih => cases h with | break_some he => exact .break_some (ih he)
   | continue_ => exact .continue_
   | earlyReturn _ ih =>
-    cases h with | earlyReturn he =>
-    exact .app (fun a ha => by simp at ha; subst ha; exact ih he)
+    cases h with | earlyReturn he => exact .cfBreak (ih he)
   | questionMark _ ih =>
     cases h with | questionMark he =>
     exact .match_ (ih he) (fun pa hpa => by
       simp at hpa
       rcases hpa with ⟨_, rfl⟩ | ⟨_, rfl⟩
       · exact .var
-      · exact .app (fun a ha => by
-          simp at ha; subst ha
-          exact .app (fun a ha => by simp at ha; subst ha; exact .var)))
+      · exact .cfBreak (.app (fun a ha => by simp at ha; subst ha; exact .var)))
+  | forFold _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFold h1 h2 h3 => exact .forFold (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFold _ _ ih1 ih2 =>
+    cases h with | whileFold h1 h2 => exact .whileFold (ih1 h1) (ih2 h2)
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFoldReturn _ _ ih1 ih2 =>
+    cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
+  | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
+  | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
 
 /-- `cfIntoMonads` preserves `NoMutation`. -/
 theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
@@ -213,17 +298,25 @@ theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
   | break_some _ ih => cases h with | break_some he => exact .break_some (ih he)
   | continue_ => exact .continue_
   | earlyReturn _ ih =>
-    cases h with | earlyReturn he =>
-    exact .app (fun a ha => by simp at ha; subst ha; exact ih he)
+    cases h with | earlyReturn he => exact .cfBreak (ih he)
   | questionMark _ ih =>
     cases h with | questionMark he =>
     exact .match_ (ih he) (fun pa hpa => by
       simp at hpa
       rcases hpa with ⟨_, rfl⟩ | ⟨_, rfl⟩
       · exact .var
-      · exact .app (fun a ha => by
-          simp at ha; subst ha
-          exact .app (fun a ha => by simp at ha; subst ha; exact .var)))
+      · exact .cfBreak (.app (fun a ha => by simp at ha; subst ha; exact .var)))
+  | forFold _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFold h1 h2 h3 => exact .forFold (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFold _ _ ih1 ih2 =>
+    cases h with | whileFold h1 h2 => exact .whileFold (ih1 h1) (ih2 h2)
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFoldReturn _ _ ih1 ih2 =>
+    cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
+  | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
+  | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
 
 /-- `cfIntoMonads` preserves `NoLoops`. -/
 theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
@@ -264,17 +357,25 @@ theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
   | break_some => exact absurd h NoLoops.not_break
   | continue_ => exact absurd h NoLoops.not_continue
   | earlyReturn _ ih =>
-    cases h with | earlyReturn he =>
-    exact .app (fun a ha => by simp at ha; subst ha; exact ih he)
+    cases h with | earlyReturn he => exact .cfBreak (ih he)
   | questionMark _ ih =>
     cases h with | questionMark he =>
     exact .match_ (ih he) (fun pa hpa => by
       simp at hpa
       rcases hpa with ⟨_, rfl⟩ | ⟨_, rfl⟩
       · exact .var
-      · exact .app (fun a ha => by
-          simp at ha; subst ha
-          exact .app (fun a ha => by simp at ha; subst ha; exact .var)))
+      · exact .cfBreak (.app (fun a ha => by simp at ha; subst ha; exact .var)))
+  | forFold _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFold h1 h2 h3 => exact .forFold (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFold _ _ ih1 ih2 =>
+    cases h with | whileFold h1 h2 => exact .whileFold (ih1 h1) (ih2 h2)
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFoldReturn _ _ ih1 ih2 =>
+    cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
+  | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
+  | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
 
 /-- On early-exit-free inputs, `cfIntoMonads` is the identity.
 
@@ -336,5 +437,26 @@ theorem cfIntoMonads_correct (e : ImpExpr) (h : NoEarlyExit e) :
       Prod.ext rfl (ih2 pa hpa (harms pa hpa)))
   | earlyReturn => exact absurd h NoEarlyExit.not_earlyReturn
   | questionMark => exact absurd h NoEarlyExit.not_questionMark
+  | forFold v lo hi body ih1 ih2 ih3 =>
+    cases h with | forFold h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | whileFold c body ih1 ih2 =>
+    cases h with | whileFold h1 h2 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | forFoldReturn v lo hi body ih1 ih2 ih3 =>
+    cases h with | forFoldReturn h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | whileFoldReturn c body ih1 ih2 =>
+    cases h with | whileFoldReturn h1 h2 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | cfBreak e ih =>
+    cases h with | cfBreak he =>
+    simp only [cfIntoMonads, ih he]
+  | cfContinue e ih =>
+    cases h with | cfContinue he =>
+    simp only [cfIntoMonads, ih he]
+  | cfBreakContinue e ih =>
+    cases h with | cfBreakContinue he =>
+    simp only [cfIntoMonads, ih he]
 
 end SSProve.Hax

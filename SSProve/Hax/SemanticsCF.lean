@@ -58,6 +58,99 @@ def encodeCF3 : Outcome → Outcome
     encodeCF3 .continued = .val (.controlFlow false .unit) := rfl
 @[simp] theorem encodeCF3_earlyRet (v : Value) : encodeCF3 (.earlyRet v) = .earlyRet v := rfl
 
+/-- Combined encoding for the full pipeline (Phases 3 + 4).
+    Maps all control flow outcomes to `val` encodings:
+    - `val v` → `val v` (unchanged)
+    - `err msg` → `err msg` (unchanged)
+    - `earlyRet v` → `val (controlFlow true v)` (early return → CF break)
+    - `broke v` → `val (controlFlow true v)` (loop break → CF break)
+    - `continued` → `val (controlFlow false unit)` (continue → CF continue)
+
+    Note: `earlyRet` and `broke` have the same encoding. For well-scoped
+    programs (`LoopScoped`), `broke`/`continued` never appear at the top
+    level — they're resolved by the enclosing loop. -/
+def encodeCF : Outcome → Outcome
+  | .val v => .val v
+  | .err msg => .err msg
+  | .earlyRet v => .val (.controlFlow true v)
+  | .broke v => .val (.controlFlow true v)
+  | .continued => .val (.controlFlow false .unit)
+
+@[simp] theorem encodeCF_val (v : Value) : encodeCF (.val v) = .val v := rfl
+@[simp] theorem encodeCF_err (msg : String) : encodeCF (.err msg) = .err msg := rfl
+@[simp] theorem encodeCF_earlyRet (v : Value) :
+    encodeCF (.earlyRet v) = .val (.controlFlow true v) := rfl
+@[simp] theorem encodeCF_broke (v : Value) :
+    encodeCF (.broke v) = .val (.controlFlow true v) := rfl
+@[simp] theorem encodeCF_continued :
+    encodeCF .continued = .val (.controlFlow false .unit) := rfl
+
+/-- Composition: encodeCF4 ∘ encodeCF3 = encodeCF -/
+@[simp] theorem encodeCF4_encodeCF3 (o : Outcome) :
+    encodeCF4 (encodeCF3 o) = encodeCF o := by
+  cases o <;> rfl
+
+/-- Nested Phase 3 encoding for loop bodies with earlyReturn.
+    Like `encodeCF3` but double-wraps `broke` to distinguish from `earlyRet`:
+    - `broke v` → `val (controlFlow true (controlFlow false v))` (loop break)
+    - `earlyRet v` → `earlyRet v` (preserved for Phase 4)
+    - `continued` → `val (controlFlow false unit)` (same as encodeCF3) -/
+def encodeCF3nested : Outcome → Outcome
+  | .val v => .val v
+  | .err msg => .err msg
+  | .earlyRet v => .earlyRet v
+  | .broke v => .val (.controlFlow true (.controlFlow false v))
+  | .continued => .val (.controlFlow false .unit)
+
+@[simp] theorem encodeCF3nested_val (v : Value) : encodeCF3nested (.val v) = .val v := rfl
+@[simp] theorem encodeCF3nested_err (msg : String) : encodeCF3nested (.err msg) = .err msg := rfl
+@[simp] theorem encodeCF3nested_earlyRet (v : Value) :
+    encodeCF3nested (.earlyRet v) = .earlyRet v := rfl
+@[simp] theorem encodeCF3nested_broke (v : Value) :
+    encodeCF3nested (.broke v) = .val (.controlFlow true (.controlFlow false v)) := rfl
+@[simp] theorem encodeCF3nested_continued :
+    encodeCF3nested .continued = .val (.controlFlow false .unit) := rfl
+
+/-- Parameterized Phase 3 encoding: `false` → `encodeCF3`, `true` → `encodeCF3nested`.
+    Defined so that `encodeCF3gen false` reduces to `encodeCF3` definitionally. -/
+def encodeCF3gen : Bool → Outcome → Outcome
+  | false => encodeCF3
+  | true => encodeCF3nested
+
+theorem encodeCF3gen_false_eq : encodeCF3gen false = encodeCF3 := rfl
+theorem encodeCF3gen_true_eq : encodeCF3gen true = encodeCF3nested := rfl
+
+@[simp] theorem encodeCF3gen_val (n : Bool) (v : Value) :
+    encodeCF3gen n (.val v) = .val v := by cases n <;> rfl
+@[simp] theorem encodeCF3gen_err (n : Bool) (msg : String) :
+    encodeCF3gen n (.err msg) = .err msg := by cases n <;> rfl
+@[simp] theorem encodeCF3gen_earlyRet (n : Bool) (v : Value) :
+    encodeCF3gen n (.earlyRet v) = .earlyRet v := by cases n <;> rfl
+@[simp] theorem encodeCF3gen_continued (n : Bool) :
+    encodeCF3gen n .continued = .val (.controlFlow false .unit) := by cases n <;> rfl
+@[simp] theorem encodeCF3gen_broke_false (v : Value) :
+    encodeCF3gen false (.broke v) = .val (.controlFlow true v) := rfl
+@[simp] theorem encodeCF3gen_broke_true (v : Value) :
+    encodeCF3gen true (.broke v) = .val (.controlFlow true (.controlFlow false v)) := rfl
+
+/-- Nested encoding for Phase 3+4 inside loops with earlyReturn.
+    Distinguishes broke (→ double-wrapped) from earlyRet (→ single-wrapped). -/
+def encodeCFnested : Outcome → Outcome
+  | .val v => .val v
+  | .err msg => .err msg
+  | .earlyRet v => .val (.controlFlow true v)
+  | .broke v => .val (.controlFlow true (.controlFlow false v))
+  | .continued => .val (.controlFlow false .unit)
+
+@[simp] theorem encodeCFnested_val (v : Value) : encodeCFnested (.val v) = .val v := rfl
+@[simp] theorem encodeCFnested_err (msg : String) : encodeCFnested (.err msg) = .err msg := rfl
+@[simp] theorem encodeCFnested_earlyRet (v : Value) :
+    encodeCFnested (.earlyRet v) = .val (.controlFlow true v) := rfl
+@[simp] theorem encodeCFnested_broke (v : Value) :
+    encodeCFnested (.broke v) = .val (.controlFlow true (.controlFlow false v)) := rfl
+@[simp] theorem encodeCFnested_continued :
+    encodeCFnested .continued = .val (.controlFlow false .unit) := rfl
+
 end Outcome
 
 /-! ## Builtins predicates -/
@@ -120,6 +213,15 @@ inductive LoopScoped : ImpExpr → Prop where
   | whileLoop {c body} : LoopScoped (.whileLoop c body)
   | earlyReturn {e} : LoopScoped e → LoopScoped (.earlyReturn e)
   | questionMark {e} : LoopScoped e → LoopScoped (.questionMark e)
+  | forFold {v lo hi body} : LoopScoped lo → LoopScoped hi →
+      LoopScoped (.forFold v lo hi body)
+  | whileFold {c body} : LoopScoped (.whileFold c body)
+  | forFoldReturn {v lo hi body} : LoopScoped lo → LoopScoped hi →
+      LoopScoped (.forFoldReturn v lo hi body)
+  | whileFoldReturn {c body} : LoopScoped (.whileFoldReturn c body)
+  | cfBreak {e} : LoopScoped e → LoopScoped (.cfBreak e)
+  | cfContinue {e} : LoopScoped e → LoopScoped (.cfContinue e)
+  | cfBreakContinue {e} : LoopScoped e → LoopScoped (.cfBreakContinue e)
 
 /-! ## ControlFlow-aware evaluator
 
@@ -226,6 +328,49 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.result false v) => pure (.earlyRet (.result false v))
     | .val _ => pure (.err "? operator on non-Result")
     | other => pure other
+  -- Dedicated constructors for Phase 3/4 output
+  | .forFold var lo hi body => do
+    let rlo ← denote' bi fuel lo
+    let rhi ← denote' bi fuel hi
+    match rlo, rhi with
+    | .val (.int lo_val), .val (.int hi_val) =>
+      denoteForLoop' bi fuel var lo_val hi_val body
+    | .val (.controlFlow _ _), _ => pure rlo
+    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | other, _ => pure other
+  | .whileFold cond body =>
+    denoteWhile' bi fuel cond body
+  | .forFoldReturn var lo hi body => do
+    let rlo ← denote' bi fuel lo
+    let rhi ← denote' bi fuel hi
+    match rlo, rhi with
+    | .val (.int lo_val), .val (.int hi_val) =>
+      denoteForLoop'Return bi fuel var lo_val hi_val body
+    | .val (.controlFlow _ _), _ => pure rlo
+    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | other, _ => pure other
+  | .whileFoldReturn cond body =>
+    denoteWhile'Return bi fuel cond body
+  | .cfBreak e => do
+    let r ← denote' bi fuel e
+    match r with
+    | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
+    | .val v => pure (.val (.controlFlow true v))
+    | other => pure other
+  | .cfContinue e => do
+    let r ← denote' bi fuel e
+    match r with
+    | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
+    | .val v => pure (.val (.controlFlow false v))
+    | other => pure other
+  | .cfBreakContinue e => do
+    let r ← denote' bi fuel e
+    match r with
+    | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
+    | .val v => pure (.val (.controlFlow true (.controlFlow false v)))
+    | other => pure other
   termination_by e => (fuel, sizeOf e)
   decreasing_by
     all_goals simp_wf
@@ -238,63 +383,18 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
        simp +arith [sizeOf, SizeOf.sizeOf, ImpExpr._sizeOf_1] at *;
        omega))
 
-/-- App dispatch: handles for_fold/while_fold/ControlFlow.Break/Continue specially. -/
+/-- App dispatch: now only handles regular (non-reserved) function calls.
+    Reserved names are handled by dedicated AST constructors. -/
 def denoteApp' (bi : Builtins) (fuel : Nat) (f : String) (args : List ImpExpr) :
-    StateM Env Outcome :=
-  if f = "for_fold" then
-    match args with
-    | [.var var, lo, hi, body] => do
-      let rlo ← denote' bi fuel lo
-      let rhi ← denote' bi fuel hi
-      match rlo, rhi with
-      | .val (.int lo_val), .val (.int hi_val) =>
-        denoteForLoop' bi fuel var lo_val hi_val body
-      | .val (.controlFlow _ _), _ => pure rlo
-      | _, .val (.controlFlow _ _) => pure rlo
-      | .val _, .val _ => pure (.err "for loop bounds must be integers")
-      | other, _ => pure other
-    | _ => pure (.err "for_fold expects [var, lo, hi, body]")
-  else if f = "while_fold" then
-    match args with
-    | [cond, body] => denoteWhile' bi fuel cond body
-    | _ => pure (.err "while_fold expects exactly 2 arguments")
-  else if f = "ControlFlow.Break" then
-    match args with
-    | [e] => do
-      let r ← denote' bi fuel e
-      match r with
-      | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
-      | .val v => pure (.val (.controlFlow true v))
-      | other => pure other
-    | _ => pure (.err "ControlFlow.Break expects 1 argument")
-  else if f = "ControlFlow.Continue" then
-    match args with
-    | [e] => do
-      let r ← denote' bi fuel e
-      match r with
-      | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
-      | .val v => pure (.val (.controlFlow false v))
-      | other => pure other
-    | _ => pure (.err "ControlFlow.Continue expects 1 argument")
-  else do
-    let mvals ← denoteArgs' bi fuel args
-    match mvals with
-    | some vals =>
-      match bi f vals with
-      | some v => pure (.val v)
-      | none => pure (.err s!"unknown function or bad args: {f}")
-    | none => pure (.err "non-value in function arguments")
+    StateM Env Outcome := do
+  let mvals ← denoteArgs' bi fuel args
+  match mvals with
+  | some vals =>
+    match bi f vals with
+    | some v => pure (.val v)
+    | none => pure (.err s!"unknown function or bad args: {f}")
+  | none => pure (.err "non-value in function arguments")
   termination_by (fuel, 1 + sizeOf args)
-  decreasing_by
-    all_goals simp_wf
-    all_goals (first | omega |
-      (try (have := ImpExpr.sizeOf_pos lo);
-       try (have := ImpExpr.sizeOf_pos hi);
-       try (have := ImpExpr.sizeOf_pos body);
-       try (have := ImpExpr.sizeOf_pos cond);
-       try (have := ImpExpr.sizeOf_pos e);
-       simp +arith [sizeOf, SizeOf.sizeOf, ImpExpr._sizeOf_1] at *;
-       omega))
 
 /-- Evaluate a list of expressions, collecting normal non-controlFlow values.
     Returns `none` if any argument evaluates to non-val or controlFlow. -/
@@ -399,6 +499,65 @@ def denoteWhileOrig' (bi : Builtins) (fuel : Nat)
       | .val _ | .continued =>
         denoteWhileOrig' bi (fuel - 1) cond body
       | .broke v => pure (.val v)
+      | other => pure other
+    | .val (.bool false) => pure (.val .unit)
+    | .val _ => pure (.err "while condition not a bool")
+    | other => pure other
+  termination_by (fuel, sizeOf cond + sizeOf body)
+  decreasing_by
+    all_goals simp_wf
+    all_goals (first | omega |
+      (have := ImpExpr.sizeOf_pos cond;
+       have := ImpExpr.sizeOf_pos body;
+       omega))
+
+/-- For loop with nested ControlFlow: distinguishes loop break from early return.
+    Used by `denote'` to evaluate `app "for_fold_return" [var, lo, hi, body]`.
+
+    Body results:
+    - `val (controlFlow true (controlFlow false v))` → loop break, return `val v`
+    - `val (controlFlow true v)` (non-Continue) → early return, propagate
+    - `val (controlFlow false _)` → continue iterating
+    - `val _` (non-CF) → normal, continue iterating -/
+def denoteForLoop'Return (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) : StateM Env Outcome :=
+  if lo ≥ hi then pure (.val .unit)
+  else if fuel = 0 then pure (.err "out of fuel")
+  else do
+    modify (Env.extend · var (.int lo))
+    let rb ← denote' bi fuel body
+    match rb with
+    | .val (.controlFlow true (.controlFlow false v)) =>  -- Break(Continue(v)) = loop break
+      pure (.val v)
+    | .val (.controlFlow true v) =>                       -- Break(v) = early return
+      pure (.val (.controlFlow true v))
+    | .val (.controlFlow false _) =>                      -- Continue = continue
+      denoteForLoop'Return bi (fuel - 1) var (lo + 1) hi body
+    | .val _ =>                                           -- normal value
+      denoteForLoop'Return bi (fuel - 1) var (lo + 1) hi body
+    | other => pure other                                 -- err/earlyRet/broke/continued
+  termination_by (fuel, sizeOf body + 1)
+
+/-- While loop with nested ControlFlow: distinguishes loop break from early return.
+    Used by `denote'` to evaluate `app "while_fold_return" [cond, body]`. -/
+def denoteWhile'Return (bi : Builtins) (fuel : Nat)
+    (cond body : ImpExpr) : StateM Env Outcome :=
+  if fuel = 0 then pure (.err "out of fuel")
+  else do
+    let rc ← denote' bi fuel cond
+    match rc with
+    | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
+    | .val (.bool true) => do
+      let rb ← denote' bi fuel body
+      match rb with
+      | .val (.controlFlow true (.controlFlow false v)) =>  -- loop break
+        pure (.val v)
+      | .val (.controlFlow true v) =>                       -- early return
+        pure (.val (.controlFlow true v))
+      | .val (.controlFlow false _) =>                      -- continue
+        denoteWhile'Return bi (fuel - 1) cond body
+      | .val _ =>                                           -- normal
+        denoteWhile'Return bi (fuel - 1) cond body
       | other => pure other
     | .val (.bool false) => pure (.val .unit)
     | .val _ => pure (.err "while condition not a bool")
