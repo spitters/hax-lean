@@ -9,3 +9,5 @@ import SSProve.Hax.Phase.FunctionalizeLoops
 import SSProve.Hax.Phase.CfIntoMonads
 import SSProve.Hax.ToRawCode
 import SSProve.Hax.Pipeline
+import SSProve.Hax.PipelineCF
+import SSProve.Hax.Tests

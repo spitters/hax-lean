@@ -93,9 +93,4 @@ theorem pipeline_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr)
   rw [cfIntoMonads_correct _ (by rw [hfl]; exact hNoEE), hfl,
       localMutation_correct, dropReferences_correct]
 
-/-- The translated RawCode has no oracle calls. -/
-theorem pipelineToRawCode_noOracleCall (e : ImpExpr) :
-    RawCode.NoOracleCall (pipelineToRawCode e) :=
-  toRawCode_noOracleCall _
-
 end SSProve.Hax

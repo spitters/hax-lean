@@ -12,13 +12,36 @@ import SSProve.Hax.Semantics
 /-!
 # Phase 2: Local Mutation Elimination
 
-Transform mutable variables into state-passing tuples.
+Transform mutable assignments into pure let-rebindings.
 
 ## Main definitions
 
 * `localMutation` — the transformation
 * `localMutation_noMut` — output guarantee: `NoMutation`
 * `localMutation_preserves_noRefs` — preservation: `NoReferences`
+* `localMutation_correct` — semantics preservation under `denote`
+
+## Design
+
+The key transformation is:
+
+    assign n rhs  ↦  seq (letBind n rhs (var n)) unitVal
+
+This works because the denotational semantics uses an `Env` (variable store)
+threaded as `StateM Env`. Under `denote`:
+
+* `assign n rhs`: evaluate `rhs` to value `v`, update env with `n ↦ v`, return `unit`
+* `seq (letBind n rhs (var n)) unitVal`: evaluate `rhs` to `v`, extend env with
+  `n ↦ v`, look up `n` (getting `v` back), then discard and return `unit`
+
+Both produce the same env update and return `unit`. The `denote_assign_eq`
+theorem proves this formally. The full `localMutation_correct` theorem
+then lifts this to all expressions by structural induction.
+
+Note: `localMutation` takes a `mvars` parameter (list of mutated variables)
+for forward compatibility with more sophisticated state-passing transforms,
+but the current implementation does not use it — it transforms all `assign`
+nodes unconditionally.
 -/
 
 namespace SSProve.Hax
@@ -51,6 +74,17 @@ def localMutation (mvars : List String) : ImpExpr → ImpExpr
   | .continue_ => .continue_
   | .earlyReturn e => .earlyReturn (localMutation mvars e)
   | .questionMark e => .questionMark (localMutation mvars e)
+  | .forFold v lo hi body =>
+    .forFold v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
+  | .whileFold c body =>
+    .whileFold (localMutation mvars c) (localMutation mvars body)
+  | .forFoldReturn v lo hi body =>
+    .forFoldReturn v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
+  | .whileFoldReturn c body =>
+    .whileFoldReturn (localMutation mvars c) (localMutation mvars body)
+  | .cfBreak e => .cfBreak (localMutation mvars e)
+  | .cfContinue e => .cfContinue (localMutation mvars e)
+  | .cfBreakContinue e => .cfBreakContinue (localMutation mvars e)
 where
   mapExpr (mvars : List String) : List ImpExpr → List ImpExpr
     | [] => []
@@ -107,6 +141,13 @@ theorem localMutation_noMut (mvars : List String) (e : ImpExpr) :
   | continue_ => exact .continue_
   | earlyReturn _ ih => exact .earlyReturn ih
   | questionMark _ ih => exact .questionMark ih
+  | forFold _ _ _ _ ih1 ih2 ih3 => exact .forFold ih1 ih2 ih3
+  | whileFold _ _ ih1 ih2 => exact .whileFold ih1 ih2
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn ih1 ih2 ih3
+  | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn ih1 ih2
+  | cfBreak _ ih => exact .cfBreak ih
+  | cfContinue _ ih => exact .cfContinue ih
+  | cfBreakContinue _ ih => exact .cfBreakContinue ih
 
 /-- `localMutation` preserves `NoReferences`. -/
 theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
@@ -152,6 +193,17 @@ theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
   | continue_ => exact .continue_
   | earlyReturn _ ih => cases h with | earlyReturn he => exact .earlyReturn (ih he)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih he)
+  | forFold _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFold h1 h2 h3 => exact .forFold (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFold _ _ ih1 ih2 =>
+    cases h with | whileFold h1 h2 => exact .whileFold (ih1 h1) (ih2 h2)
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
+  | whileFoldReturn _ _ ih1 ih2 =>
+    cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
+  | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
+  | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
 
 /-- The `assign n rhs` ↦ `seq (letBind n rhs (var n)) unitVal` transformation
     preserves denotational semantics. -/
@@ -270,5 +322,13 @@ theorem localMutation_correct (bi : Builtins) (fuel : Nat)
     simp only [localMutation]
     unfold denote
     exact denoteWhile_congr bi fuel c (localMutation mvars c) body (localMutation mvars body) ih1 ih2
+  -- Phase 3/4 output constructors: denote returns error for all
+  | forFold _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [localMutation, denote]
+  | whileFold _ _ ih1 ih2 => intro fuel; simp [localMutation, denote]
+  | forFoldReturn _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [localMutation, denote]
+  | whileFoldReturn _ _ ih1 ih2 => intro fuel; simp [localMutation, denote]
+  | cfBreak _ ih => intro fuel; simp [localMutation, denote]
+  | cfContinue _ ih => intro fuel; simp [localMutation, denote]
+  | cfBreakContinue _ ih => intro fuel; simp [localMutation, denote]
 
 end SSProve.Hax

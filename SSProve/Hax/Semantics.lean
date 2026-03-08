@@ -177,6 +177,14 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.result false v) => pure (.earlyRet (.result false v))
     | .val _ => pure (.err "? operator on non-Result")
     | other => pure other
+  -- Phase 3/4 output constructors: should not appear in pre-pipeline expressions
+  | .forFold _ _ _ _ => pure (.err "forFold in pre-pipeline expression")
+  | .whileFold _ _ => pure (.err "whileFold in pre-pipeline expression")
+  | .forFoldReturn _ _ _ _ => pure (.err "forFoldReturn in pre-pipeline expression")
+  | .whileFoldReturn _ _ => pure (.err "whileFoldReturn in pre-pipeline expression")
+  | .cfBreak _ => pure (.err "cfBreak in pre-pipeline expression")
+  | .cfContinue _ => pure (.err "cfContinue in pre-pipeline expression")
+  | .cfBreakContinue _ => pure (.err "cfBreakContinue in pre-pipeline expression")
   termination_by e => (fuel, sizeOf e)
   decreasing_by
     all_goals simp_wf

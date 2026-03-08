@@ -75,6 +75,16 @@ inductive ImpExpr where
   -- Consumed by cfIntoMonads (Phase 4)
   | earlyReturn (e : ImpExpr)
   | questionMark (e : ImpExpr)
+  -- Produced by functionalizeLoops (Phase 3)
+  | forFold (var : String) (lo hi body : ImpExpr)
+  | whileFold (cond body : ImpExpr)
+  | forFoldReturn (var : String) (lo hi body : ImpExpr)
+  | whileFoldReturn (cond body : ImpExpr)
+  | cfBreak (e : ImpExpr)
+  | cfContinue (e : ImpExpr)
+  -- Nested break encoding: break inside loop with earlyReturn
+  -- Produces val(CF true (CF false v)) directly, avoiding cfBreak/cfContinue composition
+  | cfBreakContinue (e : ImpExpr)
   deriving Inhabited
 
 /-- Custom induction principle for `ImpExpr` that handles nested lists.
@@ -105,6 +115,15 @@ def ImpExpr.ind {motive : ImpExpr → Prop}
     (continue_ : motive .continue_)
     (earlyReturn : ∀ e, motive e → motive (.earlyReturn e))
     (questionMark : ∀ e, motive e → motive (.questionMark e))
+    (forFold : ∀ v lo hi body, motive lo → motive hi → motive body →
+        motive (.forFold v lo hi body))
+    (whileFold : ∀ c body, motive c → motive body → motive (.whileFold c body))
+    (forFoldReturn : ∀ v lo hi body, motive lo → motive hi → motive body →
+        motive (.forFoldReturn v lo hi body))
+    (whileFoldReturn : ∀ c body, motive c → motive body → motive (.whileFoldReturn c body))
+    (cfBreak : ∀ e, motive e → motive (.cfBreak e))
+    (cfContinue : ∀ e, motive e → motive (.cfContinue e))
+    (cfBreakContinue : ∀ e, motive e → motive (.cfBreakContinue e))
     (e : ImpExpr) : motive e :=
   go e
 where
@@ -129,6 +148,13 @@ where
     | .continue_ => continue_
     | .earlyReturn e => earlyReturn e (go e)
     | .questionMark e => questionMark e (go e)
+    | .forFold v lo hi body => forFold v lo hi body (go lo) (go hi) (go body)
+    | .whileFold c body => whileFold c body (go c) (go body)
+    | .forFoldReturn v lo hi body => forFoldReturn v lo hi body (go lo) (go hi) (go body)
+    | .whileFoldReturn c body => whileFoldReturn c body (go c) (go body)
+    | .cfBreak e => cfBreak e (go e)
+    | .cfContinue e => cfContinue e (go e)
+    | .cfBreakContinue e => cfBreakContinue e (go e)
   goList : (es : List ImpExpr) → ∀ a, a ∈ es → motive a
     | _ :: _, _, .head _ => go _
     | _ :: es, a, .tail _ h => goList es a h

@@ -5,20 +5,34 @@ Authors: SSProve-Lean4 Contributors
 -/
 
 /-!
-# RawCode Stub
+# RawCode Deep Embedding (Stub)
 
-Minimal stub of SSProve's `RawCode` free monad, providing only the
-constructors used by `ToRawCode.lean`: `ret`, `bind`, and `fail`.
+Minimal free monad for deterministic computations, used as the target of
+the hax `toRawCode` translation.
 
-The full `RawCode` (with `sample`, `get`, `put`, `oracleCall`) lives in
-the SSProve repository under `SSProve/Deep/RawCode.lean`.
+## Relation to SSProve-lean
+
+The full `RawCode` lives in `SSProve-lean/SSProve/Deep/RawCode.lean` with
+constructors for `sample`, `get`, `put`, `oracleCall`, and `fail`, plus
+proper `Location` and `Fintype` infrastructure.
+
+This stub provides only the three constructors that `toRawCode` actually
+produces: `ret`, `bind`, and `fail`. When connecting to the real SSProve
+library, this file should be replaced by an import of
+`SSProve.Deep.RawCode` from SSProve-lean, and predicates like
+`NoOracleCall` / `IsDeterministic` proved against the real type.
 -/
 
 namespace SSProve.Deep
 
 universe u
 
-/-- Minimal free monad for computations, providing ret/bind/fail. -/
+/-- Minimal free monad for deterministic computations.
+
+    Constructors:
+    - `ret` — return a pure value
+    - `bind` — sequential composition
+    - `fail` — computation failure (e.g., pattern match failure) -/
 inductive RawCode : Type u → Type (u+1) where
   | ret {α : Type u} (a : α) : RawCode α
   | bind {α β : Type u} (c : RawCode α) (k : α → RawCode β) : RawCode β
@@ -26,13 +40,11 @@ inductive RawCode : Type u → Type (u+1) where
 
 namespace RawCode
 
-/-- A predicate asserting that a `RawCode` tree contains no oracle calls.
-    In this stub all constructors trivially satisfy it. -/
-inductive NoOracleCall : {α : Type u} → RawCode α → Prop where
-  | ret {α : Type u} (a : α) : NoOracleCall (.ret a)
-  | bind {α β : Type u} {c : RawCode β} {k : β → RawCode α}
-      (hc : NoOracleCall c) (hk : ∀ b, NoOracleCall (k b)) : NoOracleCall (.bind c k)
-  | fail {α : Type u} : NoOracleCall (@RawCode.fail α)
+/-- Interpret a `RawCode` as an `Option`. -/
+noncomputable def eval : {α : Type u} → RawCode α → Option α
+  | _, .ret a => some a
+  | _, .bind c k => do let a ← eval c; eval (k a)
+  | _, .fail => none
 
 end RawCode
 
