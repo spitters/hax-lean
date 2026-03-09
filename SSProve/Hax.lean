@@ -13,6 +13,7 @@ import SSProve.Hax.Pipeline
 import SSProve.Hax.PipelineCF
 import SSProve.Hax.Phase.ExplicitMonadicCF
 import SSProve.Hax.Tests
+import SSProve.Hax.TestCompile
 -- Typed layer
 import SSProve.Hax.ImpType
 import SSProve.Hax.TExpr

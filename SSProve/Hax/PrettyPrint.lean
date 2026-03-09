@@ -38,6 +38,34 @@ private def sanitizeName (n : String) : String :=
     | "protected" | "partial" | "unsafe" => s!"«{n}»"
     | _ => n
 
+/-- Map builtin function names to qualified Lean 4 identifiers.
+    Known builtins get `Hax.` prefix; constructors map to Lean equivalents. -/
+private def runtimeName (f : String) : String :=
+  match f with
+  -- Arithmetic
+  | "add" | "sub" | "mul" | "div" | "rem" | "neg" => s!"Hax.{f}"
+  | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg" => s!"Hax.{f}"
+  -- Comparison (eq/ne/not/and/or → prefixed names to avoid shadowing)
+  | "eq" => "Hax.beq"
+  | "ne" => "Hax.bne"
+  | "not" => "Hax.bnot"
+  | "and" => "Hax.band"
+  | "or" => "Hax.bor"
+  | "Eq" => "Hax.Eq"
+  | "Ne" => "Hax.Ne"
+  | "Not" => "Hax.Not"
+  | "And" => "Hax.And"
+  | "Or" => "Hax.Or"
+  | "lt" | "le" | "gt" | "ge" => s!"Hax.{f}"
+  | "Lt" | "Le" | "Gt" | "Ge" => s!"Hax.{f}"
+  -- Option/Result constructors → Lean equivalents
+  | "Some" => "some"
+  | "None" => "none"
+  | "Ok" => "Except.ok"
+  | "Err" => "Except.error"
+  -- Everything else: sanitize and pass through
+  | _ => sanitizeName f
+
 /-- Pretty-print a pattern. -/
 private def patToLean : ImpPat → String
   | .wildcard => "_"
@@ -84,8 +112,11 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
 
   -- Function application
   | .app f args =>
-    let argStrs := args.map fun a => parensIf (toLean a 0) (!isAtom a)
-    s!"{sanitizeName f} {" ".intercalate argStrs}"
+    let fname := runtimeName f
+    if args.isEmpty then fname
+    else
+      let argStrs := args.map fun a => parensIf (toLean a 0) (!isAtom a)
+      s!"{fname} {" ".intercalate argStrs}"
 
   -- Tuple
   | .tuple elems =>
@@ -105,9 +136,8 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
       s!"{ind}| {patToLean p} => {toLean body (lvl + 1)}"
     s!"{ind}match {toLean scrut 0} with\n{"\n".intercalate armStrs}"
 
-  -- Sequence
-  | .seq e1 e2 =>
-    s!"{toLean e1 lvl}\n{toLean e2 lvl}"
+  -- Sequence: flatten and emit as let-chain
+  | .seq e1 e2 => seqToLean lvl e1 e2
 
   -- ControlFlow constructors (post-pipeline)
   | .cfBreak e =>
@@ -140,6 +170,21 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   | .continue_ => "continue"
   | .earlyReturn e => s!"return {toLean e 0}"
   | .questionMark e => s!"{parensIf (toLean e 0) (!isAtom e)}?"
+where
+  /-- Flatten seq chains into proper let-bindings. -/
+  seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=
+    let ind := indent lvl
+    match e1, e2 with
+    -- Skip unitVal in either position
+    | .unitVal, _ => toLean e2 lvl
+    | _, .unitVal => toLean e1 lvl
+    -- Flatten left-nested seq: seq (seq a b) c → seq a (seq b c)
+    | .seq a b, _ => seqToLean lvl a (.seq b e2)
+    -- Lift letBind out of seq: seq (letBind n v body) e2 → let n := v; seq body e2
+    | .letBind n v body, _ =>
+      s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl body e2}"
+    -- General case: discard e1's value
+    | _, _ => s!"{ind}let _ := {toLean e1 0}\n{toLean e2 lvl}"
 
 /-- Wrap the output in a Lean 4 definition. -/
 def toLeanDef (name : String) (e : ImpExpr) : String :=

@@ -37,9 +37,16 @@ Fold operations thread an accumulator through a closure that returns
 inductive ControlFlow (B C : Type) where
   | Break (b : B)
   | Continue (c : C)
-  deriving Inhabited, BEq, Repr
+  deriving BEq, Repr
+
+/-- `ControlFlow` is inhabited whenever the continue type is.
+    (Uses `Continue default` rather than requiring `Inhabited B`.) -/
+instance {B C : Type} [Inhabited C] : Inhabited (ControlFlow B C) :=
+  ⟨.Continue default⟩
 
 namespace ControlFlow
+
+variable {B C : Type}
 
 /-- Extract the break value if present. -/
 def breakVal? : ControlFlow B C → Option B
@@ -64,7 +71,8 @@ namespace Hax
     The body returns `ControlFlow`:
     - `Continue acc'` → continue with new accumulator
     - `Break v` → exit loop with value `v` -/
-partial def forFold {α β : Type} (lo hi : Int) (init : α)
+partial def forFold {α β : Type} [Inhabited α]
+    (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
   if lo ≥ hi then .Continue init
   else
@@ -74,8 +82,9 @@ partial def forFold {α β : Type} (lo hi : Int) (init : α)
 
 /-- While-fold with accumulator.
     Iterates while the condition returns `true`. -/
-partial def whileFold {α β : Type} (init : α)
-    (cond : α → Bool) (f : α → ControlFlow β α) : ControlFlow β α :=
+partial def whileFold {α β : Type} [Inhabited α]
+    (init : α) (cond : α → Bool) (f : α → ControlFlow β α) :
+    ControlFlow β α :=
   if cond init then
     match f init with
     | .Break v => .Break v
@@ -87,7 +96,9 @@ partial def whileFold {α β : Type} (init : α)
     - `Continue acc'` → continue iteration
     - `Break (Continue v)` → loop break, return `v`
     - `Break (Break v)` → early return, propagate `Break v` -/
-partial def forFoldReturn {α β γ : Type} (lo hi : Int) (init : α)
+partial def forFoldReturn {α β γ : Type}
+    [Inhabited α] [Inhabited γ]
+    (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
   if lo ≥ hi then .Continue (.Continue init)
@@ -98,8 +109,9 @@ partial def forFoldReturn {α β γ : Type} (lo hi : Int) (init : α)
     | .Continue acc => forFoldReturn (lo + 1) hi acc f
 
 /-- While-fold with early return support (nested ControlFlow). -/
-partial def whileFoldReturn {α β γ : Type} (init : α)
-    (cond : α → Bool)
+partial def whileFoldReturn {α β γ : Type}
+    [Inhabited α] [Inhabited γ]
+    (init : α) (cond : α → Bool)
     (f : α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
   if cond init then
@@ -110,8 +122,51 @@ partial def whileFoldReturn {α β γ : Type} (init : α)
   else .Continue (.Continue init)
 
 /-- Extract the final value from a non-early-returning fold result. -/
-def unwrapContinue : ControlFlow B C → C
+def unwrapContinue {B C : Type} [Inhabited C] : ControlFlow B C → C
   | .Continue c => c
   | .Break _ => panic! "unexpected Break in unwrapContinue"
+
+/-! ## Builtin operations for generated code
+
+These definitions are referenced by generated Lean 4 code via `Hax.add`, `Hax.Sub`, etc.
+Capitalized variants match hax's Rust operator names. -/
+
+-- Arithmetic
+@[inline] def add (a b : Int) : Int := a + b
+@[inline] def sub (a b : Int) : Int := a - b
+@[inline] def mul (a b : Int) : Int := a * b
+@[inline] def div (a b : Int) : Int := a / b
+@[inline] def rem (a b : Int) : Int := a % b
+@[inline] def neg (a : Int) : Int := -a
+
+-- Comparison
+@[inline] def beq {α : Type} [BEq α] (a b : α) : Bool := a == b
+@[inline] def bne {α : Type} [BEq α] (a b : α) : Bool := !(a == b)
+@[inline] def lt (a b : Int) : Bool := a < b
+@[inline] def le (a b : Int) : Bool := a ≤ b
+@[inline] def gt (a b : Int) : Bool := a > b
+@[inline] def ge (a b : Int) : Bool := a ≥ b
+
+-- Boolean
+@[inline] def bnot (b : Bool) : Bool := !b
+@[inline] def band (a b : Bool) : Bool := a && b
+@[inline] def bor (a b : Bool) : Bool := a || b
+
+-- Capitalized aliases (hax's Rust operator names)
+abbrev Add := @add
+abbrev Sub := @sub
+abbrev Mul := @mul
+abbrev Div := @div
+abbrev Rem := @rem
+abbrev Neg := @neg
+abbrev Eq := @beq
+abbrev Ne := @bne
+abbrev Lt := @lt
+abbrev Le := @le
+abbrev Gt := @gt
+abbrev Ge := @ge
+abbrev Not := @bnot
+abbrev And := @band
+abbrev Or := @bor
 
 end Hax
