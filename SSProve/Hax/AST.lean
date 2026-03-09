@@ -162,4 +162,56 @@ where
     | _ :: _, _, .head _ => go _
     | _ :: rest, pa, .tail _ h => goArms rest pa h
 
+/-! ## BEq instance for ImpExpr
+
+Lean 4 cannot derive `BEq` for nested inductives (containing `List ImpExpr`),
+so we define it manually. -/
+
+/-- Structural equality for `ImpExpr`. -/
+def ImpExpr.beq : ImpExpr → ImpExpr → Bool
+  | .lit v₁, .lit v₂ => v₁ == v₂
+  | .var n₁, .var n₂ => n₁ == n₂
+  | .letBind n₁ v₁ b₁, .letBind n₂ v₂ b₂ =>
+    n₁ == n₂ && v₁.beq v₂ && b₁.beq b₂
+  | .app f₁ a₁, .app f₂ a₂ => f₁ == f₂ && beqList a₁ a₂
+  | .tuple e₁, .tuple e₂ => beqList e₁ e₂
+  | .proj e₁ i₁, .proj e₂ i₂ => e₁.beq e₂ && i₁ == i₂
+  | .ifThenElse c₁ t₁ e₁, .ifThenElse c₂ t₂ e₂ =>
+    c₁.beq c₂ && t₁.beq t₂ && e₁.beq e₂
+  | .match_ s₁ a₁, .match_ s₂ a₂ => s₁.beq s₂ && beqArms a₁ a₂
+  | .unitVal, .unitVal => true
+  | .seq e₁ e₂, .seq f₁ f₂ => e₁.beq f₁ && e₂.beq f₂
+  | .borrow e₁, .borrow e₂ => e₁.beq e₂
+  | .deref e₁, .deref e₂ => e₁.beq e₂
+  | .assign n₁ r₁, .assign n₂ r₂ => n₁ == n₂ && r₁.beq r₂
+  | .forLoop v₁ l₁ h₁ b₁, .forLoop v₂ l₂ h₂ b₂ =>
+    v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
+  | .whileLoop c₁ b₁, .whileLoop c₂ b₂ => c₁.beq c₂ && b₁.beq b₂
+  | .break_ (some e₁), .break_ (some e₂) => e₁.beq e₂
+  | .break_ none, .break_ none => true
+  | .continue_, .continue_ => true
+  | .earlyReturn e₁, .earlyReturn e₂ => e₁.beq e₂
+  | .questionMark e₁, .questionMark e₂ => e₁.beq e₂
+  | .forFold v₁ l₁ h₁ b₁, .forFold v₂ l₂ h₂ b₂ =>
+    v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
+  | .whileFold c₁ b₁, .whileFold c₂ b₂ => c₁.beq c₂ && b₁.beq b₂
+  | .forFoldReturn v₁ l₁ h₁ b₁, .forFoldReturn v₂ l₂ h₂ b₂ =>
+    v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
+  | .whileFoldReturn c₁ b₁, .whileFoldReturn c₂ b₂ => c₁.beq c₂ && b₁.beq b₂
+  | .cfBreak e₁, .cfBreak e₂ => e₁.beq e₂
+  | .cfContinue e₁, .cfContinue e₂ => e₁.beq e₂
+  | .cfBreakContinue e₁, .cfBreakContinue e₂ => e₁.beq e₂
+  | _, _ => false
+where
+  beqList : List ImpExpr → List ImpExpr → Bool
+    | [], [] => true
+    | e₁ :: r₁, e₂ :: r₂ => e₁.beq e₂ && beqList r₁ r₂
+    | _, _ => false
+  beqArms : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr) → Bool
+    | [], [] => true
+    | (p₁, e₁) :: r₁, (p₂, e₂) :: r₂ => p₁ == p₂ && e₁.beq e₂ && beqArms r₁ r₂
+    | _, _ => false
+
+instance : BEq ImpExpr := ⟨ImpExpr.beq⟩
+
 end SSProve.Hax

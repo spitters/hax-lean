@@ -109,10 +109,11 @@ EXAMPLES:
 
 /-- Compare two ImpExprs structurally and report first difference. -/
 partial def diffExpr (path : String) (e1 e2 : ImpExpr) : Option String :=
-  let j1 := toJson e1
-  let j2 := toJson e2
-  if j1 == j2 then none
-  else some s!"Mismatch at {path}:\n  pipeline: {j1.pretty}\n  expected: {j2.pretty}"
+  if e1 == e2 then none
+  else
+    let j1 := toJson e1
+    let j2 := toJson e2
+    some s!"Mismatch at {path}:\n  pipeline: {j1.pretty}\n  expected: {j2.pretty}"
 
 def main (args : List String) : IO UInt32 := do
   let opts := parseArgs args

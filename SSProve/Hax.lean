@@ -11,6 +11,7 @@ import SSProve.Hax.Phase.ExplicitMonadic
 import SSProve.Hax.ToRawCode
 import SSProve.Hax.Pipeline
 import SSProve.Hax.PipelineCF
+import SSProve.Hax.Phase.ExplicitMonadicCF
 import SSProve.Hax.Tests
 -- Typed layer
 import SSProve.Hax.ImpType
