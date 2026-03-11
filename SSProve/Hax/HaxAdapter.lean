@@ -645,6 +645,65 @@ where
       | _ => pure []
     return .app name fields
 
+/-! ## Full hax export file parsing
+
+The `hax_frontend_export.json` produced by `cargo hax json` is a top-level **array** of
+items. Each item has `{def_id, owner_id, span, vis_span, kind, attributes, visibility}`.
+The `kind` field is an externally-tagged enum:
+
+- `"Fn"`: `{ident: [name, span], generics, def: {header, params, ret, body}}`
+  where `body` is a `Decorated<ExprKind>` that `parseHaxExpr` handles.
+- `"Const"`: `[ident_pair, generics, ty, body]` where `body` is `Decorated<ExprKind>`.
+- `"TyAlias"`, `"Mod"`, `"Use"`, `"ExternCrate"`: skipped.
+-/
+
+/-- Extract the function name from a hax `Fn` item's `ident` field.
+    Format: `[name_string, span_object]`. -/
+private def extractFnName (ident : Json) : String :=
+  match ident with
+  | .arr elems => match elems.toList.head? with
+    | some (.str n) => n
+    | _ => "unknown_fn"
+  | _ => "unknown_fn"
+
+/-- Parse a single top-level item from `hax_frontend_export.json`.
+    Returns `some (name, body)` for `Fn` and `Const` items, `none` for others. -/
+partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr)) := do
+  let kind ← j.getObjVal? "kind"
+  -- Fn: {ident: [name, span], generics: {...}, def: {header, params, ret, body}}
+  if let .ok fnData := kind.getObjVal? "Fn" then
+    let name := match fnData.getObjVal? "ident" with
+      | .ok ident => extractFnName ident
+      | _ => "unknown_fn"
+    let body ← match fnData.getObjVal? "def" with
+      | .ok def_ => parseHaxExpr (← def_.getObjVal? "body")
+      | _ => throw s!"Fn item '{name}' missing def.body"
+    return some (name, body)
+  -- Const: [ident_pair, generics, ty, body]
+  else if let .ok (.arr constData) := kind.getObjVal? "Const" then
+    let name := match constData.toList with
+      | (.arr ident) :: _ => extractFnName (.arr ident)
+      | _ => "unknown_const"
+    let body ← match constData.toList[3]? with
+      | some bodyJ => parseHaxExpr bodyJ
+      | none => throw s!"Const item '{name}' missing body"
+    return some (name, body)
+  -- Skip: Mod, Use, ExternCrate, TyAlias
+  else return none
+
+/-- Parse a full `hax_frontend_export.json` (top-level array of items).
+    Combines all `Fn` and `Const` items into nested `letBind`s. -/
+partial def parseHaxFile (j : Json) : Except String ImpExpr := do
+  match j with
+  | .arr items =>
+    let parsed ← items.toList.filterMapM parseHaxItem
+    match parsed with
+    | [] => throw "no functions or constants found in hax export"
+    | _ => return parsed.foldr (fun (name, body) acc => .letBind name body acc) .unitVal
+  | _ =>
+    -- Single Decorated<ExprKind> — use the existing single-expression parser
+    parseHaxExpr j
+
 /-- Parse a hax expression and also extract the type, returning a TExpr. -/
 partial def parseHaxTExpr (j : Json) : Except String TExpr := do
   let expr ← parseHaxExpr j

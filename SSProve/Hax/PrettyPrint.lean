@@ -267,62 +267,60 @@ def toLeanFile (defs : List (String × ImpExpr))
 /-! ## HaxBridge Template Generation
 
 Generate SSProve HaxBridge boilerplate from extracted function names.
-The template includes the standard structure: imports, PureCrypto record,
-Dependencies instance, and UC security theorem sketch. -/
+
+Two extraction paths are supported:
+- **lean-refines** (pure): extracted functions go directly into Dependencies
+- **hax** (RustM): need purity proofs, then extract into Dependencies
+
+The template generates the direct Dependencies pattern. -/
 
 /-- Generate a HaxBridge template for a protocol with given function names. -/
 def toHaxBridgeTemplate (protocolName : String)
     (fnNames : List String) : String :=
   let sanitized := fnNames.map sanitizeName
   let ucModuleName := protocolName.replace "/" "."
-  -- PureCrypto record fields
-  let pureFields := sanitized.map fun n =>
-    s!"  {n} : ByteVec → ByteVec"
-  -- Dependencies fields (RustM versions)
+  -- Direct Dependencies fields (pure functions from extraction)
   let depsFields := sanitized.map fun n =>
-    s!"  {n}_rustm : ByteVec → RustM ByteVec\n  {n}_panicFree : PanicFree {n}_rustm"
-  -- PureCrypto → Dependencies instance fields
-  let instFields := sanitized.map fun n =>
-    s!"    {n}_rustm := pureWrap P.{n}\n    {n}_panicFree := pureWrap_panicFree P.{n}"
+    s!"  {n} := {protocolName.toLower}_{n}  -- from extraction"
   s!"/-
 Copyright (c) 2026 SSProve-Lean4 Contributors. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: SSProve-Lean4 Contributors
 -/
 import SSProve.Crypto.{ucModuleName}.Security
-import SSProve.Crypto.UCMonad.PureToRustM
 -- import SSProve.Crypto.{ucModuleName}.Extraction.{protocolName}_hax
 
 /-!
 # {protocolName} — Hax Bridge
 
-Connects hax-extracted Rust implementation to the UC security proof.
+Connects extracted implementation to the UC security proof.
+
+## Architecture
+
+Extracted pure functions plug directly into the Dependencies typeclass.
+No intermediate PureCrypto record or RustM wrapping needed.
 -/
 
 set_option autoImplicit false
 
 open SSProve.Core SSProve.Prob SSProve.Crypto
 open scoped ENNReal
-open UCMonad.PureToRustM
 
 namespace {ucModuleName}
 
-/-! ## Pure Crypto Record -/
-
-structure Pure{protocolName}Crypto where
-{"\n".intercalate pureFields}
-
 /-! ## Dependencies Instance -/
 
--- TODO: fill in from hax extraction
--- noncomputable instance deps (P : Pure{protocolName}Crypto) :
+-- TODO: fill in from extraction (lean-refines or hax with purity proofs)
+-- noncomputable instance concreteDeps :
 --     {protocolName}Dependencies {protocolName}Witness where
-{"\n".intercalate instFields}
+--   keygen := ...  -- SPComp (randomness)
+{"\n".intercalate depsFields}
 
 /-! ## UC Security -/
 
--- TODO: state and prove UC security theorem
--- theorem {protocolName.toLower}_uc_security ...
+-- TODO: instantiate the parametric UC theorem with concreteDeps
+-- theorem {protocolName.toLower}_concrete_uc :
+--     UCEmulates ... := {protocolName.toLower}_uc_secure ...
 
 end {ucModuleName}
 "

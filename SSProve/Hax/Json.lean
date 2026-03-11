@@ -24,17 +24,41 @@ open Lean (Json ToJson FromJson toJson fromJson?)
 
 /-! ## ImpLit -/
 
+private def intWidthToString : IntWidth → String
+  | .w8 => "u8" | .w16 => "u16" | .w32 => "u32"
+  | .w64 => "u64" | .w128 => "u128" | .wsize => "usize"
+
+private def intWidthFromString : String → Except String IntWidth
+  | "u8" | "i8" => .ok .w8 | "u16" | "i16" => .ok .w16
+  | "u32" | "i32" => .ok .w32 | "u64" | "i64" => .ok .w64
+  | "u128" | "i128" => .ok .w128 | "usize" | "isize" => .ok .wsize
+  | s => .error s!"unknown IntWidth: {s}"
+
+instance : ToJson IntWidth where toJson w := Json.str (intWidthToString w)
+instance : FromJson IntWidth where fromJson? j := do
+  let s ← j.getStr?; intWidthFromString s
+
 instance : ToJson ImpLit where
   toJson
     | .bool b => Json.mkObj [("bool", toJson b)]
     | .int n => Json.mkObj [("int", toJson n)]
     | .unit => Json.str "unit"
+    | .uintLit w n => Json.mkObj [("uint", Json.mkObj [("width", toJson w), ("value", toJson n)])]
+    | .sintLit w n => Json.mkObj [("sint", Json.mkObj [("width", toJson w), ("value", toJson n)])]
 
 instance : FromJson ImpLit where
   fromJson? j := do
     if let .str "unit" := j then return .unit
     else if let .ok b := j.getObjValAs? Bool "bool" then return .bool b
     else if let .ok n := j.getObjValAs? Int "int" then return .int n
+    else if let .ok obj := j.getObjVal? "uint" then
+      let w ← obj.getObjValAs? IntWidth "width"
+      let n ← obj.getObjValAs? Nat "value"
+      return .uintLit w n
+    else if let .ok obj := j.getObjVal? "sint" then
+      let w ← obj.getObjValAs? IntWidth "width"
+      let n ← obj.getObjValAs? Int "value"
+      return .sintLit w n
     else throw s!"expected ImpLit, got {j}"
 
 /-! ## ImpPat -/
@@ -97,6 +121,8 @@ private def impTypeToJson : ImpType → Json
     Json.mkObj [("array", Json.mkObj [("inner", impTypeToJson t),
       ("len", toJson len)])]
   | .typeVar n => Json.mkObj [("typeVar", Json.str n)]
+  | .uint w => Json.mkObj [("uint", toJson w)]
+  | .sint w => Json.mkObj [("sint", toJson w)]
 
 private partial def impTypeFromJson (j : Json) : Except String ImpType := do
   match j with
@@ -136,6 +162,10 @@ private partial def impTypeFromJson (j : Json) : Except String ImpType := do
       return .array inner len
     else if let .ok n := j.getObjValAs? String "typeVar" then
       return .typeVar n
+    else if let .ok w := j.getObjValAs? IntWidth "uint" then
+      return .uint w
+    else if let .ok w := j.getObjValAs? IntWidth "sint" then
+      return .sint w
     else throw s!"expected ImpType, got {j}"
 
 instance : ToJson ImpType where toJson := impTypeToJson

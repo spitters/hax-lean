@@ -379,6 +379,19 @@ theorem widthArrayOps_noControlFlow :
     · exact absurd h (by intro hc; cases hc)
   all_goals (intro h; cases h)
 
+theorem signedArithOps_noControlFlow :
+    SSProve.Hax.Builtins.NoControlFlow SSProve.Hax.signedArithOps := by
+  intro f args v h isBreak w heq; subst heq; revert h
+  simp only [SSProve.Hax.signedArithOps, SSProve.Hax.wrapSint]
+  split <;> intro h
+  all_goals (first | cases h | (split at h <;> cases h))
+
+theorem signedCmpOps_noControlFlow :
+    SSProve.Hax.Builtins.NoControlFlow SSProve.Hax.signedCmpOps := by
+  intro f args v h isBreak w heq; subst heq; revert h
+  simp only [SSProve.Hax.signedCmpOps]
+  split <;> (intro h; cases h)
+
 /-- `widthOps` never produces ControlFlow values.
     Proved via composition of NoControlFlow for each sub-helper. -/
 theorem widthOps_noControlFlow :
@@ -410,7 +423,19 @@ theorem widthOps_noControlFlow :
           exact widthCastOps_noControlFlow f args _ hd isBreak w rfl
         | none =>
           simp [hd] at h
-          exact widthArrayOps_noControlFlow f args _ h isBreak w rfl
+          cases he : SSProve.Hax.widthArrayOps f args with
+          | some ve =>
+            simp [he] at h; subst h
+            exact widthArrayOps_noControlFlow f args _ he isBreak w rfl
+          | none =>
+            simp [he] at h
+            cases hf : SSProve.Hax.signedArithOps f args with
+            | some vf =>
+              simp [hf] at h; subst h
+              exact signedArithOps_noControlFlow f args _ hf isBreak w rfl
+            | none =>
+              simp [hf] at h
+              exact signedCmpOps_noControlFlow f args _ h isBreak w rfl
 
 /-- `widthAwareBuiltins` never produces ControlFlow values. -/
 theorem widthAwareBuiltins_noControlFlow :

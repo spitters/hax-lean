@@ -47,10 +47,12 @@ def parseExpr (input : String) : IO ImpExpr := do
   let json ← IO.ofExcept (Json.parse input)
   IO.ofExcept (fromJson? json : Except String ImpExpr)
 
-/-- Parse JSON string from hax's native format into ImpExpr. -/
-def parseHaxExpr (input : String) : IO ImpExpr := do
+/-- Parse JSON string from hax's native format into ImpExpr.
+    Handles both the full `hax_frontend_export.json` (array of items)
+    and a single `Decorated<ExprKind>` (one expression). -/
+def parseHaxInput (input : String) : IO ImpExpr := do
   let json ← IO.ofExcept (Json.parse input)
-  IO.ofExcept (HaxAdapter.parseHaxExpr json)
+  IO.ofExcept (HaxAdapter.parseHaxFile json)
 
 /-- Command-line options. -/
 structure Options where
@@ -146,7 +148,7 @@ def main (args : List String) : IO UInt32 := do
 
   -- Read and parse input
   let input ← readInput opts.inputFile
-  let expr ← if opts.haxFormat then parseHaxExpr input else parseExpr input
+  let expr ← if opts.haxFormat then parseHaxInput input else parseExpr input
 
   -- Apply function filter if specified
   let expr := match opts.filterFns with
@@ -161,7 +163,7 @@ def main (args : List String) : IO UInt32 := do
   | some vfile =>
     -- Validation mode: compare with expected output
     let expectedInput ← IO.FS.readFile vfile
-    let expected ← if opts.haxFormat then parseHaxExpr expectedInput else parseExpr expectedInput
+    let expected ← if opts.haxFormat then parseHaxInput expectedInput else parseExpr expectedInput
     match diffExpr "" result expected with
     | none =>
       IO.println "PASS: Pipeline output matches expected output."

@@ -421,6 +421,34 @@ def widthArrayOps : Builtins
   | "push", [.array vs, v] => some (.array (vs ++ [v]))
   | _, _ => none
 
+/-- Signed integer modular reduction: maps to [-2^(w-1), 2^(w-1)). -/
+private def wrapSint (w : IntWidth) (n : Int) : Value :=
+  let m : Int := w.modulus
+  let r := n % m
+  .sint w (if r ≥ m / 2 then r - m else r)
+
+/-- Signed arithmetic operations on `Value.sint`. -/
+def signedArithOps : Builtins
+  | "add", [.sint w a, .sint _ b] => some (wrapSint w (a + b))
+  | "sub", [.sint w a, .sint _ b] => some (wrapSint w (a - b))
+  | "mul", [.sint w a, .sint _ b] => some (wrapSint w (a * b))
+  | "div", [.sint w a, .sint _ b] =>
+    if b = 0 then some (.sint w 0) else some (wrapSint w (a / b))
+  | "rem", [.sint w a, .sint _ b] =>
+    if b = 0 then some (.sint w 0) else some (wrapSint w (a % b))
+  | "neg", [.sint w a] => some (wrapSint w (-a))
+  | _, _ => none
+
+/-- Signed comparison operations. -/
+def signedCmpOps : Builtins
+  | "eq", [.sint _ a, .sint _ b] => some (.bool (a == b))
+  | "ne", [.sint _ a, .sint _ b] => some (.bool (a != b))
+  | "lt", [.sint _ a, .sint _ b] => some (.bool (a < b))
+  | "le", [.sint _ a, .sint _ b] => some (.bool (a ≤ b))
+  | "gt", [.sint _ a, .sint _ b] => some (.bool (a > b))
+  | "ge", [.sint _ a, .sint _ b] => some (.bool (a ≥ b))
+  | _, _ => none
+
 /-- Panic/unwrap operations. Models Rust's `unwrap`, `expect`, `unwrap_or`.
     Successful unwraps return the inner value; panic cases return `none`
     (mapped to `Outcome.err` by `denote`, modeling Rust panics). -/
@@ -455,7 +483,8 @@ def panicOps : Builtins
     Composed from smaller helpers for proof-friendliness. -/
 def widthOps : Builtins := fun f args =>
   widthArithOps f args <|> widthBitwiseOps f args <|> widthCmpOps f args <|>
-  widthCastOps f args <|> widthArrayOps f args
+  widthCastOps f args <|> widthArrayOps f args <|>
+  signedArithOps f args <|> signedCmpOps f args
 
 /-- Full builtins: width ops + panic ops + defaults. -/
 def fullBuiltins : Builtins := fun f args =>
