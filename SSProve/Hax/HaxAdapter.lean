@@ -164,8 +164,41 @@ partial def parseHaxType (j : Json) : ImpType :=
   | .str "Never" => .unknown
   | .str "Error" => .unknown
   | _ =>
-    if let .ok _ := tyKind.getObjVal? "Int" then .int
-    else if let .ok _ := tyKind.getObjVal? "Uint" then .int
+    if let .ok inner := tyKind.getObjVal? "Int" then
+      -- Signed integer: {"Int": "I8"} or {"Int": {"I32": null}} etc.
+      match inner with
+      | .str "I8"    => .sint .w8
+      | .str "I16"   => .sint .w16
+      | .str "I32"   => .sint .w32
+      | .str "I64"   => .sint .w64
+      | .str "I128"  => .sint .w128
+      | .str "Isize" => .sint .wsize
+      | _ =>
+        -- Try externally-tagged enum: {"I32": null}
+        if inner.getObjVal? "I8" |>.isOk then .sint .w8
+        else if inner.getObjVal? "I16" |>.isOk then .sint .w16
+        else if inner.getObjVal? "I32" |>.isOk then .sint .w32
+        else if inner.getObjVal? "I64" |>.isOk then .sint .w64
+        else if inner.getObjVal? "I128" |>.isOk then .sint .w128
+        else if inner.getObjVal? "Isize" |>.isOk then .sint .wsize
+        else .int  -- fallback to arbitrary precision
+    else if let .ok inner := tyKind.getObjVal? "Uint" then
+      -- Unsigned integer: {"Uint": "U8"} or {"Uint": {"U32": null}} etc.
+      match inner with
+      | .str "U8"    => .uint .w8
+      | .str "U16"   => .uint .w16
+      | .str "U32"   => .uint .w32
+      | .str "U64"   => .uint .w64
+      | .str "U128"  => .uint .w128
+      | .str "Usize" => .uint .wsize
+      | _ =>
+        if inner.getObjVal? "U8" |>.isOk then .uint .w8
+        else if inner.getObjVal? "U16" |>.isOk then .uint .w16
+        else if inner.getObjVal? "U32" |>.isOk then .uint .w32
+        else if inner.getObjVal? "U64" |>.isOk then .uint .w64
+        else if inner.getObjVal? "U128" |>.isOk then .uint .w128
+        else if inner.getObjVal? "Usize" |>.isOk then .uint .wsize
+        else .int  -- fallback
     else if let .ok _ := tyKind.getObjVal? "Float" then .unknown  -- no float in our ImpType
     else if let .ok inner := tyKind.getObjVal? "Tuple" then
       -- Tuple wraps an ItemRef; we'd need to resolve it. Approximate.
@@ -450,8 +483,10 @@ where
       return .app "index" [lhs, index]
 
     else if let .ok data := j.getObjVal? "Cast" then
-      -- Cast: just pass through the source (our AST doesn't represent casts)
-      parseHaxExpr (← data.getObjVal? "source")
+      -- Cast: emit as app "cast" so the pretty-printer can select the right
+      -- width-specific cast function using the TExpr type annotation.
+      let source ← parseHaxExpr (← data.getObjVal? "source")
+      return .app "cast" [source]
 
     else if let .ok data := j.getObjVal? "Use" then
       parseHaxExpr (← data.getObjVal? "source")

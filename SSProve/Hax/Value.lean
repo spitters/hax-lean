@@ -15,12 +15,20 @@ type system while still being expressive enough for correctness proofs.
 
 namespace SSProve.Hax
 
-/-- Runtime values — untyped tagged union. -/
+/-- Runtime values — untyped tagged union.
+
+    Width-aware integer values (`uint`, `sint`) carry their bit width,
+    enabling exact Rust wrapping semantics. The legacy `int` constructor
+    is preserved for backward compatibility with existing untyped proofs.
+    Array values support fixed-size arrays and slices. -/
 inductive Value where
   | bool (b : Bool)
   | int (n : Int)
+  | uint (w : IntWidth) (v : Nat)            -- unsigned fixed-width (v < w.modulus)
+  | sint (w : IntWidth) (v : Int)            -- signed fixed-width
   | unit
   | tuple (vs : List Value)
+  | array (vs : List Value)                  -- array/slice
   | option (v : Option Value)
   | result (ok : Bool) (payload : Value)     -- true = Ok, false = Err
   | controlFlow (isBreak : Bool) (payload : Value)  -- true = Break, false = Continue
@@ -33,15 +41,25 @@ def ofLit : ImpLit → Value
   | .bool b => .bool b
   | .int n => .int n
   | .unit => .unit
+  | .uintLit w n => .uint w (n % w.modulus)
+  | .sintLit w n => .sint w n
 
 /-- Try to extract a Bool. -/
 def toBool : Value → Option Bool
   | .bool b => some b
   | _ => none
 
-/-- Try to extract an Int. -/
+/-- Try to extract an Int (works for both typed and untyped integers). -/
 def toInt : Value → Option Int
   | .int n => some n
+  | .uint _ v => some (v : Int)
+  | .sint _ v => some v
+  | _ => none
+
+/-- Try to extract an unsigned integer with its width. -/
+def toUint : Value → Option (IntWidth × Nat)
+  | .uint w v => some (w, v)
+  | .int n => if 0 ≤ n then some (.w64, n.toNat) else none
   | _ => none
 
 /-- Try to extract tuple elements. -/
@@ -49,10 +67,23 @@ def toTuple : Value → Option (List Value)
   | .tuple vs => some vs
   | _ => none
 
-/-- Project the i-th component of a tuple. -/
+/-- Try to extract array elements. -/
+def toArray : Value → Option (List Value)
+  | .array vs => some vs
+  | .tuple vs => some vs  -- backward compat: tuples can act as arrays
+  | _ => none
+
+/-- Project the i-th component of a tuple or array. -/
 def projIdx (v : Value) (i : Nat) : Option Value :=
   match v with
   | .tuple vs => vs[i]?
+  | .array vs => vs[i]?
+  | _ => none
+
+/-- Array/slice length. -/
+def arrayLen : Value → Option Nat
+  | .array vs => some vs.length
+  | .tuple vs => some vs.length
   | _ => none
 
 end Value
@@ -103,6 +134,9 @@ def matchPat : ImpPat → Value → Env → Option Env
   | .litPat l, v', env => if Value.ofLit l == v' then some env else none
   | .varPat name, v', env => some (env.extend name v')
   | .tuplePat pats, .tuple vs, env =>
+    if pats.length != vs.length then none
+    else matchPatList pats vs env
+  | .tuplePat pats, .array vs, env =>
     if pats.length != vs.length then none
     else matchPatList pats vs env
   | .somePat p', .option (some v'), env => matchPat p' v' env

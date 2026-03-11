@@ -594,16 +594,26 @@ def Value.isControlFlow : Value → Bool
 @[simp] theorem Value.isControlFlow_result (ok : Bool) (v : Value) :
     (Value.result ok v).isControlFlow = false := rfl
 
+@[simp] theorem Value.isControlFlow_uint (w : IntWidth) (n : Nat) :
+    (Value.uint w n).isControlFlow = false := rfl
+@[simp] theorem Value.isControlFlow_sint (w : IntWidth) (n : Int) :
+    (Value.sint w n).isControlFlow = false := rfl
+@[simp] theorem Value.isControlFlow_array (vs : List Value) :
+    (Value.array vs).isControlFlow = false := rfl
+
 theorem Value.ofLit_not_isControlFlow (l : ImpLit) :
     (Value.ofLit l).isControlFlow = false := by
-  cases l <;> rfl
+  cases l <;> simp [Value.ofLit, isControlFlow]
 
 /-- A value contains no controlFlow wrappers at any depth. -/
 def Value.deepNoControlFlow : Value → Bool
   | .bool _ => true
   | .int _ => true
+  | .uint _ _ => true
+  | .sint _ _ => true
   | .unit => true
   | .tuple vs => deepNoControlFlowList vs
+  | .array vs => deepNoControlFlowList vs
   | .option none => true
   | .option (some v) => v.deepNoControlFlow
   | .result _ v => v.deepNoControlFlow
@@ -626,10 +636,22 @@ theorem Value.deepNoControlFlow_implies_isControlFlow_false {v : Value}
 
 theorem Value.ofLit_deepNoControlFlow (l : ImpLit) :
     (Value.ofLit l).deepNoControlFlow = true := by
-  cases l <;> simp [Value.ofLit, Value.deepNoControlFlow]
+  cases l <;> simp [Value.ofLit, Value.deepNoControlFlow, IntWidth.modulus]
 
 theorem Value.deepNoControlFlow_tuple_mem {vs : List Value}
     (h : (Value.tuple vs).deepNoControlFlow = true) {v : Value} (hv : v ∈ vs) :
+    v.deepNoControlFlow = true := by
+  simp [deepNoControlFlow] at h
+  induction vs with
+  | nil => cases hv
+  | cons w ws ih =>
+    simp [deepNoControlFlow.deepNoControlFlowList, Bool.and_eq_true] at h
+    cases hv with
+    | head => exact h.1
+    | tail _ hv => exact ih h.2 hv
+
+theorem Value.deepNoControlFlow_array_mem {vs : List Value}
+    (h : (Value.array vs).deepNoControlFlow = true) {v : Value} (hv : v ∈ vs) :
     v.deepNoControlFlow = true := by
   simp [deepNoControlFlow] at h
   induction vs with
@@ -647,6 +669,9 @@ theorem Value.deepNoControlFlow_projIdx {v : Value} {i : Nat} {vi : Value}
   | tuple vs =>
     simp [projIdx] at hp
     exact deepNoControlFlow_tuple_mem hv (List.mem_of_getElem? hp)
+  | array vs =>
+    simp [projIdx] at hp
+    exact deepNoControlFlow_array_mem hv (List.mem_of_getElem? hp)
   | _ => simp [projIdx] at hp
 
 /-- An environment contains no controlFlow values at any depth. -/

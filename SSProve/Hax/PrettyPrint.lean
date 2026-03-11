@@ -4,6 +4,7 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: SSProve-Lean4 Contributors
 -/
 import SSProve.Hax.AST
+import SSProve.Hax.ImpType
 
 /-!
 # Lean 4 Pretty-Printer for ImpExpr
@@ -58,6 +59,14 @@ private def runtimeName (f : String) : String :=
   | "Or" => "Hax.Or"
   | "lt" | "le" | "gt" | "ge" => s!"Hax.{f}"
   | "Lt" | "Le" | "Gt" | "Ge" => s!"Hax.{f}"
+  -- Bitwise
+  | "shl" | "shr" | "bitand" | "bitor" | "bitxor" | "bitnot" => s!"Hax.{f}"
+  | "Shl" | "Shr" | "BitAnd" | "BitOr" | "BitXor" => s!"Hax.{f}"
+  -- Indexing
+  | "index" => "Hax.index"
+  -- Logical operators (from LogicalOp in hax AST)
+  | "&&" => "Hax.band"
+  | "||" => "Hax.bor"
   -- Option/Result constructors → Lean equivalents
   | "Some" => "some"
   | "None" => "none"
@@ -66,6 +75,56 @@ private def runtimeName (f : String) : String :=
   -- Everything else: sanitize and pass through
   | _ => sanitizeName f
 
+/-- Map an operator name and result type to a width-specific runtime function.
+    Falls back to `runtimeName` when the type is not a fixed-width integer. -/
+private def runtimeNameTyped (f : String) (ty : ImpType) : String :=
+  match ty.intWidth? with
+  | some w =>
+    let suffix := if ty.isSigned then w.toSignedSuffix else w.toSuffix
+    match f with
+    -- Arithmetic
+    | "Add" | "add" => s!"Hax.add_{suffix}"
+    | "Sub" | "sub" => s!"Hax.sub_{suffix}"
+    | "Mul" | "mul" => s!"Hax.mul_{suffix}"
+    | "Div" | "div" => s!"Hax.div_{suffix}"
+    | "Rem" | "rem" => s!"Hax.rem_{suffix}"
+    | "Neg" | "neg" => s!"Hax.neg_{suffix}"
+    -- Bitwise (only for unsigned; signed falls through to untyped)
+    | "Shl" | "shl" => if ty.isSigned then runtimeName f else s!"Hax.shl_{suffix}"
+    | "Shr" | "shr" => if ty.isSigned then runtimeName f else s!"Hax.shr_{suffix}"
+    | "BitAnd" | "bitand" => if ty.isSigned then runtimeName f else s!"Hax.bitand_{suffix}"
+    | "BitOr"  | "bitor"  => if ty.isSigned then runtimeName f else s!"Hax.bitor_{suffix}"
+    | "BitXor" | "bitxor" => if ty.isSigned then runtimeName f else s!"Hax.bitxor_{suffix}"
+    | "Not"    | "not"    => if ty.isSigned then runtimeName f else s!"Hax.bitnot_{suffix}"
+    -- Comparison
+    | "Eq" | "eq" => s!"Hax.eq_{suffix}"
+    | "Ne" | "ne" => s!"Hax.ne_{suffix}"
+    | "Lt" | "lt" => s!"Hax.lt_{suffix}"
+    | "Le" | "le" => s!"Hax.le_{suffix}"
+    | "Gt" | "gt" => s!"Hax.gt_{suffix}"
+    | "Ge" | "ge" => s!"Hax.ge_{suffix}"
+    -- Everything else: fall through to untyped
+    | _ => runtimeName f
+  | none => runtimeName f
+
+/-- Select the cast function name based on source and target types. -/
+private def castFnName (srcTy dstTy : ImpType) : String :=
+  match srcTy.intWidth?, dstTy.intWidth? with
+  | some sw, some dw =>
+    let srcSuffix := if srcTy.isSigned then sw.toSignedSuffix else sw.toSuffix
+    let dstSuffix := if dstTy.isSigned then dw.toSignedSuffix else dw.toSuffix
+    if srcSuffix == dstSuffix then "id"
+    else s!"Hax.cast_{srcSuffix}_{dstSuffix}"
+  | _, _ => "id"  -- non-integer cast: identity
+
+/-- Format an integer literal with a type annotation when the type is known. -/
+private def litIntTyped (n : Int) (ty : ImpType) : String :=
+  let numStr := if n < 0 then s!"({n})" else toString n
+  match ty with
+  | .uint w => s!"({numStr} : {w.toLeanType})"
+  | .sint _ => s!"({numStr} : Int)"
+  | _ => numStr
+
 /-- Pretty-print a pattern. -/
 private def patToLean : ImpPat → String
   | .wildcard => "_"
@@ -73,6 +132,8 @@ private def patToLean : ImpPat → String
   | .litPat (.bool false) => "false"
   | .litPat (.int n) => toString n
   | .litPat .unit => "()"
+  | .litPat (.uintLit w n) => s!"({n} : {w.toLeanType})"
+  | .litPat (.sintLit _ n) => s!"({n} : Int)"
   | .varPat n => sanitizeName n
   | .tuplePat ps => s!"({", ".intercalate (ps.map patToLean)})"
   | .somePat p => s!"some ({patToLean p})"
@@ -101,6 +162,10 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   | .lit (.bool false) => "false"
   | .lit (.int n) => if n < 0 then s!"({n})" else toString n
   | .lit .unit => "()"
+  | .lit (.uintLit w n) => s!"({n} : {w.toLeanType})"
+  | .lit (.sintLit _ n) =>
+    let numStr := if n < 0 then s!"({n})" else toString n
+    s!"({numStr} : Int)"
   | .unitVal => "()"
 
   -- Variables
@@ -198,5 +263,68 @@ def toLeanFile (defs : List (String × ImpExpr))
   let body := "\n".intercalate (defs.map fun (n, e) => toLeanDef n e)
   let footer := s!"\nend {moduleName}\n"
   header ++ body ++ footer
+
+/-! ## HaxBridge Template Generation
+
+Generate SSProve HaxBridge boilerplate from extracted function names.
+The template includes the standard structure: imports, PureCrypto record,
+Dependencies instance, and UC security theorem sketch. -/
+
+/-- Generate a HaxBridge template for a protocol with given function names. -/
+def toHaxBridgeTemplate (protocolName : String)
+    (fnNames : List String) : String :=
+  let sanitized := fnNames.map sanitizeName
+  let ucModuleName := protocolName.replace "/" "."
+  -- PureCrypto record fields
+  let pureFields := sanitized.map fun n =>
+    s!"  {n} : ByteVec → ByteVec"
+  -- Dependencies fields (RustM versions)
+  let depsFields := sanitized.map fun n =>
+    s!"  {n}_rustm : ByteVec → RustM ByteVec\n  {n}_panicFree : PanicFree {n}_rustm"
+  -- PureCrypto → Dependencies instance fields
+  let instFields := sanitized.map fun n =>
+    s!"    {n}_rustm := pureWrap P.{n}\n    {n}_panicFree := pureWrap_panicFree P.{n}"
+  s!"/-
+Copyright (c) 2026 SSProve-Lean4 Contributors. All rights reserved.
+Released under Apache 2.0 license as described in the file LICENSE.
+Authors: SSProve-Lean4 Contributors
+-/
+import SSProve.Crypto.{ucModuleName}.Security
+import SSProve.Crypto.UCMonad.PureToRustM
+-- import SSProve.Crypto.{ucModuleName}.Extraction.{protocolName}_hax
+
+/-!
+# {protocolName} — Hax Bridge
+
+Connects hax-extracted Rust implementation to the UC security proof.
+-/
+
+set_option autoImplicit false
+
+open SSProve.Core SSProve.Prob SSProve.Crypto
+open scoped ENNReal
+open UCMonad.PureToRustM
+
+namespace {ucModuleName}
+
+/-! ## Pure Crypto Record -/
+
+structure Pure{protocolName}Crypto where
+{"\n".intercalate pureFields}
+
+/-! ## Dependencies Instance -/
+
+-- TODO: fill in from hax extraction
+-- noncomputable instance deps (P : Pure{protocolName}Crypto) :
+--     {protocolName}Dependencies {protocolName}Witness where
+{"\n".intercalate instFields}
+
+/-! ## UC Security -/
+
+-- TODO: state and prove UC security theorem
+-- theorem {protocolName.toLower}_uc_security ...
+
+end {ucModuleName}
+"
 
 end SSProve.Hax

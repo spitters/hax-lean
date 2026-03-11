@@ -674,8 +674,11 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
       | controlFlow => intro h; exact Outcome.noConfusion h
       | bool => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
       | int => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
+      | uint => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
+      | sint => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
       | unit => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
       | tuple => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
+      | array => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
       | option => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
       | result => intro h; have := Outcome.earlyRet.inj h; subst this; rfl
     | earlyRet w' =>

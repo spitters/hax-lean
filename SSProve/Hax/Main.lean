@@ -61,6 +61,7 @@ structure Options where
   haxFormat : Bool := false
   help : Bool := false
   name : String := "result"
+  filterFns : Option (List String) := none  -- only include these functions
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -70,12 +71,15 @@ where
     | [], opts => opts
     | "--emit-lean" :: rest, opts => go rest { opts with emitMode := "lean" }
     | "--emit-json" :: rest, opts => go rest { opts with emitMode := "json" }
+    | "--emit-bridge" :: rest, opts => go rest { opts with emitMode := "bridge" }
     | "--validate" :: file :: rest, opts =>
       go rest { opts with validateFile := some file }
     | "--extended" :: rest, opts => go rest { opts with extended := true }
     | "--hax" :: rest, opts => go rest { opts with haxFormat := true }
     | "--help" :: _, opts => { opts with help := true }
     | "--name" :: n :: rest, opts => go rest { opts with name := n }
+    | "--filter" :: fns :: rest, opts =>
+      go rest { opts with filterFns := some (fns.splitOn ",") }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -89,10 +93,12 @@ USAGE:
 OPTIONS:
   --emit-lean       Output Lean 4 source code (default)
   --emit-json       Output transformed AST as JSON
+  --emit-bridge     Output HaxBridge template for SSProve
   --validate FILE   Compare pipeline output with expected output from FILE
   --extended        Use 5-phase pipeline (with ExplicitMonadic)
   --hax             Input is in hax's native JSON format (Decorated<ExprKind>)
   --name NAME       Name for the generated definition (default: result)
+  --filter FN,FN    Only include matching functions (comma-separated)
   --help            Show this help message
 
 INPUT:
@@ -115,6 +121,22 @@ partial def diffExpr (path : String) (e1 e2 : ImpExpr) : Option String :=
     let j2 := toJson e2
     some s!"Mismatch at {path}:\n  pipeline: {j1.pretty}\n  expected: {j2.pretty}"
 
+/-- Extract top-level let-binding names from an expression. -/
+def extractFnNames : ImpExpr → List String
+  | .letBind n _ body => n :: extractFnNames body
+  | .seq e1 e2 => extractFnNames e1 ++ extractFnNames e2
+  | _ => []
+
+/-- Filter a top-level expression to only include let-bindings whose
+    name matches the filter list. Other expression forms pass through unchanged. -/
+def filterExpr (fns : List String) : ImpExpr → ImpExpr
+  | .letBind n val body =>
+    if fns.any (fun f => n.endsWith f || n == f) then
+      .letBind n val (filterExpr fns body)
+    else filterExpr fns body
+  | .seq e1 e2 => .seq (filterExpr fns e1) (filterExpr fns e2)
+  | e => e
+
 def main (args : List String) : IO UInt32 := do
   let opts := parseArgs args
 
@@ -125,6 +147,11 @@ def main (args : List String) : IO UInt32 := do
   -- Read and parse input
   let input ← readInput opts.inputFile
   let expr ← if opts.haxFormat then parseHaxExpr input else parseExpr input
+
+  -- Apply function filter if specified
+  let expr := match opts.filterFns with
+    | some fns => filterExpr fns expr
+    | none => expr
 
   -- Run the verified pipeline
   let result := if opts.extended then pipelineExt expr else pipeline expr
@@ -146,6 +173,9 @@ def main (args : List String) : IO UInt32 := do
     match opts.emitMode with
     | "json" =>
       IO.println ((toJson result).pretty)
+    | "bridge" =>
+      let fnNames := extractFnNames expr
+      IO.println (toHaxBridgeTemplate opts.name fnNames)
     | _ =>
       IO.println (toLeanDef opts.name result)
     return 0

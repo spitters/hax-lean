@@ -4,6 +4,8 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: SSProve-Lean4 Contributors
 -/
 
+import SSProve.Hax.ImpType
+
 /-!
 # Imperative Expression AST
 
@@ -31,6 +33,8 @@ inductive ImpLit where
   | bool (b : Bool)
   | int (n : Int)
   | unit
+  | uintLit (w : IntWidth) (n : Nat)   -- unsigned fixed-width literal
+  | sintLit (w : IntWidth) (n : Int)   -- signed fixed-width literal
   deriving Inhabited, BEq, Repr
 
 /-- Pattern matching arms. -/

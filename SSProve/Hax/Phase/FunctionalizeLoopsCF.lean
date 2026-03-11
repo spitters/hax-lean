@@ -173,6 +173,11 @@ private def matchPat_preserves_ncf_impl :
         · cases hm
         · exact ih_pats vs env env' henv
             (fun v hv' => Value.deepNoControlFlow_tuple_mem hv hv') hm
+      | array vs =>
+        simp only [matchPat] at hm; split at hm
+        · cases hm
+        · exact ih_pats vs env env' henv
+            (fun v hv' => Value.deepNoControlFlow_array_mem hv hv') hm
       | _ => simp [matchPat] at hm)
     (fun p ih v env env' henv hv hm => by
       cases v with

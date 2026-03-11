@@ -354,4 +354,122 @@ theorem denoteWhile_congr (bi : Builtins) (fuel : Nat)
 def denoteDefault (fuel : Nat) (e : ImpExpr) : StateM Env Outcome :=
   denote defaultBuiltins fuel e
 
+/-! ## Width-Aware Builtins
+
+Extended builtins that handle width-specific integer values (`Value.uint`)
+with Rust's wrapping semantics. Falls back to `defaultBuiltins` for
+untyped operations. Compatible with all pipeline proofs since `Builtins`
+is a parameter. -/
+
+/-- Wrap a natural number to unsigned integer range. -/
+def wrapUint (w : IntWidth) (n : Nat) : Value :=
+  .uint w (n % w.modulus)
+
+/-- Unsigned arithmetic operations (wrapping semantics). -/
+def widthArithOps : Builtins
+  | "add", [.uint w a, .uint _ b] => some (wrapUint w (a + b))
+  | "sub", [.uint w a, .uint _ b] => some (wrapUint w ((a + w.modulus - b) % w.modulus))
+  | "mul", [.uint w a, .uint _ b] => some (wrapUint w (a * b))
+  | "div", [.uint w a, .uint _ b] =>
+    if b = 0 then some (.uint w 0) else some (.uint w (a / b))
+  | "rem", [.uint w a, .uint _ b] =>
+    if b = 0 then some (.uint w 0) else some (.uint w (a % b))
+  | _, _ => none
+
+/-- Unsigned bitwise operations. -/
+def widthBitwiseOps : Builtins
+  | "shl", [.uint w a, .uint _ b] =>
+    some (wrapUint w (a <<< (b % w.bits)))
+  | "shr", [.uint w a, .uint _ b] =>
+    some (.uint w (a >>> (b % w.bits)))
+  | "bitand", [.uint w a, .uint _ b] => some (.uint w (a &&& b))
+  | "bitor", [.uint w a, .uint _ b] => some (.uint w (a ||| b))
+  | "bitxor", [.uint w a, .uint _ b] => some (.uint w (a ^^^ b))
+  | "bitnot", [.uint w a] => some (wrapUint w (w.modulus - 1 - a))
+  | _, _ => none
+
+/-- Unsigned comparison operations. -/
+def widthCmpOps : Builtins
+  | "eq", [.uint _ a, .uint _ b] => some (.bool (a == b))
+  | "ne", [.uint _ a, .uint _ b] => some (.bool (a != b))
+  | "lt", [.uint _ a, .uint _ b] => some (.bool (a < b))
+  | "le", [.uint _ a, .uint _ b] => some (.bool (a ≤ b))
+  | "gt", [.uint _ a, .uint _ b] => some (.bool (a > b))
+  | "ge", [.uint _ a, .uint _ b] => some (.bool (a ≥ b))
+  | _, _ => none
+
+/-- Cast operations: identity for data types. -/
+def widthCastOps : Builtins
+  | "cast", [.uint w v] => some (.uint w v)
+  | "cast", [.sint w v] => some (.sint w v)
+  | "cast", [.int n] => some (.int n)
+  | "cast", [.bool b] => some (.bool b)
+  | "cast", [.unit] => some .unit
+  | _, _ => none
+
+/-- Array operations (guarded: only return data values, not controlFlow). -/
+def widthArrayOps : Builtins
+  | "index", [.array vs, .uint _ i] => vs[i]?.bind fun
+    | .controlFlow _ _ => none
+    | v => some v
+  | "index", [.array vs, .int i] => if 0 ≤ i then
+    vs[i.toNat]?.bind fun
+      | .controlFlow _ _ => none
+      | v => some v
+    else none
+  | "len", [.array vs] => some (.uint .wsize vs.length)
+  | "push", [.array vs, v] => some (.array (vs ++ [v]))
+  | _, _ => none
+
+/-- Panic/unwrap operations. Models Rust's `unwrap`, `expect`, `unwrap_or`.
+    Successful unwraps return the inner value; panic cases return `none`
+    (mapped to `Outcome.err` by `denote`, modeling Rust panics). -/
+def panicOps : Builtins
+  -- Option::unwrap / Result::unwrap
+  | "unwrap", [.option (some v)] => some v
+  | "unwrap", [.result true v] => some v
+  | "unwrap", [.option none] => none      -- panic: unwrap on None
+  | "unwrap", [.result false _] => none   -- panic: unwrap on Err
+  -- Option::expect / Result::expect (message ignored in semantics)
+  | "expect", [.option (some v), _] => some v
+  | "expect", [.result true v, _] => some v
+  | "expect", [.option none, _] => none
+  | "expect", [.result false _, _] => none
+  -- Option::unwrap_or / Result::unwrap_or
+  | "unwrap_or", [.option (some v), _] => some v
+  | "unwrap_or", [.option none, d] => some d
+  | "unwrap_or", [.result true v, _] => some v
+  | "unwrap_or", [.result false _, d] => some d
+  -- Option::is_some / Option::is_none
+  | "is_some", [.option (some _)] => some (.bool true)
+  | "is_some", [.option none] => some (.bool false)
+  | "is_none", [.option (some _)] => some (.bool false)
+  | "is_none", [.option none] => some (.bool true)
+  -- Result::is_ok / Result::is_err
+  | "is_ok", [.result ok _] => some (.bool ok)
+  | "is_err", [.result ok _] => some (.bool !ok)
+  | _, _ => none
+
+/-- Width-specific operations on `Value.uint`. Returns `none` if the
+    operation is not handled (allowing fallback to `defaultBuiltins`).
+    Composed from smaller helpers for proof-friendliness. -/
+def widthOps : Builtins := fun f args =>
+  widthArithOps f args <|> widthBitwiseOps f args <|> widthCmpOps f args <|>
+  widthCastOps f args <|> widthArrayOps f args
+
+/-- Full builtins: width ops + panic ops + defaults. -/
+def fullBuiltins : Builtins := fun f args =>
+  widthOps f args <|> panicOps f args <|> defaultBuiltins f args
+
+/-- Width-aware builtins (without panic ops): tries `widthOps` first,
+    then falls back to `defaultBuiltins`. -/
+def widthAwareBuiltins : Builtins := fun f args =>
+  match widthOps f args with
+  | some v => some v
+  | none => defaultBuiltins f args
+
+/-- Convenience: denote with width-aware builtins. -/
+def denoteWidthAware (fuel : Nat) (e : ImpExpr) : StateM Env Outcome :=
+  denote widthAwareBuiltins fuel e
+
 end SSProve.Hax
