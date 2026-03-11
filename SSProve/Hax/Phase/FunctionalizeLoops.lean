@@ -73,6 +73,14 @@ def functionalizeLoopsAux (nested : Bool) : ImpExpr → ImpExpr
     else
       .forFold v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
         (functionalizeLoopsAux false body)
+  | .forLoopRev v lo hi body =>
+    let bodyHasEE := !checkNoEarlyExit body
+    if bodyHasEE then
+      .forFoldRevReturn v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
+        (functionalizeLoopsAux true body)
+    else
+      .forFoldRev v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
+        (functionalizeLoopsAux false body)
   | .whileLoop cond body =>
     let bodyHasEE := !checkNoEarlyExit body
     if bodyHasEE then
@@ -97,10 +105,16 @@ def functionalizeLoopsAux (nested : Bool) : ImpExpr → ImpExpr
   | .forFold v lo hi body =>
     .forFold v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
       (functionalizeLoopsAux nested body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
+      (functionalizeLoopsAux nested body)
   | .whileFold c body =>
     .whileFold (functionalizeLoopsAux nested c) (functionalizeLoopsAux nested body)
   | .forFoldReturn v lo hi body =>
     .forFoldReturn v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
+      (functionalizeLoopsAux nested body)
+  | .forFoldRevReturn v lo hi body =>
+    .forFoldRevReturn v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
       (functionalizeLoopsAux nested body)
   | .whileFoldReturn c body =>
     .whileFoldReturn (functionalizeLoopsAux nested c) (functionalizeLoopsAux nested body)
@@ -176,6 +190,11 @@ theorem functionalizeLoopsAux_noLoops (nested : Bool) (e : ImpExpr) :
     split
     · exact .forFoldReturn (ih1 _) (ih2 _) (ih3 _)
     · exact .forFold (ih1 _) (ih2 _) (ih3 _)
+  | forLoopRev v lo hi body ih1 ih2 ih3 =>
+    simp only [functionalizeLoopsAux]
+    split
+    · exact .forFoldRevReturn (ih1 _) (ih2 _) (ih3 _)
+    · exact .forFoldRev (ih1 _) (ih2 _) (ih3 _)
   | whileLoop c body ih1 ih2 =>
     simp only [functionalizeLoopsAux]
     split
@@ -195,8 +214,10 @@ theorem functionalizeLoopsAux_noLoops (nested : Bool) (e : ImpExpr) :
   | earlyReturn _ ih => exact .earlyReturn (ih _)
   | questionMark _ ih => exact .questionMark (ih _)
   | forFold _ _ _ _ ih1 ih2 ih3 => exact .forFold (ih1 _) (ih2 _) (ih3 _)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 => exact .forFoldRev (ih1 _) (ih2 _) (ih3 _)
   | whileFold _ _ ih1 ih2 => exact .whileFold (ih1 _) (ih2 _)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn (ih1 _) (ih2 _) (ih3 _)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldRevReturn (ih1 _) (ih2 _) (ih3 _)
   | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn (ih1 _) (ih2 _)
   | cfBreak _ ih => exact .cfBreak (ih _)
   | cfContinue _ ih => exact .cfContinue (ih _)
@@ -247,6 +268,11 @@ theorem functionalizeLoopsAux_preserves_noRefs (nested : Bool) (e : ImpExpr)
     simp only [functionalizeLoopsAux]; split
     · exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
     · exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 =>
+    simp only [functionalizeLoopsAux]; split
+    · exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+    · exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 =>
     simp only [functionalizeLoopsAux]; split
@@ -266,10 +292,14 @@ theorem functionalizeLoopsAux_preserves_noRefs (nested : Bool) (e : ImpExpr)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih _ he)
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 => exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 => exact .whileFold (ih1 _ h1) (ih2 _ h2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 _ h1) (ih2 _ h2)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
@@ -321,6 +351,11 @@ theorem functionalizeLoopsAux_preserves_noMut (nested : Bool) (e : ImpExpr)
     simp only [functionalizeLoopsAux]; split
     · exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
     · exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 =>
+    simp only [functionalizeLoopsAux]; split
+    · exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+    · exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 =>
     simp only [functionalizeLoopsAux]; split
@@ -340,10 +375,14 @@ theorem functionalizeLoopsAux_preserves_noMut (nested : Bool) (e : ImpExpr)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih _ he)
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 => exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 => exact .whileFold (ih1 _ h1) (ih2 _ h2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 _ h1) (ih2 _ h2)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
@@ -395,6 +434,11 @@ theorem functionalizeLoopsAux_preserves_noEarlyExit (nested : Bool) (e : ImpExpr
     simp only [functionalizeLoopsAux]; split
     · exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
     · exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 =>
+    simp only [functionalizeLoopsAux]; split
+    · exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+    · exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 =>
     simp only [functionalizeLoopsAux]; split
@@ -414,10 +458,14 @@ theorem functionalizeLoopsAux_preserves_noEarlyExit (nested : Bool) (e : ImpExpr
   | questionMark => exact absurd h NoEarlyExit.not_questionMark
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 => exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 => exact .whileFold (ih1 _ h1) (ih2 _ h2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 _ h1) (ih2 _ h2)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
@@ -476,6 +524,7 @@ theorem functionalizeLoopsAux_correct (nested : Bool) (e : ImpExpr) (h : NoLoops
     exact List.map_congr_left (fun pa hpa =>
       Prod.ext rfl (ih2 pa hpa _ (harms pa hpa)))
   | forLoop => exact absurd h NoLoops.not_forLoop
+  | forLoopRev => exact absurd h NoLoops.not_forLoopRev
   | whileLoop => exact absurd h NoLoops.not_whileLoop
   | break_none => exact absurd h NoLoops.not_break
   | break_some => exact absurd h NoLoops.not_break
@@ -483,11 +532,17 @@ theorem functionalizeLoopsAux_correct (nested : Bool) (e : ImpExpr) (h : NoLoops
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 =>
     simp only [functionalizeLoopsAux, ih1 _ h1, ih2 _ h2, ih3 _ h3]
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    simp only [functionalizeLoopsAux, ih1 _ h1, ih2 _ h2, ih3 _ h3]
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 =>
     simp only [functionalizeLoopsAux, ih1 _ h1, ih2 _ h2]
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 =>
+    simp only [functionalizeLoopsAux, ih1 _ h1, ih2 _ h2, ih3 _ h3]
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
     simp only [functionalizeLoopsAux, ih1 _ h1, ih2 _ h2, ih3 _ h3]
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 =>

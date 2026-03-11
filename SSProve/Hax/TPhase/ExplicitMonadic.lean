@@ -64,11 +64,17 @@ def tExplicitMonadic : TExpr → TExpr
   | .mk (.forFold v lo hi body) ty =>
       .mk (.forFold v (tExplicitMonadic lo) (tExplicitMonadic hi)
         (tWrapReturns (tExplicitMonadic body))) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+      .mk (.forFoldRev v (tExplicitMonadic lo) (tExplicitMonadic hi)
+        (tWrapReturns (tExplicitMonadic body))) ty
   | .mk (.whileFold c body) ty =>
       .mk (.whileFold (tExplicitMonadic c)
         (tWrapReturns (tExplicitMonadic body))) ty
   | .mk (.forFoldReturn v lo hi body) ty =>
       .mk (.forFoldReturn v (tExplicitMonadic lo) (tExplicitMonadic hi)
+        (tWrapReturns (tExplicitMonadic body))) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+      .mk (.forFoldRevReturn v (tExplicitMonadic lo) (tExplicitMonadic hi)
         (tWrapReturns (tExplicitMonadic body))) ty
   | .mk (.whileFoldReturn c body) ty =>
       .mk (.whileFoldReturn (tExplicitMonadic c)
@@ -83,6 +89,9 @@ def tExplicitMonadic : TExpr → TExpr
   | .mk (.assign n rhs) ty => .mk (.assign n (tExplicitMonadic rhs)) ty
   | .mk (.forLoop v lo hi body) ty =>
       .mk (.forLoop v (tExplicitMonadic lo) (tExplicitMonadic hi)
+        (tExplicitMonadic body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+      .mk (.forLoopRev v (tExplicitMonadic lo) (tExplicitMonadic hi)
         (tExplicitMonadic body)) ty
   | .mk (.whileLoop c body) ty =>
       .mk (.whileLoop (tExplicitMonadic c) (tExplicitMonadic body)) ty
@@ -136,9 +145,9 @@ theorem tWrapReturns_erase (e : TExpr) :
   -- Leaf cases: all map to cfContinue
   | lit | var | unitVal | app | tuple | proj
   | borrow | deref | assign
-  | forLoop | whileLoop | break_none | break_some | continue_
+  | forLoop | forLoopRev | whileLoop | break_none | break_some | continue_
   | earlyReturn | questionMark
-  | forFold | whileFold | forFoldReturn | whileFoldReturn =>
+  | forFold | forFoldRev | whileFold | forFoldReturn | forFoldRevReturn | whileFoldReturn =>
     simp [tWrapReturns, TExpr.erase, wrapReturns]
 
 /-! ## Commuting diagram: explicitMonadic -/
@@ -160,6 +169,8 @@ theorem tExplicitMonadic_erase (e : TExpr) :
   | assign _ _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih1, ih2, ih3]
+  | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih1, ih2, ih3]
   | whileLoop _ _ _ ih1 ih2 =>
     simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih1, ih2]
   | break_some _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
@@ -168,10 +179,16 @@ theorem tExplicitMonadic_erase (e : TExpr) :
   | forFold _ _ _ _ _ ih1 ih2 ih3 =>
     simp only [tExplicitMonadic, TExpr.erase, explicitMonadic]
     rw [tWrapReturns_erase, ih1, ih2, ih3]
+  | forFoldRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp only [tExplicitMonadic, TExpr.erase, explicitMonadic]
+    rw [tWrapReturns_erase, ih1, ih2, ih3]
   | whileFold _ _ _ ih1 ih2 =>
     simp only [tExplicitMonadic, TExpr.erase, explicitMonadic]
     rw [tWrapReturns_erase, ih1, ih2]
   | forFoldReturn _ _ _ _ _ ih1 ih2 ih3 =>
+    simp only [tExplicitMonadic, TExpr.erase, explicitMonadic]
+    rw [tWrapReturns_erase, ih1, ih2, ih3]
+  | forFoldRevReturn _ _ _ _ _ ih1 ih2 ih3 =>
     simp only [tExplicitMonadic, TExpr.erase, explicitMonadic]
     rw [tWrapReturns_erase, ih1, ih2, ih3]
   | whileFoldReturn _ _ _ ih1 ih2 =>

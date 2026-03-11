@@ -156,6 +156,14 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       denoteForLoop bi fuel var lo_val hi_val body
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
     | other, _ => pure other
+  | .forLoopRev var lo hi body => do
+    let rlo ← denote bi fuel lo
+    let rhi ← denote bi fuel hi
+    match rlo, rhi with
+    | .val (.int lo_val), .val (.int hi_val) =>
+      denoteForLoopRev bi fuel var lo_val hi_val body
+    | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | other, _ => pure other
   | .whileLoop cond body =>
     denoteWhile bi fuel cond body
   | .break_ (some e) => do
@@ -179,8 +187,10 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | other => pure other
   -- Phase 3/4 output constructors: should not appear in pre-pipeline expressions
   | .forFold _ _ _ _ => pure (.err "forFold in pre-pipeline expression")
+  | .forFoldRev _ _ _ _ => pure (.err "forFoldRev in pre-pipeline expression")
   | .whileFold _ _ => pure (.err "whileFold in pre-pipeline expression")
   | .forFoldReturn _ _ _ _ => pure (.err "forFoldReturn in pre-pipeline expression")
+  | .forFoldRevReturn _ _ _ _ => pure (.err "forFoldRevReturn in pre-pipeline expression")
   | .whileFoldReturn _ _ => pure (.err "whileFoldReturn in pre-pipeline expression")
   | .cfBreak _ => pure (.err "cfBreak in pre-pipeline expression")
   | .cfContinue _ => pure (.err "cfContinue in pre-pipeline expression")
@@ -230,6 +240,21 @@ def denoteForLoop (bi : Builtins) (fuel : Nat)
     match rb with
     | .val _ | .continued =>
       denoteForLoop bi (fuel - 1) var (lo + 1) hi body
+    | .broke v => pure (.val v)
+    | other => pure other
+  termination_by (fuel, sizeOf body + 1)
+
+/-- Reverse for loop helper: iterate body over (lo, hi] in reverse (hi-1 down to lo). -/
+def denoteForLoopRev (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) : StateM Env Outcome :=
+  if lo ≥ hi then pure (.val .unit)
+  else if fuel = 0 then pure (.err "out of fuel")
+  else do
+    modify (Env.extend · var (.int (hi - 1)))
+    let rb ← denote bi fuel body
+    match rb with
+    | .val _ | .continued =>
+      denoteForLoopRev bi (fuel - 1) var lo (hi - 1) body
     | .broke v => pure (.val v)
     | other => pure other
   termination_by (fuel, sizeOf body + 1)
@@ -320,6 +345,31 @@ theorem denoteForLoop_congr (bi : Builtins) (fuel : Nat)
         congr 1; funext rb
         split
         all_goals first | (simp only [Nat.add_sub_cancel]; exact ih (lo + 1)) | rfl
+
+/-- Congruence lemma for `denoteForLoopRev`. -/
+theorem denoteForLoopRev_congr (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body body' : ImpExpr)
+    (hbody : ∀ fuel, denote bi fuel body' = denote bi fuel body) :
+    denoteForLoopRev bi fuel var lo hi body' = denoteForLoopRev bi fuel var lo hi body := by
+  induction fuel generalizing hi with
+  | zero =>
+    unfold denoteForLoopRev
+    split
+    · rfl
+    · split
+      · rfl
+      · next h => exact absurd rfl h
+  | succ n ih =>
+    unfold denoteForLoopRev
+    split
+    · rfl
+    · split
+      · next h => exact absurd h (Nat.succ_ne_zero n)
+      · congr 1; funext _
+        rw [hbody (n + 1)]
+        congr 1; funext rb
+        split
+        all_goals first | (simp only [Nat.add_sub_cancel]; exact ih (hi - 1)) | rfl
 
 /-- Congruence: replacing `cond` and `body` in `denoteWhile` when `denote` is preserved for all fuel. -/
 theorem denoteWhile_congr (bi : Builtins) (fuel : Nat)

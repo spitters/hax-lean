@@ -77,6 +77,8 @@ private theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
@@ -85,8 +87,10 @@ private theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
   | earlyReturn _ ih => cases h with | earlyReturn he => exact .earlyReturn (ih he)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih he)
   | forFold => exact absurd h NoCFConstructors.not_forFold
+  | forFoldRev => exact absurd h NoCFConstructors.not_forFoldRev
   | whileFold => exact absurd h NoCFConstructors.not_whileFold
   | forFoldReturn => exact absurd h NoCFConstructors.not_forFoldReturn
+  | forFoldRevReturn => exact absurd h NoCFConstructors.not_forFoldRevReturn
   | whileFoldReturn => exact absurd h NoCFConstructors.not_whileFoldReturn
   | cfBreak => exact absurd h NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd h NoCFConstructors.not_cfContinue
@@ -128,6 +132,8 @@ private theorem localMutation_preserves_noCFConstructors (vars : List String) (e
     cases h with | assign hrhs => exact .seq (.letBind (ih hrhs) .var) .unitVal
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
@@ -136,8 +142,10 @@ private theorem localMutation_preserves_noCFConstructors (vars : List String) (e
   | earlyReturn _ ih => cases h with | earlyReturn he => exact .earlyReturn (ih he)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih he)
   | forFold => exact absurd h NoCFConstructors.not_forFold
+  | forFoldRev => exact absurd h NoCFConstructors.not_forFoldRev
   | whileFold => exact absurd h NoCFConstructors.not_whileFold
   | forFoldReturn => exact absurd h NoCFConstructors.not_forFoldReturn
+  | forFoldRevReturn => exact absurd h NoCFConstructors.not_forFoldRevReturn
   | whileFoldReturn => exact absurd h NoCFConstructors.not_whileFoldReturn
   | cfBreak => exact absurd h NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd h NoCFConstructors.not_cfContinue
@@ -180,6 +188,8 @@ private theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
@@ -189,10 +199,14 @@ private theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
   | questionMark => exact absurd h NoQuestionMark.not_questionMark
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 => exact .forFold (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 => exact .whileFold (ih1 h1) (ih2 h2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
@@ -235,6 +249,8 @@ private theorem localMutation_preserves_noQuestionMark (vars : List String) (e :
     cases h with | assign hrhs => exact .seq (.letBind (ih hrhs) .var) .unitVal
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
@@ -244,10 +260,14 @@ private theorem localMutation_preserves_noQuestionMark (vars : List String) (e :
   | questionMark => exact absurd h NoQuestionMark.not_questionMark
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 => exact .forFold (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 => exact .whileFold (ih1 h1) (ih2 h2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
@@ -293,6 +313,11 @@ private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (
     simp only [functionalizeLoopsAux]; split
     · exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
     · exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 =>
+    simp only [functionalizeLoopsAux]; split
+    · exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+    · exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 =>
     simp only [functionalizeLoopsAux]; split
@@ -312,10 +337,14 @@ private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (
   | questionMark => exact absurd h NoQuestionMark.not_questionMark
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFold h1 h2 h3 => exact .forFold (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFold _ _ ih1 ih2 =>
     cases h with | whileFold h1 h2 => exact .whileFold (ih1 _ h1) (ih2 _ h2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 _ h1) (ih2 _ h2) (ih3 _ h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 _ h1) (ih2 _ h2)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
@@ -374,6 +403,17 @@ private theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpEx
       exact .forFold (ih_lo _ hlo) (ih_hi _ hhi) (ih_body _ hbody)
         (functionalizeLoopsAux_preserves_noEarlyExit false body
           (checkNoEarlyExit_sound body hee_body))
+  | forLoopRev v lo hi body ih_lo ih_hi ih_body =>
+    cases h with | forLoopRev hlo hhi hbody =>
+    simp only [functionalizeLoopsAux]
+    split
+    · exact .forFoldRevReturn (ih_lo _ hlo) (ih_hi _ hhi) (ih_body _ hbody)
+    · rename_i hee
+      have hee_body : checkNoEarlyExit body = true := by
+        rcases hb : checkNoEarlyExit body with _ | _ <;> simp_all
+      exact .forFoldRev (ih_lo _ hlo) (ih_hi _ hhi) (ih_body _ hbody)
+        (functionalizeLoopsAux_preserves_noEarlyExit false body
+          (checkNoEarlyExit_sound body hee_body))
   | whileLoop c body ih_c ih_body =>
     cases h with | whileLoop hc hbody =>
     simp only [functionalizeLoopsAux]
@@ -401,8 +441,10 @@ private theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpEx
   | questionMark _ ih =>
     cases h with | questionMark he => exact .questionMark (ih _ he)
   | forFold => exact absurd h NoCFConstructors.not_forFold
+  | forFoldRev => exact absurd h NoCFConstructors.not_forFoldRev
   | whileFold => exact absurd h NoCFConstructors.not_whileFold
   | forFoldReturn => exact absurd h NoCFConstructors.not_forFoldReturn
+  | forFoldRevReturn => exact absurd h NoCFConstructors.not_forFoldRevReturn
   | whileFoldReturn => exact absurd h NoCFConstructors.not_whileFoldReturn
   | cfBreak => exact absurd h NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd h NoCFConstructors.not_cfContinue

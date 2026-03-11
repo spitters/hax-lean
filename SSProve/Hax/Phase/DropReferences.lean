@@ -42,6 +42,8 @@ def dropReferences : ImpExpr → ImpExpr
   | .assign n rhs => .assign n (dropReferences rhs)
   | .forLoop v lo hi body =>
     .forLoop v (dropReferences lo) (dropReferences hi) (dropReferences body)
+  | .forLoopRev v lo hi body =>
+    .forLoopRev v (dropReferences lo) (dropReferences hi) (dropReferences body)
   | .whileLoop c body => .whileLoop (dropReferences c) (dropReferences body)
   | .break_ (some e) => .break_ (some (dropReferences e))
   | .break_ none => .break_ none
@@ -54,6 +56,10 @@ def dropReferences : ImpExpr → ImpExpr
   | .forFoldReturn v lo hi body =>
     .forFoldReturn v (dropReferences lo) (dropReferences hi) (dropReferences body)
   | .whileFoldReturn c body => .whileFoldReturn (dropReferences c) (dropReferences body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v (dropReferences lo) (dropReferences hi) (dropReferences body)
+  | .forFoldRevReturn v lo hi body =>
+    .forFoldRevReturn v (dropReferences lo) (dropReferences hi) (dropReferences body)
   | .cfBreak e => .cfBreak (dropReferences e)
   | .cfContinue e => .cfContinue (dropReferences e)
   | .cfBreakContinue e => .cfBreakContinue (dropReferences e)
@@ -106,6 +112,7 @@ theorem dropReferences_noRefs (e : ImpExpr) : NoReferences (dropReferences e) :=
   | deref _ ih => exact ih
   | assign _ _ ih => exact .assign ih
   | forLoop _ _ _ _ ih1 ih2 ih3 => exact .forLoop ih1 ih2 ih3
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 => exact .forLoopRev ih1 ih2 ih3
   | whileLoop _ _ ih1 ih2 => exact .whileLoop ih1 ih2
   | break_none => exact .break_none
   | break_some _ ih => exact .break_some ih
@@ -116,6 +123,8 @@ theorem dropReferences_noRefs (e : ImpExpr) : NoReferences (dropReferences e) :=
   | whileFold _ _ ih1 ih2 => exact .whileFold ih1 ih2
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn ih1 ih2 ih3
   | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn ih1 ih2
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 => exact .forFoldRev ih1 ih2 ih3
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldRevReturn ih1 ih2 ih3
   | cfBreak _ ih => exact .cfBreak ih
   | cfContinue _ ih => exact .cfContinue ih
   | cfBreakContinue _ ih => exact .cfBreakContinue ih
@@ -212,6 +221,15 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
     · exact denoteForLoop_congr bi fuel v _ _ body (dropReferences body) ih3
     · rfl
     · rfl
+  | forLoopRev v lo hi body ih1 ih2 ih3 =>
+    intro fuel
+    simp only [dropReferences]
+    unfold denote
+    rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext rhi
+    split
+    · exact denoteForLoopRev_congr bi fuel v _ _ body (dropReferences body) ih3
+    · rfl
+    · rfl
   | whileLoop c body ih1 ih2 =>
     intro fuel
     simp only [dropReferences]
@@ -222,6 +240,8 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
   | whileFold _ _ ih1 ih2 => intro fuel; simp [dropReferences, denote]
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [dropReferences, denote]
   | whileFoldReturn _ _ ih1 ih2 => intro fuel; simp [dropReferences, denote]
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [dropReferences, denote]
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [dropReferences, denote]
   | cfBreak _ ih => intro fuel; simp [dropReferences, denote]
   | cfContinue _ ih => intro fuel; simp [dropReferences, denote]
   | cfBreakContinue _ ih => intro fuel; simp [dropReferences, denote]

@@ -80,6 +80,17 @@ partial def forFold {α β : Type} [Inhabited α]
     | .Break v => .Break v
     | .Continue acc => forFold (lo + 1) hi acc f
 
+/-- Reverse fold over `(lo, hi]` (i.e., hi-1, hi-2, ..., lo) with accumulator.
+    The body receives indices in descending order. -/
+partial def forFoldRev {α β : Type} [Inhabited α]
+    (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow β α) : ControlFlow β α :=
+  if lo ≥ hi then .Continue init
+  else
+    match f (hi - 1) init with
+    | .Break v => .Break v
+    | .Continue acc => forFoldRev lo (hi - 1) acc f
+
 /-- While-fold with accumulator.
     Iterates while the condition returns `true`. -/
 partial def whileFold {α β : Type} [Inhabited α]
@@ -107,6 +118,19 @@ partial def forFoldReturn {α β γ : Type}
     | .Break (.Continue v) => .Continue (.Break v)  -- loop break
     | .Break (.Break v) => .Break v                  -- early return
     | .Continue acc => forFoldReturn (lo + 1) hi acc f
+
+/-- Reverse for-fold with early return support (nested ControlFlow). -/
+partial def forFoldRevReturn {α β γ : Type}
+    [Inhabited α] [Inhabited γ]
+    (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
+    ControlFlow β (ControlFlow γ α) :=
+  if lo ≥ hi then .Continue (.Continue init)
+  else
+    match f (hi - 1) init with
+    | .Break (.Continue v) => .Continue (.Break v)  -- loop break
+    | .Break (.Break v) => .Break v                  -- early return
+    | .Continue acc => forFoldRevReturn lo (hi - 1) acc f
 
 /-- While-fold with early return support (nested ControlFlow). -/
 partial def whileFoldReturn {α β γ : Type}

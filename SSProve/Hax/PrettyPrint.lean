@@ -215,10 +215,14 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   -- Fold operations (post-pipeline)
   | .forFold v lo hi body =>
     s!"{ind}Hax.forFold {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} () fun {sanitizeName v} _acc =>\n{ind1}{toLean body (lvl + 1)}"
+  | .forFoldRev v lo hi body =>
+    s!"{ind}Hax.forFoldRev {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} () fun {sanitizeName v} _acc =>\n{ind1}{toLean body (lvl + 1)}"
   | .whileFold c body =>
     s!"{ind}Hax.whileFold () (fun _acc => {toLean c 0}) fun _acc =>\n{ind1}{toLean body (lvl + 1)}"
   | .forFoldReturn v lo hi body =>
     s!"{ind}Hax.forFoldReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} () fun {sanitizeName v} _acc =>\n{ind1}{toLean body (lvl + 1)}"
+  | .forFoldRevReturn v lo hi body =>
+    s!"{ind}Hax.forFoldRevReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} () fun {sanitizeName v} _acc =>\n{ind1}{toLean body (lvl + 1)}"
   | .whileFoldReturn c body =>
     s!"{ind}Hax.whileFoldReturn () (fun _acc => {toLean c 0}) fun _acc =>\n{ind1}{toLean body (lvl + 1)}"
 
@@ -228,6 +232,8 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   | .assign n rhs => s!"{sanitizeName n} := {toLean rhs 0}"
   | .forLoop v lo hi body =>
     s!"{ind}for {sanitizeName v} in {toLean lo 0} .. {toLean hi 0} do\n{ind1}{toLean body (lvl + 1)}"
+  | .forLoopRev v lo hi body =>
+    s!"{ind}for {sanitizeName v} in ({toLean lo 0} .. {toLean hi 0}).rev() do\n{ind1}{toLean body (lvl + 1)}"
   | .whileLoop c body =>
     s!"{ind}while {toLean c 0} do\n{ind1}{toLean body (lvl + 1)}"
   | .break_ none => "break"

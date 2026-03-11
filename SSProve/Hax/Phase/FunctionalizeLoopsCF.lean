@@ -92,6 +92,8 @@ inductive NoCFConstructors : ImpExpr → Prop where
   | assign {n rhs} : NoCFConstructors rhs → NoCFConstructors (.assign n rhs)
   | forLoop {v lo hi body} : NoCFConstructors lo → NoCFConstructors hi →
       NoCFConstructors body → NoCFConstructors (.forLoop v lo hi body)
+  | forLoopRev {v lo hi body} : NoCFConstructors lo → NoCFConstructors hi →
+      NoCFConstructors body → NoCFConstructors (.forLoopRev v lo hi body)
   | whileLoop {c body} : NoCFConstructors c → NoCFConstructors body →
       NoCFConstructors (.whileLoop c body)
   | break_none : NoCFConstructors (.break_ none)
@@ -102,10 +104,14 @@ inductive NoCFConstructors : ImpExpr → Prop where
 
 theorem NoCFConstructors.not_forFold {v : String} {lo hi body : ImpExpr} :
     ¬NoCFConstructors (.forFold v lo hi body) := by intro h; cases h
+theorem NoCFConstructors.not_forFoldRev {v : String} {lo hi body : ImpExpr} :
+    ¬NoCFConstructors (.forFoldRev v lo hi body) := by intro h; cases h
 theorem NoCFConstructors.not_whileFold {c body : ImpExpr} :
     ¬NoCFConstructors (.whileFold c body) := by intro h; cases h
 theorem NoCFConstructors.not_forFoldReturn {v : String} {lo hi body : ImpExpr} :
     ¬NoCFConstructors (.forFoldReturn v lo hi body) := by intro h; cases h
+theorem NoCFConstructors.not_forFoldRevReturn {v : String} {lo hi body : ImpExpr} :
+    ¬NoCFConstructors (.forFoldRevReturn v lo hi body) := by intro h; cases h
 theorem NoCFConstructors.not_whileFoldReturn {c body : ImpExpr} :
     ¬NoCFConstructors (.whileFoldReturn c body) := by intro h; cases h
 theorem NoCFConstructors.not_cfBreak {e : ImpExpr} :
@@ -794,6 +800,223 @@ private theorem denoteForLoop_combined_return (bi : Builtins) (hbi : Builtins.De
       | earlyRet v =>
         -- earlyRet v → encodeCF3nested: earlyRet v
         -- denoteForLoop'Return: other → pure other → earlyRet v
+        exact ⟨henvb, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+      | err =>
+        exact ⟨henvb, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+
+/-! ### denoteForLoopRev combined correctness -/
+
+private theorem denoteForLoopRev_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+    (body : ImpExpr) (hbody : FLInv bi body) :
+    ∀ fuel var_name lo_val hi_val env, Env.NoControlFlow env →
+      (denoteForLoopRev bi fuel var_name lo_val hi_val body env).2.NoControlFlow ∧
+      (∀ w, (denoteForLoopRev bi fuel var_name lo_val hi_val body env).1 = .val w →
+        w.deepNoControlFlow = true) ∧
+      (∀ w, (denoteForLoopRev bi fuel var_name lo_val hi_val body env).1 = .broke w →
+        w.deepNoControlFlow = true) ∧
+      denoteForLoopRev' bi fuel var_name lo_val hi_val (functionalizeLoops body) env =
+        (Outcome.encodeCF3 (denoteForLoopRev bi fuel var_name lo_val hi_val body env).1,
+         (denoteForLoopRev bi fuel var_name lo_val hi_val body env).2) := by
+  intro fuel; induction fuel with
+  | zero =>
+    intro var_name lo_val hi_val env henv
+    unfold denoteForLoopRev denoteForLoopRev'
+    split
+    · exact ⟨henv, fun v h => by
+        simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
+        fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+    · split
+      · exact ⟨henv, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+      · omega
+  | succ n ih =>
+    intro var_name lo_val hi_val env henv
+    unfold denoteForLoopRev denoteForLoopRev'
+    by_cases hge : lo_val ≥ hi_val
+    · simp only [if_pos hge]
+      exact ⟨henv, fun v h => by
+        simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
+        fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+    · have hfuel : ¬(n + 1 = 0) := by omega
+      simp only [if_neg hge, if_neg hfuel]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      have hint : (Value.int (hi_val - 1)).deepNoControlFlow = true := rfl
+      have henv' : (Env.extend env var_name (.int (hi_val - 1))).NoControlFlow := henv.extend hint
+      obtain ⟨henvb, hncb, hbrkb, hsimb⟩ :=
+        hbody (n + 1) (Env.extend env var_name (.int (hi_val - 1))) henv'
+      generalize hpb : denote bi (n + 1) body (Env.extend env var_name (.int (hi_val - 1))) = pb
+        at henvb hncb hbrkb hsimb ⊢
+      obtain ⟨rb, envb⟩ := pb; simp only [functionalizeLoops] at *
+      rw [hsimb]; simp only [Outcome.encodeCF3]
+      cases rb with
+      | val v =>
+        have hv := hncb v rfl
+        cases v with
+        | controlFlow => simp [Value.deepNoControlFlow] at hv
+        | _ =>
+          simp only [show n + 1 - 1 = n from rfl]
+          exact ih var_name lo_val (hi_val - 1) envb henvb
+      | continued =>
+        simp only [show n + 1 - 1 = n from rfl]
+        exact ih var_name lo_val (hi_val - 1) envb henvb
+      | broke w =>
+        exact ⟨henvb, fun v h => by
+          simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h
+          subst h; exact hbrkb w rfl,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          by simp [pure, Pure.pure, StateT.pure, Outcome.encodeCF3]⟩
+      | earlyRet =>
+        exact ⟨henvb, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+      | err =>
+        exact ⟨henvb, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+
+/-! ### denoteForLoopRev never returns broke/continued -/
+
+private theorem denoteForLoopRev_never_broke (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) (w : Value) :
+    (denoteForLoopRev bi fuel var lo hi body env).1 ≠ .broke w := by
+  induction fuel generalizing hi env with
+  | zero =>
+    unfold denoteForLoopRev; split
+    · simp [pure, Pure.pure, StateT.pure]
+    · simp [pure, Pure.pure, StateT.pure]
+  | succ n ih =>
+    unfold denoteForLoopRev
+    by_cases hge : lo ≥ hi
+    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      generalize denote bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
+      obtain ⟨rb, envb⟩ := pb
+      cases rb with
+      | val _ => simp only [show n + 1 - 1 = n from rfl]; exact ih (hi - 1) envb
+      | continued => simp only [show n + 1 - 1 = n from rfl]; exact ih (hi - 1) envb
+      | broke _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
+      | earlyRet _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
+      | err _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
+
+private theorem denoteForLoopRev_never_continued (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
+    (denoteForLoopRev bi fuel var lo hi body env).1 ≠ .continued := by
+  induction fuel generalizing hi env with
+  | zero =>
+    unfold denoteForLoopRev; split
+    · simp [pure, Pure.pure, StateT.pure]
+    · simp [pure, Pure.pure, StateT.pure]
+  | succ n ih =>
+    unfold denoteForLoopRev
+    by_cases hge : lo ≥ hi
+    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      generalize denote bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
+      obtain ⟨rb, envb⟩ := pb
+      cases rb with
+      | val _ => simp only [show n + 1 - 1 = n from rfl]; exact ih (hi - 1) envb
+      | continued => simp only [show n + 1 - 1 = n from rfl]; exact ih (hi - 1) envb
+      | broke _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
+      | earlyRet _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
+      | err _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
+
+private theorem denoteForLoopRev_encodeCF3_id (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
+    Outcome.encodeCF3 (denoteForLoopRev bi fuel var lo hi body env).1 =
+      (denoteForLoopRev bi fuel var lo hi body env).1 := by
+  cases h : (denoteForLoopRev bi fuel var lo hi body env).1 with
+  | val => rfl
+  | earlyRet => rfl
+  | err => rfl
+  | broke w => exact absurd h (denoteForLoopRev_never_broke bi fuel var lo hi body env w)
+  | continued => exact absurd h (denoteForLoopRev_never_continued bi fuel var lo hi body env)
+
+/-- Same as `denoteForLoopRev_encodeCF3_id` but for `encodeCF3gen nested`. -/
+private theorem denoteForLoopRev_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (nested : Bool)
+    (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
+    Outcome.encodeCF3gen nested (denoteForLoopRev bi fuel var lo hi body env).1 =
+      (denoteForLoopRev bi fuel var lo hi body env).1 := by
+  cases h : (denoteForLoopRev bi fuel var lo hi body env).1 with
+  | val => simp only [Outcome.encodeCF3gen_val]
+  | earlyRet => simp only [Outcome.encodeCF3gen_earlyRet]
+  | err => simp only [Outcome.encodeCF3gen_err]
+  | broke w => exact absurd h (denoteForLoopRev_never_broke bi fuel var lo hi body env w)
+  | continued => exact absurd h (denoteForLoopRev_never_continued bi fuel var lo hi body env)
+
+/-- Reverse for-loop combined correctness for the Return variant.
+    Relates `denoteForLoopRev` (original semantics) to `denoteForLoopRev'Return`
+    (CF-aware semantics for loops with earlyReturn in body).
+    The body uses `FLInvGen true` (nested encoding). -/
+private theorem denoteForLoopRev_combined_return (bi : Builtins)
+    (hbi : Builtins.DeepNoControlFlow bi)
+    (body : ImpExpr) (hbody : FLInvGen true bi body) :
+    ∀ fuel var_name lo_val hi_val env, Env.NoControlFlow env →
+      (denoteForLoopRev bi fuel var_name lo_val hi_val body env).2.NoControlFlow ∧
+      (∀ w, (denoteForLoopRev bi fuel var_name lo_val hi_val body env).1 = .val w →
+        w.deepNoControlFlow = true) ∧
+      (∀ w, (denoteForLoopRev bi fuel var_name lo_val hi_val body env).1 = .broke w →
+        w.deepNoControlFlow = true) ∧
+      denoteForLoopRev'Return bi fuel var_name lo_val hi_val
+          (functionalizeLoopsAux true body) env =
+        (Outcome.encodeCF3 (denoteForLoopRev bi fuel var_name lo_val hi_val body env).1,
+         (denoteForLoopRev bi fuel var_name lo_val hi_val body env).2) := by
+  intro fuel; induction fuel with
+  | zero =>
+    intro var_name lo_val hi_val env henv
+    unfold denoteForLoopRev denoteForLoopRev'Return
+    split
+    · exact ⟨henv, fun v h => by
+        simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
+        fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+    · split
+      · exact ⟨henv, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+      · omega
+  | succ n ih =>
+    intro var_name lo_val hi_val env henv
+    unfold denoteForLoopRev denoteForLoopRev'Return
+    by_cases hge : lo_val ≥ hi_val
+    · simp only [if_pos hge]
+      exact ⟨henv, fun v h => by
+        simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
+        fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
+    · have hfuel : ¬(n + 1 = 0) := by omega
+      simp only [if_neg hge, if_neg hfuel]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      have hint : (Value.int (hi_val - 1)).deepNoControlFlow = true := rfl
+      have henv' : (Env.extend env var_name (.int (hi_val - 1))).NoControlFlow := henv.extend hint
+      obtain ⟨henvb, hncb, hbrkb, hsimb⟩ :=
+        hbody (n + 1) (Env.extend env var_name (.int (hi_val - 1))) henv'
+      generalize hpb : denote bi (n + 1) body (Env.extend env var_name (.int (hi_val - 1))) = pb
+        at henvb hncb hbrkb hsimb ⊢
+      obtain ⟨rb, envb⟩ := pb
+      simp only [Outcome.encodeCF3gen_true_eq] at hsimb
+      rw [hsimb]; simp only [Outcome.encodeCF3nested]
+      cases rb with
+      | val v =>
+        have hv := hncb v rfl
+        cases v with
+        | controlFlow => simp [Value.deepNoControlFlow] at hv
+        | _ =>
+          simp only [show n + 1 - 1 = n from rfl]
+          exact ih var_name lo_val (hi_val - 1) envb henvb
+      | continued =>
+        simp only [show n + 1 - 1 = n from rfl]
+        exact ih var_name lo_val (hi_val - 1) envb henvb
+      | broke w =>
+        have hbw := hbrkb w rfl
+        exact ⟨henvb, fun v h => by
+          simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h
+          subst h; exact hbw,
+          fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
+          by simp [pure, Pure.pure, StateT.pure, Outcome.encodeCF3]⟩
+      | earlyRet v =>
         exact ⟨henvb, fun v h => by simp [pure, Pure.pure, StateT.pure] at h,
           fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
       | err =>
@@ -1498,6 +1721,314 @@ private theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlo
         refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
           fun w hw => Outcome.noConfusion hw, ?_⟩
         cases nested <;> simp [Outcome.encodeCF3gen_continued, StateT.pure, pure, Pure.pure]
+  | forLoopRev v lo hi body ih_lo ih_hi ih_body =>
+    cases hncf with | forLoopRev hlo hhi hbody_ncf =>
+    intro fuel env henv
+    by_cases hee : checkNoEarlyExit body = true
+    · -- No early exit: forFoldRev case
+      have hfl : functionalizeLoopsAux nested (.forLoopRev v lo hi body) =
+          .forFoldRev v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
+            (functionalizeLoopsAux false body) := by
+        simp [functionalizeLoopsAux, hee]
+      rw [hfl]
+      -- Unfold denote (for .forLoopRev) and denote' (for .forFoldRev)
+      unfold denote denote'
+      simp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure]
+      -- Evaluate lo via IH
+      obtain ⟨henv_lo, hnc_lo, hbrk_lo, hsim_lo⟩ := ih_lo hlo nested fuel env henv
+      generalize hplo : denote bi fuel lo env = plo at henv_lo hnc_lo hbrk_lo hsim_lo ⊢
+      obtain ⟨rlo, envlo⟩ := plo; simp only [] at *
+      rw [hsim_lo]
+      -- Evaluate hi via IH (denote evaluates both unconditionally)
+      obtain ⟨henv_hi, hnc_hi, hbrk_hi, hsim_hi⟩ := ih_hi hhi nested fuel envlo henv_lo
+      generalize hphi : denote bi fuel hi envlo = phi at henv_hi hnc_hi hbrk_hi hsim_hi ⊢
+      obtain ⟨rhi, envhi⟩ := phi; simp only [] at *
+      rw [hsim_hi]
+      -- Case split on rlo
+      cases rlo with
+      | val vlo =>
+        have hvlo := hnc_lo vlo rfl
+        cases vlo with
+        | controlFlow => simp [Value.deepNoControlFlow] at hvlo
+        | int lo_val =>
+          -- rlo = val (int lo_val), now case split on rhi
+          simp only [Outcome.encodeCF3gen_val]
+          cases rhi with
+          | val vhi =>
+            have hvhi := hnc_hi vhi rfl
+            cases vhi with
+            | controlFlow => simp [Value.deepNoControlFlow] at hvhi
+            | int hi_val =>
+              -- Both int: denote' dispatches to denoteForLoopRev' directly
+              simp only [Outcome.encodeCF3gen_val, StateT.pure]
+              have hbody_inv : FLInv bi body :=
+                (FLInvGen_false_eq_FLInv bi body).mp (ih_body hbody_ncf false)
+              obtain ⟨henvfl, hncfl, _, hsimfl⟩ :=
+                denoteForLoopRev_combined bi hbi body hbody_inv
+                  fuel v lo_val hi_val envhi henv_hi
+              simp only [functionalizeLoops] at hsimfl
+              rw [hsimfl]
+              exact ⟨henvfl, hncfl,
+                fun w hw => absurd hw (denoteForLoopRev_never_broke bi fuel v lo_val hi_val body envhi w),
+                by rw [denoteForLoopRev_encodeCF3_id, denoteForLoopRev_encodeCF3gen_id]⟩
+            | _ =>
+              -- hi = val (non-int, non-CF) → err on both sides
+              simp only [Outcome.encodeCF3gen_val]
+              dsimp only [StateT.pure, pure, Pure.pure]
+              exact ⟨henv_hi,
+                fun w hw => by simp [Outcome.val.injEq] at hw,
+                fun w hw => by simp [Outcome.val.injEq] at hw,
+                by simp [Outcome.encodeCF3gen_val]⟩
+          | earlyRet | err =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
+              Outcome.encodeCF3gen_err]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
+              fun w hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val]⟩
+          | broke w =>
+            -- rlo = val (int lo_val), rhi = broke w
+            simp only [Outcome.encodeCF3gen_val]
+            dsimp only [pure, Pure.pure, StateT.pure]
+            refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
+            · simp only [Outcome.val.injEq] at hw; subst hw; exact hvlo
+            · exact Outcome.noConfusion hw
+            · cases nested <;>
+                simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
+          | continued =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w' hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
+              fun w' hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val]⟩
+        | _ =>
+          -- lo = val (non-int, non-CF): case split on rhi
+          simp only [Outcome.encodeCF3gen_val]
+          cases rhi with
+          | val vhi =>
+            have hvhi := hnc_hi vhi rfl
+            cases vhi with
+            | controlFlow => simp [Value.deepNoControlFlow] at hvhi
+            | _ =>
+              simp only [Outcome.encodeCF3gen_val]
+              dsimp only [StateT.pure, pure, Pure.pure]
+              exact ⟨henv_hi,
+                fun w hw => by simp at hw,
+                fun w hw => by simp at hw,
+                by simp [Outcome.encodeCF3gen_val]⟩
+          | broke w =>
+            -- rlo = val (non-int, non-CF), rhi = broke w
+            refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
+            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+                StateT.pure, pure, Pure.pure] at hw <;> subst hw <;> exact hvlo
+            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+                StateT.pure, pure, Pure.pure] at hw
+            · cases nested <;>
+                simp [Outcome.encodeCF3_val, Outcome.encodeCF3_broke,
+                  Outcome.encodeCF3nested_val, Outcome.encodeCF3nested_broke,
+                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
+          | continued =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w' hw => Outcome.val.inj hw ▸ hvlo,
+              fun w' hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val]⟩
+          | earlyRet | err =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
+              Outcome.encodeCF3gen_err]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w' hw => Outcome.val.inj hw ▸ hvlo,
+              fun w' hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
+                Outcome.encodeCF3gen_err]⟩
+      | earlyRet | err =>
+        -- rlo = earlyRet/err: denote returns rlo, denote' returns rlo
+        refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
+          fun w hw => Outcome.noConfusion hw, ?_⟩
+        cases rhi with
+        | val w =>
+          cases w <;> simp [Outcome.encodeCF3gen_earlyRet, Outcome.encodeCF3gen_err,
+            Outcome.encodeCF3gen_val, StateT.pure, pure, Pure.pure]
+        | _ =>
+          cases nested <;> simp [Outcome.encodeCF3, Outcome.encodeCF3nested,
+            Outcome.encodeCF3gen_earlyRet, Outcome.encodeCF3gen_err,
+            Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+            Outcome.encodeCF3gen_continued, StateT.pure, pure, Pure.pure]
+      | broke w =>
+        -- rlo = broke w: denote returns broke w, denote' sees CF-encoded value
+        refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
+        · cases nested <;>
+            simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+              StateT.pure, pure, Pure.pure] at hw
+        · cases nested <;>
+            simp only [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+              StateT.pure, pure, Pure.pure, Outcome.broke.injEq] at hw <;>
+            subst hw <;> exact hbrk_lo _ rfl
+        · cases nested <;>
+            simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+              Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+              StateT.pure, pure, Pure.pure]
+      | continued =>
+        simp only [Outcome.encodeCF3gen_continued]
+        dsimp only [StateT.pure, pure, Pure.pure]
+        refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
+          fun w hw => Outcome.noConfusion hw, ?_⟩
+        cases nested <;> simp [Outcome.encodeCF3gen_continued, StateT.pure, pure, Pure.pure]
+    · -- Early exit in body: forFoldRevReturn case
+      have hee' : checkNoEarlyExit body = false := by
+        cases h : checkNoEarlyExit body <;> simp_all
+      have hfl : functionalizeLoopsAux nested (.forLoopRev v lo hi body) =
+          .forFoldRevReturn v (functionalizeLoopsAux nested lo) (functionalizeLoopsAux nested hi)
+            (functionalizeLoopsAux true body) := by
+        simp [functionalizeLoopsAux, hee']
+      rw [hfl]
+      -- Unfold denote (for .forLoopRev) and denote' (for .forFoldRevReturn)
+      unfold denote denote'
+      simp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure]
+      -- Evaluate lo via IH
+      obtain ⟨henv_lo, hnc_lo, hbrk_lo, hsim_lo⟩ := ih_lo hlo nested fuel env henv
+      generalize hplo : denote bi fuel lo env = plo at henv_lo hnc_lo hbrk_lo hsim_lo ⊢
+      obtain ⟨rlo, envlo⟩ := plo; simp only [] at *
+      rw [hsim_lo]
+      -- Evaluate hi via IH
+      obtain ⟨henv_hi, hnc_hi, hbrk_hi, hsim_hi⟩ := ih_hi hhi nested fuel envlo henv_lo
+      generalize hphi : denote bi fuel hi envlo = phi at henv_hi hnc_hi hbrk_hi hsim_hi ⊢
+      obtain ⟨rhi, envhi⟩ := phi; simp only [] at *
+      rw [hsim_hi]
+      -- Case split on rlo
+      cases rlo with
+      | val vlo =>
+        have hvlo := hnc_lo vlo rfl
+        cases vlo with
+        | controlFlow => simp [Value.deepNoControlFlow] at hvlo
+        | int lo_val =>
+          simp only [Outcome.encodeCF3gen_val]
+          cases rhi with
+          | val vhi =>
+            have hvhi := hnc_hi vhi rfl
+            cases vhi with
+            | controlFlow => simp [Value.deepNoControlFlow] at hvhi
+            | int hi_val =>
+              simp only [Outcome.encodeCF3gen_val, StateT.pure]
+              obtain ⟨henvfl, hncfl, _, hsimfl⟩ :=
+                denoteForLoopRev_combined_return bi hbi body (ih_body hbody_ncf true)
+                  fuel v lo_val hi_val envhi henv_hi
+              rw [hsimfl]
+              exact ⟨henvfl, hncfl,
+                fun w hw => absurd hw
+                  (denoteForLoopRev_never_broke bi fuel v lo_val hi_val body envhi w),
+                by rw [denoteForLoopRev_encodeCF3_id, denoteForLoopRev_encodeCF3gen_id]⟩
+            | _ =>
+              simp only [Outcome.encodeCF3gen_val]
+              dsimp only [StateT.pure, pure, Pure.pure]
+              exact ⟨henv_hi,
+                fun w hw => by simp [Outcome.val.injEq] at hw,
+                fun w hw => by simp [Outcome.val.injEq] at hw,
+                by simp [Outcome.encodeCF3gen_val]⟩
+          | earlyRet | err =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
+              Outcome.encodeCF3gen_err]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
+              fun w hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val]⟩
+          | broke w =>
+            simp only [Outcome.encodeCF3gen_val]
+            dsimp only [pure, Pure.pure, StateT.pure]
+            refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
+            · simp only [Outcome.val.injEq] at hw; subst hw; exact hvlo
+            · exact Outcome.noConfusion hw
+            · cases nested <;>
+                simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
+          | continued =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w' hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
+              fun w' hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val]⟩
+        | _ =>
+          simp only [Outcome.encodeCF3gen_val]
+          cases rhi with
+          | val vhi =>
+            have hvhi := hnc_hi vhi rfl
+            cases vhi with
+            | controlFlow => simp [Value.deepNoControlFlow] at hvhi
+            | _ =>
+              simp only [Outcome.encodeCF3gen_val]
+              dsimp only [StateT.pure, pure, Pure.pure]
+              exact ⟨henv_hi,
+                fun w hw => by simp at hw,
+                fun w hw => by simp at hw,
+                by simp [Outcome.encodeCF3gen_val]⟩
+          | broke w =>
+            refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
+            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+                StateT.pure, pure, Pure.pure] at hw <;> subst hw <;> exact hvlo
+            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+                StateT.pure, pure, Pure.pure] at hw
+            · cases nested <;>
+                simp [Outcome.encodeCF3_val, Outcome.encodeCF3_broke,
+                  Outcome.encodeCF3nested_val, Outcome.encodeCF3nested_broke,
+                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
+          | continued =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w' hw => Outcome.val.inj hw ▸ hvlo,
+              fun w' hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val]⟩
+          | earlyRet | err =>
+            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
+              Outcome.encodeCF3gen_err]
+            dsimp only [StateT.pure, pure, Pure.pure]
+            exact ⟨henv_hi,
+              fun w' hw => Outcome.val.inj hw ▸ hvlo,
+              fun w' hw => Outcome.noConfusion hw,
+              by simp [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
+                Outcome.encodeCF3gen_err]⟩
+      | earlyRet | err =>
+        refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
+          fun w hw => Outcome.noConfusion hw, ?_⟩
+        cases rhi with
+        | val w =>
+          cases w <;> simp [Outcome.encodeCF3gen_earlyRet, Outcome.encodeCF3gen_err,
+            Outcome.encodeCF3gen_val, StateT.pure, pure, Pure.pure]
+        | _ =>
+          cases nested <;> simp [Outcome.encodeCF3, Outcome.encodeCF3nested,
+            Outcome.encodeCF3gen_earlyRet, Outcome.encodeCF3gen_err,
+            Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+            Outcome.encodeCF3gen_continued, StateT.pure, pure, Pure.pure]
+      | broke w =>
+        refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
+        · cases nested <;>
+            simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+              StateT.pure, pure, Pure.pure] at hw
+        · cases nested <;>
+            simp only [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+              StateT.pure, pure, Pure.pure, Outcome.broke.injEq] at hw <;>
+            subst hw <;> exact hbrk_lo _ rfl
+        · cases nested <;>
+            simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
+              Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
+              StateT.pure, pure, Pure.pure]
+      | continued =>
+        simp only [Outcome.encodeCF3gen_continued]
+        dsimp only [StateT.pure, pure, Pure.pure]
+        refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
+          fun w hw => Outcome.noConfusion hw, ?_⟩
+        cases nested <;> simp [Outcome.encodeCF3gen_continued, StateT.pure, pure, Pure.pure]
   | whileLoop c body ih_c ih_b =>
     cases hncf with | whileLoop hc hb =>
     intro fuel env henv
@@ -1631,8 +2162,10 @@ private theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlo
     · simp only [pure, Pure.pure, StateT.pure, Outcome.encodeCF3gen_continued]
   -- Dedicated Phase 3/4 constructors: impossible by NoCFConstructors
   | forFold => exact absurd hncf NoCFConstructors.not_forFold
+  | forFoldRev => exact absurd hncf NoCFConstructors.not_forFoldRev
   | whileFold => exact absurd hncf NoCFConstructors.not_whileFold
   | forFoldReturn => exact absurd hncf NoCFConstructors.not_forFoldReturn
+  | forFoldRevReturn => exact absurd hncf NoCFConstructors.not_forFoldRevReturn
   | whileFoldReturn => exact absurd hncf NoCFConstructors.not_whileFoldReturn
   | cfBreak => exact absurd hncf NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd hncf NoCFConstructors.not_cfContinue

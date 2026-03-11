@@ -205,6 +205,9 @@ private partial def impExprToJson : ImpExpr → Json
   | .forLoop v lo hi body =>
     Json.mkObj [("forLoop", Json.mkObj [("var", Json.str v),
       ("lo", impExprToJson lo), ("hi", impExprToJson hi), ("body", impExprToJson body)])]
+  | .forLoopRev v lo hi body =>
+    Json.mkObj [("forLoopRev", Json.mkObj [("var", Json.str v),
+      ("lo", impExprToJson lo), ("hi", impExprToJson hi), ("body", impExprToJson body)])]
   | .whileLoop c body =>
     Json.mkObj [("whileLoop", Json.mkObj [
       ("cond", impExprToJson c), ("body", impExprToJson body)])]
@@ -215,11 +218,17 @@ private partial def impExprToJson : ImpExpr → Json
   | .forFold v lo hi body =>
     Json.mkObj [("forFold", Json.mkObj [("var", Json.str v),
       ("lo", impExprToJson lo), ("hi", impExprToJson hi), ("body", impExprToJson body)])]
+  | .forFoldRev v lo hi body =>
+    Json.mkObj [("forFoldRev", Json.mkObj [("var", Json.str v),
+      ("lo", impExprToJson lo), ("hi", impExprToJson hi), ("body", impExprToJson body)])]
   | .whileFold c body =>
     Json.mkObj [("whileFold", Json.mkObj [
       ("cond", impExprToJson c), ("body", impExprToJson body)])]
   | .forFoldReturn v lo hi body =>
     Json.mkObj [("forFoldReturn", Json.mkObj [("var", Json.str v),
+      ("lo", impExprToJson lo), ("hi", impExprToJson hi), ("body", impExprToJson body)])]
+  | .forFoldRevReturn v lo hi body =>
+    Json.mkObj [("forFoldRevReturn", Json.mkObj [("var", Json.str v),
       ("lo", impExprToJson lo), ("hi", impExprToJson hi), ("body", impExprToJson body)])]
   | .whileFoldReturn c body =>
     Json.mkObj [("whileFoldReturn", Json.mkObj [
@@ -281,6 +290,12 @@ private partial def impExprFromJson (j : Json) : Except String ImpExpr := do
       let hi ← impExprFromJson (← sub.getObjVal? "hi")
       let body ← impExprFromJson (← sub.getObjVal? "body")
       return .forLoop v lo hi body
+    else if let .ok sub := j.getObjVal? "forLoopRev" then
+      let v ← sub.getObjValAs? String "var"
+      let lo ← impExprFromJson (← sub.getObjVal? "lo")
+      let hi ← impExprFromJson (← sub.getObjVal? "hi")
+      let body ← impExprFromJson (← sub.getObjVal? "body")
+      return .forLoopRev v lo hi body
     else if let .ok sub := j.getObjVal? "whileLoop" then
       let c ← impExprFromJson (← sub.getObjVal? "cond")
       let body ← impExprFromJson (← sub.getObjVal? "body")
@@ -298,6 +313,12 @@ private partial def impExprFromJson (j : Json) : Except String ImpExpr := do
       let hi ← impExprFromJson (← sub.getObjVal? "hi")
       let body ← impExprFromJson (← sub.getObjVal? "body")
       return .forFold v lo hi body
+    else if let .ok sub := j.getObjVal? "forFoldRev" then
+      let v ← sub.getObjValAs? String "var"
+      let lo ← impExprFromJson (← sub.getObjVal? "lo")
+      let hi ← impExprFromJson (← sub.getObjVal? "hi")
+      let body ← impExprFromJson (← sub.getObjVal? "body")
+      return .forFoldRev v lo hi body
     else if let .ok sub := j.getObjVal? "whileFold" then
       let c ← impExprFromJson (← sub.getObjVal? "cond")
       let body ← impExprFromJson (← sub.getObjVal? "body")
@@ -308,6 +329,12 @@ private partial def impExprFromJson (j : Json) : Except String ImpExpr := do
       let hi ← impExprFromJson (← sub.getObjVal? "hi")
       let body ← impExprFromJson (← sub.getObjVal? "body")
       return .forFoldReturn v lo hi body
+    else if let .ok sub := j.getObjVal? "forFoldRevReturn" then
+      let v ← sub.getObjValAs? String "var"
+      let lo ← impExprFromJson (← sub.getObjVal? "lo")
+      let hi ← impExprFromJson (← sub.getObjVal? "hi")
+      let body ← impExprFromJson (← sub.getObjVal? "body")
+      return .forFoldRevReturn v lo hi body
     else if let .ok sub := j.getObjVal? "whileFoldReturn" then
       let c ← impExprFromJson (← sub.getObjVal? "cond")
       let body ← impExprFromJson (← sub.getObjVal? "body")
@@ -361,6 +388,9 @@ private partial def texprKindToJson : TExprKind → Json
   | .forLoop v lo hi body =>
     Json.mkObj [("forLoop", Json.mkObj [("var", Json.str v),
       ("lo", texprToJson lo), ("hi", texprToJson hi), ("body", texprToJson body)])]
+  | .forLoopRev v lo hi body =>
+    Json.mkObj [("forLoopRev", Json.mkObj [("var", Json.str v),
+      ("lo", texprToJson lo), ("hi", texprToJson hi), ("body", texprToJson body)])]
   | .whileLoop c body =>
     Json.mkObj [("whileLoop", Json.mkObj [
       ("cond", texprToJson c), ("body", texprToJson body)])]
@@ -371,11 +401,17 @@ private partial def texprKindToJson : TExprKind → Json
   | .forFold v lo hi body =>
     Json.mkObj [("forFold", Json.mkObj [("var", Json.str v),
       ("lo", texprToJson lo), ("hi", texprToJson hi), ("body", texprToJson body)])]
+  | .forFoldRev v lo hi body =>
+    Json.mkObj [("forFoldRev", Json.mkObj [("var", Json.str v),
+      ("lo", texprToJson lo), ("hi", texprToJson hi), ("body", texprToJson body)])]
   | .whileFold c body =>
     Json.mkObj [("whileFold", Json.mkObj [
       ("cond", texprToJson c), ("body", texprToJson body)])]
   | .forFoldReturn v lo hi body =>
     Json.mkObj [("forFoldReturn", Json.mkObj [("var", Json.str v),
+      ("lo", texprToJson lo), ("hi", texprToJson hi), ("body", texprToJson body)])]
+  | .forFoldRevReturn v lo hi body =>
+    Json.mkObj [("forFoldRevReturn", Json.mkObj [("var", Json.str v),
       ("lo", texprToJson lo), ("hi", texprToJson hi), ("body", texprToJson body)])]
   | .whileFoldReturn c body =>
     Json.mkObj [("whileFoldReturn", Json.mkObj [
@@ -443,6 +479,12 @@ where
         let hi ← texprFromJson (← sub.getObjVal? "hi")
         let body ← texprFromJson (← sub.getObjVal? "body")
         return .forLoop v lo hi body
+      else if let .ok sub := j.getObjVal? "forLoopRev" then
+        let v ← sub.getObjValAs? String "var"
+        let lo ← texprFromJson (← sub.getObjVal? "lo")
+        let hi ← texprFromJson (← sub.getObjVal? "hi")
+        let body ← texprFromJson (← sub.getObjVal? "body")
+        return .forLoopRev v lo hi body
       else if let .ok sub := j.getObjVal? "whileLoop" then
         let c ← texprFromJson (← sub.getObjVal? "cond")
         let body ← texprFromJson (← sub.getObjVal? "body")
@@ -460,6 +502,12 @@ where
         let hi ← texprFromJson (← sub.getObjVal? "hi")
         let body ← texprFromJson (← sub.getObjVal? "body")
         return .forFold v lo hi body
+      else if let .ok sub := j.getObjVal? "forFoldRev" then
+        let v ← sub.getObjValAs? String "var"
+        let lo ← texprFromJson (← sub.getObjVal? "lo")
+        let hi ← texprFromJson (← sub.getObjVal? "hi")
+        let body ← texprFromJson (← sub.getObjVal? "body")
+        return .forFoldRev v lo hi body
       else if let .ok sub := j.getObjVal? "whileFold" then
         let c ← texprFromJson (← sub.getObjVal? "cond")
         let body ← texprFromJson (← sub.getObjVal? "body")
@@ -470,6 +518,12 @@ where
         let hi ← texprFromJson (← sub.getObjVal? "hi")
         let body ← texprFromJson (← sub.getObjVal? "body")
         return .forFoldReturn v lo hi body
+      else if let .ok sub := j.getObjVal? "forFoldRevReturn" then
+        let v ← sub.getObjValAs? String "var"
+        let lo ← texprFromJson (← sub.getObjVal? "lo")
+        let hi ← texprFromJson (← sub.getObjVal? "hi")
+        let body ← texprFromJson (← sub.getObjVal? "body")
+        return .forFoldRevReturn v lo hi body
       else if let .ok sub := j.getObjVal? "whileFoldReturn" then
         let c ← texprFromJson (← sub.getObjVal? "cond")
         let body ← texprFromJson (← sub.getObjVal? "body")

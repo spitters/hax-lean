@@ -128,6 +128,8 @@ theorem wrapReturns_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
   | assign n rhs _ => exact cfContinue_denote'_wrapContinue bi fuel (.assign n rhs)
   | forLoop v lo hi body _ _ _ =>
     exact cfContinue_denote'_wrapContinue bi fuel (.forLoop v lo hi body)
+  | forLoopRev v lo hi body _ _ _ =>
+    exact cfContinue_denote'_wrapContinue bi fuel (.forLoopRev v lo hi body)
   | whileLoop c body _ _ =>
     exact cfContinue_denote'_wrapContinue bi fuel (.whileLoop c body)
   | break_none => exact cfContinue_denote'_wrapContinue bi fuel (.break_ none)
@@ -140,10 +142,14 @@ theorem wrapReturns_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
     exact cfContinue_denote'_wrapContinue bi fuel (.questionMark e)
   | forFold v lo hi body _ _ _ =>
     exact cfContinue_denote'_wrapContinue bi fuel (.forFold v lo hi body)
+  | forFoldRev v lo hi body _ _ _ =>
+    exact cfContinue_denote'_wrapContinue bi fuel (.forFoldRev v lo hi body)
   | whileFold c body _ _ =>
     exact cfContinue_denote'_wrapContinue bi fuel (.whileFold c body)
   | forFoldReturn v lo hi body _ _ _ =>
     exact cfContinue_denote'_wrapContinue bi fuel (.forFoldReturn v lo hi body)
+  | forFoldRevReturn v lo hi body _ _ _ =>
+    exact cfContinue_denote'_wrapContinue bi fuel (.forFoldRevReturn v lo hi body)
   | whileFoldReturn c body _ _ =>
     exact cfContinue_denote'_wrapContinue bi fuel (.whileFoldReturn c body)
   -- Identity cases: wrapReturns e = e, output is wrapContinue-fixed
@@ -403,6 +409,104 @@ theorem denoteForLoop'Return_wrapReturns (bi : Builtins) (fuel : Nat)
       denoteForLoop'Return bi fuel var lo hi body env :=
   fun env => forLoopReturn_body_neutral bi fuel var lo hi body fuel lo env (Nat.le_refl _)
 
+private theorem forLoopRev_body_neutral (bi : Builtins) (fuel : Nat)
+    (var : String) (lo _hi : Int) (body : ImpExpr) :
+    ∀ n : Nat, ∀ hi' : Int, ∀ env,
+      n ≤ fuel →
+      denoteForLoopRev' bi n var lo hi' (wrapReturns body) env =
+        denoteForLoopRev' bi n var lo hi' body env := by
+  intro n; induction n with
+  | zero =>
+    intro hi' env _
+    unfold denoteForLoopRev'
+    split
+    · rfl
+    · split
+      · rfl
+      · omega
+  | succ n ih =>
+    intro hi' env hn
+    unfold denoteForLoopRev'
+    by_cases hge : lo ≥ hi'
+    · simp only [if_pos hge]
+    · have hfuel : ¬(n + 1 = 0) := by omega
+      simp only [if_neg hge, if_neg hfuel]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      rw [wrapReturns_denote'_wrapContinue bi (n + 1) body
+            (Env.extend env var (.int (hi' - 1)))]
+      generalize denote' bi (n + 1) body (Env.extend env var (.int (hi' - 1))) = pb
+      obtain ⟨r, envb⟩ := pb
+      cases r with
+      | val v =>
+        cases v with
+        | controlFlow b w =>
+          simp only [Outcome.wrapContinue, show n + 1 - 1 = n from rfl]
+          cases b with
+          | true => rfl
+          | false => exact ih (hi' - 1) envb (by omega)
+        | _ =>
+          simp only [Outcome.wrapContinue, show n + 1 - 1 = n from rfl]
+          exact ih (hi' - 1) envb (by omega)
+      | _ => rfl
+
+/-- `wrapReturns` is neutral within `denoteForLoopRev'`. -/
+theorem denoteForLoopRev'_wrapReturns (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) :
+    ∀ env, denoteForLoopRev' bi fuel var lo hi (wrapReturns body) env =
+      denoteForLoopRev' bi fuel var lo hi body env :=
+  fun env => forLoopRev_body_neutral bi fuel var lo hi body fuel hi env (Nat.le_refl _)
+
+private theorem forLoopRevReturn_body_neutral (bi : Builtins) (fuel : Nat)
+    (var : String) (lo _hi : Int) (body : ImpExpr) :
+    ∀ n : Nat, ∀ hi' : Int, ∀ env, n ≤ fuel →
+      denoteForLoopRev'Return bi n var lo hi' (wrapReturns body) env =
+        denoteForLoopRev'Return bi n var lo hi' body env := by
+  intro n; induction n with
+  | zero =>
+    intro hi' env _
+    unfold denoteForLoopRev'Return
+    split
+    · rfl
+    · split
+      · rfl
+      · omega
+  | succ n ih =>
+    intro hi' env hn
+    unfold denoteForLoopRev'Return
+    by_cases hge : lo ≥ hi'
+    · simp only [if_pos hge]
+    · have hfuel : ¬(n + 1 = 0) := by omega
+      simp only [if_neg hge, if_neg hfuel]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      rw [wrapReturns_denote'_wrapContinue bi (n + 1) body
+            (Env.extend env var (.int (hi' - 1)))]
+      generalize denote' bi (n + 1) body (Env.extend env var (.int (hi' - 1))) = pb
+      obtain ⟨r, envb⟩ := pb
+      cases r with
+      | val v =>
+        cases v with
+        | controlFlow b w =>
+          simp only [Outcome.wrapContinue, show n + 1 - 1 = n from rfl]
+          cases b with
+          | true =>
+            cases w with
+            | controlFlow b'' _ => cases b'' <;> rfl
+            | _ => rfl
+          | false => exact ih (hi' - 1) envb (by omega)
+        | _ =>
+          simp only [Outcome.wrapContinue, show n + 1 - 1 = n from rfl]
+          exact ih (hi' - 1) envb (by omega)
+      | _ => rfl
+
+/-- `wrapReturns` is neutral within `denoteForLoopRev'Return`. -/
+theorem denoteForLoopRev'Return_wrapReturns (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) :
+    ∀ env, denoteForLoopRev'Return bi fuel var lo hi (wrapReturns body) env =
+      denoteForLoopRev'Return bi fuel var lo hi body env :=
+  fun env => forLoopRevReturn_body_neutral bi fuel var lo hi body fuel hi env (Nat.le_refl _)
+
 private theorem whileLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
     (cond body : ImpExpr) :
     ∀ n : Nat, ∀ env, n ≤ fuel →
@@ -587,6 +691,83 @@ private theorem denoteForLoop'Return_body_congr (bi : Builtins)
             | _ => rfl
           | false => exact ih (lo + 1) hi envb
         | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih (lo + 1) hi envb
+      | _ => rfl
+
+private theorem denoteForLoopRev'_body_congr (bi : Builtins)
+    (var : String) (body1 body2 : ImpExpr)
+    (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
+    ∀ fuel : Nat, ∀ lo hi : Int, ∀ env,
+      denoteForLoopRev' bi fuel var lo hi body1 env =
+        denoteForLoopRev' bi fuel var lo hi body2 env := by
+  intro fuel; induction fuel with
+  | zero =>
+    intro lo hi env; unfold denoteForLoopRev'
+    split
+    · rfl
+    · split
+      · rfl
+      · omega
+  | succ n ih =>
+    intro lo hi env
+    unfold denoteForLoopRev'
+    by_cases hge : lo ≥ hi
+    · simp only [if_pos hge]
+    · have hfuel : ¬(n + 1 = 0) := by omega
+      simp only [if_neg hge, if_neg hfuel]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      rw [h (n + 1) (Env.extend env var (.int (hi - 1)))]
+      generalize denote' bi (n + 1) body2 (Env.extend env var (.int (hi - 1))) = pb
+      obtain ⟨r, envb⟩ := pb
+      cases r with
+      | val v =>
+        cases v with
+        | controlFlow b w =>
+          simp only [show n + 1 - 1 = n from rfl]
+          cases b with
+          | true => rfl
+          | false => exact ih lo (hi - 1) envb
+        | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih lo (hi - 1) envb
+      | _ => rfl
+
+private theorem denoteForLoopRev'Return_body_congr (bi : Builtins)
+    (var : String) (body1 body2 : ImpExpr)
+    (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
+    ∀ fuel : Nat, ∀ lo hi : Int, ∀ env,
+      denoteForLoopRev'Return bi fuel var lo hi body1 env =
+        denoteForLoopRev'Return bi fuel var lo hi body2 env := by
+  intro fuel; induction fuel with
+  | zero =>
+    intro lo hi env; unfold denoteForLoopRev'Return
+    split
+    · rfl
+    · split
+      · rfl
+      · omega
+  | succ n ih =>
+    intro lo hi env
+    unfold denoteForLoopRev'Return
+    by_cases hge : lo ≥ hi
+    · simp only [if_pos hge]
+    · have hfuel : ¬(n + 1 = 0) := by omega
+      simp only [if_neg hge, if_neg hfuel]
+      dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
+        MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
+      rw [h (n + 1) (Env.extend env var (.int (hi - 1)))]
+      generalize denote' bi (n + 1) body2 (Env.extend env var (.int (hi - 1))) = pb
+      obtain ⟨r, envb⟩ := pb
+      cases r with
+      | val v =>
+        cases v with
+        | controlFlow b w =>
+          simp only [show n + 1 - 1 = n from rfl]
+          cases b with
+          | true =>
+            cases w with
+            | controlFlow b'' _ => cases b'' <;> rfl
+            | _ => rfl
+          | false => exact ih lo (hi - 1) envb
+        | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih lo (hi - 1) envb
       | _ => rfl
 
 private theorem denoteWhile'Return_congr (bi : Builtins)
@@ -946,6 +1127,112 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
       cases rhi with
       | val v => cases v with | controlFlow => rfl | _ => rfl
       | _ => rfl
+  | forFoldRev v lo hi body ih_lo ih_hi ih_body =>
+    cases hnr with | forFoldRev hr1 hr2 hr3 =>
+    cases hnm with | forFoldRev hm1 hm2 hm3 =>
+    cases hnl with | forFoldRev hl1 hl2 hl3 =>
+    cases hne with | forFoldRev he1 he2 he3 =>
+    intro fuel env
+    simp only [explicitMonadic]; unfold denote'
+    simp only [bind, StateT.bind]
+    rw [ih_lo hr1 hm1 hl1 he1 fuel env]
+    generalize denote' bi fuel lo env = plo
+    obtain ⟨rlo, envlo⟩ := plo
+    dsimp only []
+    rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
+    generalize denote' bi fuel hi envlo = phi
+    obtain ⟨rhi, envhi⟩ := phi
+    dsimp only []
+    cases rlo with
+    | val vlo =>
+      cases rhi with
+      | val vhi =>
+        cases vlo with
+        | int lo_val =>
+          cases vhi with
+          | int hi_val =>
+            dsimp only []
+            rw [denoteForLoopRev'_wrapReturns]
+            exact denoteForLoopRev'_body_congr bi v (explicitMonadic body) body
+              (fun fuel env => ih_body hr3 hm3 hl3 he3 fuel env)
+              fuel lo_val hi_val envhi
+          | controlFlow => rfl
+          | _ => rfl
+        | controlFlow => rfl
+        | _ => cases vhi with | controlFlow => rfl | _ => rfl
+      | err => cases vlo with | controlFlow => rfl | _ => rfl
+      | earlyRet => cases vlo with | controlFlow => rfl | _ => rfl
+      | broke => cases vlo with | controlFlow => rfl | _ => rfl
+      | continued => cases vlo with | controlFlow => rfl | _ => rfl
+    | err =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+    | earlyRet =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+    | broke =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+    | continued =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+  | forFoldRevReturn v lo hi body ih_lo ih_hi ih_body =>
+    cases hnr with | forFoldRevReturn hr1 hr2 hr3 =>
+    cases hnm with | forFoldRevReturn hm1 hm2 hm3 =>
+    cases hnl with | forFoldRevReturn hl1 hl2 hl3 =>
+    cases hne with | forFoldRevReturn he1 he2 he3 =>
+    intro fuel env
+    simp only [explicitMonadic]; unfold denote'
+    simp only [bind, StateT.bind]
+    rw [ih_lo hr1 hm1 hl1 he1 fuel env]
+    generalize denote' bi fuel lo env = plo
+    obtain ⟨rlo, envlo⟩ := plo
+    dsimp only []
+    rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
+    generalize denote' bi fuel hi envlo = phi
+    obtain ⟨rhi, envhi⟩ := phi
+    dsimp only []
+    cases rlo with
+    | val vlo =>
+      cases rhi with
+      | val vhi =>
+        cases vlo with
+        | int lo_val =>
+          cases vhi with
+          | int hi_val =>
+            dsimp only []
+            rw [denoteForLoopRev'Return_wrapReturns]
+            exact denoteForLoopRev'Return_body_congr bi v (explicitMonadic body) body
+              (fun fuel env => ih_body hr3 hm3 hl3 he3 fuel env)
+              fuel lo_val hi_val envhi
+          | controlFlow => rfl
+          | _ => rfl
+        | controlFlow => rfl
+        | _ => cases vhi with | controlFlow => rfl | _ => rfl
+      | err => cases vlo with | controlFlow => rfl | _ => rfl
+      | earlyRet => cases vlo with | controlFlow => rfl | _ => rfl
+      | broke => cases vlo with | controlFlow => rfl | _ => rfl
+      | continued => cases vlo with | controlFlow => rfl | _ => rfl
+    | err =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+    | earlyRet =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+    | broke =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
+    | continued =>
+      cases rhi with
+      | val v => cases v with | controlFlow => rfl | _ => rfl
+      | _ => rfl
   | whileFoldReturn c body ih_c ih_body =>
     cases hnr with | whileFoldReturn hr1 hr2 =>
     cases hnm with | whileFoldReturn hm1 hm2 =>
@@ -993,6 +1280,7 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
   | deref => exact absurd hnr NoReferences.not_deref
   | assign => exact absurd hnm NoMutation.not_assign
   | forLoop => exact absurd hnl NoLoops.not_forLoop
+  | forLoopRev => exact absurd hnl NoLoops.not_forLoopRev
   | whileLoop => exact absurd hnl NoLoops.not_whileLoop
   | break_none => exact absurd hnl NoLoops.not_break
   | break_some => exact absurd hnl NoLoops.not_break

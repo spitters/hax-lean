@@ -36,6 +36,8 @@ def tCfIntoMonads : TExpr → TExpr
   | .mk (.assign n rhs) ty => .mk (.assign n (tCfIntoMonads rhs)) ty
   | .mk (.forLoop v lo hi body) ty =>
       .mk (.forLoop v (tCfIntoMonads lo) (tCfIntoMonads hi) (tCfIntoMonads body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+      .mk (.forLoopRev v (tCfIntoMonads lo) (tCfIntoMonads hi) (tCfIntoMonads body)) ty
   | .mk (.whileLoop c body) ty =>
       .mk (.whileLoop (tCfIntoMonads c) (tCfIntoMonads body)) ty
   | .mk (.break_ (some e)) ty => .mk (.break_ (some (tCfIntoMonads e))) ty
@@ -52,10 +54,15 @@ def tCfIntoMonads : TExpr → TExpr
       ]) ty
   | .mk (.forFold v lo hi body) ty =>
       .mk (.forFold v (tCfIntoMonads lo) (tCfIntoMonads hi) (tCfIntoMonads body)) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+      .mk (.forFoldRev v (tCfIntoMonads lo) (tCfIntoMonads hi) (tCfIntoMonads body)) ty
   | .mk (.whileFold c body) ty =>
       .mk (.whileFold (tCfIntoMonads c) (tCfIntoMonads body)) ty
   | .mk (.forFoldReturn v lo hi body) ty =>
       .mk (.forFoldReturn v (tCfIntoMonads lo) (tCfIntoMonads hi)
+        (tCfIntoMonads body)) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+      .mk (.forFoldRevReturn v (tCfIntoMonads lo) (tCfIntoMonads hi)
         (tCfIntoMonads body)) ty
   | .mk (.whileFoldReturn c body) ty =>
       .mk (.whileFoldReturn (tCfIntoMonads c) (tCfIntoMonads body)) ty
@@ -99,6 +106,8 @@ theorem tCfIntoMonads_erase (e : TExpr) :
   | assign _ _ _ ih => simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
   | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2, ih3]
+  | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2, ih3]
   | whileLoop _ _ _ ih1 ih2 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2]
   | break_some _ _ ih => simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
@@ -106,9 +115,13 @@ theorem tCfIntoMonads_erase (e : TExpr) :
   | questionMark _ _ ih => simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
   | forFold _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2, ih3]
+  | forFoldRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2, ih3]
   | whileFold _ _ _ ih1 ih2 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2]
   | forFoldReturn _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2, ih3]
+  | forFoldRevReturn _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2, ih3]
   | whileFoldReturn _ _ _ ih1 ih2 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2]

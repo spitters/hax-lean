@@ -73,6 +73,7 @@ inductive ImpExpr where
   | assign (name : String) (rhs : ImpExpr)
   -- Consumed by functionalizeLoops (Phase 3)
   | forLoop (var : String) (lo hi : ImpExpr) (body : ImpExpr)
+  | forLoopRev (var : String) (lo hi : ImpExpr) (body : ImpExpr)
   | whileLoop (cond body : ImpExpr)
   | break_ (e : Option ImpExpr)
   | continue_
@@ -81,8 +82,10 @@ inductive ImpExpr where
   | questionMark (e : ImpExpr)
   -- Produced by functionalizeLoops (Phase 3)
   | forFold (var : String) (lo hi body : ImpExpr)
+  | forFoldRev (var : String) (lo hi body : ImpExpr)
   | whileFold (cond body : ImpExpr)
   | forFoldReturn (var : String) (lo hi body : ImpExpr)
+  | forFoldRevReturn (var : String) (lo hi body : ImpExpr)
   | whileFoldReturn (cond body : ImpExpr)
   | cfBreak (e : ImpExpr)
   | cfContinue (e : ImpExpr)
@@ -113,6 +116,8 @@ def ImpExpr.ind {motive : ImpExpr → Prop}
     (assign : ∀ n rhs, motive rhs → motive (.assign n rhs))
     (forLoop : ∀ v lo hi body, motive lo → motive hi → motive body →
         motive (.forLoop v lo hi body))
+    (forLoopRev : ∀ v lo hi body, motive lo → motive hi → motive body →
+        motive (.forLoopRev v lo hi body))
     (whileLoop : ∀ c body, motive c → motive body → motive (.whileLoop c body))
     (break_none : motive (.break_ none))
     (break_some : ∀ e, motive e → motive (.break_ (some e)))
@@ -121,9 +126,13 @@ def ImpExpr.ind {motive : ImpExpr → Prop}
     (questionMark : ∀ e, motive e → motive (.questionMark e))
     (forFold : ∀ v lo hi body, motive lo → motive hi → motive body →
         motive (.forFold v lo hi body))
+    (forFoldRev : ∀ v lo hi body, motive lo → motive hi → motive body →
+        motive (.forFoldRev v lo hi body))
     (whileFold : ∀ c body, motive c → motive body → motive (.whileFold c body))
     (forFoldReturn : ∀ v lo hi body, motive lo → motive hi → motive body →
         motive (.forFoldReturn v lo hi body))
+    (forFoldRevReturn : ∀ v lo hi body, motive lo → motive hi → motive body →
+        motive (.forFoldRevReturn v lo hi body))
     (whileFoldReturn : ∀ c body, motive c → motive body → motive (.whileFoldReturn c body))
     (cfBreak : ∀ e, motive e → motive (.cfBreak e))
     (cfContinue : ∀ e, motive e → motive (.cfContinue e))
@@ -146,6 +155,7 @@ where
     | .deref e => deref e (go e)
     | .assign n rhs => assign n rhs (go rhs)
     | .forLoop v lo hi body => forLoop v lo hi body (go lo) (go hi) (go body)
+    | .forLoopRev v lo hi body => forLoopRev v lo hi body (go lo) (go hi) (go body)
     | .whileLoop c body => whileLoop c body (go c) (go body)
     | .break_ none => break_none
     | .break_ (some e) => break_some e (go e)
@@ -153,8 +163,10 @@ where
     | .earlyReturn e => earlyReturn e (go e)
     | .questionMark e => questionMark e (go e)
     | .forFold v lo hi body => forFold v lo hi body (go lo) (go hi) (go body)
+    | .forFoldRev v lo hi body => forFoldRev v lo hi body (go lo) (go hi) (go body)
     | .whileFold c body => whileFold c body (go c) (go body)
     | .forFoldReturn v lo hi body => forFoldReturn v lo hi body (go lo) (go hi) (go body)
+    | .forFoldRevReturn v lo hi body => forFoldRevReturn v lo hi body (go lo) (go hi) (go body)
     | .whileFoldReturn c body => whileFoldReturn c body (go c) (go body)
     | .cfBreak e => cfBreak e (go e)
     | .cfContinue e => cfContinue e (go e)
@@ -190,6 +202,8 @@ def ImpExpr.beq : ImpExpr → ImpExpr → Bool
   | .assign n₁ r₁, .assign n₂ r₂ => n₁ == n₂ && r₁.beq r₂
   | .forLoop v₁ l₁ h₁ b₁, .forLoop v₂ l₂ h₂ b₂ =>
     v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
+  | .forLoopRev v₁ l₁ h₁ b₁, .forLoopRev v₂ l₂ h₂ b₂ =>
+    v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
   | .whileLoop c₁ b₁, .whileLoop c₂ b₂ => c₁.beq c₂ && b₁.beq b₂
   | .break_ (some e₁), .break_ (some e₂) => e₁.beq e₂
   | .break_ none, .break_ none => true
@@ -198,8 +212,12 @@ def ImpExpr.beq : ImpExpr → ImpExpr → Bool
   | .questionMark e₁, .questionMark e₂ => e₁.beq e₂
   | .forFold v₁ l₁ h₁ b₁, .forFold v₂ l₂ h₂ b₂ =>
     v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
+  | .forFoldRev v₁ l₁ h₁ b₁, .forFoldRev v₂ l₂ h₂ b₂ =>
+    v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
   | .whileFold c₁ b₁, .whileFold c₂ b₂ => c₁.beq c₂ && b₁.beq b₂
   | .forFoldReturn v₁ l₁ h₁ b₁, .forFoldReturn v₂ l₂ h₂ b₂ =>
+    v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
+  | .forFoldRevReturn v₁ l₁ h₁ b₁, .forFoldRevReturn v₂ l₂ h₂ b₂ =>
     v₁ == v₂ && l₁.beq l₂ && h₁.beq h₂ && b₁.beq b₂
   | .whileFoldReturn c₁ b₁, .whileFoldReturn c₂ b₂ => c₁.beq c₂ && b₁.beq b₂
   | .cfBreak e₁, .cfBreak e₂ => e₁.beq e₂

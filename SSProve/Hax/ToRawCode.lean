@@ -75,6 +75,7 @@ noncomputable def toRawCode : ImpExpr → RawCode Value
   | .deref e => toRawCode e
   | .assign _ rhs => toRawCode rhs
   | .forLoop _ _ _ body => toRawCode body
+  | .forLoopRev _ _ _ body => toRawCode body
   | .whileLoop _ body => toRawCode body
   | .break_ _ => .ret .unit
   | .continue_ => .ret .unit
@@ -84,6 +85,8 @@ noncomputable def toRawCode : ImpExpr → RawCode Value
   | .whileFold _ body => toRawCode body
   | .forFoldReturn _ _ _ body => toRawCode body
   | .whileFoldReturn _ body => toRawCode body
+  | .forFoldRev _ _ _ body => toRawCode body
+  | .forFoldRevReturn _ _ _ body => toRawCode body
   | .cfBreak e => toRawCode e
   | .cfContinue e => toRawCode e
   | .cfBreakContinue e => toRawCode e

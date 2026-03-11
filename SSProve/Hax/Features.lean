@@ -42,6 +42,8 @@ inductive NoReferences : ImpExpr → Prop where
       NoReferences (.assign n rhs)
   | forLoop {v lo hi body} : NoReferences lo → NoReferences hi → NoReferences body →
       NoReferences (.forLoop v lo hi body)
+  | forLoopRev {v lo hi body} : NoReferences lo → NoReferences hi → NoReferences body →
+      NoReferences (.forLoopRev v lo hi body)
   | whileLoop {c body} : NoReferences c → NoReferences body →
       NoReferences (.whileLoop c body)
   | break_none : NoReferences (.break_ none)
@@ -53,10 +55,14 @@ inductive NoReferences : ImpExpr → Prop where
       NoReferences (.questionMark e)
   | forFold {v lo hi body} : NoReferences lo → NoReferences hi → NoReferences body →
       NoReferences (.forFold v lo hi body)
+  | forFoldRev {v lo hi body} : NoReferences lo → NoReferences hi → NoReferences body →
+      NoReferences (.forFoldRev v lo hi body)
   | whileFold {c body} : NoReferences c → NoReferences body →
       NoReferences (.whileFold c body)
   | forFoldReturn {v lo hi body} : NoReferences lo → NoReferences hi → NoReferences body →
       NoReferences (.forFoldReturn v lo hi body)
+  | forFoldRevReturn {v lo hi body} : NoReferences lo → NoReferences hi → NoReferences body →
+      NoReferences (.forFoldRevReturn v lo hi body)
   | whileFoldReturn {c body} : NoReferences c → NoReferences body →
       NoReferences (.whileFoldReturn c body)
   | cfBreak {e} : NoReferences e → NoReferences (.cfBreak e)
@@ -93,6 +99,8 @@ inductive NoMutation : ImpExpr → Prop where
   | deref {e} : NoMutation e → NoMutation (.deref e)
   | forLoop {v lo hi body} : NoMutation lo → NoMutation hi → NoMutation body →
       NoMutation (.forLoop v lo hi body)
+  | forLoopRev {v lo hi body} : NoMutation lo → NoMutation hi → NoMutation body →
+      NoMutation (.forLoopRev v lo hi body)
   | whileLoop {c body} : NoMutation c → NoMutation body →
       NoMutation (.whileLoop c body)
   | break_none : NoMutation (.break_ none)
@@ -104,10 +112,14 @@ inductive NoMutation : ImpExpr → Prop where
       NoMutation (.questionMark e)
   | forFold {v lo hi body} : NoMutation lo → NoMutation hi → NoMutation body →
       NoMutation (.forFold v lo hi body)
+  | forFoldRev {v lo hi body} : NoMutation lo → NoMutation hi → NoMutation body →
+      NoMutation (.forFoldRev v lo hi body)
   | whileFold {c body} : NoMutation c → NoMutation body →
       NoMutation (.whileFold c body)
   | forFoldReturn {v lo hi body} : NoMutation lo → NoMutation hi → NoMutation body →
       NoMutation (.forFoldReturn v lo hi body)
+  | forFoldRevReturn {v lo hi body} : NoMutation lo → NoMutation hi → NoMutation body →
+      NoMutation (.forFoldRevReturn v lo hi body)
   | whileFoldReturn {c body} : NoMutation c → NoMutation body →
       NoMutation (.whileFoldReturn c body)
   | cfBreak {e} : NoMutation e → NoMutation (.cfBreak e)
@@ -145,10 +157,14 @@ inductive NoLoops : ImpExpr → Prop where
   | questionMark {e} : NoLoops e → NoLoops (.questionMark e)
   | forFold {v lo hi body} : NoLoops lo → NoLoops hi → NoLoops body →
       NoLoops (.forFold v lo hi body)
+  | forFoldRev {v lo hi body} : NoLoops lo → NoLoops hi → NoLoops body →
+      NoLoops (.forFoldRev v lo hi body)
   | whileFold {c body} : NoLoops c → NoLoops body →
       NoLoops (.whileFold c body)
   | forFoldReturn {v lo hi body} : NoLoops lo → NoLoops hi → NoLoops body →
       NoLoops (.forFoldReturn v lo hi body)
+  | forFoldRevReturn {v lo hi body} : NoLoops lo → NoLoops hi → NoLoops body →
+      NoLoops (.forFoldRevReturn v lo hi body)
   | whileFoldReturn {c body} : NoLoops c → NoLoops body →
       NoLoops (.whileFoldReturn c body)
   | cfBreak {e} : NoLoops e → NoLoops (.cfBreak e)
@@ -157,6 +173,8 @@ inductive NoLoops : ImpExpr → Prop where
 
 theorem NoLoops.not_forLoop {v : String} {lo hi body : ImpExpr} :
     ¬NoLoops (.forLoop v lo hi body) := by intro h; cases h
+theorem NoLoops.not_forLoopRev {v : String} {lo hi body : ImpExpr} :
+    ¬NoLoops (.forLoopRev v lo hi body) := by intro h; cases h
 theorem NoLoops.not_whileLoop {c body : ImpExpr} :
     ¬NoLoops (.whileLoop c body) := by intro h; cases h
 theorem NoLoops.not_break {oe : Option ImpExpr} :
@@ -190,6 +208,8 @@ inductive NoEarlyExit : ImpExpr → Prop where
   | assign {n rhs} : NoEarlyExit rhs → NoEarlyExit (.assign n rhs)
   | forLoop {v lo hi body} : NoEarlyExit lo → NoEarlyExit hi → NoEarlyExit body →
       NoEarlyExit (.forLoop v lo hi body)
+  | forLoopRev {v lo hi body} : NoEarlyExit lo → NoEarlyExit hi → NoEarlyExit body →
+      NoEarlyExit (.forLoopRev v lo hi body)
   | whileLoop {c body} : NoEarlyExit c → NoEarlyExit body →
       NoEarlyExit (.whileLoop c body)
   | break_none : NoEarlyExit (.break_ none)
@@ -197,10 +217,14 @@ inductive NoEarlyExit : ImpExpr → Prop where
   | continue_ : NoEarlyExit .continue_
   | forFold {v lo hi body} : NoEarlyExit lo → NoEarlyExit hi → NoEarlyExit body →
       NoEarlyExit (.forFold v lo hi body)
+  | forFoldRev {v lo hi body} : NoEarlyExit lo → NoEarlyExit hi → NoEarlyExit body →
+      NoEarlyExit (.forFoldRev v lo hi body)
   | whileFold {c body} : NoEarlyExit c → NoEarlyExit body →
       NoEarlyExit (.whileFold c body)
   | forFoldReturn {v lo hi body} : NoEarlyExit lo → NoEarlyExit hi → NoEarlyExit body →
       NoEarlyExit (.forFoldReturn v lo hi body)
+  | forFoldRevReturn {v lo hi body} : NoEarlyExit lo → NoEarlyExit hi → NoEarlyExit body →
+      NoEarlyExit (.forFoldRevReturn v lo hi body)
   | whileFoldReturn {c body} : NoEarlyExit c → NoEarlyExit body →
       NoEarlyExit (.whileFoldReturn c body)
   | cfBreak {e} : NoEarlyExit e → NoEarlyExit (.cfBreak e)
@@ -228,6 +252,8 @@ def checkNoReferences : ImpExpr → Bool
   | .assign _ rhs => checkNoReferences rhs
   | .forLoop _ lo hi body =>
     checkNoReferences lo && checkNoReferences hi && checkNoReferences body
+  | .forLoopRev _ lo hi body =>
+    checkNoReferences lo && checkNoReferences hi && checkNoReferences body
   | .whileLoop c body => checkNoReferences c && checkNoReferences body
   | .break_ none => true
   | .break_ (some e) => checkNoReferences e
@@ -235,8 +261,12 @@ def checkNoReferences : ImpExpr → Bool
   | .questionMark e => checkNoReferences e
   | .forFold _ lo hi body =>
     checkNoReferences lo && checkNoReferences hi && checkNoReferences body
+  | .forFoldRev _ lo hi body =>
+    checkNoReferences lo && checkNoReferences hi && checkNoReferences body
   | .whileFold c body => checkNoReferences c && checkNoReferences body
   | .forFoldReturn _ lo hi body =>
+    checkNoReferences lo && checkNoReferences hi && checkNoReferences body
+  | .forFoldRevReturn _ lo hi body =>
     checkNoReferences lo && checkNoReferences hi && checkNoReferences body
   | .whileFoldReturn c body => checkNoReferences c && checkNoReferences body
   | .cfBreak e => checkNoReferences e
@@ -265,6 +295,8 @@ def checkNoMutation : ImpExpr → Bool
   | .deref e => checkNoMutation e
   | .forLoop _ lo hi body =>
     checkNoMutation lo && checkNoMutation hi && checkNoMutation body
+  | .forLoopRev _ lo hi body =>
+    checkNoMutation lo && checkNoMutation hi && checkNoMutation body
   | .whileLoop c body => checkNoMutation c && checkNoMutation body
   | .break_ none => true
   | .break_ (some e) => checkNoMutation e
@@ -272,8 +304,12 @@ def checkNoMutation : ImpExpr → Bool
   | .questionMark e => checkNoMutation e
   | .forFold _ lo hi body =>
     checkNoMutation lo && checkNoMutation hi && checkNoMutation body
+  | .forFoldRev _ lo hi body =>
+    checkNoMutation lo && checkNoMutation hi && checkNoMutation body
   | .whileFold c body => checkNoMutation c && checkNoMutation body
   | .forFoldReturn _ lo hi body =>
+    checkNoMutation lo && checkNoMutation hi && checkNoMutation body
+  | .forFoldRevReturn _ lo hi body =>
     checkNoMutation lo && checkNoMutation hi && checkNoMutation body
   | .whileFoldReturn c body => checkNoMutation c && checkNoMutation body
   | .cfBreak e => checkNoMutation e
@@ -289,7 +325,7 @@ where
 
 /-- Check that an expression has no loop nodes. -/
 def checkNoLoops : ImpExpr → Bool
-  | .forLoop _ _ _ _ | .whileLoop _ _ | .break_ _ | .continue_ => false
+  | .forLoop _ _ _ _ | .forLoopRev _ _ _ _ | .whileLoop _ _ | .break_ _ | .continue_ => false
   | .lit _ | .var _ | .unitVal => true
   | .letBind _ v b => checkNoLoops v && checkNoLoops b
   | .app _ args => checkNoLoopsList args
@@ -305,8 +341,12 @@ def checkNoLoops : ImpExpr → Bool
   | .questionMark e => checkNoLoops e
   | .forFold _ lo hi body =>
     checkNoLoops lo && checkNoLoops hi && checkNoLoops body
+  | .forFoldRev _ lo hi body =>
+    checkNoLoops lo && checkNoLoops hi && checkNoLoops body
   | .whileFold c body => checkNoLoops c && checkNoLoops body
   | .forFoldReturn _ lo hi body =>
+    checkNoLoops lo && checkNoLoops hi && checkNoLoops body
+  | .forFoldRevReturn _ lo hi body =>
     checkNoLoops lo && checkNoLoops hi && checkNoLoops body
   | .whileFoldReturn c body => checkNoLoops c && checkNoLoops body
   | .cfBreak e => checkNoLoops e
@@ -336,13 +376,19 @@ def checkNoEarlyExit : ImpExpr → Bool
   | .assign _ rhs => checkNoEarlyExit rhs
   | .forLoop _ lo hi body =>
     checkNoEarlyExit lo && checkNoEarlyExit hi && checkNoEarlyExit body
+  | .forLoopRev _ lo hi body =>
+    checkNoEarlyExit lo && checkNoEarlyExit hi && checkNoEarlyExit body
   | .whileLoop c body => checkNoEarlyExit c && checkNoEarlyExit body
   | .break_ none => true
   | .break_ (some e) => checkNoEarlyExit e
   | .forFold _ lo hi body =>
     checkNoEarlyExit lo && checkNoEarlyExit hi && checkNoEarlyExit body
+  | .forFoldRev _ lo hi body =>
+    checkNoEarlyExit lo && checkNoEarlyExit hi && checkNoEarlyExit body
   | .whileFold c body => checkNoEarlyExit c && checkNoEarlyExit body
   | .forFoldReturn _ lo hi body =>
+    checkNoEarlyExit lo && checkNoEarlyExit hi && checkNoEarlyExit body
+  | .forFoldRevReturn _ lo hi body =>
     checkNoEarlyExit lo && checkNoEarlyExit hi && checkNoEarlyExit body
   | .whileFoldReturn c body => checkNoEarlyExit c && checkNoEarlyExit body
   | .cfBreak e => checkNoEarlyExit e
@@ -393,6 +439,9 @@ theorem checkNoEarlyExit_sound :
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .forLoop (ih1 h.1.1) (ih2 h.1.2) (ih3 h.2)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    intro h; simp [checkNoEarlyExit] at h
+    exact .forLoopRev (ih1 h.1.1) (ih2 h.1.2) (ih3 h.2)
   | whileLoop _ _ ih1 ih2 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .whileLoop (ih1 h.1) (ih2 h.2)
@@ -414,12 +463,18 @@ theorem checkNoEarlyExit_sound :
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .forFold (ih1 h.1.1) (ih2 h.1.2) (ih3 h.2)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    intro h; simp [checkNoEarlyExit] at h
+    exact .forFoldRev (ih1 h.1.1) (ih2 h.1.2) (ih3 h.2)
   | whileFold _ _ ih1 ih2 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .whileFold (ih1 h.1) (ih2 h.2)
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .forFoldReturn (ih1 h.1.1) (ih2 h.1.2) (ih3 h.2)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    intro h; simp [checkNoEarlyExit] at h
+    exact .forFoldRevReturn (ih1 h.1.1) (ih2 h.1.2) (ih3 h.2)
   | whileFoldReturn _ _ ih1 ih2 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .whileFoldReturn (ih1 h.1) (ih2 h.2)

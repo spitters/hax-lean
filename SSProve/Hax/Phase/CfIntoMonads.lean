@@ -44,6 +44,8 @@ def cfIntoMonads : ImpExpr → ImpExpr
   | .assign n rhs => .assign n (cfIntoMonads rhs)
   | .forLoop v lo hi body =>
     .forLoop v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
+  | .forLoopRev v lo hi body =>
+    .forLoopRev v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
   | .whileLoop c body => .whileLoop (cfIntoMonads c) (cfIntoMonads body)
   | .break_ (some e) => .break_ (some (cfIntoMonads e))
   | .break_ none => .break_ none
@@ -65,6 +67,10 @@ def cfIntoMonads : ImpExpr → ImpExpr
     .forFoldReturn v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
   | .whileFoldReturn c body =>
     .whileFoldReturn (cfIntoMonads c) (cfIntoMonads body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
+  | .forFoldRevReturn v lo hi body =>
+    .forFoldRevReturn v (cfIntoMonads lo) (cfIntoMonads hi) (cfIntoMonads body)
   | .cfBreak e => .cfBreak (cfIntoMonads e)
   | .cfContinue e => .cfContinue (cfIntoMonads e)
   | .cfBreakContinue e => .cfBreakContinue (cfIntoMonads e)
@@ -118,6 +124,7 @@ theorem cfIntoMonads_noEarlyExit (e : ImpExpr) :
   | deref _ ih => exact .deref ih
   | assign _ _ ih => exact .assign ih
   | forLoop _ _ _ _ ih1 ih2 ih3 => exact .forLoop ih1 ih2 ih3
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 => exact .forLoopRev ih1 ih2 ih3
   | whileLoop _ _ ih1 ih2 => exact .whileLoop ih1 ih2
   | break_none => exact .break_none
   | break_some _ ih => exact .break_some ih
@@ -133,6 +140,8 @@ theorem cfIntoMonads_noEarlyExit (e : ImpExpr) :
   | whileFold _ _ ih1 ih2 => exact .whileFold ih1 ih2
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn ih1 ih2 ih3
   | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn ih1 ih2
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 => exact .forFoldRev ih1 ih2 ih3
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldRevReturn ih1 ih2 ih3
   | cfBreak _ ih => exact .cfBreak ih
   | cfContinue _ ih => exact .cfContinue ih
   | cfBreakContinue _ ih => exact .cfBreakContinue ih
@@ -177,6 +186,9 @@ theorem cfIntoMonads_identity (e : ImpExpr) (h : NoEarlyExit e) :
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 =>
     simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => simp only [cfIntoMonads, ih1 h1, ih2 h2]
   | break_none => rfl
@@ -194,6 +206,12 @@ theorem cfIntoMonads_identity (e : ImpExpr) (h : NoEarlyExit e) :
     simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
   | cfBreak _ ih => cases h with | cfBreak he => simp only [cfIntoMonads, ih he]
   | cfContinue _ ih => cases h with | cfContinue he => simp only [cfIntoMonads, ih he]
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => simp only [cfIntoMonads, ih he]
@@ -233,6 +251,8 @@ theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 => cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
   | break_some _ ih => cases h with | break_some he => exact .break_some (ih he)
@@ -254,6 +274,10 @@ theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -293,6 +317,8 @@ theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
   | assign => exact absurd h NoMutation.not_assign
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 => cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
   | break_some _ ih => cases h with | break_some he => exact .break_some (ih he)
@@ -314,6 +340,10 @@ theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -352,6 +382,7 @@ theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
   | deref _ ih => cases h with | deref he => exact .deref (ih he)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop => exact absurd h NoLoops.not_forLoop
+  | forLoopRev => exact absurd h NoLoops.not_forLoopRev
   | whileLoop => exact absurd h NoLoops.not_whileLoop
   | break_none => exact absurd h NoLoops.not_break
   | break_some => exact absurd h NoLoops.not_break
@@ -373,6 +404,10 @@ theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -409,6 +444,9 @@ theorem cfIntoMonads_correct (e : ImpExpr) (h : NoEarlyExit e) :
     simp only [cfIntoMonads, ih hrhs]
   | forLoop v lo hi body ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | forLoopRev v lo hi body ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 =>
     simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
   | whileLoop c body ih1 ih2 =>
     cases h with | whileLoop h1 h2 =>
@@ -449,6 +487,12 @@ theorem cfIntoMonads_correct (e : ImpExpr) (h : NoEarlyExit e) :
   | whileFoldReturn c body ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 =>
     simp only [cfIntoMonads, ih1 h1, ih2 h2]
+  | forFoldRev v lo hi body ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
+  | forFoldRevReturn v lo hi body ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
+    simp only [cfIntoMonads, ih1 h1, ih2 h2, ih3 h3]
   | cfBreak e ih =>
     cases h with | cfBreak he =>
     simp only [cfIntoMonads, ih he]

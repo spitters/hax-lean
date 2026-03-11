@@ -52,6 +52,16 @@ def tFunctionalizeLoopsAux (nested : Bool) : TExpr → TExpr
         .mk (.forFold v (tFunctionalizeLoopsAux nested lo)
           (tFunctionalizeLoopsAux nested hi)
           (tFunctionalizeLoopsAux false body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+      let bodyHasEE := !tCheckNoEarlyExit body
+      if bodyHasEE then
+        .mk (.forFoldRevReturn v (tFunctionalizeLoopsAux nested lo)
+          (tFunctionalizeLoopsAux nested hi)
+          (tFunctionalizeLoopsAux true body)) ty
+      else
+        .mk (.forFoldRev v (tFunctionalizeLoopsAux nested lo)
+          (tFunctionalizeLoopsAux nested hi)
+          (tFunctionalizeLoopsAux false body)) ty
   | .mk (.whileLoop cond body) ty =>
       let bodyHasEE := !tCheckNoEarlyExit body
       if bodyHasEE then
@@ -79,11 +89,19 @@ def tFunctionalizeLoopsAux (nested : Bool) : TExpr → TExpr
       .mk (.forFold v (tFunctionalizeLoopsAux nested lo)
         (tFunctionalizeLoopsAux nested hi)
         (tFunctionalizeLoopsAux nested body)) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+      .mk (.forFoldRev v (tFunctionalizeLoopsAux nested lo)
+        (tFunctionalizeLoopsAux nested hi)
+        (tFunctionalizeLoopsAux nested body)) ty
   | .mk (.whileFold c body) ty =>
       .mk (.whileFold (tFunctionalizeLoopsAux nested c)
         (tFunctionalizeLoopsAux nested body)) ty
   | .mk (.forFoldReturn v lo hi body) ty =>
       .mk (.forFoldReturn v (tFunctionalizeLoopsAux nested lo)
+        (tFunctionalizeLoopsAux nested hi)
+        (tFunctionalizeLoopsAux nested body)) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+      .mk (.forFoldRevReturn v (tFunctionalizeLoopsAux nested lo)
         (tFunctionalizeLoopsAux nested hi)
         (tFunctionalizeLoopsAux nested body)) ty
   | .mk (.whileFoldReturn c body) ty =>
@@ -151,6 +169,9 @@ theorem tFunctionalizeLoopsAux_erase (nested : Bool) (e : TExpr) :
   | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
     simp only [tFunctionalizeLoopsAux, tCheckNoEarlyExit_eq, TExpr.erase, functionalizeLoopsAux]
     split <;> simp [TExpr.erase, ih1, ih2, ih3]
+  | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp only [tFunctionalizeLoopsAux, tCheckNoEarlyExit_eq, TExpr.erase, functionalizeLoopsAux]
+    split <;> simp [TExpr.erase, ih1, ih2, ih3]
   | whileLoop _ _ _ ih1 ih2 =>
     simp only [tFunctionalizeLoopsAux, tCheckNoEarlyExit_eq, TExpr.erase, functionalizeLoopsAux]
     split <;> simp [TExpr.erase, ih1, ih2]
@@ -162,9 +183,13 @@ theorem tFunctionalizeLoopsAux_erase (nested : Bool) (e : TExpr) :
     split <;> simp [TExpr.erase, ih]
   | forFold _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2, ih3]
+  | forFoldRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2, ih3]
   | whileFold _ _ _ ih1 ih2 =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2]
   | forFoldReturn _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2, ih3]
+  | forFoldRevReturn _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2, ih3]
   | whileFoldReturn _ _ _ ih1 ih2 =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2]

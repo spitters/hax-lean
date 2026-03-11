@@ -313,7 +313,7 @@ where
   parseExprKind (j : Json) : Except String ImpExpr := do
     -- Unit variants come as plain strings
     match j with
-    | .str "Todo" => return .unitVal  -- placeholder for unhandled
+    | .str "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
     | _ => pure ()
 
     -- Struct variants: {"VariantName": {fields...}}
@@ -645,6 +645,187 @@ where
       | _ => pure []
     return .app name fields
 
+/-! ## For-Loop Reconstruction
+
+Hax desugars `for i in lo..hi { body }` into an iterator pattern:
+```
+match into_iter(Range { start: lo, end: hi }) {
+  iter => loop {
+    match next(&mut iter) {
+      None => break,
+      Some(i) => body
+    }
+  }
+}
+```
+
+We reconstruct this back to `forLoop` / `forLoopRev` by pattern-matching
+on the parsed `ImpExpr`. This mirrors the OCaml hax engine's
+`phase_reconstruct_for_loops.ml`.
+
+### Reversed ranges
+
+`for i in (lo..hi).rev()` appears as `into_iter(rev(Range { ... }))`.
+We detect `rev` in the call chain and emit `forLoopRev`. -/
+
+/-- Check if a function name is `into_iter` (possibly qualified). -/
+private def isIntoIter (f : String) : Bool :=
+  f == "into_iter" || f.endsWith "into_iter" ||
+  f.endsWith "IntoIterator::into_iter"
+
+/-- Check if a function name is `Iterator::next` (possibly qualified). -/
+private def isIterNext (f : String) : Bool :=
+  f == "next" || f.endsWith "next" ||
+  f.endsWith "Iterator::next" || f.endsWith "Iterator__next"
+
+/-- Check if a function name is `rev` (possibly qualified). -/
+private def isRev (f : String) : Bool :=
+  f == "rev" || f.endsWith "rev" || f.endsWith "Iterator::rev"
+
+/-- Try to extract Range bounds from a constructor call.
+    Hax represents `Range { start, end }` as `app "Range" [lo, hi]`
+    or as `app "Range::new" [lo, hi]` or as `tuple [lo, hi]` wrapping. -/
+private def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr) :=
+  match e with
+  | .app f [lo, hi] =>
+    if f == "Range" || f.endsWith "Range" || f == "new" || f == "Range::new"
+    then some (lo, hi)
+    else none
+  | .tuple [lo, hi] => some (lo, hi)  -- Range as tuple
+  | _ => none
+
+/-- Information about a recognized iterator expression. -/
+private inductive IterInfo where
+  | range (lo hi : ImpExpr) (reversed : Bool)
+
+/-- Try to extract iterator info from the scrutinee of the outer match.
+    Recognizes: `into_iter(Range(lo, hi))` and `into_iter(rev(Range(lo, hi)))`. -/
+private def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
+  match e with
+  | .app f [arg] =>
+    if isIntoIter f then
+      -- Direct range: into_iter(Range(lo, hi))
+      match tryExtractRange arg with
+      | some (lo, hi) => some (.range lo hi false)
+      | none =>
+        -- Reversed range: into_iter(rev(Range(lo, hi)))
+        match arg with
+        | .app g [inner] =>
+          if isRev g then
+            match tryExtractRange inner with
+            | some (lo, hi) => some (.range lo hi true)
+            | none => none
+          else none
+        | _ => none
+    else if isRev f then
+      -- rev(into_iter(Range(lo, hi)))
+      match e with
+      | .app _ [.app g [inner]] =>
+        if isIntoIter g then
+          match tryExtractRange inner with
+          | some (lo, hi) => some (.range lo hi true)
+          | none => none
+        else none
+      | _ => none
+    else none
+  | _ => none
+
+/-- Try to extract the loop variable and body from the inner match on `next()`.
+    Pattern: `match next(&mut iter) { None => break, Some(i) => body }` -/
+private def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
+    Option (String × ImpExpr) :=
+  -- The inner body may be wrapped in seq, letBind, or be a direct match
+  match innerBody with
+  | .match_ scrut arms =>
+    -- Check scrutinee calls next on the iterator
+    let isNext := match scrut with
+      | .app f _ => isIterNext f
+      | _ => false
+    if !isNext then none
+    else
+      -- Look for None → break, Some(varPat v) → body pattern
+      -- The arms may be in either order
+      let findSome := arms.findSome? fun (pat, body) =>
+        match pat with
+        | .somePat (.varPat v) => some (v, body)
+        | .varPat v =>
+          -- Sometimes hax uses a binding pattern for Some
+          -- Check if there's a destructure in the body
+          some (v, body)
+        | _ => none
+      let hasBreak := arms.any fun (pat, body) =>
+        match pat with
+        | .nonePat | .wildcard => match body with
+          | .break_ _ => true
+          | _ => false
+        | _ => false
+      match findSome, hasBreak with
+      | some (v, body), true => some (v, body)
+      | _, _ => none
+  -- Wrapped in letBind: let _ = match ... ; rest
+  | .letBind _ inner rest =>
+    match tryExtractNextMatch inner iterVar with
+    | some r => some r
+    | none => tryExtractNextMatch rest iterVar
+  | .seq e1 e2 =>
+    match tryExtractNextMatch e1 iterVar with
+    | some r => some r
+    | none => tryExtractNextMatch e2 iterVar
+  | _ => none
+
+/-- Reconstruct for-loops from desugared iterator patterns in a single expression.
+    Recursively traverses the expression, looking for the characteristic
+    `match(into_iter(Range(...))) { iter => loop { match(next(iter)) { ... } } }`
+    pattern produced by Rust's for-loop desugaring. -/
+partial def reconstructForLoops : ImpExpr → ImpExpr
+  | .match_ scrut arms =>
+    match tryExtractIterator scrut, arms with
+    | some (.range lo hi reversed),
+      [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
+      -- Found the pattern! Extract the loop var from the inner next() match
+      let lo' := reconstructForLoops lo
+      let hi' := reconstructForLoops hi
+      match tryExtractNextMatch innerBody _iterVar with
+      | some (loopVar, body) =>
+        let body' := reconstructForLoops body
+        if reversed then .forLoopRev loopVar lo' hi' body'
+        else .forLoop loopVar lo' hi' body'
+      | none =>
+        -- Inner match didn't match — fall through to regular match
+        .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
+    | _, _ =>
+      .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
+  -- Recursive descent into all other constructors
+  | .lit v => .lit v
+  | .var n => .var n
+  | .letBind n v b => .letBind n (reconstructForLoops v) (reconstructForLoops b)
+  | .app f args => .app f (args.map reconstructForLoops)
+  | .tuple es => .tuple (es.map reconstructForLoops)
+  | .proj e i => .proj (reconstructForLoops e) i
+  | .ifThenElse c t e => .ifThenElse (reconstructForLoops c) (reconstructForLoops t) (reconstructForLoops e)
+  | .unitVal => .unitVal
+  | .seq e1 e2 => .seq (reconstructForLoops e1) (reconstructForLoops e2)
+  | .borrow e => .borrow (reconstructForLoops e)
+  | .deref e => .deref (reconstructForLoops e)
+  | .assign n rhs => .assign n (reconstructForLoops rhs)
+  | .forLoop v lo hi body => .forLoop v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
+  | .forLoopRev v lo hi body => .forLoopRev v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
+  | .whileLoop c body => .whileLoop (reconstructForLoops c) (reconstructForLoops body)
+  | .break_ (some e) => .break_ (some (reconstructForLoops e))
+  | .break_ none => .break_ none
+  | .continue_ => .continue_
+  | .earlyReturn e => .earlyReturn (reconstructForLoops e)
+  | .questionMark e => .questionMark (reconstructForLoops e)
+  | .forFold v lo hi body => .forFold v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
+  | .forFoldRev v lo hi body => .forFoldRev v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
+  | .whileFold c body => .whileFold (reconstructForLoops c) (reconstructForLoops body)
+  | .forFoldReturn v lo hi body => .forFoldReturn v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
+  | .forFoldRevReturn v lo hi body => .forFoldRevReturn v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
+  | .whileFoldReturn c body => .whileFoldReturn (reconstructForLoops c) (reconstructForLoops body)
+  | .cfBreak e => .cfBreak (reconstructForLoops e)
+  | .cfContinue e => .cfContinue (reconstructForLoops e)
+  | .cfBreakContinue e => .cfBreakContinue (reconstructForLoops e)
+
 /-! ## Full hax export file parsing
 
 The `hax_frontend_export.json` produced by `cargo hax json` is a top-level **array** of
@@ -678,7 +859,7 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
     let body ← match fnData.getObjVal? "def" with
       | .ok def_ => parseHaxExpr (← def_.getObjVal? "body")
       | _ => throw s!"Fn item '{name}' missing def.body"
-    return some (name, body)
+    return some (name, reconstructForLoops body)
   -- Const: [ident_pair, generics, ty, body]
   else if let .ok (.arr constData) := kind.getObjVal? "Const" then
     let name := match constData.toList with
@@ -687,9 +868,46 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
     let body ← match constData.toList[3]? with
       | some bodyJ => parseHaxExpr bodyJ
       | none => throw s!"Const item '{name}' missing body"
-    return some (name, body)
+    return some (name, reconstructForLoops body)
   -- Skip: Mod, Use, ExternCrate, TyAlias
   else return none
+
+/-- Validate that an ImpExpr contains no unsupported/dangerous patterns
+    that could produce vacuous proofs. Returns a list of warnings. -/
+partial def validateExtraction (e : ImpExpr) (path : String := "") : List String :=
+  match e with
+  | .app f args =>
+    let selfWarns :=
+      if f.startsWith "hax_unsupported_" then
+        [s!"{path}: unsupported hax construct '{f}' — extraction is incomplete"]
+      else if f == "literal" then
+        [s!"{path}: unsupported literal type — extraction is incomplete"]
+      else if f.startsWith "todo:" then
+        [s!"{path}: hax Todo '{f}' — Rust code was not translated"]
+      else []
+    selfWarns ++ args.bind (fun a => validateExtraction a path)
+  | .letBind n v b =>
+    validateExtraction v (path ++ "/" ++ n) ++ validateExtraction b path
+  | .seq e1 e2 => validateExtraction e1 path ++ validateExtraction e2 path
+  | .ifThenElse c t el =>
+    validateExtraction c path ++ validateExtraction t path ++ validateExtraction el path
+  | .match_ s arms =>
+    validateExtraction s path ++
+      arms.bind (fun (_, b) => validateExtraction b path)
+  | .tuple es => es.bind (fun e => validateExtraction e path)
+  | .proj e _ => validateExtraction e path
+  | .forLoop _ lo hi b | .forLoopRev _ lo hi b
+  | .forFold _ lo hi b | .forFoldRev _ lo hi b
+  | .forFoldReturn _ lo hi b | .forFoldRevReturn _ lo hi b =>
+    validateExtraction lo path ++ validateExtraction hi path ++
+      validateExtraction b path
+  | .whileLoop c b | .whileFold c b | .whileFoldReturn c b =>
+    validateExtraction c path ++ validateExtraction b path
+  | .borrow e | .deref e | .assign _ e | .break_ (some e)
+  | .earlyReturn e | .questionMark e
+  | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
+    validateExtraction e path
+  | _ => []
 
 /-- Parse a full `hax_frontend_export.json` (top-level array of items).
     Combines all `Fn` and `Const` items into nested `letBind`s. -/
@@ -702,7 +920,15 @@ partial def parseHaxFile (j : Json) : Except String ImpExpr := do
     | _ => return parsed.foldr (fun (name, body) acc => .letBind name body acc) .unitVal
   | _ =>
     -- Single Decorated<ExprKind> — use the existing single-expression parser
-    parseHaxExpr j
+    return reconstructForLoops (← parseHaxExpr j)
+
+/-- Parse and validate a hax export. Returns the ImpExpr and any warnings.
+    Warnings indicate incomplete translation (Todo, unsupported literals, etc.)
+    that could make downstream proofs vacuous. -/
+partial def parseHaxFileValidated (j : Json) : Except String (ImpExpr × List String) := do
+  let expr ← parseHaxFile j
+  let warnings := validateExtraction expr
+  return (expr, warnings)
 
 /-- Parse a hax expression and also extract the type, returning a TExpr. -/
 partial def parseHaxTExpr (j : Json) : Except String TExpr := do
@@ -732,14 +958,17 @@ where
     | .deref e => .deref (TExpr.ofImpExpr e .unknown)
     | .assign n rhs => .assign n (TExpr.ofImpExpr rhs .unknown)
     | .forLoop v lo hi body => .forLoop v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
+    | .forLoopRev v lo hi body => .forLoopRev v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
     | .whileLoop c body => .whileLoop (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr body .unknown)
     | .break_ none => .break_ none
     | .break_ (some e) => .break_ (some (TExpr.ofImpExpr e .unknown))
     | .earlyReturn e => .earlyReturn (TExpr.ofImpExpr e .unknown)
     | .questionMark e => .questionMark (TExpr.ofImpExpr e .unknown)
     | .forFold v lo hi body => .forFold v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
+    | .forFoldRev v lo hi body => .forFoldRev v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
     | .whileFold c body => .whileFold (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr body .unknown)
     | .forFoldReturn v lo hi body => .forFoldReturn v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
+    | .forFoldRevReturn v lo hi body => .forFoldRevReturn v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
     | .whileFoldReturn c body => .whileFoldReturn (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr body .unknown)
     | .cfBreak e => .cfBreak (TExpr.ofImpExpr e .unknown)
     | .cfContinue e => .cfContinue (TExpr.ofImpExpr e .unknown)

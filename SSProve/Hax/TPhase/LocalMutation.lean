@@ -40,6 +40,9 @@ def tLocalMutation (mvars : List String) : TExpr → TExpr
   | .mk (.forLoop v lo hi body) ty =>
       .mk (.forLoop v (tLocalMutation mvars lo) (tLocalMutation mvars hi)
         (tLocalMutation mvars body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+      .mk (.forLoopRev v (tLocalMutation mvars lo) (tLocalMutation mvars hi)
+        (tLocalMutation mvars body)) ty
   | .mk (.whileLoop c body) ty =>
       .mk (.whileLoop (tLocalMutation mvars c) (tLocalMutation mvars body)) ty
   | .mk (.break_ (some e)) ty => .mk (.break_ (some (tLocalMutation mvars e))) ty
@@ -50,10 +53,16 @@ def tLocalMutation (mvars : List String) : TExpr → TExpr
   | .mk (.forFold v lo hi body) ty =>
       .mk (.forFold v (tLocalMutation mvars lo) (tLocalMutation mvars hi)
         (tLocalMutation mvars body)) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+      .mk (.forFoldRev v (tLocalMutation mvars lo) (tLocalMutation mvars hi)
+        (tLocalMutation mvars body)) ty
   | .mk (.whileFold c body) ty =>
       .mk (.whileFold (tLocalMutation mvars c) (tLocalMutation mvars body)) ty
   | .mk (.forFoldReturn v lo hi body) ty =>
       .mk (.forFoldReturn v (tLocalMutation mvars lo) (tLocalMutation mvars hi)
+        (tLocalMutation mvars body)) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+      .mk (.forFoldRevReturn v (tLocalMutation mvars lo) (tLocalMutation mvars hi)
         (tLocalMutation mvars body)) ty
   | .mk (.whileFoldReturn c body) ty =>
       .mk (.whileFoldReturn (tLocalMutation mvars c) (tLocalMutation mvars body)) ty
@@ -99,6 +108,8 @@ theorem tLocalMutation_erase (mvars : List String) (e : TExpr) :
   | assign _ _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2, ih3]
+  | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2, ih3]
   | whileLoop _ _ _ ih1 ih2 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2]
   | break_some _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
@@ -106,9 +117,13 @@ theorem tLocalMutation_erase (mvars : List String) (e : TExpr) :
   | questionMark _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | forFold _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2, ih3]
+  | forFoldRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2, ih3]
   | whileFold _ _ _ ih1 ih2 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2]
   | forFoldReturn _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2, ih3]
+  | forFoldRevReturn _ _ _ _ _ ih1 ih2 ih3 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2, ih3]
   | whileFoldReturn _ _ _ ih1 ih2 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2]

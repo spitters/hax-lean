@@ -67,6 +67,8 @@ def localMutation (mvars : List String) : ImpExpr → ImpExpr
     .seq (.letBind n (localMutation mvars rhs) (.var n)) .unitVal
   | .forLoop v lo hi body =>
     .forLoop v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
+  | .forLoopRev v lo hi body =>
+    .forLoopRev v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
   | .whileLoop c body =>
     .whileLoop (localMutation mvars c) (localMutation mvars body)
   | .break_ (some e) => .break_ (some (localMutation mvars e))
@@ -82,6 +84,10 @@ def localMutation (mvars : List String) : ImpExpr → ImpExpr
     .forFoldReturn v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
   | .whileFoldReturn c body =>
     .whileFoldReturn (localMutation mvars c) (localMutation mvars body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
+  | .forFoldRevReturn v lo hi body =>
+    .forFoldRevReturn v (localMutation mvars lo) (localMutation mvars hi) (localMutation mvars body)
   | .cfBreak e => .cfBreak (localMutation mvars e)
   | .cfContinue e => .cfContinue (localMutation mvars e)
   | .cfBreakContinue e => .cfBreakContinue (localMutation mvars e)
@@ -135,6 +141,7 @@ theorem localMutation_noMut (mvars : List String) (e : ImpExpr) :
   | deref _ ih => exact .deref ih
   | assign _ _ ih => exact .seq (.letBind ih .var) .unitVal
   | forLoop _ _ _ _ ih1 ih2 ih3 => exact .forLoop ih1 ih2 ih3
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 => exact .forLoopRev ih1 ih2 ih3
   | whileLoop _ _ ih1 ih2 => exact .whileLoop ih1 ih2
   | break_none => exact .break_none
   | break_some _ ih => exact .break_some ih
@@ -145,6 +152,8 @@ theorem localMutation_noMut (mvars : List String) (e : ImpExpr) :
   | whileFold _ _ ih1 ih2 => exact .whileFold ih1 ih2
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldReturn ih1 ih2 ih3
   | whileFoldReturn _ _ ih1 ih2 => exact .whileFoldReturn ih1 ih2
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 => exact .forFoldRev ih1 ih2 ih3
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 => exact .forFoldRevReturn ih1 ih2 ih3
   | cfBreak _ ih => exact .cfBreak ih
   | cfContinue _ ih => exact .cfContinue ih
   | cfBreakContinue _ ih => exact .cfBreakContinue ih
@@ -186,6 +195,8 @@ theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
     exact .seq (.letBind (ih hrhs) .var) .unitVal
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 => cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
   | break_some _ ih =>
@@ -201,6 +212,10 @@ theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
     cases h with | forFoldReturn h1 h2 h3 => exact .forFoldReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 => exact .whileFoldReturn (ih1 h1) (ih2 h2)
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 => exact .forFoldRev (ih1 h1) (ih2 h2) (ih3 h3)
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 => exact .forFoldRevReturn (ih1 h1) (ih2 h2) (ih3 h3)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -317,6 +332,15 @@ theorem localMutation_correct (bi : Builtins) (fuel : Nat)
     · exact denoteForLoop_congr bi fuel v _ _ body (localMutation mvars body) ih3
     · rfl
     · rfl
+  | forLoopRev v lo hi body ih1 ih2 ih3 =>
+    intro fuel
+    simp only [localMutation]
+    unfold denote
+    rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext rhi
+    split
+    · exact denoteForLoopRev_congr bi fuel v _ _ body (localMutation mvars body) ih3
+    · rfl
+    · rfl
   | whileLoop c body ih1 ih2 =>
     intro fuel
     simp only [localMutation]
@@ -327,6 +351,8 @@ theorem localMutation_correct (bi : Builtins) (fuel : Nat)
   | whileFold _ _ ih1 ih2 => intro fuel; simp [localMutation, denote]
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [localMutation, denote]
   | whileFoldReturn _ _ ih1 ih2 => intro fuel; simp [localMutation, denote]
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [localMutation, denote]
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 => intro fuel; simp [localMutation, denote]
   | cfBreak _ ih => intro fuel; simp [localMutation, denote]
   | cfContinue _ ih => intro fuel; simp [localMutation, denote]
   | cfBreakContinue _ ih => intro fuel; simp [localMutation, denote]

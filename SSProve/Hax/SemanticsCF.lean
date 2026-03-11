@@ -210,14 +210,20 @@ inductive LoopScoped : ImpExpr → Prop where
   | assign {n rhs} : LoopScoped rhs → LoopScoped (.assign n rhs)
   | forLoop {v lo hi body} : LoopScoped lo → LoopScoped hi →
       LoopScoped (.forLoop v lo hi body)
+  | forLoopRev {v lo hi body} : LoopScoped lo → LoopScoped hi →
+      LoopScoped (.forLoopRev v lo hi body)
   | whileLoop {c body} : LoopScoped (.whileLoop c body)
   | earlyReturn {e} : LoopScoped e → LoopScoped (.earlyReturn e)
   | questionMark {e} : LoopScoped e → LoopScoped (.questionMark e)
   | forFold {v lo hi body} : LoopScoped lo → LoopScoped hi →
       LoopScoped (.forFold v lo hi body)
+  | forFoldRev {v lo hi body} : LoopScoped lo → LoopScoped hi →
+      LoopScoped (.forFoldRev v lo hi body)
   | whileFold {c body} : LoopScoped (.whileFold c body)
   | forFoldReturn {v lo hi body} : LoopScoped lo → LoopScoped hi →
       LoopScoped (.forFoldReturn v lo hi body)
+  | forFoldRevReturn {v lo hi body} : LoopScoped lo → LoopScoped hi →
+      LoopScoped (.forFoldRevReturn v lo hi body)
   | whileFoldReturn {c body} : LoopScoped (.whileFoldReturn c body)
   | cfBreak {e} : LoopScoped e → LoopScoped (.cfBreak e)
   | cfContinue {e} : LoopScoped e → LoopScoped (.cfContinue e)
@@ -304,6 +310,14 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       denoteForLoopOrig' bi fuel var lo_val hi_val body
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
     | other, _ => pure other
+  | .forLoopRev var lo hi body => do
+    let rlo ← denote' bi fuel lo
+    let rhi ← denote' bi fuel hi
+    match rlo, rhi with
+    | .val (.int lo_val), .val (.int hi_val) =>
+      denoteForLoopRevOrig' bi fuel var lo_val hi_val body
+    | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | other, _ => pure other
   | .whileLoop cond body =>
     denoteWhileOrig' bi fuel cond body
   | .break_ (some e) => do
@@ -339,6 +353,16 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | _, .val (.controlFlow _ _) => pure rlo
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
     | other, _ => pure other
+  | .forFoldRev var lo hi body => do
+    let rlo ← denote' bi fuel lo
+    let rhi ← denote' bi fuel hi
+    match rlo, rhi with
+    | .val (.int lo_val), .val (.int hi_val) =>
+      denoteForLoopRev' bi fuel var lo_val hi_val body
+    | .val (.controlFlow _ _), _ => pure rlo
+    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | other, _ => pure other
   | .whileFold cond body =>
     denoteWhile' bi fuel cond body
   | .forFoldReturn var lo hi body => do
@@ -347,6 +371,16 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     match rlo, rhi with
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoop'Return bi fuel var lo_val hi_val body
+    | .val (.controlFlow _ _), _ => pure rlo
+    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | other, _ => pure other
+  | .forFoldRevReturn var lo hi body => do
+    let rlo ← denote' bi fuel lo
+    let rhi ← denote' bi fuel hi
+    match rlo, rhi with
+    | .val (.int lo_val), .val (.int hi_val) =>
+      denoteForLoopRev'Return bi fuel var lo_val hi_val body
     | .val (.controlFlow _ _), _ => pure rlo
     | _, .val (.controlFlow _ _) => pure rlo
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
@@ -569,6 +603,60 @@ def denoteWhile'Return (bi : Builtins) (fuel : Nat)
       (have := ImpExpr.sizeOf_pos cond;
        have := ImpExpr.sizeOf_pos body;
        omega))
+
+/-- Reverse for loop helper for the original `forLoopRev` constructor.
+    Same as `denoteForLoopOrig'` but iterates hi-1 down to lo. -/
+def denoteForLoopRevOrig' (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) : StateM Env Outcome :=
+  if lo ≥ hi then pure (.val .unit)
+  else if fuel = 0 then pure (.err "out of fuel")
+  else do
+    modify (Env.extend · var (.int (hi - 1)))
+    let rb ← denote' bi fuel body
+    match rb with
+    | .val _ | .continued =>
+      denoteForLoopRevOrig' bi (fuel - 1) var lo (hi - 1) body
+    | .broke v => pure (.val v)
+    | other => pure other
+  termination_by (fuel, sizeOf body + 1)
+
+/-- Reverse for loop over [lo, hi) with ControlFlow-based break/continue detection.
+    Same as `denoteForLoop'` but iterates hi-1 down to lo. -/
+def denoteForLoopRev' (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) : StateM Env Outcome :=
+  if lo ≥ hi then pure (.val .unit)
+  else if fuel = 0 then pure (.err "out of fuel")
+  else do
+    modify (Env.extend · var (.int (hi - 1)))
+    let rb ← denote' bi fuel body
+    match rb with
+    | .val (.controlFlow true v) => pure (.val v)       -- break
+    | .val (.controlFlow false _) =>                     -- continue
+      denoteForLoopRev' bi (fuel - 1) var lo (hi - 1) body
+    | .val _ => denoteForLoopRev' bi (fuel - 1) var lo (hi - 1) body  -- normal
+    | other => pure other                                -- earlyRet/err/broke/continued
+  termination_by (fuel, sizeOf body + 1)
+
+/-- Reverse for loop with nested ControlFlow: distinguishes loop break from early return.
+    Same as `denoteForLoop'Return` but iterates hi-1 down to lo. -/
+def denoteForLoopRev'Return (bi : Builtins) (fuel : Nat)
+    (var : String) (lo hi : Int) (body : ImpExpr) : StateM Env Outcome :=
+  if lo ≥ hi then pure (.val .unit)
+  else if fuel = 0 then pure (.err "out of fuel")
+  else do
+    modify (Env.extend · var (.int (hi - 1)))
+    let rb ← denote' bi fuel body
+    match rb with
+    | .val (.controlFlow true (.controlFlow false v)) =>  -- Break(Continue(v)) = loop break
+      pure (.val v)
+    | .val (.controlFlow true v) =>                       -- Break(v) = early return
+      pure (.val (.controlFlow true v))
+    | .val (.controlFlow false _) =>                      -- Continue = continue
+      denoteForLoopRev'Return bi (fuel - 1) var lo (hi - 1) body
+    | .val _ =>                                           -- normal value
+      denoteForLoopRev'Return bi (fuel - 1) var lo (hi - 1) body
+    | other => pure other                                 -- err/earlyRet/broke/continued
+  termination_by (fuel, sizeOf body + 1)
 
 end
 

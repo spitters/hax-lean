@@ -87,6 +87,12 @@ def explicitMonadic : ImpExpr → ImpExpr
         (wrapReturns (explicitMonadic body))
   | .whileFoldReturn c body =>
       .whileFoldReturn (explicitMonadic c) (wrapReturns (explicitMonadic body))
+  | .forFoldRev v lo hi body =>
+      .forFoldRev v (explicitMonadic lo) (explicitMonadic hi)
+        (wrapReturns (explicitMonadic body))
+  | .forFoldRevReturn v lo hi body =>
+      .forFoldRevReturn v (explicitMonadic lo) (explicitMonadic hi)
+        (wrapReturns (explicitMonadic body))
   -- CF constructors: recurse
   | .cfBreak e => .cfBreak (explicitMonadic e)
   | .cfContinue e => .cfContinue (explicitMonadic e)
@@ -97,6 +103,8 @@ def explicitMonadic : ImpExpr → ImpExpr
   | .assign n rhs => .assign n (explicitMonadic rhs)
   | .forLoop v lo hi body =>
       .forLoop v (explicitMonadic lo) (explicitMonadic hi) (explicitMonadic body)
+  | .forLoopRev v lo hi body =>
+      .forLoopRev v (explicitMonadic lo) (explicitMonadic hi) (explicitMonadic body)
   | .whileLoop c body => .whileLoop (explicitMonadic c) (explicitMonadic body)
   | .break_ (some e) => .break_ (some (explicitMonadic e))
   | .break_ none => .break_ none
@@ -251,6 +259,12 @@ theorem explicitMonadic_preserves_noRefs (e : ImpExpr)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 =>
     exact .whileFoldReturn (ih1 h1) (wrapReturns_preserves_noRefs _ (ih2 h2))
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    exact .forFoldRev (ih1 h1) (ih2 h2) (wrapReturns_preserves_noRefs _ (ih3 h3))
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
+    exact .forFoldRevReturn (ih1 h1) (ih2 h2) (wrapReturns_preserves_noRefs _ (ih3 h3))
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -259,6 +273,8 @@ theorem explicitMonadic_preserves_noRefs (e : ImpExpr)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
@@ -311,6 +327,12 @@ theorem explicitMonadic_preserves_noMut (e : ImpExpr)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 =>
     exact .whileFoldReturn (ih1 h1) (wrapReturns_preserves_noMut _ (ih2 h2))
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    exact .forFoldRev (ih1 h1) (ih2 h2) (wrapReturns_preserves_noMut _ (ih3 h3))
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
+    exact .forFoldRevReturn (ih1 h1) (ih2 h2) (wrapReturns_preserves_noMut _ (ih3 h3))
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -319,6 +341,8 @@ theorem explicitMonadic_preserves_noMut (e : ImpExpr)
   | assign => exact absurd h NoMutation.not_assign
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none
@@ -371,6 +395,12 @@ theorem explicitMonadic_preserves_noLoops (e : ImpExpr)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 =>
     exact .whileFoldReturn (ih1 h1) (wrapReturns_preserves_noLoops _ (ih2 h2))
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    exact .forFoldRev (ih1 h1) (ih2 h2) (wrapReturns_preserves_noLoops _ (ih3 h3))
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
+    exact .forFoldRevReturn (ih1 h1) (ih2 h2) (wrapReturns_preserves_noLoops _ (ih3 h3))
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -378,6 +408,7 @@ theorem explicitMonadic_preserves_noLoops (e : ImpExpr)
   | deref _ ih => cases h with | deref he => exact .deref (ih he)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop => exact absurd h NoLoops.not_forLoop
+  | forLoopRev => exact absurd h NoLoops.not_forLoopRev
   | whileLoop => exact absurd h NoLoops.not_whileLoop
   | break_none => exact absurd h NoLoops.not_break
   | break_some => exact absurd h NoLoops.not_break
@@ -429,6 +460,12 @@ theorem explicitMonadic_preserves_noEarlyExit (e : ImpExpr)
   | whileFoldReturn _ _ ih1 ih2 =>
     cases h with | whileFoldReturn h1 h2 =>
     exact .whileFoldReturn (ih1 h1) (wrapReturns_preserves_noEarlyExit _ (ih2 h2))
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRev h1 h2 h3 =>
+    exact .forFoldRev (ih1 h1) (ih2 h2) (wrapReturns_preserves_noEarlyExit _ (ih3 h3))
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forFoldRevReturn h1 h2 h3 =>
+    exact .forFoldRevReturn (ih1 h1) (ih2 h2) (wrapReturns_preserves_noEarlyExit _ (ih3 h3))
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
@@ -437,6 +474,8 @@ theorem explicitMonadic_preserves_noEarlyExit (e : ImpExpr)
   | assign _ _ ih => cases h with | assign hrhs => exact .assign (ih hrhs)
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     cases h with | forLoop h1 h2 h3 => exact .forLoop (ih1 h1) (ih2 h2) (ih3 h3)
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    cases h with | forLoopRev h1 h2 h3 => exact .forLoopRev (ih1 h1) (ih2 h2) (ih3 h3)
   | whileLoop _ _ ih1 ih2 =>
     cases h with | whileLoop h1 h2 => exact .whileLoop (ih1 h1) (ih2 h2)
   | break_none => exact .break_none

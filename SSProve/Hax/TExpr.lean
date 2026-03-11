@@ -51,6 +51,7 @@ inductive TExprKind where
   | assign (name : String) (rhs : TExpr)
   -- Consumed by functionalizeLoops (Phase 3)
   | forLoop (var : String) (lo hi body : TExpr)
+  | forLoopRev (var : String) (lo hi body : TExpr)
   | whileLoop (cond body : TExpr)
   | break_ (e : Option TExpr)
   | continue_
@@ -59,8 +60,10 @@ inductive TExprKind where
   | questionMark (e : TExpr)
   -- Produced by functionalizeLoops (Phase 3)
   | forFold (var : String) (lo hi body : TExpr)
+  | forFoldRev (var : String) (lo hi body : TExpr)
   | whileFold (cond body : TExpr)
   | forFoldReturn (var : String) (lo hi body : TExpr)
+  | forFoldRevReturn (var : String) (lo hi body : TExpr)
   | whileFoldReturn (cond body : TExpr)
   | cfBreak (e : TExpr)
   | cfContinue (e : TExpr)
@@ -101,6 +104,7 @@ def TExpr.erase : TExpr → ImpExpr
   | .mk (.deref e) _ => .deref e.erase
   | .mk (.assign n rhs) _ => .assign n rhs.erase
   | .mk (.forLoop v lo hi body) _ => .forLoop v lo.erase hi.erase body.erase
+  | .mk (.forLoopRev v lo hi body) _ => .forLoopRev v lo.erase hi.erase body.erase
   | .mk (.whileLoop c body) _ => .whileLoop c.erase body.erase
   | .mk (.break_ (some e)) _ => .break_ (some e.erase)
   | .mk (.break_ none) _ => .break_ none
@@ -108,8 +112,10 @@ def TExpr.erase : TExpr → ImpExpr
   | .mk (.earlyReturn e) _ => .earlyReturn e.erase
   | .mk (.questionMark e) _ => .questionMark e.erase
   | .mk (.forFold v lo hi body) _ => .forFold v lo.erase hi.erase body.erase
+  | .mk (.forFoldRev v lo hi body) _ => .forFoldRev v lo.erase hi.erase body.erase
   | .mk (.whileFold c body) _ => .whileFold c.erase body.erase
   | .mk (.forFoldReturn v lo hi body) _ => .forFoldReturn v lo.erase hi.erase body.erase
+  | .mk (.forFoldRevReturn v lo hi body) _ => .forFoldRevReturn v lo.erase hi.erase body.erase
   | .mk (.whileFoldReturn c body) _ => .whileFoldReturn c.erase body.erase
   | .mk (.cfBreak e) _ => .cfBreak e.erase
   | .mk (.cfContinue e) _ => .cfContinue e.erase
@@ -163,6 +169,8 @@ def TExpr.ind {motive : TExpr → Prop}
         motive (.mk (.assign n rhs) ty))
     (forLoop : ∀ ty v lo hi body, motive lo → motive hi → motive body →
         motive (.mk (.forLoop v lo hi body) ty))
+    (forLoopRev : ∀ ty v lo hi body, motive lo → motive hi → motive body →
+        motive (.mk (.forLoopRev v lo hi body) ty))
     (whileLoop : ∀ ty c body, motive c → motive body →
         motive (.mk (.whileLoop c body) ty))
     (break_none : ∀ ty, motive (.mk (.break_ none) ty))
@@ -175,10 +183,14 @@ def TExpr.ind {motive : TExpr → Prop}
         motive (.mk (.questionMark e) ty))
     (forFold : ∀ ty v lo hi body, motive lo → motive hi → motive body →
         motive (.mk (.forFold v lo hi body) ty))
+    (forFoldRev : ∀ ty v lo hi body, motive lo → motive hi → motive body →
+        motive (.mk (.forFoldRev v lo hi body) ty))
     (whileFold : ∀ ty c body, motive c → motive body →
         motive (.mk (.whileFold c body) ty))
     (forFoldReturn : ∀ ty v lo hi body, motive lo → motive hi → motive body →
         motive (.mk (.forFoldReturn v lo hi body) ty))
+    (forFoldRevReturn : ∀ ty v lo hi body, motive lo → motive hi → motive body →
+        motive (.mk (.forFoldRevReturn v lo hi body) ty))
     (whileFoldReturn : ∀ ty c body, motive c → motive body →
         motive (.mk (.whileFoldReturn c body) ty))
     (cfBreak : ∀ ty e, motive e → motive (.mk (.cfBreak e) ty))
@@ -203,6 +215,8 @@ where
     | .mk (.assign n rhs) ty => assign ty n rhs (go rhs)
     | .mk (.forLoop v lo hi body) ty =>
         forLoop ty v lo hi body (go lo) (go hi) (go body)
+    | .mk (.forLoopRev v lo hi body) ty =>
+        forLoopRev ty v lo hi body (go lo) (go hi) (go body)
     | .mk (.whileLoop c body) ty => whileLoop ty c body (go c) (go body)
     | .mk (.break_ none) ty => break_none ty
     | .mk (.break_ (some e)) ty => break_some ty e (go e)
@@ -211,9 +225,13 @@ where
     | .mk (.questionMark e) ty => questionMark ty e (go e)
     | .mk (.forFold v lo hi body) ty =>
         forFold ty v lo hi body (go lo) (go hi) (go body)
+    | .mk (.forFoldRev v lo hi body) ty =>
+        forFoldRev ty v lo hi body (go lo) (go hi) (go body)
     | .mk (.whileFold c body) ty => whileFold ty c body (go c) (go body)
     | .mk (.forFoldReturn v lo hi body) ty =>
         forFoldReturn ty v lo hi body (go lo) (go hi) (go body)
+    | .mk (.forFoldRevReturn v lo hi body) ty =>
+        forFoldRevReturn ty v lo hi body (go lo) (go hi) (go body)
     | .mk (.whileFoldReturn c body) ty =>
         whileFoldReturn ty c body (go c) (go body)
     | .mk (.cfBreak e) ty => cfBreak ty e (go e)
@@ -247,6 +265,8 @@ def TExpr.ofImpExpr : ImpExpr → TExpr
   | .assign n rhs => .mk (.assign n (ofImpExpr rhs)) .unknown
   | .forLoop v lo hi body =>
       .mk (.forLoop v (ofImpExpr lo) (ofImpExpr hi) (ofImpExpr body)) .unknown
+  | .forLoopRev v lo hi body =>
+      .mk (.forLoopRev v (ofImpExpr lo) (ofImpExpr hi) (ofImpExpr body)) .unknown
   | .whileLoop c body => .mk (.whileLoop (ofImpExpr c) (ofImpExpr body)) .unknown
   | .break_ (some e) => .mk (.break_ (some (ofImpExpr e))) .unknown
   | .break_ none => .mk (.break_ none) .unknown
@@ -255,9 +275,13 @@ def TExpr.ofImpExpr : ImpExpr → TExpr
   | .questionMark e => .mk (.questionMark (ofImpExpr e)) .unknown
   | .forFold v lo hi body =>
       .mk (.forFold v (ofImpExpr lo) (ofImpExpr hi) (ofImpExpr body)) .unknown
+  | .forFoldRev v lo hi body =>
+      .mk (.forFoldRev v (ofImpExpr lo) (ofImpExpr hi) (ofImpExpr body)) .unknown
   | .whileFold c body => .mk (.whileFold (ofImpExpr c) (ofImpExpr body)) .unknown
   | .forFoldReturn v lo hi body =>
       .mk (.forFoldReturn v (ofImpExpr lo) (ofImpExpr hi) (ofImpExpr body)) .unknown
+  | .forFoldRevReturn v lo hi body =>
+      .mk (.forFoldRevReturn v (ofImpExpr lo) (ofImpExpr hi) (ofImpExpr body)) .unknown
   | .whileFoldReturn c body =>
       .mk (.whileFoldReturn (ofImpExpr c) (ofImpExpr body)) .unknown
   | .cfBreak e => .mk (.cfBreak (ofImpExpr e)) .unknown
@@ -285,14 +309,20 @@ theorem TExpr.erase_ofImpExpr (e : ImpExpr) : (TExpr.ofImpExpr e).erase = e := b
   | assign _ _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
   | forLoop _ _ _ _ ih1 ih2 ih3 =>
     simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
+  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
+    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
   | whileLoop _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
   | break_some _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
   | earlyReturn _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
   | questionMark _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
   | forFold _ _ _ _ ih1 ih2 ih3 =>
     simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
+  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
+    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
   | whileFold _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
   | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
+    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
+  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
     simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
   | whileFoldReturn _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
   | cfBreak _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
