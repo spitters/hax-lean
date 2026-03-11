@@ -76,8 +76,14 @@ private def firstObjKey (j : Json) : Option String :=
 /-- Extract the last meaningful name from a hax `DefId` path.
     DefId JSON: `{"krate": "...", "path": [{"data": {"TypeNs": "..."}, "disambiguator": 0}, ...]}` -/
 private partial def extractDefIdName (j : Json) : String :=
-  -- Try to get the path and extract the last segment's name
-  match j.getObjVal? "path" with
+  -- hax DefId may be: {path: [...]} or {contents: {value: {path: [...]}}}
+  -- Unwrap to find the object containing "path"
+  let inner := match j.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with
+      | .ok v => v
+      | _ => c
+    | _ => j
+  match inner.getObjVal? "path" with
   | .ok (.arr segments) =>
     let names := segments.toList.filterMap fun seg =>
       match seg.getObjVal? "data" with
@@ -97,11 +103,11 @@ private partial def extractDefIdName (j : Json) : String :=
     match names.getLast? with
     | some n => n
     | none =>
-      match j.getObjValAs? String "krate" with
+      match inner.getObjValAs? String "krate" with
       | .ok k => k
       | _ => "unknown"
   | _ =>
-    match j.getObjValAs? String "krate" with
+    match inner.getObjValAs? String "krate" with
     | .ok k => k
     | _ => "unknown"
 
@@ -111,6 +117,18 @@ private def extractLocalIdentName (j : Json) : String :=
   match j.getObjValAs? String "name" with
   | .ok n => n
   | _ => "unknown"
+
+/-- Extract the DefId name from an `item` JSON object.
+    hax items have structure: `{id, value: {def_id: ...}}` or `{def_id: ...}`. -/
+private partial def extractItemDefIdName (item : Json) (fallback : String) : String :=
+  let defIdJ := match item.getObjVal? "value" with
+    | .ok v => match v.getObjVal? "def_id" with
+      | .ok d => some d
+      | _ => item.getObjVal? "def_id" |>.toOption
+    | _ => item.getObjVal? "def_id" |>.toOption
+  match defIdJ with
+  | some defId => extractDefIdName defId
+  | none => fallback
 
 /-- Extract a function name from a hax expression (for Call).
     If the callee is a GlobalName, extract its item's DefId name.
@@ -122,10 +140,7 @@ private partial def extractCallName (j : Json) : String :=
     match contents.getObjVal? "GlobalName" with
     | .ok gn =>
       match gn.getObjVal? "item" with
-      | .ok item =>
-        match item.getObjVal? "def_id" with
-        | .ok defId => extractDefIdName defId
-        | _ => "unknown_fn"
+      | .ok item => extractItemDefIdName item "unknown_fn"
       | _ => "unknown_fn"
     | _ => "indirect_call"
   | _ => "unknown_fn"
@@ -248,9 +263,12 @@ partial def parseHaxPat (j : Json) : ImpPat :=
       -- Variant pattern: use the variant info
       match variantData.getObjVal? "info" with
       | .ok info =>
-        let name := match info.getObjValAs? String "variant_name" with
-          | .ok n => n
-          | _ => "Variant"
+        -- hax JSON: info.variant is a DefId (not a string "variant_name")
+        let name := match info.getObjVal? "variant" with
+          | .ok variantDefId => extractDefIdName variantDefId
+          | _ => match info.getObjValAs? String "variant_name" with
+            | .ok n => n
+            | _ => "Variant"
         -- Get subpatterns
         let subpats := match variantData.getObjValAs? (Array Json) "subpatterns" with
           | .ok fps => fps.toList.filterMap fun fp =>
@@ -325,9 +343,7 @@ where
 
     else if let .ok data := j.getObjVal? "GlobalName" then
       let name := match data.getObjVal? "item" with
-        | .ok item => match item.getObjVal? "def_id" with
-          | .ok defId => extractDefIdName defId
-          | _ => "global"
+        | .ok item => extractItemDefIdName item "global"
         | _ => "global"
       return .var name
 
@@ -522,9 +538,7 @@ where
 
     else if let .ok data := j.getObjVal? "NamedConst" then
       let name := match data.getObjVal? "item" with
-        | .ok item => match item.getObjVal? "def_id" with
-          | .ok defId => extractDefIdName defId
-          | _ => "const"
+        | .ok item => extractItemDefIdName item "const"
         | _ => "const"
       return .var name
 
@@ -630,12 +644,15 @@ where
 
   /-- Parse a hax AdtExpr (struct/enum construction). -/
   parseAdtExpr (j : Json) : Except String ImpExpr := do
+    -- hax JSON: info.variant is a DefId, info.type_namespace is a DefId
     let name := match j.getObjVal? "info" with
-      | .ok info => match info.getObjValAs? String "variant_name" with
-        | .ok n => n
-        | _ => match info.getObjValAs? String "type_name" with
-          | .ok n => n
-          | _ => "Adt"
+      | .ok info => match info.getObjVal? "variant" with
+        | .ok variantDefId => extractDefIdName variantDefId
+        | _ => match info.getObjVal? "type_namespace" with
+          | .ok nsDefId => extractDefIdName nsDefId
+          | _ => match info.getObjValAs? String "variant_name" with
+            | .ok n => n
+            | _ => "Adt"
       | _ => "Adt"
     let fields ← match j.getObjValAs? (Array Json) "fields" with
       | .ok fs => fs.toList.mapM fun fj =>
@@ -885,7 +902,7 @@ partial def validateExtraction (e : ImpExpr) (path : String := "") : List String
       else if f.startsWith "todo:" then
         [s!"{path}: hax Todo '{f}' — Rust code was not translated"]
       else []
-    selfWarns ++ args.bind (fun a => validateExtraction a path)
+    selfWarns ++ args.flatMap (fun a => validateExtraction a path)
   | .letBind n v b =>
     validateExtraction v (path ++ "/" ++ n) ++ validateExtraction b path
   | .seq e1 e2 => validateExtraction e1 path ++ validateExtraction e2 path
@@ -893,8 +910,8 @@ partial def validateExtraction (e : ImpExpr) (path : String := "") : List String
     validateExtraction c path ++ validateExtraction t path ++ validateExtraction el path
   | .match_ s arms =>
     validateExtraction s path ++
-      arms.bind (fun (_, b) => validateExtraction b path)
-  | .tuple es => es.bind (fun e => validateExtraction e path)
+      arms.flatMap (fun (_, b) => validateExtraction b path)
+  | .tuple es => es.flatMap (fun e => validateExtraction e path)
   | .proj e _ => validateExtraction e path
   | .forLoop _ lo hi b | .forLoopRev _ lo hi b
   | .forFold _ lo hi b | .forFoldRev _ lo hi b

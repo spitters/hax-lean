@@ -155,6 +155,13 @@ def main (args : List String) : IO UInt32 := do
     | some fns => filterExpr fns expr
     | none => expr
 
+  -- Run extraction validation
+  let warnings := HaxAdapter.validateExtraction expr
+  if !warnings.isEmpty then
+    for w in warnings do
+      IO.eprintln s!"WARNING: {w}"
+    IO.eprintln s!"Total warnings: {warnings.length}"
+
   -- Run the verified pipeline
   let result := if opts.extended then pipelineExt expr else pipeline expr
 
