@@ -469,6 +469,16 @@ def widthArrayOps : Builtins
     else none
   | "len", [.array vs] => some (.uint .wsize vs.length)
   | "push", [.array vs, v] => some (.array (vs ++ [v]))
+  | "repeat", [v, .uint _ n] => some (.array (List.replicate n v))
+  | "repeat", [v, .int n] => if 0 ≤ n then some (.array (List.replicate n.toNat v)) else none
+  | "array_lit", vs => some (.array vs)
+  | "rotate_right", [.uint .w64 a, .uint _ b] =>
+    let shift := b % 64
+    some (.uint .w64 (((a >>> shift) ||| (a <<< (64 - shift))) % IntWidth.w64.modulus))
+  | "array_update", [.array vs, .uint _ i, v] =>
+    if i < vs.length then some (.array (vs.set i v)) else some (.array vs)
+  | "array_update", [.array vs, .int i, v] =>
+    if 0 ≤ i && i.toNat < vs.length then some (.array (vs.set i.toNat v)) else some (.array vs)
   | _, _ => none
 
 /-- Signed integer modular reduction: maps to [-2^(w-1), 2^(w-1)). -/
@@ -546,6 +556,13 @@ def widthAwareBuiltins : Builtins := fun f args =>
   match widthOps f args with
   | some v => some v
   | none => defaultBuiltins f args
+
+/-! ## Convenience: extract result value -/
+
+/-- Run `denote` and extract the result value (if evaluation succeeds). -/
+def denoteValue (bi : Builtins) (fuel : Nat) (e : ImpExpr) (env : Env) : Option Value :=
+  let (outcome, _) := (denote bi fuel e).run env
+  outcome.toVal
 
 /-- Convenience: denote with width-aware builtins. -/
 def denoteWidthAware (fuel : Nat) (e : ImpExpr) : StateM Env Outcome :=

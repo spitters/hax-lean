@@ -63,15 +63,33 @@ def isBreak : ControlFlow B C → Bool
   | .Break _ => true
   | .Continue _ => false
 
+/-- Extract the value from either variant when both carry the same type. -/
+def merge {α : Type} : ControlFlow α α → α
+  | .Break v => v
+  | .Continue v => v
+
 end ControlFlow
 
 namespace Hax
+
+/-- Simple fold over `[lo, hi)` — no ControlFlow, no break/continue.
+    Used for loops whose body only mutates accumulators without early exit. -/
+partial def foldRange {α : Type} (lo hi : Int) (init : α)
+    (f : Int → α → α) : α :=
+  if lo ≥ hi then init
+  else foldRange (lo + 1) hi (f lo init) f
+
+/-- Simple reverse fold over `(lo, hi]` — no ControlFlow. -/
+partial def foldRangeRev {α : Type} (lo hi : Int) (init : α)
+    (f : Int → α → α) : α :=
+  if lo ≥ hi then init
+  else foldRangeRev lo (hi - 1) (f (hi - 1) init) f
 
 /-- Fold over `[lo, hi)` with accumulator.
     The body returns `ControlFlow`:
     - `Continue acc'` → continue with new accumulator
     - `Break v` → exit loop with value `v` -/
-partial def forFold {α β : Type} [Inhabited α]
+partial def forFold {α β : Type}
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
   if lo ≥ hi then .Continue init
@@ -82,7 +100,7 @@ partial def forFold {α β : Type} [Inhabited α]
 
 /-- Reverse fold over `(lo, hi]` (i.e., hi-1, hi-2, ..., lo) with accumulator.
     The body receives indices in descending order. -/
-partial def forFoldRev {α β : Type} [Inhabited α]
+partial def forFoldRev {α β : Type}
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
   if lo ≥ hi then .Continue init
@@ -93,7 +111,7 @@ partial def forFoldRev {α β : Type} [Inhabited α]
 
 /-- While-fold with accumulator.
     Iterates while the condition returns `true`. -/
-partial def whileFold {α β : Type} [Inhabited α]
+partial def whileFold {α β : Type}
     (init : α) (cond : α → Bool) (f : α → ControlFlow β α) :
     ControlFlow β α :=
   if cond init then
@@ -108,7 +126,6 @@ partial def whileFold {α β : Type} [Inhabited α]
     - `Break (Continue v)` → loop break, return `v`
     - `Break (Break v)` → early return, propagate `Break v` -/
 partial def forFoldReturn {α β γ : Type}
-    [Inhabited α] [Inhabited γ]
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
@@ -121,7 +138,6 @@ partial def forFoldReturn {α β γ : Type}
 
 /-- Reverse for-fold with early return support (nested ControlFlow). -/
 partial def forFoldRevReturn {α β γ : Type}
-    [Inhabited α] [Inhabited γ]
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
@@ -134,7 +150,6 @@ partial def forFoldRevReturn {α β γ : Type}
 
 /-- While-fold with early return support (nested ControlFlow). -/
 partial def whileFoldReturn {α β γ : Type}
-    [Inhabited α] [Inhabited γ]
     (init : α) (cond : α → Bool)
     (f : α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
@@ -163,9 +178,12 @@ Capitalized variants match hax's Rust operator names. -/
 @[inline] def rem (a b : Int) : Int := a % b
 @[inline] def neg (a : Int) : Int := -a
 
--- Comparison
-@[inline] def beq {α : Type} [BEq α] (a b : α) : Bool := a == b
-@[inline] def bne {α : Type} [BEq α] (a b : α) : Bool := !(a == b)
+-- Comparison (Int-specialized to avoid typeclass issues with untyped parameters)
+@[inline] def beq (a b : Int) : Bool := a == b
+@[inline] def bne (a b : Int) : Bool := !(a == b)
+-- Polymorphic versions for typed extraction
+@[inline] def beq_ {α : Type} [BEq α] (a b : α) : Bool := a == b
+@[inline] def bne_ {α : Type} [BEq α] (a b : α) : Bool := !(a == b)
 @[inline] def lt (a b : Int) : Bool := a < b
 @[inline] def le (a b : Int) : Bool := a ≤ b
 @[inline] def gt (a b : Int) : Bool := a > b
@@ -184,31 +202,52 @@ Capitalized variants match hax's Rust operator names. -/
 @[inline] def bitxor (a b : Int) : Int := ↑(a.toNat ^^^ b.toNat)
 @[inline] def bitnot (a : Int) : Int := -(a + 1)
 
--- Indexing
-@[inline] def index {α : Type} [Inhabited α] (a : Array α) (i : Int) : α :=
-  a.getD i.toNat default
+-- Indexing — uses sorry for empty array fallback (never reached in extracted code)
+@[inline] def index {α : Type} (a : Array α) (i : Int) : α :=
+  if h : i.toNat < a.size then a[i.toNat]
+  else if h2 : 0 < a.size then a[0]
+  else have : Inhabited α := ⟨sorry⟩; default
 
--- Capitalized aliases (hax's Rust operator names, untyped)
-abbrev Add := @add
-abbrev Sub := @sub
-abbrev Mul := @mul
-abbrev Div := @div
-abbrev Rem := @rem
-abbrev Neg := @neg
+-- Capitalized aliases (hax's Rust operator names)
+-- These are polymorphic so they work with both Int and fixed-width UInt types.
+-- Lean's type inference resolves to the correct width-specific operation.
+@[inline] def Add {α : Type} [HAdd α α α] (a b : α) : α := a + b
+@[inline] def Sub {α : Type} [HSub α α α] (a b : α) : α := a - b
+@[inline] def Mul {α : Type} [HMul α α α] (a b : α) : α := a * b
+@[inline] def Div {α : Type} [HDiv α α α] (a b : α) : α := a / b
+@[inline] def Rem {α : Type} [HMod α α α] (a b : α) : α := a % b
+@[inline] def Neg {α : Type} [_root_.Neg α] (a : α) : α := -a
 abbrev Eq := @beq
 abbrev Ne := @bne
-abbrev Lt := @lt
-abbrev Le := @le
-abbrev Gt := @gt
-abbrev Ge := @ge
-abbrev Not := @bnot
+@[inline] def Lt {α : Type} [_root_.LT α] [DecidableRel (α := α) (· < ·)] (a b : α) : Bool :=
+  decide (a < b)
+@[inline] def Le {α : Type} [_root_.LE α] [DecidableRel (α := α) (· ≤ ·)] (a b : α) : Bool :=
+  decide (a ≤ b)
+@[inline] def Gt {α : Type} [_root_.LT α] [DecidableRel (α := α) (· < ·)] (a b : α) : Bool :=
+  decide (b < a)
+@[inline] def Ge {α : Type} [_root_.LE α] [DecidableRel (α := α) (· ≤ ·)] (a b : α) : Bool :=
+  decide (b ≤ a)
+/-- Polymorphic NOT: boolean negation for Bool, bitwise complement for UInt. -/
+class HaxNot (α : Type) where
+  not : α → α
+instance : HaxNot Bool where not := fun b => !b
+instance : HaxNot UInt8 where not := fun a => ~~~a
+instance : HaxNot UInt16 where not := fun a => ~~~a
+instance : HaxNot UInt32 where not := fun a => ~~~a
+instance : HaxNot UInt64 where not := fun a => ~~~a
+@[inline] def Not {α : Type} [HaxNot α] (a : α) : α := HaxNot.not a
 abbrev And := @band
 abbrev Or := @bor
-abbrev Shl := @shl
-abbrev Shr := @shr
-abbrev BitAnd := @bitand
-abbrev BitOr := @bitor
-abbrev BitXor := @bitxor
+@[inline] def Shl {α β γ : Type} [HShiftLeft α β γ] (a : α) (b : β) : γ := a <<< b
+@[inline] def Shr {α β γ : Type} [HShiftRight α β γ] (a : α) (b : β) : γ := a >>> b
+@[inline] def BitAnd {α : Type} [HAnd α α α] (a b : α) : α := a &&& b
+@[inline] def BitOr {α : Type} [HOr α α α] (a b : α) : α := a ||| b
+@[inline] def BitXor {α : Type} [HXor α α α] (a b : α) : α := a ^^^ b
+
+/-- Generic cast (identity in untyped mode).
+    Named `castVal` to avoid conflict with Lean's kernel `cast`.
+    For width-specific casts, use `cast_u8_u64` etc. -/
+@[inline] def castVal {α : Type} (a : α) : α := a
 
 /-! ## Width-Aware Operations
 
@@ -415,5 +454,69 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 @[inline] def cast_i16_u16 (x : Int) : UInt16 := UInt16.ofNat x.toNat
 @[inline] def cast_i32_u32 (x : Int) : UInt32 := UInt32.ofNat x.toNat
 @[inline] def cast_i64_u64 (x : Int) : UInt64 := UInt64.ofNat x.toNat
+
+/-! ### Collection operations -/
+
+/-- Create an array filled with `n` copies of `val`. -/
+@[inline] def repeat_ {α : Type} (val : α) (n : Int) : Array α :=
+  (List.replicate n.toNat val).toArray
+
+/-- Array length. -/
+@[inline] def array_len {α : Type} (arr : Array α) : Nat := arr.size
+
+/-- Rotate a UInt64 right by `n` bits. -/
+@[inline] def rotate_right_u64 (x : UInt64) (n : UInt32) : UInt64 :=
+  let shift := n.toUInt64 % 64
+  (x >>> shift) ||| (x <<< (64 - shift))
+
+/-- Rotate right (Int version for untyped mode). -/
+@[inline] def rotate_right (x n : Int) : Int :=
+  let xn := x.toNat
+  let shift := n.toNat % 64
+  (((xn >>> shift) ||| (xn <<< (64 - shift))) % (2 ^ 64) : Nat)
+
+/-- Rotate a UInt32 left by `n` bits. -/
+@[inline] def rotate_left_u32 (x : UInt32) (n : UInt32) : UInt32 :=
+  let shift := n % 32
+  (x <<< shift) ||| (x >>> (32 - shift))
+
+/-- Rotate a UInt64 left by `n` bits. -/
+@[inline] def rotate_left_u64 (x : UInt64) (n : UInt32) : UInt64 :=
+  let shift := n.toUInt64 % 64
+  (x <<< shift) ||| (x >>> (64 - shift))
+
+/-- Rotate left (Int version for untyped mode). -/
+@[inline] def rotate_left (x n : Int) : Int :=
+  let xn := x.toNat
+  let shift := n.toNat % 64
+  (((xn <<< shift) ||| (xn >>> (64 - shift))) % (2 ^ 64) : Nat)
+
+/-- Wrapping add — alias for width-aware addition. -/
+@[inline] def wrapping_add_u32 (a b : UInt32) : UInt32 := a + b
+@[inline] def wrapping_add_u64 (a b : UInt64) : UInt64 := a + b
+@[inline] def wrapping_sub_u32 (a b : UInt32) : UInt32 := a - b
+@[inline] def wrapping_sub_u64 (a b : UInt64) : UInt64 := a - b
+@[inline] def wrapping_mul_u32 (a b : UInt32) : UInt32 := a * b
+@[inline] def wrapping_mul_u64 (a b : UInt64) : UInt64 := a * b
+
+/-- Wrapping add (Int version for untyped mode). -/
+@[inline] def wrapping_add (a b : Int) : Int := a + b
+@[inline] def wrapping_sub (a b : Int) : Int := a - b
+@[inline] def wrapping_mul (a b : Int) : Int := a * b
+
+/-- Update array element at index `i` with value `v`. Out-of-bounds is a no-op. -/
+@[inline] def array_update {α : Type} (arr : Array α) (i : Int) (v : α) : Array α :=
+  let n := i.toNat
+  if h : n < arr.size then arr.set n v else arr
+
+/-- Push an element onto an array. -/
+@[inline] def push {α : Type} (arr : Array α) (x : α) : Array α := arr.push x
+
+/-- Array literal — surface code uses `#[...]` syntax instead. -/
+-- Not called directly; `array_lit` in ImpExpr maps to `#[...]` in surface Lean.
+
+-- USize casts
+@[inline] def cast_usize_u64 (x : USize) : UInt64 := UInt64.ofNat x.toNat
+@[inline] def cast_u64_usize (x : UInt64) : USize := USize.ofNat x.toBitVec.toNat
 
 end Hax

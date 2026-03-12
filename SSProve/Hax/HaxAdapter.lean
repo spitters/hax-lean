@@ -250,6 +250,11 @@ partial def parseHaxPat (j : Json) : ImpPat :=
       match bindData.getObjVal? "var" with
       | .ok varJ => .varPat (extractLocalIdentName varJ)
       | _ => .wildcard
+    else if let .ok derefData := patKind.getObjVal? "Deref" then
+      -- Deref pattern: unwrap to inner subpattern
+      match derefData.getObjVal? "subpattern" with
+      | .ok subpat => parseHaxPat subpat
+      | _ => .wildcard
     else if let .ok tupleData := patKind.getObjVal? "Tuple" then
       match tupleData.getObjValAs? (Array Json) "subpatterns" with
       | .ok pats => .tuplePat (pats.toList.map parseHaxPat)
@@ -309,13 +314,25 @@ where
     if let .ok b := j.getObjValAs? Bool "Bool" then .litPat (.bool b)
     else if let .ok intData := j.getObjVal? "Int" then
       match intData with
+      -- Format: "Int": [n, suffix]
       | .arr #[n, _] =>
         match n.getStr? with
         | .ok s => match s.toInt? with
           | some n => .litPat (.int n)
           | none => .wildcard
         | _ => .wildcard
-      | _ => .wildcard
+      -- Format: "Int": {"Uint": [n, suffix]} or "Int": {"Int": [n, suffix]}
+      | _ =>
+        let tryUint := intData.getObjVal? "Uint"
+        let tryInt := intData.getObjVal? "Int"
+        match tryUint.toOption.orElse fun _ => tryInt.toOption with
+        | some (.arr #[n, _]) =>
+          match n.getStr? with
+          | .ok s => match s.toInt? with
+            | some n => .litPat (.int n)
+            | none => .wildcard
+          | _ => .wildcard
+        | _ => .wildcard
     else .wildcard
 
 /-! ## Expression mapping -/
@@ -370,12 +387,21 @@ where
       let pat := match data.getObjVal? "pat" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
-      let name := match pat with
-        | .varPat n => n
-        | _ => "_let"
-      -- Let in hax is a pattern-matching let, not a let-in-body.
-      -- It's used inside blocks. We'll approximate as letBind with unitVal body.
-      return .letBind name rhs .unitVal
+      -- Handle tuple destructuring: let (a, b) = rhs → let _tup := rhs; let a := _tup.1; let b := _tup.2
+      match pat with
+      | .tuplePat pats =>
+        let tmpName := "_tup"
+        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
+          let name := match p with
+            | .varPat n => if n.startsWith "_" then "_" else n
+            | _ => "_"
+          (name, ImpExpr.proj (.var tmpName) i)
+        let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
+        return .letBind tmpName rhs inner
+      | .varPat n =>
+        return .letBind n rhs .unitVal
+      | _ =>
+        return .letBind "_let" rhs .unitVal
 
     else if let .ok data := j.getObjVal? "Block" then
       -- Block: {stmts: [...], expr: Option<Expr>, ...}
@@ -409,21 +435,44 @@ where
     else if let .ok data := j.getObjVal? "Assign" then
       let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
       let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      let name := match lhs with
+      -- Strip deref wrappers from LHS (references erased by dropReferences)
+      let rec stripD : ImpExpr → ImpExpr
+        | .deref e => stripD e
+        | e => e
+      let lhs' : ImpExpr := stripD lhs
+      let getVarName : ImpExpr → String
         | .var n => n
+        | .deref (.var n) => n
         | _ => "_assign"
-      return .assign name rhs
+      match lhs' with
+      | .var n => return .assign n rhs
+      -- Array element assignment: arr[i] = v → assign arr (array_update arr i v)
+      | .app "index" [arr, idx] =>
+        let arrName := getVarName (stripD arr)
+        return .assign arrName (.app "array_update" [arr, idx, rhs])
+      | _ => return .assign "_assign" rhs
 
     else if let .ok data := j.getObjVal? "AssignOp" then
-      let op := match data.getObjVal? "op" with
+      let rawOp := match data.getObjVal? "op" with
         | .ok opJ => binOpName opJ
         | _ => "op"
+      -- Strip "Assign" suffix to get base op (BitXorAssign → BitXor)
+      let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
       let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
       let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      let name := match lhs with
-        | .var n => n
-        | _ => "_assign"
-      return .assign name (.app op [lhs, rhs])
+      -- Strip deref wrappers from LHS
+      let rec stripD2 : ImpExpr → ImpExpr
+        | .deref e => stripD2 e
+        | e => e
+      let lhs' : ImpExpr := stripD2 lhs
+      match lhs' with
+      | .var n => return .assign n (.app op [lhs, rhs])
+      | .app "index" [arr, idx] =>
+        -- arr[i] op= v → assign arr (array_update arr idx (op(arr[i], v)))
+        let arrName := match stripD2 arr with
+          | .var n => n | .deref (.var n) => n | _ => "_assign"
+        return .assign arrName (.app "array_update" [arr, idx, .app op [lhs, rhs]])
+      | _ => return .assign "_assign" (.app op [lhs, rhs])
 
     else if let .ok data := j.getObjVal? "Borrow" then
       let arg ← parseHaxExpr (← data.getObjVal? "arg")
@@ -522,7 +571,10 @@ where
 
     else if let .ok data := j.getObjVal? "Repeat" then
       let value ← parseHaxExpr (← data.getObjVal? "value")
-      return .app "repeat" [value]
+      let count ← match data.getObjVal? "count" with
+        | .ok countJ => parseHaxExpr countJ
+        | _ => pure (.lit (.int 0))
+      return .app "repeat" [value, count]
 
     else if let .ok data := j.getObjVal? "PlaceTypeAscription" then
       parseHaxExpr (← data.getObjVal? "source")
@@ -608,29 +660,44 @@ where
       let pat := match data.getObjVal? "pattern" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
-      let name := match pat with
-        | .varPat n => n
-        | _ => "_let"
       let init ← match data.getObjVal? "initializer" with
         | .ok (.null) => pure .unitVal
         | .ok e => parseHaxExpr e
         | _ => pure .unitVal
-      return .letBind name init .unitVal  -- body filled in by stmtsToSeq
+      -- Handle tuple destructuring: let (a, b) = rhs → let _tup := rhs; let a := _tup.1; let b := _tup.2
+      -- Uses nested letBind so stmtsToSeq can connect the tail properly.
+      match pat with
+      | .tuplePat pats =>
+        let tmpName := "_tup"
+        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
+          let name := match p with
+            | .varPat n => if n.startsWith "_" then "_" else n
+            | _ => "_"
+          (name, ImpExpr.proj (.var tmpName) i)
+        -- Build nested letBinds: letBind _tup rhs (letBind a _tup.0 (letBind b _tup.1 unitVal))
+        let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
+        return .letBind tmpName init inner
+      | .varPat n =>
+        return .letBind n init .unitVal  -- body filled in by stmtsToSeq
+      | _ =>
+        return .letBind "_let" init .unitVal
     else
       return .unitVal
+
+  /-- Replace the deepest unitVal in a letBind chain with a continuation.
+      letBind a v1 (letBind b v2 unitVal) → letBind a v1 (letBind b v2 cont) -/
+  replaceDeepestUnit (e : ImpExpr) (cont : ImpExpr) : ImpExpr :=
+    match e with
+    | .letBind n v .unitVal => .letBind n v cont
+    | .letBind n v body => .letBind n v (replaceDeepestUnit body cont)
+    | _ => .seq e cont
 
   /-- Convert a list of statement expressions into nested seq/letBind. -/
   stmtsToSeq (stmts : List ImpExpr) (tail : ImpExpr) : ImpExpr :=
     match stmts with
     | [] => tail
-    | [s] =>
-      match s with
-      | .letBind n v .unitVal => .letBind n v tail
-      | _ => .seq s tail
-    | s :: rest =>
-      match s with
-      | .letBind n v .unitVal => .letBind n v (stmtsToSeq rest tail)
-      | _ => .seq s (stmtsToSeq rest tail)
+    | [s] => replaceDeepestUnit s tail
+    | s :: rest => replaceDeepestUnit s (stmtsToSeq rest tail)
 
   /-- Parse a hax Arm (from Match). -/
   parseArm (j : Json) : Except String (ImpPat × ImpExpr) := do
@@ -843,6 +910,100 @@ partial def reconstructForLoops : ImpExpr → ImpExpr
   | .cfContinue e => .cfContinue (reconstructForLoops e)
   | .cfBreakContinue e => .cfBreakContinue (reconstructForLoops e)
 
+/-! ## Compound Assignment Normalization
+
+Hax sometimes emits compound assignments (`state[3] ^= k0`) as `Call` expressions
+to trait methods like `BitXorAssign::bitxor_assign`, producing `app "BitXorAssign" [lhs, rhs]`.
+These should be `assign` nodes for the pipeline's LocalMutation phase to process correctly.
+
+We normalize:
+- `app "XAssign" [var x, rhs]` → `assign x (app "X" [var x, rhs])`
+- `app "XAssign" [index(arr, i), rhs]` → `assign arr (app "array_update" [var arr, i, app "X" [index(arr, i), rhs]])`
+-/
+
+/-- Strip the "Assign" suffix from a compound op name to get the base op.
+    Returns `none` if not a compound assign op. -/
+private def stripAssignSuffix (f : String) : Option String :=
+  let pairs := [
+    ("AddAssign", "Add"), ("SubAssign", "Sub"), ("MulAssign", "Mul"),
+    ("DivAssign", "Div"), ("RemAssign", "Rem"),
+    ("BitXorAssign", "BitXor"), ("BitOrAssign", "BitOr"), ("BitAndAssign", "BitAnd"),
+    ("ShlAssign", "Shl"), ("ShrAssign", "Shr")]
+  pairs.findSome? fun (cmpd, base) => if f == cmpd then some base else none
+
+/-- Strip deref wrappers (references are erased by dropReferences phase). -/
+private def stripDeref : ImpExpr → ImpExpr
+  | .deref e => stripDeref e
+  | e => e
+
+/-- Extract the variable name from an lvalue expression. -/
+private def extractLValueName : ImpExpr → String
+  | .var n => n
+  | .deref (.var n) => n
+  | .deref (.deref (.var n)) => n
+  | .app "index" (.var n :: _) => n
+  | .app "index" (.deref (.var n) :: _) => n
+  | .app "index" (.deref (.deref (.var n)) :: _) => n
+  | _ => "_assign"
+
+/-- Normalize compound assignment ops in an expression.
+    Converts `app "XAssign" [target, val]` into proper `assign` nodes
+    that the pipeline's LocalMutation phase can process. -/
+partial def normalizeAssignOps : ImpExpr → ImpExpr
+  | .app f [target, val] =>
+    match stripAssignSuffix f with
+    | some baseOp =>
+      let target' := normalizeAssignOps target
+      let val' := normalizeAssignOps val
+      let name := extractLValueName target'
+      match stripDeref target' with
+      | .app "index" [arr, idx] =>
+        -- Array element mutation: arr = array_update(arr, idx, X(arr[idx], val))
+        .assign name (.app "array_update" [arr, idx, .app baseOp [target', val']])
+      | _ =>
+        -- Simple variable mutation: x = X(x, val)
+        .assign name (.app baseOp [target', val'])
+    | none => .app f [normalizeAssignOps target, normalizeAssignOps val]
+  | .app f args => .app f (args.map normalizeAssignOps)
+  | .lit v => .lit v
+  | .var n => .var n
+  | .unitVal => .unitVal
+  | .letBind n v b => .letBind n (normalizeAssignOps v) (normalizeAssignOps b)
+  | .tuple es => .tuple (es.map normalizeAssignOps)
+  | .proj e i => .proj (normalizeAssignOps e) i
+  | .ifThenElse c t e =>
+    .ifThenElse (normalizeAssignOps c) (normalizeAssignOps t) (normalizeAssignOps e)
+  | .match_ s arms =>
+    .match_ (normalizeAssignOps s) (arms.map fun (p, b) => (p, normalizeAssignOps b))
+  | .seq e1 e2 => .seq (normalizeAssignOps e1) (normalizeAssignOps e2)
+  | .borrow e => .borrow (normalizeAssignOps e)
+  | .deref e => .deref (normalizeAssignOps e)
+  | .assign n rhs => .assign n (normalizeAssignOps rhs)
+  | .forLoop v lo hi body =>
+    .forLoop v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
+  | .forLoopRev v lo hi body =>
+    .forLoopRev v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
+  | .whileLoop c body => .whileLoop (normalizeAssignOps c) (normalizeAssignOps body)
+  | .break_ (some e) => .break_ (some (normalizeAssignOps e))
+  | .break_ none => .break_ none
+  | .continue_ => .continue_
+  | .earlyReturn e => .earlyReturn (normalizeAssignOps e)
+  | .questionMark e => .questionMark (normalizeAssignOps e)
+  | .forFold v lo hi body =>
+    .forFold v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
+  | .whileFold c body => .whileFold (normalizeAssignOps c) (normalizeAssignOps body)
+  | .forFoldReturn v lo hi body =>
+    .forFoldReturn v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
+  | .forFoldRevReturn v lo hi body =>
+    .forFoldRevReturn v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
+  | .whileFoldReturn c body =>
+    .whileFoldReturn (normalizeAssignOps c) (normalizeAssignOps body)
+  | .cfBreak e => .cfBreak (normalizeAssignOps e)
+  | .cfContinue e => .cfContinue (normalizeAssignOps e)
+  | .cfBreakContinue e => .cfBreakContinue (normalizeAssignOps e)
+
 /-! ## Full hax export file parsing
 
 The `hax_frontend_export.json` produced by `cargo hax json` is a top-level **array** of
@@ -864,6 +1025,33 @@ private def extractFnName (ident : Json) : String :=
     | _ => "unknown_fn"
   | _ => "unknown_fn"
 
+/-- Extract parameter names from a hax function definition's `params` array.
+    Each param has `{pat: Decorated<PatKind>, ty: ...}`.
+    Returns the list of parameter names (from Binding patterns). -/
+private def extractParamNames (params : Array Json) : List String :=
+  params.toList.filterMap fun p =>
+    match p.getObjVal? "pat" with
+    | .ok patJ =>
+      let contents := match patJ.getObjVal? "contents" with
+        | .ok c => c
+        | _ => patJ
+      match contents.getObjVal? "Binding" with
+      | .ok bindData =>
+        match bindData.getObjVal? "var" with
+        | .ok varJ => match varJ.getObjValAs? String "name" with
+          | .ok n => some n
+          | _ => none
+        | _ => none
+      | _ => none
+    | _ => none
+
+/-- Wrap a function body in parameter bindings.
+    Emits `letBind "param" (var "param") body` for each parameter,
+    which the pipeline processes as identity bindings.
+    The `extractFnDefs` in Main.lean then extracts these as function parameters. -/
+private def wrapParams (params : List String) (body : ImpExpr) : ImpExpr :=
+  params.foldr (fun p acc => .letBind p (.var p) acc) body
+
 /-- Parse a single top-level item from `hax_frontend_export.json`.
     Returns `some (name, body)` for `Fn` and `Const` items, `none` for others. -/
 partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr)) := do
@@ -873,10 +1061,20 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
     let name := match fnData.getObjVal? "ident" with
       | .ok ident => extractFnName ident
       | _ => "unknown_fn"
+    -- Extract parameter names
+    let paramNames := match fnData.getObjVal? "def" with
+      | .ok def_ => match def_.getObjValAs? (Array Json) "params" with
+        | .ok params => extractParamNames params
+        | _ => []
+      | _ => []
     let body ← match fnData.getObjVal? "def" with
       | .ok def_ => parseHaxExpr (← def_.getObjVal? "body")
       | _ => throw s!"Fn item '{name}' missing def.body"
-    return some (name, reconstructForLoops body)
+    let processed := normalizeAssignOps (reconstructForLoops body)
+    -- Wrap body in identity let-bindings for parameters so the pretty printer
+    -- can detect them and emit proper function signatures.
+    let wrapped := if paramNames.isEmpty then processed else wrapParams paramNames processed
+    return some (name, wrapped)
   -- Const: [ident_pair, generics, ty, body]
   else if let .ok (.arr constData) := kind.getObjVal? "Const" then
     let name := match constData.toList with
@@ -885,7 +1083,7 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
     let body ← match constData.toList[3]? with
       | some bodyJ => parseHaxExpr bodyJ
       | none => throw s!"Const item '{name}' missing body"
-    return some (name, reconstructForLoops body)
+    return some (name, normalizeAssignOps (reconstructForLoops body))
   -- Skip: Mod, Use, ExternCrate, TyAlias
   else return none
 
@@ -937,7 +1135,7 @@ partial def parseHaxFile (j : Json) : Except String ImpExpr := do
     | _ => return parsed.foldr (fun (name, body) acc => .letBind name body acc) .unitVal
   | _ =>
     -- Single Decorated<ExprKind> — use the existing single-expression parser
-    return reconstructForLoops (← parseHaxExpr j)
+    return normalizeAssignOps (reconstructForLoops (← parseHaxExpr j))
 
 /-- Parse and validate a hax export. Returns the ImpExpr and any warnings.
     Warnings indicate incomplete translation (Todo, unsupported literals, etc.)

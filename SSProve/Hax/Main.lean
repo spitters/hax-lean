@@ -74,6 +74,7 @@ where
     | "--emit-lean" :: rest, opts => go rest { opts with emitMode := "lean" }
     | "--emit-json" :: rest, opts => go rest { opts with emitMode := "json" }
     | "--emit-bridge" :: rest, opts => go rest { opts with emitMode := "bridge" }
+    | "--emit-certified" :: rest, opts => go rest { opts with emitMode := "certified" }
     | "--validate" :: file :: rest, opts =>
       go rest { opts with validateFile := some file }
     | "--extended" :: rest, opts => go rest { opts with extended := true }
@@ -127,6 +128,12 @@ partial def diffExpr (path : String) (e1 e2 : ImpExpr) : Option String :=
 def extractFnNames : ImpExpr → List String
   | .letBind n _ body => n :: extractFnNames body
   | .seq e1 e2 => extractFnNames e1 ++ extractFnNames e2
+  | _ => []
+
+/-- Extract top-level let-binding (name, value) pairs from an expression. -/
+def extractFnDefs : ImpExpr → List (String × ImpExpr)
+  | .letBind n val body => (n, val) :: extractFnDefs body
+  | .seq e1 e2 => extractFnDefs e1 ++ extractFnDefs e2
   | _ => []
 
 /-- Filter a top-level expression to only include let-bindings whose
@@ -185,6 +192,11 @@ def main (args : List String) : IO UInt32 := do
     | "bridge" =>
       let fnNames := extractFnNames expr
       IO.println (toHaxBridgeTemplate opts.name fnNames)
+    | "certified" =>
+      -- Extract individual function definitions for certified output
+      let fnDefs := extractFnDefs result
+      let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
+      IO.println (toLeanCertifiedFile defs opts.name)
     | _ =>
       IO.println (toLeanDef opts.name result)
     return 0
