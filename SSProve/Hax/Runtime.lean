@@ -74,22 +74,24 @@ namespace Hax
 
 /-- Simple fold over `[lo, hi)` — no ControlFlow, no break/continue.
     Used for loops whose body only mutates accumulators without early exit. -/
-partial def foldRange {α : Type} (lo hi : Int) (init : α)
+def foldRange {α : Type} (lo hi : Int) (init : α)
     (f : Int → α → α) : α :=
   if lo ≥ hi then init
   else foldRange (lo + 1) hi (f lo init) f
+termination_by (hi - lo).toNat
 
 /-- Simple reverse fold over `(lo, hi]` — no ControlFlow. -/
-partial def foldRangeRev {α : Type} (lo hi : Int) (init : α)
+def foldRangeRev {α : Type} (lo hi : Int) (init : α)
     (f : Int → α → α) : α :=
   if lo ≥ hi then init
   else foldRangeRev lo (hi - 1) (f (hi - 1) init) f
+termination_by (hi - lo).toNat
 
 /-- Fold over `[lo, hi)` with accumulator.
     The body returns `ControlFlow`:
     - `Continue acc'` → continue with new accumulator
     - `Break v` → exit loop with value `v` -/
-partial def forFold {α β : Type}
+def forFold {α β : Type}
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
   if lo ≥ hi then .Continue init
@@ -97,10 +99,11 @@ partial def forFold {α β : Type}
     match f lo init with
     | .Break v => .Break v
     | .Continue acc => forFold (lo + 1) hi acc f
+termination_by (hi - lo).toNat
 
 /-- Reverse fold over `(lo, hi]` (i.e., hi-1, hi-2, ..., lo) with accumulator.
     The body receives indices in descending order. -/
-partial def forFoldRev {α β : Type}
+def forFoldRev {α β : Type}
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
   if lo ≥ hi then .Continue init
@@ -108,6 +111,7 @@ partial def forFoldRev {α β : Type}
     match f (hi - 1) init with
     | .Break v => .Break v
     | .Continue acc => forFoldRev lo (hi - 1) acc f
+termination_by (hi - lo).toNat
 
 /-- While-fold with accumulator.
     Iterates while the condition returns `true`. -/
@@ -125,7 +129,7 @@ partial def whileFold {α β : Type}
     - `Continue acc'` → continue iteration
     - `Break (Continue v)` → loop break, return `v`
     - `Break (Break v)` → early return, propagate `Break v` -/
-partial def forFoldReturn {α β γ : Type}
+def forFoldReturn {α β γ : Type}
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
@@ -135,9 +139,10 @@ partial def forFoldReturn {α β γ : Type}
     | .Break (.Continue v) => .Continue (.Break v)  -- loop break
     | .Break (.Break v) => .Break v                  -- early return
     | .Continue acc => forFoldReturn (lo + 1) hi acc f
+termination_by (hi - lo).toNat
 
 /-- Reverse for-fold with early return support (nested ControlFlow). -/
-partial def forFoldRevReturn {α β γ : Type}
+def forFoldRevReturn {α β γ : Type}
     (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
@@ -147,6 +152,7 @@ partial def forFoldRevReturn {α β γ : Type}
     | .Break (.Continue v) => .Continue (.Break v)  -- loop break
     | .Break (.Break v) => .Break v                  -- early return
     | .Continue acc => forFoldRevReturn lo (hi - 1) acc f
+termination_by (hi - lo).toNat
 
 /-- While-fold with early return support (nested ControlFlow). -/
 partial def whileFoldReturn {α β γ : Type}
@@ -159,6 +165,12 @@ partial def whileFoldReturn {α β γ : Type}
     | .Break (.Break v) => .Break v                  -- early return
     | .Continue acc => whileFoldReturn acc cond f
   else .Continue (.Continue init)
+
+/-- Helper for code generation: wraps `ControlFlow.Break` with explicit type params. -/
+@[inline] def cfBreak {B C : Type} (v : B) : ControlFlow B C := ControlFlow.Break v
+
+/-- Helper for code generation: wraps `ControlFlow.Continue` with explicit type params. -/
+@[inline] def cfContinue {B C : Type} (v : C) : ControlFlow B C := ControlFlow.Continue v
 
 /-- Extract the final value from a non-early-returning fold result. -/
 def unwrapContinue {B C : Type} [Inhabited C] : ControlFlow B C → C
@@ -231,6 +243,7 @@ abbrev Ne := @bne
 class HaxNot (α : Type) where
   not : α → α
 instance : HaxNot Bool where not := fun b => !b
+instance : HaxNot Int where not := fun a => -(a + 1)  -- bitwise complement
 instance : HaxNot UInt8 where not := fun a => ~~~a
 instance : HaxNot UInt16 where not := fun a => ~~~a
 instance : HaxNot UInt32 where not := fun a => ~~~a
@@ -243,6 +256,14 @@ abbrev Or := @bor
 @[inline] def BitAnd {α : Type} [HAnd α α α] (a b : α) : α := a &&& b
 @[inline] def BitOr {α : Type} [HOr α α α] (a b : α) : α := a ||| b
 @[inline] def BitXor {α : Type} [HXor α α α] (a b : α) : α := a ^^^ b
+
+/-- Polymorphic condition: coerce any type to Bool for `if` conditions.
+    Bool passes through; Int uses C-style truth (nonzero = true). -/
+class HaxCond (α : Type) where
+  toBool : α → Bool
+instance : HaxCond Bool where toBool := id
+instance : HaxCond Int where toBool := fun n => n != 0
+@[inline] def cond {α : Type} [HaxCond α] (a : α) : Bool := HaxCond.toBool a
 
 /-- Generic cast (identity in untyped mode).
     Named `castVal` to avoid conflict with Lean's kernel `cast`.
@@ -512,8 +533,60 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 /-- Push an element onto an array. -/
 @[inline] def push {α : Type} (arr : Array α) (x : α) : Array α := arr.push x
 
-/-- Array literal — surface code uses `#[...]` syntax instead. -/
+-- Array literal — surface code uses `#[...]` syntax instead.
 -- Not called directly; `array_lit` in ImpExpr maps to `#[...]` in surface Lean.
+
+/-- Byte string literal placeholder (untyped extraction). -/
+@[inline] def literal : Array Int := #[]
+
+/-- Copy from slice — identity in untyped extraction. -/
+@[inline] def copy_from_slice {α : Type} (_dst : Array α) (src : Array α) : Array α := src
+
+/-- Extend from slice — append in untyped extraction. -/
+@[inline] def extend_from_slice {α : Type} (dst : Array α) (src : Array α) : Array α := dst ++ src
+
+/-- Into iter — identity in untyped extraction. -/
+@[inline] def into_iter {α : Type} (x : α) : α := x
+
+/-- Into vec — identity in untyped extraction. -/
+@[inline] def into_vec {α : Type} (x : α) : α := x
+
+/-- Next (iterator) — identity in untyped extraction. -/
+@[inline] def next {α : Type} (x : α) : α := x
+
+/-- Enumerate — identity in untyped extraction. -/
+@[inline] def enumerate {α : Type} (x : α) : α := x
+
+/-- With capacity — empty array in untyped extraction. -/
+@[inline] def with_capacity {α : Type} (_n : Int) : Array α := #[]
+
+/-- From elem — repeat in untyped extraction. -/
+@[inline] def from_elem {α : Type} (val : α) (n : Int) : Array α :=
+  (List.replicate n.toNat val).toArray
+
+/-- Check if array is empty (Vec::is_empty). -/
+@[inline] def is_empty {α : Type} (arr : Array α) : Bool := arr.isEmpty
+
+/-- Truncate — identity in untyped extraction. -/
+@[inline] def truncate {α : Type} (arr : Array α) (_n : Int) : Array α := arr
+
+/-- Mutable index — identity in untyped extraction (slice access pattern). -/
+@[inline] def index_mut {α : Type} (arr : α) (_i : Int) : α := arr
+
+/-- Range-to constructor (0..hi). -/
+@[inline] def RangeTo (hi : Int) : Int := hi
+
+/-- Range-from constructor (lo..). -/
+@[inline] def RangeFrom (lo : Int) : Int := lo
+
+/-- Deref — identity in untyped extraction. -/
+@[inline] def deref {α : Type} (x : α) : α := x
+
+/-- Assignment placeholder (identity). -/
+@[inline] def assign {α : Type} (x : α) : α := x
+
+/-- From constructor placeholder (identity). -/
+@[inline] def from_val {α : Type} (x : α) : α := x
 
 -- USize casts
 @[inline] def cast_usize_u64 (x : USize) : UInt64 := UInt64.ofNat x.toNat

@@ -91,6 +91,69 @@ def isSigned : ImpType → Bool
   | .sint _ => true
   | _ => false
 
+/-- Is this the unknown type (unresolved or unsupported)? -/
+def isUnknown : ImpType → Bool
+  | .unknown => true
+  | _ => false
+
+/-- Is this an integer-like type (int, uint, or sint)? -/
+def isIntLike : ImpType → Bool
+  | .int => true
+  | .uint _ => true
+  | .sint _ => true
+  | _ => false
+
+/-- Convert an ImpType to a Lean 4 type string for code generation.
+    `structLookup` resolves ADT names to their Lean tuple type strings. -/
+partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option String := fun _ => none) : String :=
+  match ty with
+  | .bool => "Bool"
+  | .int => "Int"
+  | .uint _ => "Int"  -- In untyped extraction mode, all integers map to Int
+  | .sint _ => "Int"
+  | .unit => "Unit"
+  | .str => "String"
+  | .tuple elems =>
+    if elems.isEmpty then "Unit"
+    else
+      let strs := elems.map fun e =>
+        let s := e.toLeanTypeStr structLookup
+        if (s.splitOn " × ").length > 1 then s!"({s})" else s
+      " × ".intercalate strs
+  | .option inner => s!"Option ({inner.toLeanTypeStr structLookup})"
+  | .result ok err =>
+    s!"Except ({err.toLeanTypeStr structLookup}) ({ok.toLeanTypeStr structLookup})"
+  | .controlFlow brk cont =>
+    s!"ControlFlow ({brk.toLeanTypeStr structLookup}) ({cont.toLeanTypeStr structLookup})"
+  | .adt name args =>
+    -- Check struct lookup first
+    match structLookup name with
+    | some s => s
+    | none =>
+      -- Vec/Array → Array inner
+      if name == "Vec" || name.endsWith "::Vec" then
+        match args with
+        | [inner] => s!"Array ({inner.toLeanTypeStr structLookup})"
+        | _ => "Array Int"
+      else if name == "Box" || name.endsWith "::Box" then
+        match args with
+        | [inner] => inner.toLeanTypeStr structLookup
+        | _ => "Int"
+      else "Int"  -- unknown ADT
+  | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
+  | .ref inner _ => inner.toLeanTypeStr structLookup
+  | .slice inner => s!"Array ({inner.toLeanTypeStr structLookup})"
+  | .array inner _ => s!"Array ({inner.toLeanTypeStr structLookup})"
+  | .typeVar _ => "Int"
+  | .unknown => "Int"
+
 end ImpType
+
+/-- Type information for a Rust function (parameter names+types, return type).
+    Defined here so both HaxAdapter and PrettyPrint can use it. -/
+structure FnTypeInfo where
+  paramTypes : List (String × ImpType)
+  retType : ImpType
+  deriving Inhabited
 
 end SSProve.Hax

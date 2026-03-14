@@ -54,6 +54,24 @@ def parseHaxInput (input : String) : IO ImpExpr := do
   let json ← IO.ofExcept (Json.parse input)
   IO.ofExcept (HaxAdapter.parseHaxFile json)
 
+/-- Parse struct metadata from hax JSON for preamble generation.
+    Returns list of (struct_name, [(field_name, type_tag)]). -/
+def parseHaxStructMeta (input : String) : IO StructMeta := do
+  let json ← IO.ofExcept (Json.parse input)
+  let structInfos := HaxAdapter.parseStructDefsFromJson json
+  return structInfos.map fun si =>
+    (si.name, si.fields.map fun fi => (fi.name, fi.typeTag, fi.impType))
+
+/-- Parse hax JSON with per-function type information.
+    Returns both the ImpExpr and a list of (name, FnTypeInfo). -/
+def parseHaxInputWithTypes (input : String) :
+    IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo) × List (String × ImpType)) := do
+  let json ← IO.ofExcept (Json.parse input)
+  let (expr, fnTypes) ← IO.ofExcept (HaxAdapter.parseHaxFileWithTypes json)
+  -- Extract return types for all function calls from the raw JSON expression tree
+  let callRetTypes := HaxAdapter.extractCallReturnTypesFromFile json
+  pure (expr, fnTypes, callRetTypes)
+
 /-- Command-line options. -/
 structure Options where
   emitMode : String := "lean"  -- "lean" | "json"
@@ -155,8 +173,18 @@ def main (args : List String) : IO UInt32 := do
 
   -- Read and parse input
   let input ← readInput opts.inputFile
-  let expr ← if opts.haxFormat then parseHaxInput input else parseExpr input
 
+  -- For certified extraction in hax mode, use the typed parse path
+  let (expr, fnTypes, callRetTypes) ← if opts.haxFormat && opts.emitMode == "certified" then
+      parseHaxInputWithTypes input
+    else do
+      let e ← if opts.haxFormat then parseHaxInput input else parseExpr input
+      pure (e, [], [])
+
+  -- Parse struct metadata for certified extraction preambles
+  let structMeta ← if opts.haxFormat && opts.emitMode == "certified" then
+      parseHaxStructMeta input
+    else pure []
   -- Apply function filter if specified
   let expr := match opts.filterFns with
     | some fns => filterExpr fns expr
@@ -196,7 +224,7 @@ def main (args : List String) : IO UInt32 := do
       -- Extract individual function definitions for certified output
       let fnDefs := extractFnDefs result
       let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
-      IO.println (toLeanCertifiedFile defs opts.name)
+      IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes)
     | _ =>
       IO.println (toLeanDef opts.name result)
     return 0
