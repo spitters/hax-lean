@@ -298,27 +298,32 @@ private partial def hasControlFlowNodes : ImpExpr → Bool
 
 /-- Extract accumulator variable names from a fold body.
     Looks for the localMutation pattern: `seq (letBind n rhs (var n)) rest`
-    which came from `assign n rhs`. Returns unique names in order. -/
+    which came from `assign n rhs`. Returns unique names in order.
+    Filters out `_assign`-prefixed names which are intermediate mutation
+    temporaries from nested field/index assignments (not real accumulators). -/
 private partial def extractAccumulators : ImpExpr → List String
   | .seq (.seq a b) c => extractAccumulators (.seq a (.seq b c))
   | .seq (.letBind n _ (.var v)) rest =>
-    if n == v then
+    if n == v && !n.startsWith "_assign" then
       let restAccs := extractAccumulators rest
       if restAccs.contains n then restAccs else n :: restAccs
     else extractAccumulators rest
   -- Look inside conditional mutations for hidden accumulators
   | .seq (.ifThenElse _ thn _) rest =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
+      |>.filter (!·.startsWith "_assign")
     let restAccs := extractAccumulators rest
     let all := thnAccs ++ restAccs
     all.eraseDups
   | .seq _ rest => extractAccumulators rest
-  | .letBind n _ (.var v) => if n == v then [n] else []
+  | .letBind n _ (.var v) =>
+    if n == v && !n.startsWith "_assign" then [n] else []
   -- Recurse into local let-bindings (non-mutation letBind)
   | .letBind _ _ body => extractAccumulators body
   -- Top-level ifThenElse (entire fold body is a conditional)
   | .ifThenElse _ thn _ =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
+      |>.filter (!·.startsWith "_assign")
     thnAccs.eraseDups
   | _ => []
 
@@ -382,7 +387,7 @@ private def accStrings (accs : List String) : String × String :=
     Also skips non-mutation `letBind` wrappers (e.g., `let block := ...`). -/
 private partial def extractWhileAccumulators : ImpExpr → List String
   | .ifThenElse _ thn _ => extractWhileAccumulators thn
-  | .letBind n _ (.var v) => if n == v then
+  | .letBind n _ (.var v) => if n == v && !n.startsWith "_assign" then
       -- Mutation pattern at top level
       [n]
     else []
@@ -514,6 +519,35 @@ private partial def exprContainsApp (fname : String) : ImpExpr → Bool
   | .match_ scrut arms =>
     exprContainsApp fname scrut || arms.any fun (_, b) => exprContainsApp fname b
   | .proj e _ => exprContainsApp fname e
+  | _ => false
+
+/-- Check if `.app projName [.var varName]` appears in an expression.
+    Used to detect struct projection usage on a specific variable. -/
+private partial def checkProjOnVar (varName projName : String) : ImpExpr → Bool
+  | .app f [.var v] => f == projName && v == varName
+  | .app _ args => args.any (checkProjOnVar varName projName)
+  | .letBind _ v body =>
+    checkProjOnVar varName projName v || checkProjOnVar varName projName body
+  | .seq a b => checkProjOnVar varName projName a || checkProjOnVar varName projName b
+  | .ifThenElse c t e =>
+    checkProjOnVar varName projName c || checkProjOnVar varName projName t ||
+    checkProjOnVar varName projName e
+  | .tuple es => es.any (checkProjOnVar varName projName)
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    checkProjOnVar varName projName lo || checkProjOnVar varName projName hi ||
+    checkProjOnVar varName projName body
+  | .whileFold c body =>
+    checkProjOnVar varName projName c || checkProjOnVar varName projName body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    checkProjOnVar varName projName lo || checkProjOnVar varName projName hi ||
+    checkProjOnVar varName projName body
+  | .whileFoldReturn c body =>
+    checkProjOnVar varName projName c || checkProjOnVar varName projName body
+  | .match_ scrut arms =>
+    checkProjOnVar varName projName scrut ||
+    arms.any fun (_, b) => checkProjOnVar varName projName b
+  | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
+    checkProjOnVar varName projName e
   | _ => false
 
 /-- Helper for hasGuardRecursion: walk through letBind/seq chains. -/
@@ -2250,28 +2284,54 @@ where
 /-- Compute which structs are pass-through (used as opaque values passed to deps).
     A struct is pass-through if:
     1. Its constructor is called and the result flows to non-projection deps, OR
-    2. Its constructor is never called (projections become identity on Array Int). -/
+    2. Its constructor is never called (projections become identity on Array Int).
+    EXCEPTION: A struct is NEVER pass-through if its field projections are used
+    in the code, because pass-through collapses the struct to `Array Int` and
+    projections then have the wrong type. -/
 private def computeStructPassthrough (structMeta : StructMeta)
     (defs : List (String × ImpExpr)) : List (String × Bool) :=
   let allCalls := defs.foldl (fun acc (_, e) => acc ++ collectAppCalls e) []
   let allAppNames := allCalls.map (·.1) |>.eraseDups
-  structMeta.map fun (sname, fields) =>
+  -- Phase 1: initial pass-through computation
+  let initial := structMeta.map fun (sname, fields) =>
     if fields.length <= 1 then (sname, false)
     else
-      let isUsed := allAppNames.contains sname
-      if !isUsed then
-        -- Constructor never called. Pass-through (identity on Array Int) works
-        -- when all fields are "array" type. But if any field is "int" and
-        -- projections are used, we need real tuple projections.
-        let projUsed := fields.any fun (fname, _, _) =>
-          allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}"
-        let hasIntFields := fields.any (·.2.1 == "int")
-        if projUsed && hasIntFields then (sname, false)
-        else (sname, true)
+      -- Check if any field projection is used in the code
+      let projUsed := fields.any fun (fname, _, _) =>
+        allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}"
+      -- If projections are used, NEVER make pass-through (the struct needs tuple type)
+      if projUsed then (sname, false)
       else
-        let usedExternally := defs.any fun (_, e) =>
-          checkStructPassedExternally sname fields e
-        (sname, usedExternally)
+        let isUsed := allAppNames.contains sname
+        if !isUsed then
+          -- Constructor never called, no projections used → pass-through
+          (sname, true)
+        else
+          let usedExternally := defs.any fun (_, e) =>
+            checkStructPassedExternally sname fields e
+          (sname, usedExternally)
+  -- Phase 2: propagate — if struct A has a field of struct B type,
+  -- and A is not pass-through, then B must also not be pass-through
+  -- (its tuple type is needed for the nested field access).
+  let rec propagate (pt : List (String × Bool)) (fuel : Nat) : List (String × Bool) :=
+    match fuel with
+    | 0 => pt
+    | fuel + 1 =>
+      let anyChanged := false
+      let changed := pt.map fun (sname, isPt) =>
+        if !isPt then (sname, false)  -- already not pass-through
+        else
+          -- Check if this struct is used as a field type of any non-pass-through struct
+          let usedInNonPt := structMeta.any fun (otherName, otherFields) =>
+            let otherIsPt := (pt.find? fun (n, _) => n == otherName).map (·.2) |>.getD true
+            !otherIsPt && otherFields.any fun (_, tag, _) => tag == sname
+          if usedInNonPt then (sname, false) else (sname, true)
+      -- Check if anything changed (any pass-through became non-pass-through)
+      let anyFlipped := changed.any fun (sname, isPt) =>
+        let oldPt := (pt.find? fun (n, _) => n == sname).map (·.2) |>.getD true
+        oldPt != isPt
+      if anyFlipped then propagate changed fuel else pt
+  propagate initial structMeta.length
 
 /-- Build a struct lookup that maps pass-through structs to "Array Int"
     and resolves other structs to their tuple types. -/
@@ -2429,6 +2489,20 @@ def generatePreamble (defs : List (String × ImpExpr))
       let depsClassName := s!"{moduleName}Deps"
       -- Detect return tuple arities and argument types by scanning call sites
       let allExprs := defs.map (·.2)
+      -- Pre-pass: detect which deps return Int (for use in arg type inference).
+      -- This lets us resolve variable references to dep results as Int.
+      let depNamesList := depArities.map (·.1)
+      let intReturnDeps := depArities.filterMap fun (d, _) =>
+        let retArity := allExprs.foldl (fun acc e => max acc (detectReturnArity d e)) 0
+        let retIsInt := retArity < 2 &&
+          allExprs.any (detectReturnIsInt d allParamTypes structMeta) &&
+          !allExprs.any (detectReturnUsedAsDep d depNamesList)
+        if retIsInt then some d else none
+      -- Also detect deps returning Int from call-site return types
+      let intReturnDepsFromCallRet := callRetTypes.filterMap fun (d, ty) =>
+        if ty.isIntLike && depNamesList.contains d then some d else none
+      -- Augment knownIntNames with Int-returning deps
+      let knownIntNames := knownIntNames ++ intReturnDeps ++ intReturnDepsFromCallRet
       let fields := depArities.map fun (d, arity) =>
         -- Check if any call site destructures the result as a tuple
         let retArity := allExprs.foldl (fun acc e =>
@@ -2436,7 +2510,6 @@ def generatePreamble (defs : List (String × ImpExpr))
         -- Check if return value is used in Int context
         -- BUT: if the result is also passed to another dep (which expects Array Int),
         -- don't mark as Int to avoid type conflicts.
-        let depNamesList := depArities.map (·.1)
         let retIsInt := retArity < 2 &&
           allExprs.any (detectReturnIsInt d allParamTypes structMeta) &&
           !allExprs.any (detectReturnUsedAsDep d depNamesList)
@@ -2475,10 +2548,26 @@ def generatePreamble (defs : List (String × ImpExpr))
         if arity == 0 then
           -- For 0-arity free-variable deps, also check if used in Int contexts
           -- (e.g., as array size in repeat_, loop bound in foldRange)
-          let finalRetType := if retType == "Array Int" then
-              let usedAsInt := allExprs.any (isVarUsedAsInt d)
-              if usedAsInt then "Int" else retType
-            else retType
+          -- Also check if used with struct projections (needs struct tuple type)
+          let finalRetType :=
+            -- First check struct type from projections or constructor context
+            match retStructType with
+            | some st => st
+            | none =>
+              if retType == "Array Int" then
+                -- Check direct struct projection usage: is dep var used as arg to projections?
+                let structTypeFromVar := allExprs.findSome? fun e =>
+                  structMeta.findSome? fun ((sname, fields) : String × List (String × String × ImpType)) =>
+                    let projUsed : Bool := fields.any fun (fname, _, _) =>
+                      checkProjOnVar d s!".{fname}" e ||
+                      checkProjOnVar d s!"{sname}.{fname}" e
+                    if projUsed == true then structLookup sname else none
+                match structTypeFromVar with
+                | some st => st
+                | none =>
+                  let usedAsInt := allExprs.any (isVarUsedAsInt d)
+                  if usedAsInt then "Int" else retType
+              else retType
           s!"  {sanitizeName d} : {finalRetType}"
         else
           -- Detect which arguments are Int vs Array Int (heuristic)
