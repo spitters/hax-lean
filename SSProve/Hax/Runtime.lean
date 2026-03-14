@@ -595,6 +595,9 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 @[inline] def range (lo hi : Int) : Array Int :=
   (List.range (hi.toNat - lo.toNat)).map (· + lo.toNat) |>.map (Int.ofNat) |>.toArray
 
+/-- Convert Bool to Int (true → 1, false → 0). -/
+@[inline] def boolToInt (b : Bool) : Int := if b then 1 else 0
+
 /-- Deref — identity in untyped extraction. -/
 @[inline] def deref {α : Type} (x : α) : α := x
 
