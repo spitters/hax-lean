@@ -706,7 +706,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
     -- When then-branch has ControlFlow but else is unitVal, else needs Hax.cfContinue ()
     let eStr := if e == .unitVal && hasControlFlowNodes t then
         s!"{ifInd1}Hax.cfContinue ()"
-      else toLean e (ifLvl + 1)
+      else atLine e (ifLvl + 1)
     let condStr := condToLean c
     -- When else is unitVal and then is non-ControlFlow, non-unit:
     -- Wrap then-branch in `let _ := ...; ()` so both branches return Unit.
@@ -715,7 +715,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
     if e == .unitVal && !hasControlFlowNodes t && t != .unitVal then
       s!"{ifInd}if {condStr} then\n{ifInd1}let _ := {toLean t (ifLvl + 1)}\n{ifInd1}()\n{ifInd}else\n{ifInd1}()"
     else
-      s!"{ifInd}if {condStr} then\n{ifInd1}{toLean t (ifLvl + 1)}\n{ifInd}else\n{ifInd1}{eStr}"
+      s!"{ifInd}if {condStr} then\n{atLine t (ifLvl + 1)}\n{ifInd}else\n{eStr}"
 
   -- Pattern match
   | .match_ scrut arms =>
@@ -732,14 +732,14 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
       let rec ifChain (remaining : List (ImpPat × ImpExpr)) : String :=
         match remaining with
         | [] => s!"{ifInd}()" -- unreachable
-        | [(_, body)] => toLean body (ifLvl + 1)
+        | [(_, body)] => atLine body (ifLvl + 1)
         | (p, body) :: rest =>
           match p with
           | .varPat n =>
             -- Parenthesize compound scrutinee to avoid multi-arg Hax.beq
             let scrutParen := if isAtom scrut then scrutStr else s!"({scrutStr})"
-            s!"{ifInd}if Hax.beq {scrutParen} {sanitizeName n} then\n{ifInd1}{toLean body (ifLvl + 1)}\n{ifInd}else\n{ifInd1}{ifChain rest}"
-          | _ => toLean body (ifLvl + 1) -- wildcard/fallback
+            s!"{ifInd}if Hax.beq {scrutParen} {sanitizeName n} then\n{atLine body (ifLvl + 1)}\n{ifInd}else\n{ifChain rest}"
+          | _ => atLine body (ifLvl + 1) -- wildcard/fallback
       ifChain arms
     else
       -- Use max lvl 1 for match arms to ensure they're never at column 0
@@ -909,14 +909,12 @@ where
       | some retVal, none =>
         let ifLvl := max lvl 1
         let ifInd := indent ifLvl
-        let ifInd1 := indent (ifLvl + 1)
-        s!"{ifInd}if {condToLean cond} then\n{ifInd1}{toLean retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
+        s!"{ifInd}if {condToLean cond} then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | none, some retVal =>
         -- Inverted: if cond then continue else break → if !cond then val else rest
         let ifLvl := max lvl 1
         let ifInd := indent ifLvl
-        let ifInd1 := indent (ifLvl + 1)
-        s!"{ifInd}if !({condToLean cond}) then\n{ifInd1}{toLean retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
+        s!"{ifInd}if !({condToLean cond}) then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | _, _ =>
       if els == .unitVal then
         -- One-sided: if cond then {let x := rhs; x} else unitVal

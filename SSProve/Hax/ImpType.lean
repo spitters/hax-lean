@@ -130,14 +130,14 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
     match structLookup name with
     | some s => s
     | none =>
-      -- Vec/Array → Array inner
+      -- Vec/Array → Array inner (Vec has 2 generic args: elem type + allocator)
       if name == "Vec" || name.endsWith "::Vec" then
         match args with
-        | [inner] => s!"Array ({inner.toLeanTypeStr structLookup})"
+        | inner :: _ => s!"Array ({inner.toLeanTypeStr structLookup})"
         | _ => "Array Int"
       else if name == "Box" || name.endsWith "::Box" then
         match args with
-        | [inner] => inner.toLeanTypeStr structLookup
+        | inner :: _ => inner.toLeanTypeStr structLookup
         | _ => "Int"
       else "Int"  -- unknown ADT
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
