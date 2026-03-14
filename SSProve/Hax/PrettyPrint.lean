@@ -1644,9 +1644,20 @@ private def isIntExprCtx (knownIntNames : List String)
        -- Also check the binding expression
        (match findVarBinding' v c with
        | some (.var w) => knownIntNames.contains w
+       | some (.app f _) => knownIntNames.contains f || isIntExprBase (.app f [])
        | some binding => isIntExpr intProjNames binding
        | none => false)
      | none => false)
+  | .app f args =>
+    -- Check if function name is a known Int-returning name (dep or local def)
+    -- But NOT for collection operations that may return arrays depending on args
+    if knownIntNames.contains f then true
+    else
+      -- Exclude index with Range*/RangeTo/RangeFrom args (these are slice ops)
+      match f, args with
+      | "index", [_, .app "RangeTo" _] | "index", [_, .app "RangeFrom" _]
+      | "index", [_, .app "Range" _] => false
+      | _, _ => isIntExprBase (.app f args)
   | e => isIntExpr intProjNames e
 
 /-- Check if an expression's terminal value (through let-chains and if-branches) is Int.
@@ -1736,6 +1747,12 @@ private partial def inferExprType (paramTypeMap : List (String × ImpType))
   | .tuple elems =>
     let elemTypes := elems.filterMap (inferExprType paramTypeMap structMeta fnBody defsMap (depth + 1))
     if elemTypes.length == elems.length then some (.tuple elemTypes) else none
+  | .app "index" [arr, .app "RangeTo" _] | .app "index" [arr, .app "RangeFrom" _]
+  | .app "index" [arr, .app "Range" _]
+  | .app "index_mut" [arr, .app "RangeTo" _] | .app "index_mut" [arr, .app "RangeFrom" _]
+  | .app "index_mut" [arr, .app "Range" _] =>
+    -- Slice operation: returns the same array type (not element type)
+    inferExprType paramTypeMap structMeta fnBody defsMap depth arr
   | .app "index" [arr, _] | .app "index_" [arr, _] =>
     match inferExprType paramTypeMap structMeta fnBody defsMap depth arr with
     | some (.array inner _) => some inner
@@ -2489,20 +2506,41 @@ def generatePreamble (defs : List (String × ImpExpr))
       let depsClassName := s!"{moduleName}Deps"
       -- Detect return tuple arities and argument types by scanning call sites
       let allExprs := defs.map (·.2)
-      -- Pre-pass: detect which deps return Int (for use in arg type inference).
-      -- This lets us resolve variable references to dep results as Int.
+      -- Pre-pass: iteratively detect which deps return Int.
+      -- Each round discovers new Int-returning deps and adds them to knownIntNames.
+      -- This resolves circular dep chains (exp returns Int, group_op takes exp's result as Int).
       let depNamesList := depArities.map (·.1)
-      let intReturnDeps := depArities.filterMap fun (d, _) =>
-        let retArity := allExprs.foldl (fun acc e => max acc (detectReturnArity d e)) 0
-        let retIsInt := retArity < 2 &&
-          allExprs.any (detectReturnIsInt d allParamTypes structMeta) &&
-          !allExprs.any (detectReturnUsedAsDep d depNamesList)
-        if retIsInt then some d else none
       -- Also detect deps returning Int from call-site return types
       let intReturnDepsFromCallRet := callRetTypes.filterMap fun (d, ty) =>
         if ty.isIntLike && depNamesList.contains d then some d else none
-      -- Augment knownIntNames with Int-returning deps
-      let knownIntNames := knownIntNames ++ intReturnDeps ++ intReturnDepsFromCallRet
+      -- Names that should NEVER be classified as Int-returning (collection operations)
+      let collectionOps := ["iter", "map", "collect", "filter", "zip", "fold",
+        "flat_map", "chain", "take", "skip", "enumerate", "rev", "sort",
+        "into_iter", "next", "deref"]
+      let rec iterateIntDeps (known : List String) (fuel : Nat) : List String :=
+        match fuel with
+        | 0 => known
+        | fuel + 1 =>
+          let newIntDeps := depArities.filterMap fun (d, _) =>
+            if known.contains d || collectionOps.contains d then none
+            else
+              let retArity := allExprs.foldl (fun acc e => max acc (detectReturnArity d e)) 0
+              -- Check usage as Int with current known set
+              let retIsIntDirect := retArity < 2 &&
+                allExprs.any (detectReturnIsInt d allParamTypes structMeta (some (ImpExpr.lit (.int 0))) defs.toArray.toList) &&
+                !allExprs.any (detectReturnUsedAsDep d depNamesList) &&
+                !allExprs.any (detectReturnUsedAsStructArg d structNames)
+              -- Also check: if ALL args are known Int or other known-Int deps/constants
+              let allArgsKnownInt := retArity < 2 && depArities.any fun (d', arity') =>
+                d' == d && arity' > 0 &&
+                  let argTypes := allExprs.foldl (fun acc e =>
+                    acc ++ detectArgTypes d arity' known intProjNames (some e) e) ([] : List (List Bool))
+                  argTypes.length > 0 && argTypes.all fun ct => ct.all id
+              if retIsIntDirect || allArgsKnownInt then some d else none
+          if newIntDeps.isEmpty then known
+          else iterateIntDeps (known ++ newIntDeps) fuel
+      let knownIntNames := iterateIntDeps
+        (knownIntNames ++ intReturnDepsFromCallRet) 5
       let fields := depArities.map fun (d, arity) =>
         -- Check if any call site destructures the result as a tuple
         let retArity := allExprs.foldl (fun acc e =>
@@ -2511,6 +2549,7 @@ def generatePreamble (defs : List (String × ImpExpr))
         -- BUT: if the result is also passed to another dep (which expects Array Int),
         -- don't mark as Int to avoid type conflicts.
         let retIsInt := retArity < 2 &&
+          !collectionOps.contains d &&
           allExprs.any (detectReturnIsInt d allParamTypes structMeta) &&
           !allExprs.any (detectReturnUsedAsDep d depNamesList)
         -- Check if return value is used as a Bool (if-condition)
@@ -2593,12 +2632,15 @@ def generatePreamble (defs : List (String × ImpExpr))
               | none => none
           -- Use single letter params for readability
           let letters := #["a", "b", "c", "d", "e", "f", "g", "h"]
+          -- Heuristic: when a dep returns Int/Bool, unresolved args default to Int
+          -- (scalar/group ops uniformly work on field elements)
+          let defaultArgType := if retType == "Int" || retType == "Bool" then "Int" else "Array Int"
           let paramStr := (List.range arity).map (fun i =>
             let letter := if h : i < letters.size then letters[i] else s!"x{i}"
             -- Prefer typed arg info over heuristic
             let ty := match typedArgTypes.getD i none with
               | some impTy => impTy.toLeanTypeStr structLookup
-              | none => if argIsIntArr.getD i false then "Int" else "Array Int"
+              | none => if argIsIntArr.getD i false then "Int" else defaultArgType
             s!"({letter} : {ty})") |> " ".intercalate
           s!"  {sanitizeName d} {paramStr} : {retType}"
       let exportList := depArities.map (fun (d, _) => sanitizeName d) |> " ".intercalate

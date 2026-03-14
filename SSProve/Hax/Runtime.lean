@@ -579,6 +579,22 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 /-- Range-from constructor (lo..). -/
 @[inline] def RangeFrom (lo : Int) : Int := lo
 
+/-- Slice to: arr[..hi] — take first hi elements. -/
+@[inline] def slice_to {α : Type} (arr : Array α) (hi : Int) : Array α :=
+  arr.toList.take hi.toNat |>.toArray
+
+/-- Slice from: arr[lo..] — drop first lo elements. -/
+@[inline] def slice_from {α : Type} (arr : Array α) (lo : Int) : Array α :=
+  arr.toList.drop lo.toNat |>.toArray
+
+/-- Slice range: arr[lo..hi] — subarray from lo to hi. -/
+@[inline] def slice_range {α : Type} (arr : Array α) (lo hi : Int) : Array α :=
+  (arr.toList.drop lo.toNat).take (hi.toNat - lo.toNat) |>.toArray
+
+/-- Collect range into array. -/
+@[inline] def range (lo hi : Int) : Array Int :=
+  (List.range (hi.toNat - lo.toNat)).map (· + lo.toNat) |>.map (Int.ofNat) |>.toArray
+
 /-- Deref — identity in untyped extraction. -/
 @[inline] def deref {α : Type} (x : α) : α := x
 
