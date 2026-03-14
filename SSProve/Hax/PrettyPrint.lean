@@ -1650,8 +1650,8 @@ private def isIntExprCtx (knownIntNames : List String)
      | none => false)
   | .app f args =>
     -- Check if function name is a known Int-returning name (dep or local def)
-    -- But NOT for collection operations that may return arrays depending on args
-    if knownIntNames.contains f then true
+    -- Also check struct projections (names like ".field" or "Struct.field")
+    if knownIntNames.contains f || intProjNames.contains f then true
     else
       -- Exclude index with Range*/RangeTo/RangeFrom args (these are slice ops)
       match f, args with
@@ -2584,6 +2584,8 @@ def generatePreamble (defs : List (String × ImpExpr))
             else if retIsBool then "Bool"
             else if retIsInt then "Int"
             else "Array Int"
+        -- Override: collection operations always return Array Int
+        let retType := if collectionOps.contains d && retType == "Int" then "Array Int" else retType
         if arity == 0 then
           -- For 0-arity free-variable deps, also check if used in Int contexts
           -- (e.g., as array size in repeat_, loop bound in foldRange)
