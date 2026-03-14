@@ -584,6 +584,12 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   | .var "new" => "#[]"  -- Vec::new() → empty array literal (polymorphic)
   | .var n => sanitizeName n
 
+  -- Skip dead ControlFlow let-bindings: let _ := cfBreak/cfContinue/cfBreakContinue (...) → just render body
+  | .letBind n (.cfBreak _) body | .letBind n (.cfContinue _) body | .letBind n (.cfBreakContinue _) body =>
+    if n.startsWith "_" then atLine body lvl
+    else
+      let ind := indent lvl
+      s!"{ind}let {sanitizeName n} := (sorry : Unit)\n{atLine body lvl}"
   -- Let binding: detect tuple destructuring pattern
   -- letBind "_tup" rhs (letBind "a" (proj (var "_tup") 0) (letBind "b" (proj (var "_tup") 1) body))
   -- → let (a, b) := rhs
@@ -761,6 +767,8 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
     let (initStr, paramStr) := accStrings accs
     -- Apply transformWhileFoldBody to ensure trailing bare expressions are wrapped in cfContinue
     let body' := if !accs.isEmpty then transformWhileFoldBody accs body else body
+    -- Nest cfBreak for early returns (same as forFoldReturn)
+    let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.whileFoldReturn {initStr} (fun {paramStr} => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
 
   -- Pre-pipeline constructors (should not appear in output, but handle gracefully)
@@ -839,6 +847,10 @@ where
     | .var _, _ => atLine e2 lvl
     -- Flatten left-nested seq: seq (seq a b) c → seq a (seq b c)
     | .seq a b, _ => seqToLean lvl a (.seq b e2)
+    -- Skip dead code: seq (letBind "_" (cfBreak ...) body) e2
+    | .letBind n (.cfBreak _) body, _ =>
+      if n.startsWith "_" then seqToLean lvl body e2
+      else s!"{ind}let {sanitizeName n} := {toLean (.cfBreak (.cfBreak .unitVal)) 0}\n{seqToLean lvl body e2}"
     -- Lift letBind out of seq: seq (letBind n v body) e2 → let n := v; seq body e2
     | .letBind n v body, _ =>
       s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl body e2}"
@@ -927,6 +939,10 @@ where
         else
           let valStr := if isLeafExpr e1 then toLean e1 0 else s!"\n{toLean e1 (lvl + 1)}"
           s!"{ind}let _ := {valStr}\n{atLine e2 lvl}"
+    -- Skip dead ControlFlow expressions in seq (cfBreak/cfContinue/cfBreakContinue)
+    | .cfBreak _, _ => atLine e2 lvl
+    | .cfContinue _, _ => atLine e2 lvl
+    | .cfBreakContinue _, _ => atLine e2 lvl
     -- General case: skip assert blocks, discard e1's value otherwise
     | _, _ =>
       -- Skip assert_eq!/assert! blocks (Rust runtime assertions with unsynthesizable types)
@@ -996,7 +1012,12 @@ where
       else
         let accStr := ", ".intercalate (accs.map sanitizeName)
         let destr := if accs.length == 1 then sanitizeName accs.head! else s!"({accStr})"
-        s!"{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := _cf.merge\n{atLine tail (lvl + 1)}"
+        -- If the tail is a Bool literal but Break returns Int, wrap in boolToInt
+        let tailRendered := match tail with
+          | .lit (.bool true) => s!"{ind1}Hax.boolToInt true"
+          | .lit (.bool false) => s!"{ind1}Hax.boolToInt false"
+          | _ => atLine tail (lvl + 1)
+        s!"{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := _cf.merge\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
 
@@ -1522,6 +1543,9 @@ private partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
     -- array_update arr idx val → position 1 (idx) is Int
     -- repeat_ val n → position 1 (n) is Int
     -- foldRange lo hi init body → lo (pos 0) and hi (pos 1) are Int
+    -- array_lit: if varName is an element, it's used as Int
+    -- (array_lit creates Array α; in the untyped pipeline, element-level deps are Int constants)
+    let arrayLitInt := f == "array_lit" && args.any argIsVarName
     let posSpecific :=
       (f == "index" || f == "array_update" || f == "index_mut") &&
         args.length > 1 && argIsVar 1
@@ -1531,12 +1555,16 @@ private partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
       ||
       (f == "foldRange" || f == "foldRangeRev") &&
         args.length > 0 && (argIsVar 0 || argIsVar 1)
-    (allArgsInt || posSpecific) || args.any (isVarUsedAsInt varName)
+    (allArgsInt || posSpecific || arrayLitInt) || args.any (isVarUsedAsInt varName)
   | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
     (match lo with | .var v => v == varName | _ => false) ||
     (match hi with | .var v => v == varName | _ => false) ||
     isVarUsedAsInt varName lo || isVarUsedAsInt varName hi ||
     isVarUsedAsInt varName body
+  | .letBind n (.var v) body =>
+    -- If `let n := varName`, check if `n` is used as Int in the body
+    if v == varName then isVarUsedAsInt n body
+    else isVarUsedAsInt varName body
   | .letBind _ v body => isVarUsedAsInt varName v || isVarUsedAsInt varName body
   | .seq a b => isVarUsedAsInt varName a || isVarUsedAsInt varName b
   | .ifThenElse c t e =>
@@ -1551,10 +1579,40 @@ private partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
       isVarUsedAsInt varName body
   | _ => false
 
-/-- Extended isIntExpr that also recognizes .var references to known Int names. -/
+/-- Find the most recent binding for a variable name in an expression tree.
+    Returns the RHS of the last `letBind varName rhs body` encountered. -/
+private partial def findVarBinding' (varName : String) : ImpExpr → Option ImpExpr
+  | .letBind n v body =>
+    if n == varName then some v
+    else findVarBinding' varName body
+  | .seq a b => findVarBinding' varName a |>.orElse fun _ => findVarBinding' varName b
+  | .ifThenElse _ t e =>
+    findVarBinding' varName t |>.orElse fun _ => findVarBinding' varName e
+  | .whileFold _ body => findVarBinding' varName body
+  | .forFold _ _ _ body | .forFoldRev _ _ _ body => findVarBinding' varName body
+  | .forFoldReturn _ _ _ body | .forFoldRevReturn _ _ _ body => findVarBinding' varName body
+  | .whileFoldReturn _ body => findVarBinding' varName body
+  | .match_ _ arms => arms.findSome? fun (_, b) => findVarBinding' varName b
+  | _ => none
+
+/-- Extended isIntExpr that also recognizes .var references to known Int names.
+    Optionally resolves local variable bindings via `findVarBinding'`. -/
 private def isIntExprCtx (knownIntNames : List String)
-    (intProjNames : List String := []) : ImpExpr → Bool
-  | .var v => knownIntNames.contains v
+    (intProjNames : List String := [])
+    (ctx : Option ImpExpr := none) : ImpExpr → Bool
+  | .var v =>
+    knownIntNames.contains v ||
+    -- Resolve local variable bindings through the context
+    (match ctx with
+     | some c =>
+       -- Check if the variable is used as Int elsewhere in the context
+       isVarUsedAsInt v c ||
+       -- Also check the binding expression
+       (match findVarBinding' v c with
+       | some (.var w) => knownIntNames.contains w
+       | some binding => isIntExpr intProjNames binding
+       | none => false)
+     | none => false)
   | e => isIntExpr intProjNames e
 
 /-- Check if an expression's terminal value (through let-chains and if-branches) is Int.
@@ -1569,27 +1627,28 @@ private partial def isTerminalInt (intProjNames : List String := []) : ImpExpr �
     Returns a list of arg types (per position): true = Int, false = Array Int. -/
 private partial def detectArgTypes (fname : String) (arity : Nat)
     (knownIntNames : List String := [])
-    (intProjNames : List String := []) : ImpExpr → List (List Bool)
+    (intProjNames : List String := [])
+    (fnCtx : Option ImpExpr := none) : ImpExpr → List (List Bool)
   | .app f args =>
-    let sub := args.foldl (fun acc a => acc ++ detectArgTypes fname arity knownIntNames intProjNames a) []
+    let sub := args.foldl (fun acc a => acc ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx a) []
     if f == fname && args.length == arity then
-      [args.map (isIntExprCtx knownIntNames intProjNames)] ++ sub
+      [args.map (isIntExprCtx knownIntNames intProjNames fnCtx)] ++ sub
     else sub
-  | .letBind _ v body => detectArgTypes fname arity knownIntNames intProjNames v ++ detectArgTypes fname arity knownIntNames intProjNames body
-  | .seq a b => detectArgTypes fname arity knownIntNames intProjNames a ++ detectArgTypes fname arity knownIntNames intProjNames b
+  | .letBind _ v body => detectArgTypes fname arity knownIntNames intProjNames fnCtx v ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx body
+  | .seq a b => detectArgTypes fname arity knownIntNames intProjNames fnCtx a ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx b
   | .ifThenElse c t e =>
-    detectArgTypes fname arity knownIntNames intProjNames c ++ detectArgTypes fname arity knownIntNames intProjNames t ++ detectArgTypes fname arity knownIntNames intProjNames e
+    detectArgTypes fname arity knownIntNames intProjNames fnCtx c ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx t ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx e
   | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
-    detectArgTypes fname arity knownIntNames intProjNames lo ++ detectArgTypes fname arity knownIntNames intProjNames hi ++ detectArgTypes fname arity knownIntNames intProjNames body
-  | .whileFold c body => detectArgTypes fname arity knownIntNames intProjNames c ++ detectArgTypes fname arity knownIntNames intProjNames body
+    detectArgTypes fname arity knownIntNames intProjNames fnCtx lo ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx hi ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx body
+  | .whileFold c body => detectArgTypes fname arity knownIntNames intProjNames fnCtx c ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx body
   | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
-    detectArgTypes fname arity knownIntNames intProjNames lo ++ detectArgTypes fname arity knownIntNames intProjNames hi ++ detectArgTypes fname arity knownIntNames intProjNames body
-  | .whileFoldReturn c body => detectArgTypes fname arity knownIntNames intProjNames c ++ detectArgTypes fname arity knownIntNames intProjNames body
-  | .tuple es => es.foldl (fun acc e => acc ++ detectArgTypes fname arity knownIntNames intProjNames e) []
-  | .proj e _ => detectArgTypes fname arity knownIntNames intProjNames e
+    detectArgTypes fname arity knownIntNames intProjNames fnCtx lo ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx hi ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx body
+  | .whileFoldReturn c body => detectArgTypes fname arity knownIntNames intProjNames fnCtx c ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx body
+  | .tuple es => es.foldl (fun acc e => acc ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx e) []
+  | .proj e _ => detectArgTypes fname arity knownIntNames intProjNames fnCtx e
   | .match_ scrut arms =>
-    detectArgTypes fname arity knownIntNames intProjNames scrut ++ arms.foldl (fun acc (_, b) => acc ++ detectArgTypes fname arity knownIntNames intProjNames b) []
-  | .cfBreak e | .cfContinue e | .cfBreakContinue e => detectArgTypes fname arity knownIntNames intProjNames e
+    detectArgTypes fname arity knownIntNames intProjNames fnCtx scrut ++ arms.foldl (fun acc (_, b) => acc ++ detectArgTypes fname arity knownIntNames intProjNames fnCtx b) []
+  | .cfBreak e | .cfContinue e | .cfBreakContinue e => detectArgTypes fname arity knownIntNames intProjNames fnCtx e
   | _ => []
 
 /-- Find the binding expression for a variable name in a function body.
@@ -2424,7 +2483,7 @@ def generatePreamble (defs : List (String × ImpExpr))
         else
           -- Detect which arguments are Int vs Array Int (heuristic)
           let allArgTypes := allExprs.foldl (fun acc e =>
-            acc ++ detectArgTypes d arity knownIntNames intProjNames e) []
+            acc ++ detectArgTypes d arity knownIntNames intProjNames (some e) e) []
           let argIsIntArr := (List.range arity).map fun i =>
             allArgTypes.length > 0 &&
             allArgTypes.all fun callArgs =>
@@ -2510,6 +2569,9 @@ private partial def collectProjectionsOnVar (varName : String) : ImpExpr → Lis
     collectProjectionsOnVar varName c ++ collectProjectionsOnVar varName body
   | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
     collectProjectionsOnVar varName e
+  | .match_ scrut arms =>
+    collectProjectionsOnVar varName scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ collectProjectionsOnVar varName b) []
   | _ => []
 
 /-- Infer struct type of a variable from context:
