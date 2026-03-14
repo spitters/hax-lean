@@ -2634,9 +2634,18 @@ def generatePreamble (defs : List (String × ImpExpr))
               | none => none
           -- Use single letter params for readability
           let letters := #["a", "b", "c", "d", "e", "f", "g", "h"]
-          -- Heuristic: when a dep returns Int/Bool, unresolved args default to Int
-          -- (scalar/group ops uniformly work on field elements)
-          let defaultArgType := if retType == "Int" || retType == "Bool" then "Int" else "Array Int"
+          -- Heuristic: when a dep returns Int, unresolved args default to Int
+          -- (scalar/group ops uniformly work on field elements).
+          -- But NOT for deps returning Bool/Array Int (like mac_verify) since
+          -- they typically take mixed Array/Int args.
+          -- Also check: if typed arg info shows any arg is Array, don't use Int default
+          let hasArrayArg := typedArgTypes.any fun opt =>
+            match opt with
+            | some (ImpType.array _ _) => true
+            | some (ImpType.slice _) => true
+            | some (ImpType.adt "Vec" _) => true
+            | _ => false
+          let defaultArgType := if retType == "Int" && !hasArrayArg then "Int" else "Array Int"
           let paramStr := (List.range arity).map (fun i =>
             let letter := if h : i < letters.size then letters[i] else s!"x{i}"
             -- Prefer typed arg info over heuristic
