@@ -371,6 +371,30 @@ private partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
   -- Other terminal: leave as-is
   | e => e
 
+/-- Extract the initial value for an accumulator from a fold body.
+    If the body starts with `let acc := <init>` where `<init>` does NOT reference
+    `acc` (a fresh initialization, not a mutation), returns `some <init>`.
+    This handles patterns like:
+      `let w := ZERO_WORD; let w := array_update w 0 ...; w`
+    where the first binding is a fresh init that should be the fold's initial value. -/
+private partial def extractAccInit (accName : String) : ImpExpr → Option ImpExpr
+  | .seq (.seq a b) c => extractAccInit accName (.seq a (.seq b c))
+  -- seq (letBind accName init (var accName)) rest — mutation, not init
+  | .seq (.letBind n val (.var v)) rest =>
+    if n == accName && n == v then none  -- mutation pattern
+    else if n == accName then
+      -- Fresh binding of accName — check if val references accName
+      if exprContainsVar accName val then none
+      else some val
+    else extractAccInit accName rest
+  -- Direct letBind accName init body — check if it's fresh (not self-referencing)
+  | .letBind n val body =>
+    if n == accName then
+      if exprContainsVar accName val then none
+      else some val
+    else extractAccInit accName body
+  | _ => none
+
 /-- Format accumulator initial value and lambda parameter for fold rendering. -/
 private def accStrings (accs : List String) : String × String :=
   if accs.isEmpty then ("()", "_acc")
@@ -380,6 +404,17 @@ private def accStrings (accs : List String) : String × String :=
   else
     let names := ", ".intercalate (accs.map sanitizeName)
     (s!"({names})", s!"({names})")
+
+/-- Compute custom init expressions for accumulators that need default initialization.
+    Returns a list of (accName, initExpr) pairs for accumulators whose first binding
+    in the fold body is a fresh init (not self-referencing).
+    These need `let acc := init` emitted BEFORE the fold. -/
+private def accInitOverrides (accs : List String) (body : ImpExpr) :
+    List (String × ImpExpr) :=
+  accs.filterMap fun acc =>
+    match extractAccInit acc body with
+    | some initExpr => some (acc, initExpr)
+    | none => none
 
 /-- Extract accumulators from a whileFold body.
     The body may be wrapped in an `ifThenElse` (from `while true { if cond ... else break }`),
@@ -662,6 +697,8 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
     -- (Hax.Not uses HaxNot typeclass: Bool → !, Int → bitwise complement)
     if isKnownBool x then s!"(!{parensIf (toLean x 0) (!isAtom x)})"
     else s!"(Hax.Not {parensIf (toLean x 0) (!isAtom x)})"
+  -- panic/panic_fmt → unit (Rust panics become no-ops in the extraction)
+  | .app "panic" _ | .app "panic_fmt" _ => "()"
   | .app f args =>
     -- Special-case: index/index_mut with range args → slice functions
     match f, args with
@@ -990,18 +1027,23 @@ where
     -- then strip the leading indent since we place it after 'let acc :='
     let foldStr := (toLean foldExpr lvl).trimLeft
     let accs := extractAccumulators body
+    -- Emit init overrides for accumulators that need default initialization
+    let overrides := accInitOverrides accs body
+    let initPrefix := if overrides.isEmpty then ""
+      else overrides.map (fun (n, e) =>
+        s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
     if accs.isEmpty then
       s!"{ind}let _ := {foldStr}\n{atLine tail lvl}"
     else if accs.length == 1 then
       let acc := accs.head!
       -- If the tail just reads the accumulator, the fold IS the return value
       match tail with
-      | .var n => if n == acc then toLean foldExpr lvl
-                  else s!"{ind}let {sanitizeName acc} := {foldStr}\n{atLine tail lvl}"
-      | _ => s!"{ind}let {sanitizeName acc} := {foldStr}\n{atLine tail lvl}"
+      | .var n => if n == acc then s!"{initPrefix}{toLean foldExpr lvl}"
+                  else s!"{initPrefix}{ind}let {sanitizeName acc} := {foldStr}\n{atLine tail lvl}"
+      | _ => s!"{initPrefix}{ind}let {sanitizeName acc} := {foldStr}\n{atLine tail lvl}"
     else
       let accStr := ", ".intercalate (accs.map sanitizeName)
-      s!"{ind}let ({accStr}) := {foldStr}\n{atLine tail lvl}"
+      s!"{initPrefix}{ind}let ({accStr}) := {foldStr}\n{atLine tail lvl}"
   /-- Handle seq where the first expression is a whileFold/whileFoldReturn.
       These return `ControlFlow β α` so we use `.merge` to extract the value.
       We split into two lets to help Lean's type inference. -/
@@ -1012,17 +1054,22 @@ where
     -- Filter out loop-local variables (same as in toLean whileFold case)
     let localVars := collectLetBindVars body
     let accs := accs.filter fun a => !localVars.contains a
+    -- Emit init overrides for accumulators that need default initialization
+    let overrides := accInitOverrides accs body
+    let initPrefix := if overrides.isEmpty then ""
+      else overrides.map (fun (n, e) =>
+        s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
     if accs.isEmpty then
       s!"{ind}let _ := {foldStr}\n{atLine tail lvl}"
     else if accs.length == 1 then
       let acc := accs.head!
       match tail with
-      | .var n => if n == acc then s!"{ind}({foldStr}).merge"
-                  else s!"{ind}let _wf := {foldStr}\n{ind}let {sanitizeName acc} := _wf.merge\n{atLine tail lvl}"
-      | _ => s!"{ind}let _wf := {foldStr}\n{ind}let {sanitizeName acc} := _wf.merge\n{atLine tail lvl}"
+      | .var n => if n == acc then s!"{initPrefix}{ind}({foldStr}).merge"
+                  else s!"{initPrefix}{ind}let _wf := {foldStr}\n{ind}let {sanitizeName acc} := _wf.merge\n{atLine tail lvl}"
+      | _ => s!"{initPrefix}{ind}let _wf := {foldStr}\n{ind}let {sanitizeName acc} := _wf.merge\n{atLine tail lvl}"
     else
       let accStr := ", ".intercalate (accs.map sanitizeName)
-      s!"{ind}let _wf := {foldStr}\n{ind}let ({accStr}) := _wf.merge\n{atLine tail lvl}"
+      s!"{initPrefix}{ind}let _wf := {foldStr}\n{ind}let ({accStr}) := _wf.merge\n{atLine tail lvl}"
   /-- Handle seq where the first expression is a forFoldReturn/forFoldRevReturn.
       These return `ControlFlow β (ControlFlow γ α)`.
       `.Break v` = early return, `.Continue (.Break v)` = loop break,
@@ -1035,12 +1082,17 @@ where
       let foldStr := (toLean foldExpr lvl).trimLeft
       let accs := extractAccumulators body
       let ind1 := indent (lvl + 1)
+      -- Emit init overrides for accumulators that need default initialization
+      let overrides := accInitOverrides accs body
+      let initPrefix := if overrides.isEmpty then ""
+        else overrides.map (fun (n, e) =>
+          s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
       -- Render the tail expression to detect its type for annotations
       let tailStr := (atLine tail (lvl + 1)).trimRight
       if accs.isEmpty then
         -- forFoldReturn returns ControlFlow β (ControlFlow γ Unit)
         -- We need to annotate to fix unresolvable γ
-        s!"{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow _ (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break _v => _v\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
+        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow _ (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break _v => _v\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
       else
         let accStr := ", ".intercalate (accs.map sanitizeName)
         let destr := if accs.length == 1 then sanitizeName accs.head! else s!"({accStr})"
@@ -1049,7 +1101,7 @@ where
           | .lit (.bool true) => s!"{ind1}Hax.boolToInt true"
           | .lit (.bool false) => s!"{ind1}Hax.boolToInt false"
           | _ => atLine tail (lvl + 1)
-        s!"{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := _cf.merge\n{tailRendered}"
+        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
 
