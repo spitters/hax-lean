@@ -1360,6 +1360,176 @@ partial def collectCallReturnTypes (j : Json) : List (String × ImpType) :=
   | .arr items => items.toList.flatMap collectCallReturnTypes
   | _ => []
 
+/-- Collect full type signatures (argument types + return type) for function calls
+    from the hax JSON expression tree. For each Call node, extracts the `ty` of each
+    argument and the `ty` of the call itself (return type).
+    Returns: functionName → FnTypeInfo (paramTypes named "arg0".."argN", retType). -/
+partial def collectCallSignatures (j : Json) : List (String × FnTypeInfo) :=
+  match j with
+  | .obj _ =>
+    let callSigs := match j.getObjVal? "contents" with
+      | .ok contents =>
+        match contents.getObjVal? "Call" with
+        | .ok callData =>
+          let funName := extractCallName (match callData.getObjVal? "fun" with
+            | .ok f => f | _ => .null)
+          let retType := match j.getObjVal? "ty" with
+            | .ok tyJ => parseHaxType tyJ
+            | _ => .unknown
+          let argTypes := match callData.getObjValAs? (Array Json) "args" with
+            | .ok args =>
+              let argList := args.toList
+              (argList.zip (List.range argList.length)).map fun (arg, i) =>
+                let ty := match arg.getObjVal? "ty" with
+                  | .ok tyJ => parseHaxType tyJ
+                  | _ => .unknown
+                (s!"arg{i}", ty)
+            | _ => []
+          if funName != "unknown_fn" && funName != "indirect_call" then
+            [(funName, ⟨argTypes, retType⟩)]
+          else []
+        | _ => []
+      | _ => []
+    let childSigs := j.getObj?.toOption.map (fun obj =>
+      obj.toList.flatMap fun (_, v) => collectCallSignatures v) |>.getD []
+    callSigs ++ childSigs
+  | .arr items => items.toList.flatMap collectCallSignatures
+  | _ => []
+
+/-- Extract call signatures from a single hax JSON item (Fn). -/
+private partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
+  match item.getObjVal? "kind" with
+  | .ok kind =>
+    match kind.getObjVal? "Fn" with
+    | .ok fnData =>
+      match fnData.getObjVal? "def" with
+      | .ok d => match d.getObjVal? "body" with
+        | .ok body => collectCallSignatures body
+        | _ => []
+      | _ => []
+    | _ =>
+      -- Also check Const items
+      match kind.getObjVal? "Const" with
+      | .ok (.arr constData) =>
+        match constData.toList[3]? with
+        | some bodyJ => collectCallSignatures bodyJ
+        | none => []
+      | _ => []
+  | _ => []
+
+/-- Extract call signatures from a full hax export JSON.
+    Returns deduplicated map: functionName → FnTypeInfo.
+    When multiple call sites exist, keeps the one with the most non-unknown arg types. -/
+partial def extractCallSignaturesFromFile (j : Json) : List (String × FnTypeInfo) :=
+  let raw : List (String × FnTypeInfo) := match j with
+    | Json.arr items => items.toList.flatMap fun item =>
+      extractCallSigsItem item ++
+      -- Also recurse into Mod items
+      (match item.getObjVal? "kind" with
+       | .ok kind =>
+         match kind.getObjVal? "Mod" with
+         | .ok (Json.arr modData) =>
+           match modData.toList[1]? with
+           | some (Json.arr subItems) => subItems.toList.flatMap extractCallSigsItem
+           | _ => []
+         | _ => []
+       | _ => ([] : List (String × FnTypeInfo)))
+    | _ => []
+  -- Deduplicate: for each function name, pick the best type info
+  -- (most non-unknown param types, then non-unknown return type)
+  raw.foldl (fun (acc : List (String × FnTypeInfo)) ((name, ti) : String × FnTypeInfo) =>
+    match acc.find? (·.1 == name) with
+    | some (_, existTi) =>
+      let existKnown := existTi.paramTypes.filter (fun (_, t) => !t.isUnknown) |>.length
+      let existScore := existKnown + (if existTi.retType.isUnknown then 0 else 1)
+      let newKnown := ti.paramTypes.filter (fun (_, t) => !t.isUnknown) |>.length
+      let newScore := newKnown + (if ti.retType.isUnknown then 0 else 1)
+      if newScore > existScore then
+        acc.map fun (n, t) => if n == name then (n, ti) else (n, t)
+      else acc
+    | none => acc ++ [(name, ti)]) []
+
+/-- Collect types of free variable references from hax JSON expression tree.
+    For standalone variable references (VarRef) that are not function call targets,
+    extracts `ty` to determine whether a free var dep should be Int, Array Int, etc.
+    Returns: variableName → ImpType. -/
+partial def collectVarRefTypes (j : Json) : List (String × ImpType) :=
+  match j with
+  | .obj _ =>
+    let varTypes := match j.getObjVal? "contents" with
+      | .ok contents =>
+        -- Handle GlobalVar references
+        let globalVarTypes := match contents.getObjVal? "GlobalVar" with
+          | .ok varData =>
+            let varName := match varData.getObjVal? "id" with
+              | .ok id => match id.getObjValAs? String "name" with
+                | .ok n => n
+                | _ => "unknown"
+              | _ => "unknown"
+            let ty := match j.getObjVal? "ty" with
+              | .ok tyJ => parseHaxType tyJ
+              | _ => .unknown
+            if varName != "unknown" && !ty.isUnknown then [(varName, ty)] else []
+          | _ => ([] : List (String × ImpType))
+        -- Handle StaticRef references (static constants like AEGIS_C0)
+        let staticRefTypes := match contents.getObjVal? "StaticRef" with
+          | .ok data =>
+            let varName := match data.getObjVal? "def_id" with
+              | .ok defId => extractDefIdName defId
+              | _ => "unknown"
+            let ty := match j.getObjVal? "ty" with
+              | .ok tyJ => parseHaxType tyJ
+              | _ => .unknown
+            if varName != "unknown" && varName != "static" && !ty.isUnknown
+            then [(varName, ty)] else []
+          | _ => ([] : List (String × ImpType))
+        globalVarTypes ++ staticRefTypes
+      | _ => ([] : List (String × ImpType))
+    let childTypes := j.getObj?.toOption.map (fun obj =>
+      obj.toList.flatMap fun (_, v) => collectVarRefTypes v) |>.getD []
+    varTypes ++ childTypes
+  | .arr items => items.toList.flatMap collectVarRefTypes
+  | _ => []
+
+/-- Extract var ref types from a single hax JSON item. -/
+private partial def extractVarRefTypesItem (item : Json) : List (String × ImpType) :=
+  match item.getObjVal? "kind" with
+  | .ok kind =>
+    match kind.getObjVal? "Fn" with
+    | .ok fnData =>
+      match fnData.getObjVal? "def" with
+      | .ok d => match d.getObjVal? "body" with
+        | .ok body => collectVarRefTypes body
+        | _ => []
+      | _ => []
+    | _ =>
+      match kind.getObjVal? "Const" with
+      | .ok (.arr constData) =>
+        match constData.toList[3]? with
+        | some bodyJ => collectVarRefTypes bodyJ
+        | none => []
+      | _ => []
+  | _ => []
+
+/-- Extract variable reference types from a full hax export JSON.
+    Returns deduplicated map: variableName → ImpType. -/
+partial def extractVarRefTypesFromFile (j : Json) : List (String × ImpType) :=
+  let raw : List (String × ImpType) := match j with
+    | Json.arr items => items.toList.flatMap fun item =>
+      extractVarRefTypesItem item ++
+      (match item.getObjVal? "kind" with
+       | .ok kind =>
+         match kind.getObjVal? "Mod" with
+         | .ok (Json.arr modData) =>
+           match modData.toList[1]? with
+           | some (Json.arr subItems) => subItems.toList.flatMap extractVarRefTypesItem
+           | _ => []
+         | _ => []
+       | _ => ([] : List (String × ImpType)))
+    | _ => []
+  raw.foldl (fun (acc : List (String × ImpType)) ((name, ty) : String × ImpType) =>
+    if acc.any (·.1 == name) then acc else acc ++ [(name, ty)]) []
+
 /-- Extract call return types from a single hax JSON item (Fn). -/
 private partial def extractCallRetTypesItem (item : Json) : List (String × ImpType) :=
   match item.getObjVal? "kind" with

@@ -2537,11 +2537,15 @@ private def mkStructLookup (structMeta : StructMeta)
 /-- Generate auto-preamble: struct definitions, projections, and dependency class.
     `structMeta`: struct definitions from hax JSON (name → [(field_name, type_tag)])
     `defs`: the extracted ImpExpr function definitions
-    `fnTypes`: per-function type info from hax JSON (for typed dep signatures) -/
+    `fnTypes`: per-function type info from hax JSON (for typed dep signatures)
+    `callSigs`: per-call-site full signatures from hax JSON (arg types + return type)
+    `varRefTypes`: types of free variable references from hax JSON -/
 def generatePreamble (defs : List (String × ImpExpr))
     (moduleName : String) (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (callRetTypes : List (String × ImpType) := [])
+    (callSigs : List (String × HaxAdapter.FnTypeInfo) := [])
+    (varRefTypes : List (String × ImpType) := [])
     : String × List (String × String) :=
   let definedNames := defs.map (·.1)
   -- Collect all app calls across all definitions
@@ -2718,6 +2722,10 @@ def generatePreamble (defs : List (String × ImpExpr))
       let knownIntNames := iterateIntDeps
         (knownIntNames ++ intReturnDepsFromCallRet) 5
       let fields := depArities.map fun (d, arity) =>
+        -- === TYPED PATH: Use call-site signatures from hax JSON when available ===
+        let callSig := callSigs.find? (·.1 == d) |>.map (·.2)
+        -- For 0-arity deps, also check varRefTypes
+        let varRefType := varRefTypes.find? (·.1 == d) |>.map (·.2)
         -- Check if any call site destructures the result as a tuple
         let retArity := allExprs.foldl (fun acc e =>
           max acc (detectReturnArity d e)) 0
@@ -2736,100 +2744,121 @@ def generatePreamble (defs : List (String × ImpExpr))
         let retStructType := retStructName.bind structLookup
         -- First check: use call-site return type from hax JSON if available
         let callRetType := callRetTypes.find? (·.1 == d) |>.map (·.2)
-        let retType := match callRetType with
-          | some ty =>
-            let s := ty.toLeanTypeStr structLookup
-            -- Only use typed return if it resolves to a concrete type (not unknown/Unit)
-            if s != "Unit" && s != "()" && !ty.isUnknown then s
-            else match retStructType with
-              | some st => st
-              | none => if retIsBool then "Bool" else if retIsInt then "Int" else "Array Int"
-          | none => match retStructType with
-          | some st => st  -- Use the resolved struct tuple type
+        -- Compute return type from typed info (callSig or callRetType), falling back to heuristic
+        let retTypeFromSig := match callSig with
+          | some sig =>
+            if !sig.retType.isUnknown then
+              let s := sig.retType.toLeanTypeStr structLookup
+              if s != "Unit" && s != "()" then some s else none
+            else none
+          | none => none
+        let retType := match retTypeFromSig with
+          | some s => s
           | none =>
-            if retArity >= 2 then
-              -- Analyze each tuple component's type from usage context
-              let compTypes := allExprs.foldl (fun acc e =>
-                acc ++ detectReturnComponentTypes d knownIntNames e) []
-              -- For each position, if ALL call sites agree it's Int, use Int
-              let componentIsInt := (List.range retArity).map fun i =>
-                compTypes.length > 0 &&
-                compTypes.all fun ct => ct.getD i false
-              " × ".intercalate (componentIsInt.map fun isInt =>
-                if isInt then "Int" else "Array Int")
-            else if retIsBool then "Bool"
-            else if retIsInt then "Int"
-            else "Array Int"
+            match callRetType with
+            | some ty =>
+              let s := ty.toLeanTypeStr structLookup
+              if s != "Unit" && s != "()" && !ty.isUnknown then s
+              else match retStructType with
+                | some st => st
+                | none => if retIsBool then "Bool" else if retIsInt then "Int" else "Array Int"
+            | none => match retStructType with
+              | some st => st
+              | none =>
+                if retArity >= 2 then
+                  let compTypes := allExprs.foldl (fun acc e =>
+                    acc ++ detectReturnComponentTypes d knownIntNames e) []
+                  let componentIsInt := (List.range retArity).map fun i =>
+                    compTypes.length > 0 &&
+                    compTypes.all fun ct => ct.getD i false
+                  " × ".intercalate (componentIsInt.map fun isInt =>
+                    if isInt then "Int" else "Array Int")
+                else if retIsBool then "Bool"
+                else if retIsInt then "Int"
+                else "Array Int"
         -- Override: collection operations always return Array Int
         let retType := if collectionOps.contains d && retType == "Int" then "Array Int" else retType
         if arity == 0 then
-          -- For 0-arity free-variable deps, also check if used in Int contexts
-          -- (e.g., as array size in repeat_, loop bound in foldRange)
-          -- Also check if used with struct projections (needs struct tuple type)
+          -- For 0-arity free-variable deps, use typed info when available
           let finalRetType :=
-            -- First check struct type from projections or constructor context
-            match retStructType with
-            | some st => st
-            | none =>
-              if retType == "Array Int" then
-                -- Check direct struct projection usage: is dep var used as arg to projections?
-                let structTypeFromVar := allExprs.findSome? fun e =>
-                  structMeta.findSome? fun ((sname, fields) : String × List (String × String × ImpType)) =>
-                    let projUsed : Bool := fields.any fun (fname, _, _) =>
-                      checkProjOnVar d s!".{fname}" e ||
-                      checkProjOnVar d s!"{sname}.{fname}" e
-                    if projUsed == true then structLookup sname else none
-                match structTypeFromVar with
+            -- First: check varRefTypes from hax JSON for this variable
+            match varRefType with
+            | some ty =>
+              let s := ty.toLeanTypeStr structLookup
+              if s != "Unit" && s != "()" && !ty.isUnknown then s
+              else
+                match retStructType with
                 | some st => st
                 | none =>
                   let usedAsInt := allExprs.any (isVarUsedAsInt d)
-                  if usedAsInt then "Int" else retType
-              else retType
+                  if usedAsInt then "Int" else "Array Int"
+            | none =>
+              match retStructType with
+              | some st => st
+              | none =>
+                if retType == "Array Int" then
+                  let structTypeFromVar := allExprs.findSome? fun e =>
+                    structMeta.findSome? fun ((sname, fields) : String × List (String × String × ImpType)) =>
+                      let projUsed : Bool := fields.any fun (fname, _, _) =>
+                        checkProjOnVar d s!".{fname}" e ||
+                        checkProjOnVar d s!"{sname}.{fname}" e
+                      if projUsed == true then structLookup sname else none
+                  match structTypeFromVar with
+                  | some st => st
+                  | none =>
+                    let usedAsInt := allExprs.any (isVarUsedAsInt d)
+                    if usedAsInt then "Int" else retType
+                else retType
           s!"  {sanitizeName d} : {finalRetType}"
         else
-          -- Detect which arguments are Int vs Array Int (heuristic)
-          let allArgTypes := allExprs.foldl (fun acc e =>
-            acc ++ detectArgTypes d arity knownIntNames intProjNames (some e) e) []
-          let argIsIntArr := (List.range arity).map fun i =>
-            allArgTypes.length > 0 &&
-            allArgTypes.all fun callArgs =>
-              callArgs.getD i false
-          -- Also detect typed args from fnTypes cross-referencing
-          let typedArgResults := defs.foldl (fun acc (fnName, e) =>
-            let paramMap := match fnTypes.find? (·.1 == fnName) with
-              | some (_, ti) => ti.paramTypes
-              | none => []
-            acc ++ detectTypedArgs d arity paramMap structMeta (some e) defs callRetTypes e) ([] : List (List (Option ImpType)))
-          -- For each position, find typed arg info (first known type wins)
-          -- Skip Bool (ImpExpr uses Int for booleans) and Tuple (may be pass-through struct)
-          let typedArgTypes := (List.range arity).map fun i =>
-            typedArgResults.findSome? fun callArgs =>
-              match callArgs.getD i none with
-              | some .unknown | some .bool | some (.tuple _) => none
-              | some ty => some ty
-              | none => none
-          -- Use single letter params for readability
+          -- === TYPED PATH for arguments: use callSig when available ===
           let letters := #["a", "b", "c", "d", "e", "f", "g", "h"]
-          -- Heuristic: when a dep returns Int, unresolved args default to Int
-          -- (scalar/group ops uniformly work on field elements).
-          -- But NOT for deps returning Bool/Array Int (like mac_verify) since
-          -- they typically take mixed Array/Int args.
-          -- Also check: if typed arg info shows any arg is Array, don't use Int default
-          let hasArrayArg := typedArgTypes.any fun opt =>
-            match opt with
-            | some (ImpType.array _ _) => true
-            | some (ImpType.slice _) => true
-            | some (ImpType.adt "Vec" _) => true
-            | _ => false
-          let defaultArgType := if retType == "Int" && !hasArrayArg then "Int" else "Array Int"
-          let paramStr := (List.range arity).map (fun i =>
-            let letter := if h : i < letters.size then letters[i] else s!"x{i}"
-            -- Prefer typed arg info over heuristic
-            let ty := match typedArgTypes.getD i none with
-              | some impTy => impTy.toLeanTypeStr structLookup
-              | none => if argIsIntArr.getD i false then "Int" else defaultArgType
-            s!"({letter} : {ty})") |> " ".intercalate
-          s!"  {sanitizeName d} {paramStr} : {retType}"
+          match callSig with
+          | some sig =>
+            -- We have typed arg info from hax JSON — use it directly
+            let sigArgCount := sig.paramTypes.length
+            let paramStr := (List.range arity).map (fun i =>
+              let letter := if h : i < letters.size then letters[i] else s!"x{i}"
+              let ty := if i < sigArgCount then
+                let (_, impTy) := sig.paramTypes[i]!
+                if impTy.isUnknown then "Array Int"
+                else impTy.toLeanTypeStr structLookup
+              else "Array Int"
+              s!"({letter} : {ty})") |> " ".intercalate
+            s!"  {sanitizeName d} {paramStr} : {retType}"
+          | none =>
+            -- Fall back to heuristic detection
+            let allArgTypes := allExprs.foldl (fun acc e =>
+              acc ++ detectArgTypes d arity knownIntNames intProjNames (some e) e) []
+            let argIsIntArr := (List.range arity).map fun i =>
+              allArgTypes.length > 0 &&
+              allArgTypes.all fun callArgs =>
+                callArgs.getD i false
+            let typedArgResults := defs.foldl (fun acc (fnName, e) =>
+              let paramMap := match fnTypes.find? (·.1 == fnName) with
+                | some (_, ti) => ti.paramTypes
+                | none => []
+              acc ++ detectTypedArgs d arity paramMap structMeta (some e) defs callRetTypes e) ([] : List (List (Option ImpType)))
+            let typedArgTypes := (List.range arity).map fun i =>
+              typedArgResults.findSome? fun callArgs =>
+                match callArgs.getD i none with
+                | some .unknown | some .bool | some (.tuple _) => none
+                | some ty => some ty
+                | none => none
+            let hasArrayArg := typedArgTypes.any fun opt =>
+              match opt with
+              | some (ImpType.array _ _) => true
+              | some (ImpType.slice _) => true
+              | some (ImpType.adt "Vec" _) => true
+              | _ => false
+            let defaultArgType := if retType == "Int" && !hasArrayArg then "Int" else "Array Int"
+            let paramStr := (List.range arity).map (fun i =>
+              let letter := if h : i < letters.size then letters[i] else s!"x{i}"
+              let ty := match typedArgTypes.getD i none with
+                | some impTy => impTy.toLeanTypeStr structLookup
+                | none => if argIsIntArr.getD i false then "Int" else defaultArgType
+              s!"({letter} : {ty})") |> " ".intercalate
+            s!"  {sanitizeName d} {paramStr} : {retType}"
       let exportList := depArities.map (fun (d, _) => sanitizeName d) |> " ".intercalate
       s!"/-- External dependencies for {moduleName} extraction (auto-generated). -/\nclass {depsClassName} where\n{"\n".intercalate fields}\n\nexport {depsClassName} ({exportList})\n\nvariable [{depsClassName}]\n"
   -- Assemble preamble
@@ -3447,7 +3476,9 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
-    (callRetTypes : List (String × ImpType) := []) : String :=
+    (callRetTypes : List (String × ImpType) := [])
+    (callSigs : List (String × HaxAdapter.FnTypeInfo) := [])
+    (varRefTypes : List (String × ImpType) := []) : String :=
   -- Deduplicate: hax JSON may contain the same constant/function defined in
   -- multiple Rust modules. Keep the first occurrence, drop later duplicates.
   let defs := defs.foldl (fun (acc : List (String × ImpExpr)) (n, e) =>
@@ -3488,7 +3519,7 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
     else defs.map fun (n, e) => (n, fixProjectionPaths arityMap e)
   -- Build struct lookup function for type resolution (accounts for pass-through structs)
   let structLookup := mkStructLookup structMeta (computeStructPassthrough structMeta defs)
-  let (preamble, projConflicts) := generatePreamble defs moduleName structMeta fnTypes callRetTypes
+  let (preamble, projConflicts) := generatePreamble defs moduleName structMeta fnTypes callRetTypes callSigs varRefTypes
   -- Rewrite function body projection references for conflicts
   let defs := if projConflicts.isEmpty then defs
     else defs.map fun (n, e) =>
