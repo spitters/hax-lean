@@ -968,14 +968,27 @@ where
       -- The cfBreak may be wrapped in seq: (seq (cfBreak val) unitVal)
       else match extractCfBreak thn, extractCfBreak els with
       | some retVal, none =>
-        let ifLvl := max lvl 1
-        let ifInd := indent ifLvl
-        s!"{ifInd}if {condToLean cond} then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
+        -- Skip guard pattern if retVal is a cfBreak (double-nested forFoldReturn context).
+        -- In that case, fall through to normal rendering to preserve ControlFlow nesting.
+        match retVal with
+        | .cfBreak _ =>
+          let ifLvl := max lvl 1
+          s!"{indent ifLvl}if {condToLean cond} then\n{atLine (.cfBreak retVal) (ifLvl + 1)}\n{indent ifLvl}else\n{atLine e2 (ifLvl + 1)}"
+        | _ =>
+          let ifLvl := max lvl 1
+          let ifInd := indent ifLvl
+          s!"{ifInd}if {condToLean cond} then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | none, some retVal =>
         -- Inverted: if cond then continue else break → if !cond then val else rest
-        let ifLvl := max lvl 1
-        let ifInd := indent ifLvl
-        s!"{ifInd}if !({condToLean cond}) then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
+        -- Same double-nesting check as above
+        match retVal with
+        | .cfBreak _ =>
+          let ifLvl := max lvl 1
+          s!"{indent ifLvl}if !({condToLean cond}) then\n{atLine (.cfBreak retVal) (ifLvl + 1)}\n{indent ifLvl}else\n{atLine e2 (ifLvl + 1)}"
+        | _ =>
+          let ifLvl := max lvl 1
+          let ifInd := indent ifLvl
+          s!"{ifInd}if !({condToLean cond}) then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | _, _ =>
       if els == .unitVal then
         -- One-sided: if cond then {let x := rhs; x} else unitVal
