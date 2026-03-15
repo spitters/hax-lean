@@ -895,11 +895,12 @@ where
   condToLean (c : ImpExpr) : String :=
     match c with
     | .app "Not" [x] | .app "not" [x] =>
-      -- Not on a known-Bool or function call: use logical negation
-      if isKnownBool x || x matches .app _ _ then
+      -- Not on a known-Bool expression: use logical negation (!)
+      if isKnownBool x then
         s!"!{parensIf (toLean x 0) (!isAtom x)}"
-      -- Not on a variable or other: use Hax.beq _ 0 for correct negation
-      -- Don't annotate 0 with : Int — let Lean infer (works for Bool via OfNat)
+      -- Not on a function call or variable: use Hax.beq _ 0 for correct negation
+      -- This handles both Int-returning functions and Bool-returning deps
+      -- (Hax.beq works on both since it uses HaxEq typeclass)
       else s!"Hax.beq {parensIf (toLean x 0) (!isAtom x)} 0"
     | .app _ _ =>
       -- Function applications: either runtime op (known Bool) or preamble function
