@@ -500,7 +500,10 @@ private partial def transformWhileContinue (accs : List String) : ImpExpr → Im
       -- Both have CF: leave as-is
       .ifThenElse c thn els
   | .unitVal => .cfContinue (accTuple accs)
-  | e => e
+  -- Non-CF terminal expression: wrap in cfContinue so whileFold body has correct type
+  | e =>
+    if hasControlFlowNodes e then e
+    else .seq e (.cfContinue (accTuple accs))
 
 /-- Transform a whileFold body for surface rendering.
     - In continue branches: replace trailing `unitVal` with `cfContinue (accs)`
@@ -828,7 +831,9 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
       -- Use _ for condition lambda (condition rarely uses accumulator names)
       s!"{ind}Hax.whileFold {initStr} (fun _ => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
     else
-      s!"{ind}Hax.whileFold () (fun _ => {toLean c 0}) fun _acc =>\n{atLine body (lvl + 1)}"
+      -- Even with empty accs, wrap if-then-else branches that need ControlFlow
+      let body' := transformWhileFoldBody [] body
+      s!"{ind}Hax.whileFold () (fun _ => {toLean c 0}) fun _acc =>\n{atLine body' (lvl + 1)}"
   | .forFoldReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
