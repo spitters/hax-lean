@@ -1399,11 +1399,11 @@ Used together with the surface code to generate agreement proofs. -/
 
 /-- Emit an ImpLit as Lean constructor syntax. -/
 private def litToConstructor : ImpLit → String
-  | .bool b => s!".bool {b}"
-  | .int n => s!".int {n}"
-  | .unit => ".unit"
-  | .uintLit w n => s!".uintLit .{w.toSuffix} {n}"
-  | .sintLit w n => s!".sintLit .{w.toSuffix} {n}"
+  | .bool b => s!"ImpLit.bool {b}"
+  | .int n => s!"ImpLit.int {n}"
+  | .unit => "ImpLit.unit"
+  | .uintLit w n => s!"ImpLit.uintLit .{w.toSuffix} {n}"
+  | .sintLit w n => s!"ImpLit.sintLit .{w.toSuffix} {n}"
 
 /-- Emit an ImpPat as Lean constructor syntax. -/
 private partial def patToConstructor : ImpPat → String
