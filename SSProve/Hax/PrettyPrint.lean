@@ -1888,7 +1888,8 @@ private partial def inferExprType (paramTypeMap : List (String × ImpType))
     (structMeta : List (String × List (String × String × ImpType)) := [])
     (fnBody : Option ImpExpr := none)
     (defsMap : List (String × ImpExpr) := [])
-    (depth : Nat := 0) : ImpExpr → Option ImpType
+    (depth : Nat := 0)
+    (callRetTypes : List (String × ImpType) := []) : ImpExpr → Option ImpType
   | .var v =>
     if depth > 5 then none  -- prevent infinite recursion
     else
@@ -1902,53 +1903,58 @@ private partial def inferExprType (paramTypeMap : List (String × ImpType))
         | none => none
       match fromLocal with
       | some bindExpr =>
-        inferExprType paramTypeMap structMeta fnBody defsMap (depth + 1) bindExpr
+        inferExprType paramTypeMap structMeta fnBody defsMap (depth + 1) callRetTypes bindExpr
       | none =>
         -- Try cross-def resolution (0-arity mutual defs like ZERO_TOKEN)
         match defsMap.find? (·.1 == v) with
         | some (_, defExpr) =>
-          inferExprType paramTypeMap structMeta none defsMap (depth + 1) defExpr
+          inferExprType paramTypeMap structMeta none defsMap (depth + 1) callRetTypes defExpr
         | none => none
   | .lit (.int _) => some .int
   | .lit (.uintLit _ _) => some .int
   | .lit (.bool _) => some .bool
   | .tuple elems =>
-    let elemTypes := elems.filterMap (inferExprType paramTypeMap structMeta fnBody defsMap (depth + 1))
+    let elemTypes := elems.filterMap (inferExprType paramTypeMap structMeta fnBody defsMap (depth + 1) callRetTypes)
     if elemTypes.length == elems.length then some (.tuple elemTypes) else none
   | .app "index" [arr, .app "RangeTo" _] | .app "index" [arr, .app "RangeFrom" _]
   | .app "index" [arr, .app "Range" _]
   | .app "index_mut" [arr, .app "RangeTo" _] | .app "index_mut" [arr, .app "RangeFrom" _]
   | .app "index_mut" [arr, .app "Range" _] =>
     -- Slice operation: returns the same array type (not element type)
-    inferExprType paramTypeMap structMeta fnBody defsMap depth arr
+    inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr
   | .app "index" [arr, _] | .app "index_" [arr, _] =>
-    match inferExprType paramTypeMap structMeta fnBody defsMap depth arr with
+    match inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr with
     | some (.array inner _) => some inner
     | some (.slice inner) => some inner
     | _ => none
   | .app "repeat_" [val, _] | .app "repeat" [val, _] | .app "from_elem" [val, _] =>
-    match inferExprType paramTypeMap structMeta fnBody defsMap depth val with
+    match inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes val with
     | some t => some (.array t 0)
     | _ => none
   | .app "with_capacity" _ => some (.array .unknown 0)
   | .app "array_update" [arr, _, _] =>
-    inferExprType paramTypeMap structMeta fnBody defsMap depth arr
+    inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr
   | .app "push" [arr, _] =>
-    inferExprType paramTypeMap structMeta fnBody defsMap depth arr
+    inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr
   | .app sname _ =>
     if structMeta.any (·.1 == sname) then some (.adt sname [])
-    else if depth < 3 then
-      -- Try resolving through defsMap: if called function's body is Int-valued
-      match defsMap.find? (·.1 == sname) with
-      | some (_, defBody) =>
-        -- Strip params and check if body is Int-valued (through let-chains/branches)
-        let rec stripParams : ImpExpr → ImpExpr
-          | .letBind _ (.var _) b => stripParams b
-          | e => e
-        let stripped := stripParams defBody
-        if isIntExprBase stripped || isTerminalInt [] stripped then some .int else none
-      | none => none
-    else none
+    else
+      -- Try call return types from hax JSON (dep return types)
+      match callRetTypes.find? (·.1 == sname) with
+      | some (_, retTy) => if retTy.isUnknown then none else some retTy
+      | none =>
+        if depth < 3 then
+          -- Try resolving through defsMap: if called function's body is Int-valued
+          match defsMap.find? (·.1 == sname) with
+          | some (_, defBody) =>
+            -- Strip params and check if body is Int-valued (through let-chains/branches)
+            let rec stripParams : ImpExpr → ImpExpr
+              | .letBind _ (.var _) b => stripParams b
+              | e => e
+            let stripped := stripParams defBody
+            if isIntExprBase stripped || isTerminalInt [] stripped then some .int else none
+          | none => none
+        else none
   | _ => none
 
 /-- Detect typed argument types for a dep by cross-referencing with fnTypes.
@@ -1961,44 +1967,45 @@ private partial def detectTypedArgs (fname : String) (arity : Nat)
     (structMeta : List (String × List (String × String × ImpType)) := [])
     (fnBody : Option ImpExpr := none)
     (defsMap : List (String × ImpExpr) := [])
+    (callRetTypes : List (String × ImpType) := [])
     : ImpExpr → List (List (Option ImpType))
   | .app f args =>
-    let sub := args.foldl (fun acc a => acc ++ detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap a) []
+    let sub := args.foldl (fun acc a => acc ++ detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes a) []
     if f == fname && args.length == arity then
-      let argTypes := args.map fun a => inferExprType paramTypeMap structMeta fnBody defsMap 0 a
+      let argTypes := args.map fun a => inferExprType paramTypeMap structMeta fnBody defsMap 0 callRetTypes a
       [argTypes] ++ sub
     else sub
   | .letBind _ v body =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap v ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap body
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes v ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .seq a b =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap a ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap b
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes a ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes b
   | .ifThenElse c t e =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap c ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap t ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap e
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes c ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes t ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes e
   | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap lo ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap hi ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap body
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes lo ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes hi ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .whileFold c body =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap c ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap body
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes c ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap lo ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap hi ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap body
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes lo ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes hi ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .whileFoldReturn c body =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap c ++
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap body
-  | .tuple es => es.foldl (fun acc e => acc ++ detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap e) []
-  | .proj e _ => detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap e
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes c ++
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes body
+  | .tuple es => es.foldl (fun acc e => acc ++ detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes e) []
+  | .proj e _ => detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes e
   | .match_ scrut arms =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap scrut ++
-    arms.foldl (fun acc (_, b) => acc ++ detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap b) []
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes b) []
   | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
-    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap e
+    detectTypedArgs fname arity paramTypeMap structMeta fnBody defsMap callRetTypes e
   | _ => []
 
 /-- Detect if a function's return value is ever passed to a non-builtin function
@@ -2116,9 +2123,10 @@ private partial def detectReturnIsInt (fname : String)
     (structMeta : List (String × List (String × String × ImpType)) := [])
     (fnBody : Option ImpExpr := none)
     (defsMap : List (String × ImpExpr) := [])
+    (callRetTypes : List (String × ImpType) := [])
     : ImpExpr → Bool
   | .app f args =>
-    let inArgs := args.any (detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap)
+    let inArgs := args.any (detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes)
     -- Check if fname's result is used directly as an Int-typed arg
     let directUse := match f with
       -- array_update arr idx val — val is Int only if arr has Int element type (flat)
@@ -2129,7 +2137,7 @@ private partial def detectReturnIsInt (fname : String)
           let isValFromFname := match valExpr with | .app g _ => g == fname | _ => false
           if isValFromFname then
             -- Check if the array has a known nested type
-            let arrType := inferExprType paramTypeMap structMeta fnBody defsMap 0 arrExpr
+            let arrType := inferExprType paramTypeMap structMeta fnBody defsMap 0 callRetTypes arrExpr
             let _ := arrType  -- resolved via inferExprType with fnBody/defsMap
             match arrType with
             | some (.array inner _) | some (.slice inner) =>
@@ -2154,36 +2162,36 @@ private partial def detectReturnIsInt (fname : String)
       | _ => false
     inArgs || directUse
   | .letBind _ v body =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap v ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap body
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes v ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .seq a b =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap a ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap b
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes a ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes b
   | .ifThenElse c t e =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap c ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap t ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap e
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes c ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes t ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes e
   | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap lo ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap hi ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap body
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes lo ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes hi ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .whileFold c body =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap c ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap body
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes c ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap lo ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap hi ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap body
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes lo ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes hi ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes body
   | .whileFoldReturn c body =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap c ||
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap body
-  | .tuple es => es.any (detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap)
-  | .proj e _ => detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap e
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes c ||
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes body
+  | .tuple es => es.any (detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes)
+  | .proj e _ => detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes e
   | .match_ scrut arms =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap scrut ||
-    arms.any fun (_, b) => detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap b
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes scrut ||
+    arms.any fun (_, b) => detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes b
   | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
-    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap e
+    detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes e
   | _ => false
 
 /-- Detect if a function's return value is used as a Bool (if-condition or Bool operator arg).
@@ -2695,7 +2703,7 @@ def generatePreamble (defs : List (String × ImpExpr))
               let retArity := allExprs.foldl (fun acc e => max acc (detectReturnArity d e)) 0
               -- Check usage as Int with current known set
               let retIsIntDirect := retArity < 2 &&
-                allExprs.any (detectReturnIsInt d allParamTypes structMeta (some (ImpExpr.lit (.int 0))) defs.toArray.toList) &&
+                allExprs.any (detectReturnIsInt d allParamTypes structMeta (some (ImpExpr.lit (.int 0))) defs.toArray.toList callRetTypes) &&
                 !allExprs.any (detectReturnUsedAsDep d depNamesList) &&
                 !allExprs.any (detectReturnUsedAsStructArg d structNames)
               -- Also check: if ALL args are known Int or other known-Int deps/constants
@@ -2791,7 +2799,7 @@ def generatePreamble (defs : List (String × ImpExpr))
             let paramMap := match fnTypes.find? (·.1 == fnName) with
               | some (_, ti) => ti.paramTypes
               | none => []
-            acc ++ detectTypedArgs d arity paramMap structMeta (some e) defs e) ([] : List (List (Option ImpType)))
+            acc ++ detectTypedArgs d arity paramMap structMeta (some e) defs callRetTypes e) ([] : List (List (Option ImpType)))
           -- For each position, find typed arg info (first known type wins)
           -- Skip Bool (ImpExpr uses Int for booleans) and Tuple (may be pass-through struct)
           let typedArgTypes := (List.range arity).map fun i =>

@@ -1291,12 +1291,38 @@ partial def parseHaxItemWithTypes (j : Json) :
   else return none
 
 /-- Parse a full hax export with per-function type information.
-    Returns both the combined ImpExpr and a list of (name, FnTypeInfo). -/
+    Returns both the combined ImpExpr and a list of (name, FnTypeInfo).
+    Recurses into Mod items to find nested functions/constants. -/
 partial def parseHaxFileWithTypes (j : Json) :
     Except String (ImpExpr × List (String × FnTypeInfo)) := do
+  let rec parseItemsWithTypes (items : List Json) :
+      Except String (List (String × ImpExpr × FnTypeInfo)) := do
+    let mut result : List (String × ImpExpr × FnTypeInfo) := []
+    for item in items do
+      -- Try parsing as Fn/Const
+      match ← parseHaxItemWithTypes item with
+      | some r => result := result ++ [r]
+      | none =>
+        -- Recurse into Mod items: kind.Mod = [name_data, [sub_items]]
+        let kind := (item.getObjVal? "kind").toOption
+        match kind with
+        | some kindJ =>
+          match kindJ.getObjVal? "Mod" with
+          | .ok (.arr modData) =>
+            match modData.toList[1]? with
+            | some subJ =>
+              match subJ with
+              | .arr subItems =>
+                let sub ← parseItemsWithTypes subItems.toList
+                result := result ++ sub
+              | _ => pure ()
+            | _ => pure ()
+          | _ => pure ()
+        | none => pure ()
+    return result
   match j with
   | .arr items =>
-    let parsed ← items.toList.filterMapM parseHaxItemWithTypes
+    let parsed ← parseItemsWithTypes items.toList
     match parsed with
     | [] => throw "no functions or constants found in hax export"
     | _ =>
