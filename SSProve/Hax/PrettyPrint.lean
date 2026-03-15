@@ -1466,7 +1466,7 @@ Used together with the surface code to generate agreement proofs. -/
 /-- Emit an ImpLit as Lean constructor syntax. -/
 private def litToConstructor : ImpLit → String
   | .bool b => s!"ImpLit.bool {b}"
-  | .int n => s!"ImpLit.int {n}"
+  | .int n => if n < 0 then s!"ImpLit.int ({n})" else s!"ImpLit.int {n}"
   | .unit => "ImpLit.unit"
   | .uintLit w n => s!"ImpLit.uintLit .{w.toSuffix} {n}"
   | .sintLit w n => s!"ImpLit.sintLit .{w.toSuffix} {n}"
