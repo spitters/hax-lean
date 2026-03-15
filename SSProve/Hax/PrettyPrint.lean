@@ -1129,6 +1129,72 @@ where
     else
       seqFold lvl foldExpr body tail
 
+/-- Collect all projection names applied to a given variable (simple version for param inference).
+    Looks for `.app ".field" [.var varName]` and `.app "Struct.field" [.var varName]` patterns. -/
+private partial def collectProjectionsOnVar' (varName : String) : ImpExpr → List String
+  | .app f [.var v] =>
+    if v == varName && (f.startsWith "." || f.contains '.') then
+      -- Extract the field name from ".field" or "Struct.field"
+      let fname := if f.startsWith "." then f.drop 1
+        else match f.splitOn "." with | [_, n] => n | _ => ""
+      if fname.isEmpty then [] else [fname]
+    else []
+  | .app _ args => args.foldl (fun acc a => acc ++ collectProjectionsOnVar' varName a) []
+  | .letBind _ v body =>
+    collectProjectionsOnVar' varName v ++ collectProjectionsOnVar' varName body
+  | .seq a b => collectProjectionsOnVar' varName a ++ collectProjectionsOnVar' varName b
+  | .ifThenElse c t e =>
+    collectProjectionsOnVar' varName c ++ collectProjectionsOnVar' varName t ++
+    collectProjectionsOnVar' varName e
+  | .tuple es => es.foldl (fun acc e => acc ++ collectProjectionsOnVar' varName e) []
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    collectProjectionsOnVar' varName lo ++ collectProjectionsOnVar' varName hi ++
+    collectProjectionsOnVar' varName body
+  | .whileFold c body =>
+    collectProjectionsOnVar' varName c ++ collectProjectionsOnVar' varName body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    collectProjectionsOnVar' varName lo ++ collectProjectionsOnVar' varName hi ++
+    collectProjectionsOnVar' varName body
+  | .whileFoldReturn c body =>
+    collectProjectionsOnVar' varName c ++ collectProjectionsOnVar' varName body
+  | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
+    collectProjectionsOnVar' varName e
+  | .match_ scrut arms =>
+    collectProjectionsOnVar' varName scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ collectProjectionsOnVar' varName b) []
+  | _ => []
+
+/-- Infer struct type for a parameter from projection usage.
+    Returns `some structTupleTypeStr` if the param is used with projections of a known struct.
+    `structMeta`: list of (struct_name, [(field_name, type_tag, ImpType)])
+    `structLookup`: resolves struct name to tuple type string -/
+private def inferParamStructType
+    (structMeta : List (String × List (String × String × ImpType)))
+    (structLookup : String → Option String)
+    (paramName : String) (body : ImpExpr) : Option String :=
+  if structMeta.isEmpty then none
+  else
+    let projs := (collectProjectionsOnVar' paramName body).eraseDups
+    if projs.isEmpty then none
+    else
+      let candidates := structMeta.filter fun (_, fields) =>
+        projs.any fun proj => fields.any (·.1 == proj)
+      match candidates with
+      | [] => none
+      | [(sname, _)] => structLookup sname
+      | _ =>
+        let scored := candidates.map fun (sname, fields) =>
+          let matchCount := (projs.filter fun proj => fields.any (·.1 == proj)).length
+          (sname, matchCount, fields.length)
+        let best := scored.foldl (fun acc (sname, mc, fl) =>
+          match acc with
+          | none => some (sname, mc, fl)
+          | some (_, bestMc, bestFl) =>
+            if mc > bestMc then some (sname, mc, fl)
+            else if mc == bestMc && fl < bestFl then some (sname, mc, fl)
+            else acc) none
+        best.bind fun (sname, _, _) => structLookup sname
+
 /-- Extract leading identity let-bindings (let x := x) as function parameters.
     These are emitted by HaxAdapter for Rust function parameters. -/
 private def extractParams : ImpExpr → List String × ImpExpr
@@ -1177,38 +1243,66 @@ private partial def collectArrayParams (params : List String) : ImpExpr → List
 /-- Wrap the output in a Lean 4 definition with parameters.
     In certified (untyped) mode, annotates parameters to help type inference:
     parameters used with index/array_update get `Array Int`, others get no annotation.
-    When `fnTypeInfo` is provided, uses real types from hax JSON instead of heuristics. -/
+    When `fnTypeInfo` is provided, uses real types from hax JSON instead of heuristics.
+    `structMeta` enables struct type inference from projection usage on params. -/
 def toLeanDef (name : String) (e : ImpExpr) (annotateTypes : Bool := false)
     (fnTypeInfo : Option HaxAdapter.FnTypeInfo := none)
-    (structLookup : String → Option String := fun _ => none) : String :=
+    (structLookup : String → Option String := fun _ => none)
+    (structMeta : List (String × List (String × String × ImpType)) := []) : String :=
   let (params, body) := extractParams e
   let arrayParams := if annotateTypes && fnTypeInfo.isNone then
       (collectArrayParams params body).eraseDups
     else []
+  let inferStructTypeForParam (p : String) : Option String :=
+    inferParamStructType structMeta structLookup p body
   let paramStr := if params.isEmpty then ""
     else " " ++ " ".intercalate (params.map fun p =>
       let sn := sanitizeName p
       -- Use real type from fnTypeInfo when available.
       -- Skip Bool (ImpExpr world uses Int for booleans via Hax.bne x 0).
-      -- Skip Tuple (may be pass-through struct resolved to tuple by hax JSON).
       -- Annotate Int, Array, Slice, Adt (via structLookup) to prevent
       -- wrong inference (e.g., u16 param inferred as Array Int).
       match fnTypeInfo >>= fun ti => ti.paramTypes.find? (·.1 == p) with
-      | some (_, .unknown) | some (_, .bool) | some (_, .tuple _) =>
-        if annotateTypes && arrayParams.contains p then s!"({sn} : Array Int)"
-        else sn
+      | some (_, .unknown) | some (_, .bool) =>
+        -- Check struct projection usage for unknown/Bool params
+        match inferStructTypeForParam p with
+        | some st => s!"({sn} : {st})"
+        | none =>
+          if annotateTypes && arrayParams.contains p then s!"({sn} : Array Int)"
+          else sn
+      | some (_, .tuple _) =>
+        -- Tuple type from hax: use it directly via toLeanTypeStr
+        match fnTypeInfo >>= fun ti => ti.paramTypes.find? (·.1 == p) with
+        | some (_, ty) =>
+          let tyStr := ty.toLeanTypeStr structLookup
+          if (tyStr.splitOn " × ").length > 1 then s!"({sn} : {tyStr})"
+          else sn
+        | none => sn
       | some (_, ty) =>
         -- In untyped (certified) mode, collapse integer types to Int
         -- to avoid conflicts with untyped runtime ops (Hax.add, etc.)
         let tyStr := ty.toLeanTypeStr structLookup
         if ty.isIntLike then s!"({sn} : Int)"
-        else if tyStr == "Int" || tyStr == "Array Int" then s!"({sn} : {tyStr})"
+        else if tyStr == "Int" then
+          -- Type resolved to Int but might be a struct — check projection usage
+          match inferStructTypeForParam p with
+          | some st => s!"({sn} : {st})"
+          | none => s!"({sn} : Int)"
+        else if tyStr == "Array Int" then
+          -- Pass-through struct or actual Array Int — check projection usage
+          match inferStructTypeForParam p with
+          | some st => s!"({sn} : {st})"
+          | none => s!"({sn} : Array Int)"
         else if tyStr.startsWith "Array" && !(tyStr.splitOn " × ").length > 1 then s!"({sn} : {tyStr})"
         else if (tyStr.splitOn " × ").length > 1 then s!"({sn} : {tyStr})"  -- struct tuple type
         else sn  -- unknown/complex types: no annotation
       | none =>
-        if annotateTypes && arrayParams.contains p then s!"({sn} : Array Int)"
-        else sn)
+        -- No type info from hax — check struct projection usage
+        match inferStructTypeForParam p with
+        | some st => s!"({sn} : {st})"
+        | none =>
+          if annotateTypes && arrayParams.contains p then s!"({sn} : Array Int)"
+          else sn)
   -- Don't annotate return types — they block param type inference
   -- when not all params are annotated. The param annotations for nested
   -- arrays are sufficient; Lean infers return types from the body.
@@ -3419,7 +3513,7 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
   let header := s!"/-\n  Auto-generated by haxpipe --emit-certified (verified hax pipeline)\n  Surface code + ImpExpr literals for agreement proofs.\n-/\nimport SSProve.Hax.Runtime\nimport SSProve.Hax.AST\nimport SSProve.Hax.Semantics\n\nset_option linter.unusedVariables false\n\nnamespace {moduleName}\n\nopen SSProve.Hax\n{preamble}\nmutual\n\n"
   let body := "\n".intercalate (defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
-    let surfaceDef := toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup)
+    let surfaceDef := toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta)
     -- If any function needs partial, mark all as partial (mutual block requirement)
     let surfaceDef := if needsPartial then surfaceDef.replace "def " "partial def " else surfaceDef
     s!"{surfaceDef}")
