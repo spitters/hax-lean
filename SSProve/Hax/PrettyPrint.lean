@@ -114,6 +114,8 @@ private def runtimeName (f : String) : String :=
   | "truncate" => "Hax.truncate"
   | "is_empty" => "Hax.is_empty"
   | "deref" => "Hax.deref"
+  | "clone" => "Hax.clone"
+  | "to_vec" => "Hax.to_vec"
   | "_assign" => "Hax.assign"
   | "count_ones" => "Hax.count_ones"
   | "assert_failed" => "Hax.assert_failed"
@@ -1278,13 +1280,11 @@ private def inferParamStructType
     These are emitted by HaxAdapter for Rust function parameters. -/
 private def extractParams : ImpExpr → List String × ImpExpr
   | .letBind n (.var v) body =>
-    if n == v && !n.startsWith "_" then
+    if n == v then
+      -- Include all parameters, including _-prefixed unused ones.
+      -- Skipping _-prefixed params causes arity mismatches at call sites.
       let (ps, rest) := extractParams body
       (n :: ps, rest)
-    else if n == v && n.startsWith "_" then
-      -- Unused parameter: skip it entirely from the def signature
-      let (ps, rest) := extractParams body
-      (ps, rest)
     else ([], .letBind n (.var v) body)
   | e => ([], e)
 
@@ -1560,7 +1560,7 @@ private def isRuntimeName (f : String) : Bool :=
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
   | "array_update" | "cast" | "castVal"
   | "Some" | "None" | "Ok" | "Err"
-  | "panic" | "literal" | "deref" | "copy_from_slice"
+  | "panic" | "literal" | "deref" | "clone" | "to_vec" | "copy_from_slice"
   | "extend_from_slice" | "truncate" | "sha256"
   | "with_capacity" | "into_vec" | "into_iter" | "next"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range" | "min" | "max"
@@ -1578,7 +1578,7 @@ private def isAlwaysBuiltin (f : String) : Bool :=
   | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "flat_map" | "next" | "new"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range"
   | "count_ones" | "assert_failed" | "index_mut" | "enumerate" | "is_empty"
-  | "from" | "literal" | "deref" | "cast" | "castVal"
+  | "from" | "literal" | "deref" | "clone" | "to_vec" | "cast" | "castVal"
   | "rotate_right" | "rotate_left"
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
   | "panic" | "sha256" | "Some" | "None" | "Ok" | "Err"
@@ -2609,7 +2609,7 @@ where
     EXCEPTION: A struct is NEVER pass-through if its field projections are used
     in the code, because pass-through collapses the struct to `Array Int` and
     projections then have the wrong type. -/
-private def computeStructPassthrough (structMeta : StructMeta)
+def computeStructPassthrough (structMeta : StructMeta)
     (defs : List (String × ImpExpr)) : List (String × Bool) :=
   let allCalls := defs.foldl (fun acc (_, e) => acc ++ collectAppCalls e) []
   let allAppNames := allCalls.map (·.1) |>.eraseDups
@@ -2656,7 +2656,7 @@ private def computeStructPassthrough (structMeta : StructMeta)
 
 /-- Build a struct lookup that maps pass-through structs to "Array Int"
     and resolves other structs to their tuple types. -/
-private def mkStructLookup (structMeta : StructMeta)
+def mkStructLookup (structMeta : StructMeta)
     (passthrough : List (String × Bool)) : String → Option String :=
   fun name =>
     if passthrough.any fun (n, pt) => n == name && pt then some "Array Int"

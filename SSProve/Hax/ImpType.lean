@@ -149,7 +149,15 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
           s!"Except ({err.toLeanTypeStr structLookup}) ({ok.toLeanTypeStr structLookup})"
         | ok :: _ => s!"Except Int ({ok.toLeanTypeStr structLookup})"
         | _ => "Except Int Int"
-      else "Int"  -- unknown ADT
+      else
+        -- Try matching the last segment of the Rust path against structLookup
+        -- e.g., "softspoken_hax::types::WordVec" → try "WordVec"
+        let shortName := match name.splitOn "::" with
+          | [] => name
+          | segs => segs.getLast!
+        match structLookup shortName with
+        | some s => s
+        | none => "Int"
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
   | .ref inner _ => inner.toLeanTypeStr structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStr structLookup})"
