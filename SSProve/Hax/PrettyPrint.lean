@@ -101,6 +101,10 @@ private def runtimeName (f : String) : String :=
   | "Range" => "Hax.Range"
   | "from" => "Hax.from_val"
   | "into_iter" => "Hax.into_iter"
+  -- iter/map/collect are handled by special app cases, fallback to Hax.* for n-ary calls
+  | "iter" => "Hax.iter"
+  | "map" => "Hax.map_arr"
+  | "collect" => "Hax.collect"
   | "into_vec" => "Hax.into_vec"
   | "next" => "Hax.next"
   | "enumerate" => "Hax.enumerate"
@@ -749,6 +753,18 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
       s!"{ind}let {sanitizeName n} := {valStr}\n{atLine body lvl}"
 
   -- Function application
+  -- Iterator map: map(iter_expr, func_expr) → (iter_expr).map (fun v => func_expr)
+  -- The func_expr typically contains a free variable (the iterator element).
+  | .app "map" [iterExpr, funcExpr] =>
+    -- Detect the free variable: typically .app ".field" [.var name] or .app "Struct.field" [.var name]
+    let param := match funcExpr with
+      | .app _ [.var v] => v
+      | _ => "_el"
+    s!"({toLean iterExpr 0}).map (fun {sanitizeName param} => {toLean funcExpr 0})"
+  -- Iterator collect: collect(arr) → arr (identity in untyped mode)
+  | .app "collect" [arrExpr] => toLean arrExpr lvl
+  -- Iterator iter: iter(arr) → arr (identity in untyped mode)
+  | .app "iter" [arrExpr] => toLean arrExpr lvl
   | .app "array_lit" args =>
     -- Emit as Lean array literal: #[a, b, c]
     let argStrs := args.map fun a => toLean a 0
@@ -1552,7 +1568,7 @@ private def isAlwaysBuiltin (f : String) : Bool :=
   match f with
   | "index" | "array_update" | "repeat" | "array_lit" | "push" | "len"
   | "copy_from_slice" | "extend_from_slice" | "truncate"
-  | "with_capacity" | "into_vec" | "into_iter" | "next" | "new"
+  | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "next" | "new"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range"
   | "count_ones" | "assert_failed" | "index_mut" | "enumerate" | "is_empty"
   | "from" | "literal" | "deref" | "cast" | "castVal"
