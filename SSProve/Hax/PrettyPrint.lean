@@ -379,14 +379,22 @@ private partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
     where the first binding is a fresh init that should be the fold's initial value. -/
 private partial def extractAccInit (accName : String) : ImpExpr → Option ImpExpr
   | .seq (.seq a b) c => extractAccInit accName (.seq a (.seq b c))
-  -- seq (letBind accName init (var accName)) rest — mutation, not init
+  -- seq (letBind accName init (var accName)) rest
+  -- This is a mutation pattern (let n := val; n), BUT if val does NOT reference
+  -- accName, then it's a fresh init (e.g., `let w := ZERO_WORD; w`).
   | .seq (.letBind n val (.var v)) rest =>
-    if n == accName && n == v then none  -- mutation pattern
+    if n == accName && n == v then
+      -- Check if the RHS is a fresh init (doesn't reference accName)
+      if exprContainsVar accName val then none  -- true mutation (self-referencing)
+      else some val  -- fresh init disguised as mutation
     else if n == accName then
-      -- Fresh binding of accName — check if val references accName
       if exprContainsVar accName val then none
       else some val
     else extractAccInit accName rest
+  -- seq (letBind n val body) rest — local binding, recurse into rest
+  | .seq (.letBind _ _ _) rest => extractAccInit accName rest
+  -- seq (non-letBind) rest — skip and recurse
+  | .seq _ rest => extractAccInit accName rest
   -- Direct letBind accName init body — check if it's fresh (not self-referencing)
   | .letBind n val body =>
     if n == accName then
