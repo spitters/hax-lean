@@ -101,10 +101,11 @@ private def runtimeName (f : String) : String :=
   | "Range" => "Hax.Range"
   | "from" => "Hax.from_val"
   | "into_iter" => "Hax.into_iter"
-  -- iter/map/collect are handled by special app cases, fallback to Hax.* for n-ary calls
+  -- iter/map/collect/flat_map are handled by special app cases, fallback to Hax.* for n-ary calls
   | "iter" => "Hax.iter"
   | "map" => "Hax.map_arr"
   | "collect" => "Hax.collect"
+  | "flat_map" => "Hax.flat_map"
   | "into_vec" => "Hax.into_vec"
   | "next" => "Hax.next"
   | "enumerate" => "Hax.enumerate"
@@ -761,6 +762,12 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
       | .app _ [.var v] => v
       | _ => "_el"
     s!"({toLean iterExpr 0}).map (fun {sanitizeName param} => {toLean funcExpr 0})"
+  -- Iterator flat_map: flat_map(iter_expr, func_expr) → (iter_expr).flatMap (fun v => func_expr)
+  | .app "flat_map" [iterExpr, funcExpr] =>
+    let param := match funcExpr with
+      | .app _ [.var v] => v
+      | _ => "_el"
+    s!"Hax.concatMap ({toLean iterExpr 0}) (fun {sanitizeName param} => {toLean funcExpr 0})"
   -- Iterator collect: collect(arr) → arr (identity in untyped mode)
   | .app "collect" [arrExpr] => toLean arrExpr lvl
   -- Iterator iter: iter(arr) → arr (identity in untyped mode)
@@ -1568,7 +1575,7 @@ private def isAlwaysBuiltin (f : String) : Bool :=
   match f with
   | "index" | "array_update" | "repeat" | "array_lit" | "push" | "len"
   | "copy_from_slice" | "extend_from_slice" | "truncate"
-  | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "next" | "new"
+  | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "flat_map" | "next" | "new"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range"
   | "count_ones" | "assert_failed" | "index_mut" | "enumerate" | "is_empty"
   | "from" | "literal" | "deref" | "cast" | "castVal"
