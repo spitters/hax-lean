@@ -458,9 +458,13 @@ private def accTuple (accs : List String) : ImpExpr :=
     Replaces `cfBreak unitVal` and bare `unitVal` with `cfBreak (accs)` so the break value
     carries the current accumulator state. -/
 private partial def transformWhileBreak (accs : List String) : ImpExpr → ImpExpr
-  | .cfBreak _ => .cfBreak (accTuple accs)
+  | .cfBreak .unitVal => .cfBreak (accTuple accs)
+  | .cfBreak v => .cfBreak v  -- preserve function-level early returns with actual values
+  | .cfBreakContinue _ => .cfBreakContinue (accTuple accs)
   | .unitVal => .cfBreak (accTuple accs)
-  | .seq (.cfBreak _) _ => .cfBreak (accTuple accs)  -- collapse redundant seq after cfBreak
+  | .seq (.cfBreak .unitVal) _ => .cfBreak (accTuple accs)
+  | .seq (.cfBreak v) _ => .cfBreak v  -- preserve function-level early returns
+  | .seq (.cfBreakContinue _) _ => .cfBreakContinue (accTuple accs)  -- preserve loop-break semantics
   | .seq .unitVal rest => transformWhileBreak accs rest
   | .seq e1 e2 => .seq (transformWhileBreak accs e1) (transformWhileBreak accs e2)
   | .letBind n v body => .letBind n v (transformWhileBreak accs body)
@@ -546,6 +550,15 @@ private partial def hasCfBreak : ImpExpr → Bool
   | .ifThenElse _ t e => hasCfBreak t || hasCfBreak e
   | .match_ _ arms => arms.any fun (_, b) => hasCfBreak b
   | _ => false
+
+/-- Collect all cfBreak values from an expression (for detecting return type). -/
+private partial def extractAllCfBreakVals : ImpExpr → List ImpExpr
+  | .cfBreak v => [v]
+  | .letBind _ v b => extractAllCfBreakVals v ++ extractAllCfBreakVals b
+  | .seq a b => extractAllCfBreakVals a ++ extractAllCfBreakVals b
+  | .ifThenElse _ t e => extractAllCfBreakVals t ++ extractAllCfBreakVals e
+  | .match_ _ arms => arms.foldl (fun acc (_, b) => acc ++ extractAllCfBreakVals b) []
+  | _ => []
 
 /-- Extract the cfBreak return value from an expression, looking through seq/unitVal wrappers.
     Returns the break value if the expression is essentially a cfBreak (early return),
@@ -684,6 +697,33 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   -- letBind "_tup" rhs (letBind "a" (proj (var "_tup") 0) (letBind "b" (proj (var "_tup") 1) body))
   -- → let (a, b) := rhs
   | .letBind n val body =>
+    -- Mutation-discard pattern: let _assign := val; _assign → let _ := val; ()
+    -- Prevents non-Unit _assign values from leaking as the block return value.
+    if n.startsWith "_assign" && body == .var n then
+      s!"{ind}let _ := {toLean val 0}\n{ind}()"
+    else
+    -- Match-with-cfBreak pattern: let x := (match s with | p1 => v1 | p2 => cfBreak v2); body
+    -- → if-else chain (for Option/Result patterns in untyped mode) or inlined match
+    -- Inlines the continuation into non-cfBreak arms to avoid type mismatch.
+    let matchCfBreak := match val with
+      | .match_ scrut arms =>
+        if arms.any fun (_, b) => hasCfBreak b then some (scrut, arms) else none
+      | _ => none
+    match matchCfBreak with
+    | some (scrut, arms) =>
+      -- Inline continuation into non-cfBreak arms, unwrap cfBreak in cfBreak arms
+      let armLvl := max lvl 1
+        let armInd := indent armLvl
+        let armStrs := arms.map fun (p, armBody) =>
+          if hasCfBreak armBody then
+            let unwrapped := match extractCfBreak armBody with
+              | some v => v | none => armBody
+            s!"{armInd}| {patToLean p} => {toLean unwrapped (armLvl + 1)}"
+          else
+            let inlined := ImpExpr.letBind n armBody body
+            s!"{armInd}| {patToLean p} =>\n{atLine inlined (armLvl + 1)}"
+        s!"{ind}match {toLean scrut 0} with\n{"\n".intercalate armStrs}"
+    | none =>
     match extractTupleDestr n body with
     | some (names, rest) =>
       -- If only one field is non-wildcard, use projection instead of tuple pattern
@@ -1133,10 +1173,13 @@ where
       else
         let accStr := ", ".intercalate (accs.map sanitizeName)
         let destr := if accs.length == 1 then sanitizeName accs.head! else s!"({accStr})"
-        -- If the tail is a Bool literal but Break returns Int, wrap in boolToInt
+        -- If the tail is a Bool literal but Break returns Int, wrap in boolToInt.
+        -- But if cfBreak values are Bool (function returns Bool), don't convert.
+        let breakIsBool := extractAllCfBreakVals body |>.any fun v => match v with
+          | .lit (.bool _) => true | _ => false
         let tailRendered := match tail with
-          | .lit (.bool true) => s!"{ind1}Hax.boolToInt true"
-          | .lit (.bool false) => s!"{ind1}Hax.boolToInt false"
+          | .lit (.bool true) => if breakIsBool then s!"{ind1}true" else s!"{ind1}Hax.boolToInt true"
+          | .lit (.bool false) => if breakIsBool then s!"{ind1}false" else s!"{ind1}Hax.boolToInt false"
           | _ => atLine tail (lvl + 1)
         s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
     else
@@ -2268,6 +2311,55 @@ where
     | .cfBreak e | .cfContinue e | .cfBreakContinue e => varUsedAsBool vn e
     | _ => false
 
+/-- Detect if a dep's return value is used as a scrutinee of an Option/Result match
+    (i.e., matched against somePat/nonePat/okPat/errPat). If so, it cannot be Int. -/
+private partial def detectReturnIsOptionMatch (fname : String) : ImpExpr → Bool
+  | .match_ scrut arms =>
+    let scrutUsesF := match scrut with
+      | .app f _ => f == fname
+      | .var _ => false
+      | _ => false
+    let hasOptPats := arms.any fun (p, _) => match p with
+      | .somePat _ | .nonePat | .okPat _ | .errPat _ => true | _ => false
+    -- Also check: a let-bound result of fname is matched in Option context
+    (scrutUsesF && hasOptPats) ||
+    detectReturnIsOptionMatch fname scrut ||
+    arms.any fun (_, b) => detectReturnIsOptionMatch fname b
+  | .letBind vn (.app f _) body =>
+    if f == fname then
+      -- Check if vn is used as Option match scrutinee in the body
+      varUsedAsOptionMatch vn body || detectReturnIsOptionMatch fname body
+    else detectReturnIsOptionMatch fname body
+  | .letBind _ v body =>
+    detectReturnIsOptionMatch fname v || detectReturnIsOptionMatch fname body
+  | .seq a b => detectReturnIsOptionMatch fname a || detectReturnIsOptionMatch fname b
+  | .ifThenElse c t e =>
+    detectReturnIsOptionMatch fname c || detectReturnIsOptionMatch fname t ||
+    detectReturnIsOptionMatch fname e
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    detectReturnIsOptionMatch fname lo || detectReturnIsOptionMatch fname hi ||
+    detectReturnIsOptionMatch fname body
+  | .whileFold c body =>
+    detectReturnIsOptionMatch fname c || detectReturnIsOptionMatch fname body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    detectReturnIsOptionMatch fname lo || detectReturnIsOptionMatch fname hi ||
+    detectReturnIsOptionMatch fname body
+  | .whileFoldReturn c body =>
+    detectReturnIsOptionMatch fname c || detectReturnIsOptionMatch fname body
+  | .cfBreak e | .cfContinue e | .cfBreakContinue e => detectReturnIsOptionMatch fname e
+  | _ => false
+where
+  varUsedAsOptionMatch (vn : String) : ImpExpr → Bool
+    | .match_ (.var v) arms =>
+      let hasOptPats := arms.any fun (p, _) => match p with
+        | .somePat _ | .nonePat | .okPat _ | .errPat _ => true | _ => false
+      (v == vn && hasOptPats) || arms.any fun (_, b) => varUsedAsOptionMatch vn b
+    | .letBind _ v body => varUsedAsOptionMatch vn v || varUsedAsOptionMatch vn body
+    | .seq a b => varUsedAsOptionMatch vn a || varUsedAsOptionMatch vn b
+    | .ifThenElse c t e =>
+      varUsedAsOptionMatch vn c || varUsedAsOptionMatch vn t || varUsedAsOptionMatch vn e
+    | _ => false
+
 /-- Struct metadata: name → list of (field_name, type_tag, impType).
     Type tags: "int" → Int, "array" → Array Int, or a struct name for nested structs.
     impType carries the full parsed Rust type for precision (nested arrays, tuples, etc.). -/
@@ -2720,6 +2812,7 @@ def generatePreamble (defs : List (String × ImpExpr))
               let retArity := allExprs.foldl (fun acc e => max acc (detectReturnArity d e)) 0
               -- Check usage as Int with current known set
               let retIsIntDirect := retArity < 2 &&
+                !allExprs.any (detectReturnIsOptionMatch d) &&
                 allExprs.any (detectReturnIsInt d allParamTypes structMeta (some (ImpExpr.lit (.int 0))) defs.toArray.toList callRetTypes) &&
                 !allExprs.any (detectReturnUsedAsDep d depNamesList) &&
                 !allExprs.any (detectReturnUsedAsStructArg d structNames)
@@ -2745,8 +2838,10 @@ def generatePreamble (defs : List (String × ImpExpr))
         -- Check if return value is used in Int context
         -- BUT: if the result is also passed to another dep (which expects Array Int),
         -- don't mark as Int to avoid type conflicts.
+        -- Deps whose result is used as Option/Result match scrutinee cannot be Int
+        let isOptionMatch := allExprs.any (detectReturnIsOptionMatch d)
         let retIsInt := retArity < 2 &&
-          !collectionOps.contains d &&
+          !collectionOps.contains d && !isOptionMatch &&
           allExprs.any (detectReturnIsInt d allParamTypes structMeta) &&
           !allExprs.any (detectReturnUsedAsDep d depNamesList)
         -- Check if return value is used as a Bool (if-condition)

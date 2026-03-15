@@ -139,6 +139,16 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
         match args with
         | inner :: _ => inner.toLeanTypeStr structLookup
         | _ => "Int"
+      else if name == "Option" || name.endsWith "::Option" then
+        match args with
+        | inner :: _ => s!"Option ({inner.toLeanTypeStr structLookup})"
+        | _ => "Option Int"
+      else if name == "Result" || name.endsWith "::Result" then
+        match args with
+        | ok :: err :: _ =>
+          s!"Except ({err.toLeanTypeStr structLookup}) ({ok.toLeanTypeStr structLookup})"
+        | ok :: _ => s!"Except Int ({ok.toLeanTypeStr structLookup})"
+        | _ => "Except Int Int"
       else "Int"  -- unknown ADT
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
   | .ref inner _ => inner.toLeanTypeStr structLookup
