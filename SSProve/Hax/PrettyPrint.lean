@@ -416,12 +416,22 @@ private def accStrings (accs : List String) : String × String :=
 /-- Compute custom init expressions for accumulators that need default initialization.
     Returns a list of (accName, initExpr) pairs for accumulators whose first binding
     in the fold body is a fresh init (not self-referencing).
-    These need `let acc := init` emitted BEFORE the fold. -/
+    These need `let acc := init` emitted BEFORE the fold.
+    Skips init expressions that reference variables only defined inside the fold body
+    (local bindings like destructured results, loop-local temporaries). -/
 private def accInitOverrides (accs : List String) (body : ImpExpr) :
     List (String × ImpExpr) :=
+  -- Collect all locally-bound variable names inside the fold body
+  let locallyBound := collectLetBindVars body
   accs.filterMap fun acc =>
     match extractAccInit acc body with
-    | some initExpr => some (acc, initExpr)
+    | some initExpr =>
+      -- Only emit override if the init expression doesn't reference any
+      -- fold-body-local variable (which wouldn't exist in the outer scope)
+      let usesLocal := locallyBound.any fun v =>
+        v != acc && !accs.contains v && exprContainsVar v initExpr
+      if usesLocal then none
+      else some (acc, initExpr)
     | none => none
 
 /-- Extract accumulators from a whileFold body.
