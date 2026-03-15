@@ -2981,6 +2981,91 @@ where
       (go structNames varName t).orElse fun _ => go structNames varName e
     | _ => none
 
+/-- Infer the struct type of an arbitrary expression (not just a variable).
+    Handles:
+    - `.var v` → delegate to inferStructType
+    - `.app "Hax.index" [arr, idx]` / `.app "index" [arr, idx]` → look at arr's element type
+    - `.app ".field" [parent]` → look up field type in struct metadata
+    This enables correct projection qualification for patterns like
+    `.block_id (Hax.index (.stash state) i)` where `.stash` returns Array StashEntry. -/
+private partial def inferExprStructType (structMeta : StructMeta) (ctx : ImpExpr)
+    : ImpExpr → Option String
+  | .var v => inferStructType structMeta v ctx
+  -- Hax.index arr idx → element type of arr
+  | .app f [arr, _] =>
+    if f == "index" || f == "Hax.index" then
+      inferArrayElementStructType structMeta ctx arr
+    else none
+  | .app f [inner] =>
+    if f.startsWith "." || (f.splitOn ".").length > 1 then
+      -- This is a struct projection. Infer the result struct type.
+      let projField := if f.startsWith "." then f.drop 1
+        else (f.splitOn ".").getLast!
+      -- Find the struct that 'inner' belongs to, then look up the field type
+      let innerStructType := inferExprStructType structMeta ctx inner
+      match innerStructType with
+      | some sname =>
+        -- Find the field in this struct and check its type
+        match structMeta.find? (·.1 == sname) with
+        | some (_, fields) =>
+          -- Find the matching field by name
+          match fields.find? fun (fn, _, _) => fn == projField with
+          | some (_, tag, _) =>
+            -- The tag might be a struct name — check if it's in structMeta
+            if structMeta.any (·.1 == tag) then some tag else none
+          | none => none
+        | none => none
+      | none => none
+    else none
+  | _ => none
+where
+  /-- Infer the struct type of array elements. If the array comes from a struct
+      field projection, look up the field's element type in struct metadata. -/
+  inferArrayElementStructType (structMeta : StructMeta) (ctx : ImpExpr)
+      : ImpExpr → Option String
+    | .app f [inner] =>
+      if f.startsWith "." || (f.splitOn ".").length > 1 then
+        let projField := if f.startsWith "." then f.drop 1
+          else (f.splitOn ".").getLast!
+        -- Find the struct of the inner expression
+        let innerStruct := inferExprStructType structMeta ctx inner
+        match innerStruct with
+        | some sname =>
+          match structMeta.find? (·.1 == sname) with
+          | some (_, fields) =>
+            match fields.find? fun (fn, _, _) => fn == projField with
+            | some (_, tag, fty) =>
+              -- Check if the field type is Vec<Struct> or Array<Struct>
+              -- Vec has 2 generic args: [elemType, allocator]
+              let elemStruct := match fty with
+                | .adt name args =>
+                  if name == "Vec" || name.endsWith "::Vec" then
+                    match args.head? with
+                    | some (.adt inner _) =>
+                      if structMeta.any (·.1 == inner) then some inner else none
+                    | _ => none
+                  else none
+                | .array (.adt inner _) _ =>
+                  if structMeta.any (·.1 == inner) then some inner else none
+                | .slice (.adt inner _) =>
+                  if structMeta.any (·.1 == inner) then some inner else none
+                | _ => none
+              match elemStruct with
+              | some s => some s
+              | none =>
+                -- Fallback: check if tag is a known struct name (heuristic)
+                if structMeta.any (·.1 == tag) then some tag else none
+            | none => none
+          | none => none
+        | none => none
+      else none
+    | .var v =>
+      -- Check if variable is bound to a struct constructor that returns arrays
+      inferStructType structMeta v ctx |>.bind fun sname =>
+        -- This variable is a struct — but we need its ELEMENT type
+        none  -- variable-level struct type doesn't help with element type
+    | _ => none
+
 /-- Qualify ambiguous projections in an ImpExpr: `.field` → `StructName.field`
     when the argument is known to be of a specific struct type. -/
 private partial def qualifyProjections (structMeta : StructMeta)
@@ -2989,9 +3074,13 @@ private partial def qualifyProjections (structMeta : StructMeta)
     if f.startsWith "." then
       let fname := f.drop 1
       if ambiguous.contains fname then
-        -- Try to infer the struct type of the argument
-        let argVar := match arg with | .var v => some v | _ => none
-        let structType := argVar.bind fun v => inferStructType structMeta v ctx
+        -- Try to infer the struct type: first from expression structure, then from variable
+        let structType := inferExprStructType structMeta ctx arg
+        let structType := match structType with
+          | some s => some s
+          | none =>
+            let argVar := match arg with | .var v => some v | _ => none
+            argVar.bind fun v => inferStructType structMeta v ctx
         match structType with
         | some sname =>
           -- Check if this struct actually has this field
