@@ -10,3 +10,6 @@ lean_lib SSProve where
 
 lean_exe haxpipe where
   root := `SSProve.Hax.Main
+
+lean_exe haxpipeT where
+  root := `SSProve.Hax.MainT
