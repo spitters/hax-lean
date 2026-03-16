@@ -4398,7 +4398,7 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
   let impExprs := "\n".intercalate (defs.map fun (n, e) =>
     let impExprDef := toLeanImpExprDef n e
     s!"{impExprDef}")
-  let footer := s!"\nend\n\n{impExprs}\nend {moduleName}\n"
+  let footer := s!"\n{impExprs}\nend\n\nend {moduleName}\n"
   -- Post-process: fix dependency references that got Hax. prefix
   fixDepReferences (header ++ body ++ footer) depNames
 
