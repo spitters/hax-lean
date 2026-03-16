@@ -770,14 +770,9 @@ where
           | _ => none)
         .app "array_lit" byteExprs
       | _ => .app "array_lit" []
-    else if let .ok strData := litKind.getObjVal? "Str" then
-      -- Str: [string_content, "Cooked"] → emit as byte array
-      match strData with
-      | .arr #[.str s, _] =>
-        let byteExprs : List ImpExpr :=
-          s.toUTF8.toList.map fun b => ImpExpr.lit (.int b.toNat)
-        .app "array_lit" byteExprs
-      | _ => .app "array_lit" []
+    else if let .ok _strData := litKind.getObjVal? "Str" then
+      -- Str: string literal → opaque in untyped extraction
+      .app "literal" []
     else .app "literal" []  -- char, float, etc.
 
   /-- Parse a hax Stmt (from Block). -/

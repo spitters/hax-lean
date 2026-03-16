@@ -1350,10 +1350,13 @@ where
       else
         let valStr := if isLeafExpr e1 then toLean e1 0 else s!"\n{toLean e1 (lvl + 1)}"
         s!"{ind}let _ := {valStr}\n{atLine e2 lvl}"
-    -- General case: skip assert blocks, discard e1's value otherwise
+    -- General case: skip assert blocks, eliminate dead code, discard e1's value otherwise
     | _, _ =>
       -- Skip assert_eq!/assert! blocks (Rust runtime assertions with unsynthesizable types)
       if isAssertBlock e1 then atLine e2 lvl
+      -- Dead code elimination: if e1 fully returns ControlFlow (both branches of if-else
+      -- have cfBreak/cfContinue), e2 is unreachable — skip it
+      else if hasSurfaceControlFlow e1 then atLine e1 lvl
       else
         let valStr := if isLeafExpr e1 then toLean e1 0 else s!"\n{toLean e1 (lvl + 1)}"
         s!"{ind}let _ := {valStr}\n{atLine e2 lvl}"
