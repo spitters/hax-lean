@@ -591,14 +591,14 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
     let thnHasCF := hasSurfaceControlFlow thn
     let elsHasCF := hasSurfaceControlFlow els
     -- Case 1: thn already has surface cfBreak (it IS the early exit), els is fall-through
-    -- Combine els+rest as the continue path, preserve thn as-is.
+    -- Combine els+rest as the continue path, patch thn's cfBreak unitVal → cfBreak (accs).
     if thnHasCF && !elsHasCF then
       let combined := if rest == .unitVal then els else .seq els rest
-      .ifThenElse c thn (transformForFoldCfBody accs combined)
+      .ifThenElse c (patchCfBreakUnit accs thn) (transformForFoldCfBody accs combined)
     -- Case 2: els already has surface cfBreak, thn is fall-through
     else if !thnHasCF && elsHasCF then
       let combined := if rest == .unitVal then thn else .seq thn rest
-      .ifThenElse c (transformForFoldCfBody accs combined) els
+      .ifThenElse c (transformForFoldCfBody accs combined) (patchCfBreakUnit accs els)
     -- Case 3: neither has surface CF, thn is unitVal (guard: if cond then done else work)
     else if !thnHasCF && thn == .unitVal then
       -- In ControlFlow fold: done = cfBreak (exit loop), work continues
