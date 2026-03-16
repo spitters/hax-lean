@@ -760,7 +760,25 @@ where
             | _ => 0
         .lit (.int (if neg then -n else n))
       | _ => .lit (.int 0)
-    else .app "literal" []  -- char, float, string, etc.
+    else if let .ok bsData := litKind.getObjVal? "ByteStr" then
+      -- ByteStr: [[byte0, byte1, ...], "Cooked"]
+      match bsData with
+      | .arr #[.arr bytes, _] =>
+        let byteExprs : List ImpExpr := (bytes.toList.filterMap fun b =>
+          match b.getNat? with
+          | .ok n => some (ImpExpr.lit (.int n))
+          | _ => none)
+        .app "array_lit" byteExprs
+      | _ => .app "array_lit" []
+    else if let .ok strData := litKind.getObjVal? "Str" then
+      -- Str: [string_content, "Cooked"] → emit as byte array
+      match strData with
+      | .arr #[.str s, _] =>
+        let byteExprs : List ImpExpr :=
+          s.toUTF8.toList.map fun b => ImpExpr.lit (.int b.toNat)
+        .app "array_lit" byteExprs
+      | _ => .app "array_lit" []
+    else .app "literal" []  -- char, float, etc.
 
   /-- Parse a hax Stmt (from Block). -/
   parseStmt (j : Json) : Except String ImpExpr := do
