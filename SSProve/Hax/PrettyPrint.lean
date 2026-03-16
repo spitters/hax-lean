@@ -564,15 +564,15 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
     -- If neither branch has CF, and one is unitVal (guard pattern),
     -- we need to wrap the unitVal branch in cfContinue for ControlFlow fold
     if !thnHasCF && thn == .unitVal then
-      -- Guard: if cond then skip else work; rest
-      -- In ControlFlow fold: skip = cfContinue, work continues to rest
+      -- Guard: if cond then done else work; rest
+      -- In ControlFlow fold: done = cfBreak (exit loop), work continues
       let combined := if rest == .unitVal then els else .seq els rest
-      let result := ImpExpr.ifThenElse c (.cfContinue (accTuple accs)) (transformForFoldCfBody accs combined)
+      let result := ImpExpr.ifThenElse c (.cfBreak (accTuple accs)) (transformForFoldCfBody accs combined)
       result
     else if !elsHasCF && els == .unitVal then
-      -- Inverted guard: if cond then work else skip (cfContinue)
+      -- Inverted guard: if cond then work else done (cfBreak)
       let combined := if rest == .unitVal then thn else .seq thn rest
-      .ifThenElse c (transformForFoldCfBody accs combined) (.cfContinue (accTuple accs))
+      .ifThenElse c (transformForFoldCfBody accs combined) (.cfBreak (accTuple accs))
     else
       .seq (.ifThenElse c thn els) (transformForFoldCfBody accs rest)
   | .seq e1 rest => .seq e1 (transformForFoldCfBody accs rest)
@@ -1069,14 +1069,28 @@ where
       let body' := simplifyFoldBody (transformFoldBody accs body)
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
     else if accs.isEmpty && !hasControlFlowNodes body then
-      -- Unit-accumulator fold (side-effect loop): wrap body to return ()
-      let bodyStr := if isLeafExpr body then toLean body 0
-                     else s!"\n{toLean body (lvl + 2)}"
-      s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
+      -- Unit-accumulator fold (side-effect loop)
+      -- Check if body is an if-then-else with one unitVal branch (early-exit pattern)
+      -- If so, use forFold with ControlFlow wrapping instead of simple let _ :=
+      match body with
+      | .ifThenElse cond thn els =>
+        if thn == .unitVal || els == .unitVal then
+          -- Early-exit pattern: emit as forFold with cfBreak/cfContinue
+          let wrapCf (e : ImpExpr) : String :=
+            if e == .unitVal then s!"Hax.cfBreak ()"
+            else s!"let _ := {toLean e 0}\n{ind1}  Hax.cfContinue ()"
+          s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}if {toLean cond 0} then\n{ind1}  {wrapCf thn}\n{ind1}else\n{ind1}  {wrapCf els}"
+        else
+          let bodyStr := s!"\n{toLean body (lvl + 2)}"
+          s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
+      | _ =>
+        let bodyStr := if isLeafExpr body then toLean body 0
+                       else s!"\n{toLean body (lvl + 2)}"
+        s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
     else
       -- ControlFlow fold (has break/continue)
       -- Transform body: wrap bare () and accumulator returns in cfContinue
-      let body' := if !accs.isEmpty then transformForFoldCfBody accs body else body
+      let body' := transformForFoldCfBody accs body
       s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   /-- Flatten seq chains into proper let-bindings. -/
   seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=
