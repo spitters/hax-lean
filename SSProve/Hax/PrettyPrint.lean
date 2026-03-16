@@ -292,7 +292,8 @@ private partial def collectLetBindVars : ImpExpr → List String
   | .ifThenElse _ t e => collectLetBindVars t ++ collectLetBindVars e
   | _ => []
 
-/-- Check if an expression contains ControlFlow nodes (cfBreak/cfContinue/cfBreakContinue). -/
+/-- Check if an expression contains ControlFlow nodes (cfBreak/cfContinue/cfBreakContinue).
+    Recurses into all sub-expressions including nested loop bodies. -/
 private partial def hasControlFlowNodes : ImpExpr → Bool
   | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
   | .letBind _ v b => hasControlFlowNodes v || hasControlFlowNodes b
@@ -301,6 +302,23 @@ private partial def hasControlFlowNodes : ImpExpr → Bool
   | .match_ _ arms => arms.any fun (_, b) => hasControlFlowNodes b
   | .app _ args => args.any hasControlFlowNodes
   | .tuple elems => elems.any hasControlFlowNodes
+  | _ => false
+
+/-- Check if an expression has cfBreak/cfContinue at the surface level.
+    Does NOT recurse into nested loop bodies (forFold/whileFold/forFoldReturn etc.),
+    so inner-loop control flow doesn't leak to outer rendering decisions. -/
+private partial def hasSurfaceControlFlow : ImpExpr → Bool
+  | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
+  | .letBind _ v b => hasSurfaceControlFlow v || hasSurfaceControlFlow b
+  | .seq e1 e2 => hasSurfaceControlFlow e1 || hasSurfaceControlFlow e2
+  | .ifThenElse _ t e => hasSurfaceControlFlow t || hasSurfaceControlFlow e
+  | .match_ _ arms => arms.any fun (_, b) => hasSurfaceControlFlow b
+  | .forFold _ _ _ _ | .forFoldRev _ _ _ _ => false  -- stop at loop boundaries
+  | .whileFold _ _ => false
+  | .forFoldReturn _ _ _ _ | .forFoldRevReturn _ _ _ _ => false
+  | .whileFoldReturn _ _ => false
+  | .app _ args => args.any hasSurfaceControlFlow
+  | .tuple elems => elems.any hasSurfaceControlFlow
   | _ => false
 
 /-- Extract accumulator variable names from a fold body.
@@ -559,18 +577,25 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
   -- The unitVal branch means "skip" (cfContinue), the work branch does mutations,
   -- and rest continues the fold body. Transform: make the unitVal a cfContinue.
   | .seq (.ifThenElse c thn els) rest =>
-    let thnHasCF := hasControlFlowNodes thn
-    let elsHasCF := hasControlFlowNodes els
-    -- If neither branch has CF, and one is unitVal (guard pattern),
-    -- we need to wrap the unitVal branch in cfContinue for ControlFlow fold
-    if !thnHasCF && thn == .unitVal then
-      -- Guard: if cond then done else work; rest
+    let thnHasCF := hasSurfaceControlFlow thn
+    let elsHasCF := hasSurfaceControlFlow els
+    -- Case 1: thn already has surface cfBreak (it IS the early exit), els is fall-through
+    -- Combine els+rest as the continue path, preserve thn as-is.
+    if thnHasCF && !elsHasCF then
+      let combined := if rest == .unitVal then els else .seq els rest
+      .ifThenElse c thn (transformForFoldCfBody accs combined)
+    -- Case 2: els already has surface cfBreak, thn is fall-through
+    else if !thnHasCF && elsHasCF then
+      let combined := if rest == .unitVal then thn else .seq thn rest
+      .ifThenElse c (transformForFoldCfBody accs combined) els
+    -- Case 3: neither has surface CF, thn is unitVal (guard: if cond then done else work)
+    else if !thnHasCF && thn == .unitVal then
       -- In ControlFlow fold: done = cfBreak (exit loop), work continues
       let combined := if rest == .unitVal then els else .seq els rest
       let result := ImpExpr.ifThenElse c (.cfBreak (accTuple accs)) (transformForFoldCfBody accs combined)
       result
+    -- Case 4: neither has CF, els is unitVal (inverted guard)
     else if !elsHasCF && els == .unitVal then
-      -- Inverted guard: if cond then work else done (cfBreak)
       let combined := if rest == .unitVal then thn else .seq thn rest
       .ifThenElse c (transformForFoldCfBody accs combined) (.cfBreak (accTuple accs))
     else
@@ -578,8 +603,8 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
   | .seq e1 rest => .seq e1 (transformForFoldCfBody accs rest)
   | .letBind n val body => .letBind n val (transformForFoldCfBody accs body)
   | .ifThenElse c thn els =>
-    let thnHasCF := hasControlFlowNodes thn
-    let elsHasCF := hasControlFlowNodes els
+    let thnHasCF := hasSurfaceControlFlow thn
+    let elsHasCF := hasSurfaceControlFlow els
     if thnHasCF && elsHasCF then
       .ifThenElse c thn els
     else if thnHasCF && !elsHasCF then
@@ -591,10 +616,10 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
   | .unitVal => .cfContinue (accTuple accs)
   | .var n =>
     if accs.contains n then .cfContinue (accTuple accs)
-    else if hasControlFlowNodes (.var n) then .var n
+    else if hasSurfaceControlFlow (.var n) then .var n
     else .cfContinue (accTuple accs)
   | e =>
-    if hasControlFlowNodes e then e
+    if hasSurfaceControlFlow e then e
     else .cfContinue (accTuple accs)
 
 /-- Nest `.cfBreak` inside `forFoldReturn` bodies.
@@ -632,13 +657,30 @@ private partial def extractAllCfBreakVals : ImpExpr → List ImpExpr
 /-- Extract the cfBreak return value from an expression, looking through seq/unitVal wrappers.
     Returns the break value if the expression is essentially a cfBreak (early return),
     or none if it's not. -/
-private def extractCfBreak : ImpExpr → Option ImpExpr
+private partial def extractCfBreak : ImpExpr → Option ImpExpr
   | .cfBreak val => some val
   | .seq (.cfBreak val) .unitVal => some val
   | .cfContinue _ => none
   | .unitVal => none
   | .seq .unitVal rest => extractCfBreak rest
+  | .letBind _ _ body => extractCfBreak body
+  -- seq of mutation patterns (letBind n rhs (var n)) followed by more:
+  -- recurse into the tail to find cfBreak at the end of a mutation chain
+  | .seq (.letBind _ _ (.var _)) rest => extractCfBreak rest
+  | .seq (.seq _ _) rest => extractCfBreak rest
   | _ => none
+
+/-- Strip cfBreak from the tail of an expression, replacing it with the break value.
+    This allows rendering the whole expression with proper let-bindings and the
+    return value at the end (instead of cfBreak wrapper).
+    Returns the original expression unchanged if no cfBreak is found. -/
+private partial def stripCfBreak : ImpExpr → ImpExpr
+  | .cfBreak val => val
+  | .seq (.cfBreak val) .unitVal => val
+  | .seq .unitVal rest => stripCfBreak rest
+  | .letBind n v body => .letBind n v (stripCfBreak body)
+  | .seq e1 e2 => .seq e1 (stripCfBreak e2)
+  | e => e
 
 /-- Check if an expression references a name as a function call (.app fname ...). -/
 private partial def exprContainsApp (fname : String) : ImpExpr → Bool
@@ -1064,29 +1106,16 @@ where
     let (initStr, paramStr) := accStrings accs
     let loStr := parensIf (toLean lo 0) (!isAtom lo)
     let hiStr := parensIf (toLean hi 0) (!isAtom hi)
-    if !hasControlFlowNodes body && !accs.isEmpty then
+    if !hasSurfaceControlFlow body && !accs.isEmpty then
       -- Simple fold with accumulators, no ControlFlow
       let body' := simplifyFoldBody (transformFoldBody accs body)
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
-    else if accs.isEmpty && !hasControlFlowNodes body then
-      -- Unit-accumulator fold (side-effect loop)
-      -- Check if body is an if-then-else with one unitVal branch (early-exit pattern)
-      -- If so, use forFold with ControlFlow wrapping instead of simple let _ :=
-      match body with
-      | .ifThenElse cond thn els =>
-        if thn == .unitVal || els == .unitVal then
-          -- Early-exit pattern: emit as forFold with cfBreak/cfContinue
-          let wrapCf (e : ImpExpr) : String :=
-            if e == .unitVal then s!"Hax.cfBreak ()"
-            else s!"let _ := {toLean e 0}\n{ind1}  Hax.cfContinue ()"
-          s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}if {toLean cond 0} then\n{ind1}  {wrapCf thn}\n{ind1}else\n{ind1}  {wrapCf els}"
-        else
-          let bodyStr := s!"\n{toLean body (lvl + 2)}"
-          s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
-      | _ =>
-        let bodyStr := if isLeafExpr body then toLean body 0
-                       else s!"\n{toLean body (lvl + 2)}"
-        s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
+    else if accs.isEmpty && !hasSurfaceControlFlow body then
+      -- Unit-accumulator fold (side-effect loop, no surface ControlFlow)
+      -- Render as simple fold with `let _ := body; ()`
+      let bodyStr := if isLeafExpr body then toLean body 0
+                     else s!"\n{toLean body (lvl + 2)}"
+      s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
     else
       -- ControlFlow fold (has break/continue)
       -- Transform body: wrap bare () and accumulator returns in cfContinue
@@ -1147,7 +1176,9 @@ where
         | _ =>
           let ifLvl := max lvl 1
           let ifInd := indent ifLvl
-          s!"{ifInd}if {condToLean cond} then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
+          -- Use stripCfBreak to preserve let-bindings before the return value
+          let thnStripped := stripCfBreak thn
+          s!"{ifInd}if {condToLean cond} then\n{atLine thnStripped (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | none, some retVal =>
         -- Inverted: if cond then continue else break → if !cond then val else rest
         -- Same double-nesting check as above
@@ -1158,16 +1189,19 @@ where
         | _ =>
           let ifLvl := max lvl 1
           let ifInd := indent ifLvl
-          s!"{ifInd}if !({condToLean cond}) then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
+          -- Use stripCfBreak to preserve let-bindings before the return value
+          let elsStripped := stripCfBreak els
+          s!"{ifInd}if !({condToLean cond}) then\n{atLine elsStripped (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | _, _ =>
       -- Guard pattern in ControlFlow context: if cond then () else <work-with-CF>; rest
       -- The () needs to become Hax.cfContinue () so both branches have ControlFlow type
-      if thn == .unitVal && (hasControlFlowNodes els || hasControlFlowNodes e2) then
+      if thn == .unitVal && (hasSurfaceControlFlow els || hasSurfaceControlFlow e2) then
         let ifLvl := max lvl 1
         let ifInd := indent ifLvl
         let ifInd1 := indent (ifLvl + 1)
         s!"{ifInd}if {condToLean cond} then\n{ifInd1}Hax.cfContinue ()\n{ifInd}else\n{atLine els (ifLvl + 1)}\n{seqToLean lvl .unitVal e2}"
-      else if els == .unitVal && (hasControlFlowNodes thn || hasControlFlowNodes e2) then
+      else if els == .unitVal && hasSurfaceControlFlow thn then
+        -- thn has surface CF (e.g., cfBreak/cfContinue), wrap the els in cfContinue to match types
         let ifLvl := max lvl 1
         let ifInd := indent ifLvl
         let ifInd1 := indent (ifLvl + 1)
