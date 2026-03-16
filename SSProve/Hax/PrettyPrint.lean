@@ -244,6 +244,22 @@ private def simplifyFoldBody : ImpExpr → ImpExpr
   | .letBind n val (.var v) => if n == v then val else .letBind n val (.var v)
   | e => e
 
+/-- Patch match expressions at the tail of a fold body where some arms return `()` (Unit)
+    and others return non-unit values. Replaces `()` arms with the fold accumulator variable
+    to ensure all arms have the same type.
+    This handles patterns like `match ctr with | 0 => foldRange ... | _ => ()` inside folds. -/
+private partial def patchMatchUnitArmsInBody (accVar : String) : ImpExpr → ImpExpr
+  | .letBind n v body => .letBind n v (patchMatchUnitArmsInBody accVar body)
+  | .seq a b => .seq a (patchMatchUnitArmsInBody accVar b)
+  | .match_ scrut arms =>
+    let hasUnit := arms.any fun (_, b) => b == .unitVal
+    let hasNonUnit := arms.any fun (_, b) => b != .unitVal
+    if hasUnit && hasNonUnit then
+      .match_ scrut (arms.map fun (p, b) =>
+        if b == .unitVal then (p, .var accVar) else (p, b))
+    else .match_ scrut arms
+  | e => e
+
 /-- Extract mutation variable names and their RHS from a conditional then-branch.
     Returns list of (name, rhs) for patterns like `seq (letBind n rhs (var n)) rest`. -/
 private partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr)
@@ -391,6 +407,14 @@ private partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
     let thn' := transformFoldBody accs thn
     let els' := if els == .unitVal then accReturn else transformFoldBody accs els
     .ifThenElse cond thn' els'
+  -- Match at tail of fold body: transform each arm, replacing unitVal arms with accumulator return
+  | .match_ scrut arms =>
+    let accReturn := match accs with
+      | [a] => ImpExpr.var a
+      | _ => .tuple (accs.map .var)
+    .match_ scrut (arms.map fun (p, b) =>
+      if b == .unitVal then (p, accReturn)
+      else (p, transformFoldBody accs b))
   -- Terminal: unitVal → accumulator return
   | .unitVal =>
     match accs with
@@ -621,23 +645,22 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
   | .ifThenElse c thn els =>
     let thnHasCF := hasSurfaceControlFlow thn
     let elsHasCF := hasSurfaceControlFlow els
-    if thnHasCF && elsHasCF then
-      -- Both have CF: still need to patch cfBreak unitVal → cfBreak (accs)
-      .ifThenElse c (patchCfBreakUnit accs thn) (patchCfBreakUnit accs els)
-    else if thnHasCF && !elsHasCF then
-      .ifThenElse c (patchCfBreakUnit accs thn) (transformForFoldCfBody accs els)
-    else if !thnHasCF && elsHasCF then
-      .ifThenElse c (transformForFoldCfBody accs thn) (patchCfBreakUnit accs els)
-    else
-      .ifThenElse c (transformForFoldCfBody accs thn) (transformForFoldCfBody accs els)
+    -- Always use full transform on both branches to handle nested if-else
+    -- where sub-branches may have bare values needing cfContinue wrapping.
+    -- transformForFoldCfBody preserves existing cfBreak/cfContinue nodes and
+    -- patches cfBreak unitVal → cfBreak (accs) while wrapping bare terminals.
+    .ifThenElse c (transformForFoldCfBody accs thn) (transformForFoldCfBody accs els)
+  -- Patch cfBreak unitVal → cfBreak (accs) to carry accumulator through break
+  | .cfBreak .unitVal => .cfBreak (accTuple accs)
+  -- Existing cfBreak/cfContinue with non-unit values: preserve as-is
+  | .cfBreak v => .cfBreak v
+  | .cfContinue v => .cfContinue v
+  | .cfBreakContinue v => .cfBreakContinue v
   | .unitVal => .cfContinue (accTuple accs)
   | .var n =>
     if accs.contains n then .cfContinue (accTuple accs)
-    else if hasSurfaceControlFlow (.var n) then .var n
     else .cfContinue (accTuple accs)
-  | e =>
-    if hasSurfaceControlFlow e then e
-    else .cfContinue (accTuple accs)
+  | e => .cfContinue (accTuple accs)
 
 /-- Nest `.cfBreak` inside `forFoldReturn` bodies.
     In `forFoldReturn`, the body returns `ControlFlow (ControlFlow β γ) α`.
@@ -1051,12 +1074,16 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
   | .forFoldReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
-    let body' := nestCfBreakForReturn body
+    -- First wrap bare values/accumulators in cfContinue (forFoldReturn body must return ControlFlow)
+    let body' := transformForFoldCfBody accs body
+    -- Then nest cfBreak for early function returns
+    let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.forFoldReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .forFoldRevReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
-    let body' := nestCfBreakForReturn body
+    let body' := transformForFoldCfBody accs body
+    let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.forFoldRevReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .whileFoldReturn c body =>
     let accs := extractAccumulators body
@@ -1108,7 +1135,11 @@ where
       else s!"Hax.beq {parensIf (toLean x 0) (!isAtom x)} 0"
     | .app _ _ =>
       -- Function applications: either runtime op (known Bool) or preamble function
-      toLean c 0
+      -- For non-runtime function calls (user-defined or dep), add `= true` to ensure
+      -- Decidable instance is available, especially in mutual blocks where the
+      -- return type may not yet be inferred.
+      if isKnownBool c then toLean c 0
+      else s!"{parensIf (toLean c 0) (!isAtom c)} = true"
     | _ =>
       if isKnownBool c then toLean c 0
       else s!"Hax.bne {parensIf (toLean c 0) (!isAtom c)} 0"
@@ -1301,6 +1332,24 @@ where
     | .cfBreak _, _ => atLine e2 lvl
     | .cfContinue _, _ => atLine e2 lvl
     | .cfBreakContinue _, _ => atLine e2 lvl
+    -- Match in seq position: wrap each arm to return Unit so all arms have the same type.
+    -- This handles patterns like `match x with | 0 => foldRange... | _ => ()` where some
+    -- arms mutate accumulators (returning Array Int) and others are dead (returning Unit).
+    | .match_ scrut arms, _ =>
+      let hasUnitArm := arms.any fun (_, b) => b == .unitVal
+      let hasNonUnitArm := arms.any fun (_, b) => b != .unitVal
+      if hasUnitArm && hasNonUnitArm then
+        -- Heterogeneous arms: wrap all in `let _ := body; ()` for uniform Unit type
+        let armLvl := max lvl 1 + 1
+        let armInd := indent armLvl
+        let armStrs := arms.map fun (p, body) =>
+          if body == .unitVal then s!"{armInd}| {patToLean p} => ()"
+          else s!"{armInd}| {patToLean p} => let _ := {toLean body 0}\n{armInd}  ()"
+        let matchInd := indent (max lvl 1)
+        s!"{ind}let _ := \n{matchInd}match {toLean scrut 0} with\n{"\n".intercalate armStrs}\n{atLine e2 lvl}"
+      else
+        let valStr := if isLeafExpr e1 then toLean e1 0 else s!"\n{toLean e1 (lvl + 1)}"
+        s!"{ind}let _ := {valStr}\n{atLine e2 lvl}"
     -- General case: skip assert blocks, discard e1's value otherwise
     | _, _ =>
       -- Skip assert_eq!/assert! blocks (Rust runtime assertions with unsynthesizable types)
