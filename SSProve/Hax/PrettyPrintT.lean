@@ -429,6 +429,42 @@ private partial def qualifyProjectionsFromUsage
     .cfBreakContinue (qualifyProjectionsFromUsage arrayElemTypes varStructTypes structMeta ambiguousFields e)
   | e => e
 
+/-- Propagate return element types: when a function call result is bound to a
+    variable, and that function is known to return arrays of a specific struct type,
+    record the variable as containing that struct type. -/
+private partial def propagateReturnElemTypes
+    (funcRetElemTypes : List (String × String)) : ImpExpr → List (String × String)
+  | .letBind varName (.app fname _) body =>
+    let fromCall := match funcRetElemTypes.find? (·.1 == fname) with
+      | some (_, sn) => [(varName, sn)]
+      | none => []
+    fromCall ++ propagateReturnElemTypes funcRetElemTypes body
+  | .letBind _ v body =>
+    propagateReturnElemTypes funcRetElemTypes v ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .seq a b =>
+    propagateReturnElemTypes funcRetElemTypes a ++
+    propagateReturnElemTypes funcRetElemTypes b
+  | .ifThenElse c t e =>
+    propagateReturnElemTypes funcRetElemTypes c ++
+    propagateReturnElemTypes funcRetElemTypes t ++
+    propagateReturnElemTypes funcRetElemTypes e
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    propagateReturnElemTypes funcRetElemTypes lo ++
+    propagateReturnElemTypes funcRetElemTypes hi ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    propagateReturnElemTypes funcRetElemTypes lo ++
+    propagateReturnElemTypes funcRetElemTypes hi ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .whileFold c body | .whileFoldReturn c body =>
+    propagateReturnElemTypes funcRetElemTypes c ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .match_ scrut arms =>
+    propagateReturnElemTypes funcRetElemTypes scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ propagateReturnElemTypes funcRetElemTypes b) []
+  | _ => []
+
 /-! ## Pass D: Fix fold accumulator type for unit-valued outer folds
 
 When a forFoldReturn's inner body returns `()` as its fold value but the outer
@@ -480,18 +516,36 @@ def toLeanCertifiedFileT (defs : List (String × ImpExpr))
   let ambiguousFields := findAmbiguousFieldsT structMeta
   let defs := if ambiguousFields.isEmpty then defs
     else
+      let structNames := structMeta.map (·.1)
       -- Collect array element types and variable struct types across all defs
       let arrayElemTypes := defs.foldl (fun acc (_, e) =>
         acc ++ detectArrayElementTypes e) []
       let varStructTypes := defs.foldl (fun acc (_, e) =>
         acc ++ detectLetBindStructTypes e) []
-      let structNames := structMeta.map (·.1)
       -- Filter to only include known struct names
       let arrayElemTypes := arrayElemTypes.filter fun (_, sn) => structNames.contains sn
       let varStructTypes := varStructTypes.filter fun (_, sn) => structNames.contains sn
-      if arrayElemTypes.isEmpty && varStructTypes.isEmpty then defs
+      -- Cross-function propagation: for each function that pushes StructName into
+      -- a returned array, find call sites where the result is bound to a variable.
+      -- That variable then also contains StructName elements.
+      -- Step 1: For each function, determine what struct type its return array contains.
+      -- A function returns StructName elements if it pushes StructName into any array
+      -- that's the return value.
+      let funcRetElemTypes := defs.filterMap fun (fname, e) =>
+        -- Find the last array variable that has push operations with struct constructors
+        let pushTypes := detectArrayElementTypes e
+        let structPushes := pushTypes.filter fun (_, sn) => structNames.contains sn
+        match structPushes.head? with
+        | some (_, sn) => some (fname, sn)
+        | none => none
+      -- Step 2: Find call sites where these functions' results are bound to variables
+      let crossFuncElemTypes := defs.foldl (fun acc (_, e) =>
+        acc ++ propagateReturnElemTypes funcRetElemTypes e) []
+      let allArrayElemTypes := (arrayElemTypes ++ crossFuncElemTypes).eraseDups
+      let allVarStructTypes := (varStructTypes ++ crossFuncElemTypes).eraseDups
+      if allArrayElemTypes.isEmpty && allVarStructTypes.isEmpty then defs
       else defs.map fun (n, e) =>
-        (n, qualifyProjectionsFromUsage arrayElemTypes varStructTypes structMeta ambiguousFields e)
+        (n, qualifyProjectionsFromUsage allArrayElemTypes allVarStructTypes structMeta ambiguousFields e)
   -- Delegate to the standard certified file emitter
   toLeanCertifiedFile defs moduleName structMeta fnTypes callRetTypes callSigs varRefTypes
 
