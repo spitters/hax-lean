@@ -88,6 +88,10 @@ def main (args : List String) : IO UInt32 := do
     | "certified" =>
       let fnDefs := extractFnDefs result
       let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
+      -- Emit field name collision warnings to stderr
+      let collisionWarnings := detectFieldCollisions structMeta
+      for w in collisionWarnings do
+        IO.eprintln s!"WARNING: {w}"
       IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
     | _ =>
       IO.println (toLeanDef opts.name result)

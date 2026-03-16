@@ -563,6 +563,17 @@ private partial def transformWhileFoldBody (accs : List String) : ImpExpr → Im
   | .letBind n v body => .letBind n v (transformWhileFoldBody accs body)
   | e => transformWhileContinue accs e
 
+/-- Patch cfBreak unitVal → cfBreak (accTuple accs) in an expression.
+    Used when the body already has CF nodes but the break value is ()
+    instead of the accumulator tuple. -/
+private partial def patchCfBreakUnit (accs : List String) : ImpExpr → ImpExpr
+  | .cfBreak .unitVal => .cfBreak (accTuple accs)
+  | .seq (.cfBreak .unitVal) rest => .seq (.cfBreak (accTuple accs)) rest
+  | .letBind n v body => .letBind n v (patchCfBreakUnit accs body)
+  | .seq e1 e2 => .seq (patchCfBreakUnit accs e1) (patchCfBreakUnit accs e2)
+  | .ifThenElse c t e => .ifThenElse c (patchCfBreakUnit accs t) (patchCfBreakUnit accs e)
+  | e => e
+
 /-- Transform a forFold body for ControlFlow rendering.
     Wraps bare `unitVal` / accumulator returns in `cfContinue (accs)` so
     the body has type `ControlFlow β α` as expected by `Hax.forFold`.
@@ -606,11 +617,12 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
     let thnHasCF := hasSurfaceControlFlow thn
     let elsHasCF := hasSurfaceControlFlow els
     if thnHasCF && elsHasCF then
-      .ifThenElse c thn els
+      -- Both have CF: still need to patch cfBreak unitVal → cfBreak (accs)
+      .ifThenElse c (patchCfBreakUnit accs thn) (patchCfBreakUnit accs els)
     else if thnHasCF && !elsHasCF then
-      .ifThenElse c thn (transformForFoldCfBody accs els)
+      .ifThenElse c (patchCfBreakUnit accs thn) (transformForFoldCfBody accs els)
     else if !thnHasCF && elsHasCF then
-      .ifThenElse c (transformForFoldCfBody accs thn) els
+      .ifThenElse c (transformForFoldCfBody accs thn) (patchCfBreakUnit accs els)
     else
       .ifThenElse c (transformForFoldCfBody accs thn) (transformForFoldCfBody accs els)
   | .unitVal => .cfContinue (accTuple accs)
@@ -1280,6 +1292,9 @@ where
     -- then strip the leading indent since we place it after 'let acc :='
     let foldStr := (toLean foldExpr lvl).trimLeft
     let accs := extractAccumulators body
+    -- Check if this fold uses ControlFlow (forFold instead of foldRange).
+    -- If so, the result is `ControlFlow β α` and needs `.merge` to extract the value.
+    let isCf := hasSurfaceControlFlow body
     -- Emit init overrides for accumulators that need default initialization
     let overrides := accInitOverrides accs body
     let initPrefix := if overrides.isEmpty then ""
@@ -1287,6 +1302,17 @@ where
         s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
     if accs.isEmpty then
       s!"{ind}let _ := {foldStr}\n{atLine tail lvl}"
+    else if isCf then
+      -- ControlFlow fold: result is ControlFlow, use .merge
+      if accs.length == 1 then
+        let acc := accs.head!
+        match tail with
+        | .var n => if n == acc then s!"{initPrefix}{ind}({foldStr}).merge"
+                    else s!"{initPrefix}{ind}let _wf := {foldStr}\n{ind}let {sanitizeName acc} := _wf.merge\n{atLine tail lvl}"
+        | _ => s!"{initPrefix}{ind}let _wf := {foldStr}\n{ind}let {sanitizeName acc} := _wf.merge\n{atLine tail lvl}"
+      else
+        let accStr := ", ".intercalate (accs.map sanitizeName)
+        s!"{initPrefix}{ind}let _wf := {foldStr}\n{ind}let ({accStr}) := _wf.merge\n{atLine tail lvl}"
     else if accs.length == 1 then
       let acc := accs.head!
       -- If the tail just reads the accumulator, the fold IS the return value
@@ -3149,6 +3175,21 @@ def generatePreamble (defs : List (String × ImpExpr))
   let result := if parts.isEmpty then ""
     else "\n" ++ "\n\n".intercalate parts ++ "\n"
   (result, projConflicts)
+
+/-- Detect field name collisions across structs in the metadata.
+    Returns a list of warning strings for fields that appear in multiple structs. -/
+def detectFieldCollisions (structMeta : StructMeta) : List String :=
+  -- Build a map: field name -> list of struct names that contain it
+  let fieldToStructs := structMeta.foldl (fun acc (sname, fields) =>
+    fields.foldl (fun acc2 (fname, _, _) =>
+      let existing := acc2.find? (fun (f, _) => f == fname) |>.map (·.2) |>.getD []
+      let acc2' := acc2.filter (fun (f, _) => f != fname)
+      acc2' ++ [(fname, existing ++ [sname])]) acc) ([] : List (String × List String))
+  -- Filter to fields with 2+ structs
+  fieldToStructs.filterMap fun (fname, structs) =>
+    if structs.length >= 2 then
+      some s!"field name collision: '.{fname}' appears in structs {", ".intercalate structs} — rename to avoid projection ambiguity"
+    else none
 
 /-- Post-process generated code: replace `Hax.{dep}` with bare `{dep}` for dependency names.
     This is needed because `runtimeName` maps names like `mul` to `Hax.mul`, but when
