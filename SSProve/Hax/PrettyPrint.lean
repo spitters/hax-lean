@@ -611,7 +611,12 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
       .ifThenElse c (transformForFoldCfBody accs combined) (.cfBreak (accTuple accs))
     else
       .seq (.ifThenElse c thn els) (transformForFoldCfBody accs rest)
-  | .seq e1 rest => .seq e1 (transformForFoldCfBody accs rest)
+  | .seq e1 rest =>
+    -- Dead code elimination: if e1 already returns ControlFlow, rest is unreachable
+    if hasSurfaceControlFlow e1 then
+      transformForFoldCfBody accs e1
+    else
+      .seq e1 (transformForFoldCfBody accs rest)
   | .letBind n val body => .letBind n val (transformForFoldCfBody accs body)
   | .ifThenElse c thn els =>
     let thnHasCF := hasSurfaceControlFlow thn
@@ -2895,8 +2900,11 @@ def generatePreamble (defs : List (String × ImpExpr))
       let isUsed := allAppNames.contains sname
       let isPassthrough := structIsPassthrough.any fun (n, pt) => n == sname && pt
       let tupleT := structTupleType structMeta fields structLookup
-      -- Constructor definition (only if used in code)
-      let ctorDefs := if isUsed then
+      -- Constructor definition (generate if used in code OR if projections are used
+      -- so that rewriteNewToStructCtor can rewrite `new []` calls)
+      let projectionsUsed := fields.any fun (fname, _, _) =>
+        allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}"
+      let ctorDefs := if isUsed || projectionsUsed then
         if isPassthrough then
           -- Pass-through: struct constructor is identity (returns first Array Int arg)
           let paramDecls := fields.map fun (fname, ftag, fty) =>
@@ -3509,7 +3517,7 @@ private partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpE
     a qualifying struct context. -/
 private partial def rewriteNewToStructCtor (structMeta : StructMeta) : ImpExpr → ImpExpr
   | .app "new" args =>
-    if args.isEmpty then .app "new" args  -- Vec::new() → keep as "new" → "#[]"
+    if args.isEmpty then .app "new" args  -- Vec::new() → keep as "new" → "#[]" (unless overridden by letBind context)
     else
       -- Find structs whose field count matches arg count
       let candidates := structMeta.filter fun (_, fields) => fields.length == args.length
@@ -4348,6 +4356,53 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
   -- Pre-process: rewrite `new args` to struct constructor calls
   let defs := if structMeta.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewToStructCtor structMeta e)
+  -- Pre-process: resolve remaining `new []` to struct constructors using type info.
+  -- When `let v := new []; ... f(v) ...` and `f` has parameter type matching a struct,
+  -- replace `new []` with the struct constructor using default values.
+  let defs := if structMeta.isEmpty then defs
+    else defs.map fun (defName, e) =>
+      let rec findCallsWithVar (v : String) : ImpExpr → List (String × Nat)
+        | .app f args =>
+          let thisCall := if args.any (· == .var v) then
+            (args.zip (List.range args.length)).findSome? fun (a, i) => if a == .var v then some (f, i) else none
+          else none
+          let sub := args.foldl (fun acc a => acc ++ findCallsWithVar v a) []
+          match thisCall with
+          | some c => c :: sub
+          | none => sub
+        | .letBind _ val body => findCallsWithVar v val ++ findCallsWithVar v body
+        | .seq a b => findCallsWithVar v a ++ findCallsWithVar v b
+        | .ifThenElse c t e => findCallsWithVar v c ++ findCallsWithVar v t ++ findCallsWithVar v e
+        | _ => []
+      let rec rewriteNewZeroArg : ImpExpr → ImpExpr
+        | .letBind n (.app "new" []) body =>
+          -- Find functions called with `n` as argument and the arg position
+          let calls := findCallsWithVar n body
+          -- Check if any call's parameter type is a struct
+          let structMatch := calls.findSome? fun (fname, pos) =>
+            let fnTi := fnTypes.find? (·.1 == fname) |>.map (·.2)
+            match fnTi with
+            | some ti =>
+              if pos < ti.paramTypes.length then
+                let paramTy := ti.paramTypes[pos]!.2
+                match paramTy with
+                | .adt sname _ => structMeta.find? fun (s, _) => s == sname
+                | _ => none
+              else none
+            | none => none
+          match structMatch with
+          | some (sname, fields) =>
+            let defaultArgs := fields.map fun (_, _, ty) =>
+              match ty with
+              | .array _ len => ImpExpr.app "repeat" [.lit (.int 0), .lit (.int len)]
+              | _ => ImpExpr.lit (.int 0)
+            .letBind n (.app sname defaultArgs) (rewriteNewZeroArg body)
+          | none => .letBind n (.app "new" []) (rewriteNewZeroArg body)
+        | .letBind n v body => .letBind n (rewriteNewZeroArg v) (rewriteNewZeroArg body)
+        | .seq a b => .seq (rewriteNewZeroArg a) (rewriteNewZeroArg b)
+        | .ifThenElse c t e => .ifThenElse (rewriteNewZeroArg c) (rewriteNewZeroArg t) (rewriteNewZeroArg e)
+        | e => e
+      (defName, rewriteNewZeroArg e)
   -- Pre-process: rewrite `from_elem ZERO n` for struct arrays
   let defs := if structMeta.isEmpty then defs
     else defs.map fun (n, e) =>
