@@ -4,15 +4,15 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: SSProve-Lean4 Contributors
 -/
 import SSProve.Hax.CLI
+import SSProve.Hax.PrettyPrintT
 
 /-!
 # haxpipeT CLI — Typed Hax Pipeline
 
-Typed variant of `haxpipe`. Can be iterated on independently.
-Changes here or in `PrettyPrintT.lean` (future) won't affect `haxpipe`.
+Typed variant of `haxpipe`. Uses `toLeanCertifiedFileT` from `PrettyPrintT.lean`
+which adds type-aware rewrite passes on top of the frozen `PrettyPrint.lean`.
 
-Currently identical to haxpipe. The typed emission will be added here
-by replacing `toLeanCertifiedFile` with a typed version.
+Changes here or in `PrettyPrintT.lean` do not affect `haxpipe`.
 -/
 
 open SSProve.Hax
@@ -40,8 +40,8 @@ def main (args : List String) : IO UInt32 := do
   | "certified" =>
     let fnDefs := extractFnDefs result
     let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
-    -- TODO: Replace with typed version that threads struct types
-    IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
+    -- Use typed variant with additional rewrite passes
+    IO.println (toLeanCertifiedFileT defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
   | _ =>
     IO.println (toLeanDef opts.name result)
   return 0
