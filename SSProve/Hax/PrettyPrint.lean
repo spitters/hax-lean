@@ -1157,6 +1157,13 @@ where
         s!"{ind}let _ := \n{ifInd}if {condToLean c} then\n{ifInd1}let _ := {toLean thn 0}\n{ifInd1}()\n{ifInd}else\n{ifInd1}()\n{seqToLean lvl body e2}"
       else
         s!"{ind}let {sanitizeName n} := {toLean (.ifThenElse c thn (.var elsV)) 0}\n{seqToLean lvl body e2}"
+    -- Mutation-discard _assign in seq: seq (letBind "_assign" val (var "_assign")) rest
+    -- Render as `let _ := val` to avoid type-leaking _assign bindings
+    | .letBind n v (.var vn), _ =>
+      if n.startsWith "_assign" && n == vn then
+        s!"{ind}let _ := {toLean v 0}\n{seqToLean lvl (.var vn) e2}"
+      else
+        s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl (.var vn) e2}"
     -- Lift letBind out of seq: seq (letBind n v body) e2 → let n := v; seq body e2
     | .letBind n v body, _ =>
       s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl body e2}"
@@ -1238,7 +1245,13 @@ where
           -- the first occurrence is a default init emitted unconditionally.
           let seen : List String := []
           let (initStrs, condStrs, _) := trueMuts.foldl (fun (inits, conds, seen) (name, rhs) =>
-            if seen.contains name then
+            -- _assign variables are intermediate mutation artifacts; always use `let _ :=`
+            if name.startsWith "_assign" then
+              let ifLvl := max lvl 1
+              let ifInd := indent ifLvl
+              let ifInd1 := indent (ifLvl + 1)
+              (inits, conds ++ [s!"{ind}let _ := \n{ifInd}if {condToLean cond} then\n{ifInd1}let _ := {toLean rhs 0}\n{ifInd1}()\n{ifInd}else\n{ifInd1}()"], seen)
+            else if seen.contains name then
               -- Already seen this name — emit as conditional mutation
               (inits, conds ++ [s!"{ind}let {sanitizeName name} := if {condToLean cond} then {toLean rhs 0} else {sanitizeName name}"], seen)
             else
@@ -1268,7 +1281,13 @@ where
           let mutStr := allNames.map fun name =>
             let thnRhs := (thnMuts.find? (·.1 == name)).map (·.2) |>.getD (.var name)
             let elsRhs := (elsMuts.find? (·.1 == name)).map (·.2) |>.getD (.var name)
-            s!"{ind}let {sanitizeName name} := if {condToLean cond} then {toLean thnRhs 0} else {toLean elsRhs 0}"
+            if name.startsWith "_assign" then
+              let ifLvl := max lvl 1
+              let ifInd := indent ifLvl
+              let ifInd1 := indent (ifLvl + 1)
+              s!"{ind}let _ := \n{ifInd}if {condToLean cond} then\n{ifInd1}let _ := {toLean thnRhs 0}\n{ifInd1}()\n{ifInd}else\n{ifInd1}let _ := {toLean elsRhs 0}\n{ifInd1}()"
+            else
+              s!"{ind}let {sanitizeName name} := if {condToLean cond} then {toLean thnRhs 0} else {toLean elsRhs 0}"
           s!"{"\n".intercalate mutStr}\n{atLine e2 lvl}"
         else
           let valStr := if isLeafExpr e1 then toLean e1 0 else s!"\n{toLean e1 (lvl + 1)}"
@@ -4397,6 +4416,8 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
     s!"{surfaceDef}")
   let impExprs := "\n".intercalate (defs.map fun (n, e) =>
     let impExprDef := toLeanImpExprDef n e
+    -- If any function needs partial, mark impExpr defs too (mutual block requirement)
+    let impExprDef := if needsPartial then impExprDef.replace "def " "partial def " else impExprDef
     s!"{impExprDef}")
   let footer := s!"\n{impExprs}\nend\n\nend {moduleName}\n"
   -- Post-process: fix dependency references that got Hax. prefix
