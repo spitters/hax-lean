@@ -541,11 +541,51 @@ def toLeanCertifiedFileT (defs : List (String × ImpExpr))
       -- Step 2: Find call sites where these functions' results are bound to variables
       let crossFuncElemTypes := defs.foldl (fun acc (_, e) =>
         acc ++ propagateReturnElemTypes funcRetElemTypes e) []
+      -- Step 3: For each function, check param types from fnTypes.
+      -- If a param's type matches a struct's tuple type, add it to varStructTypes.
+      let paramStructTypes := defs.foldl (fun acc (fname, e) =>
+        match fnTypes.find? (·.1 == fname) with
+        | some (_, ti) =>
+          -- Extract params from the expression
+          let rec getParamsT : ImpExpr → List String
+            | .letBind pn (.var pv) body => if pn == pv then pn :: getParamsT body else []
+            | _ => []
+          let paramNames := getParamsT e
+          -- For each param, check if its ImpType is an ADT that's a known struct
+          acc ++ paramNames.filterMap fun pname =>
+            match ti.paramTypes.find? (·.1 == pname) with
+            | some (_, pty) =>
+              let upty := unwrapRef pty
+              match upty with
+              | .adt adtName _ =>
+                if structNames.contains adtName then some (pname, adtName) else none
+              | _ => none
+            | none => none
+        | none => acc) ([] : List (String × String))
       let allArrayElemTypes := (arrayElemTypes ++ crossFuncElemTypes).eraseDups
-      let allVarStructTypes := (varStructTypes ++ crossFuncElemTypes).eraseDups
-      if allArrayElemTypes.isEmpty && allVarStructTypes.isEmpty then defs
+      let allVarStructTypes := (varStructTypes ++ crossFuncElemTypes ++ paramStructTypes).eraseDups
+      if allArrayElemTypes.isEmpty && allVarStructTypes.isEmpty && paramStructTypes.isEmpty then defs
       else defs.map fun (n, e) =>
-        (n, qualifyProjectionsFromUsage allArrayElemTypes allVarStructTypes structMeta ambiguousFields e)
+        -- Per-function: merge global var types with this function's param types
+        let fnParamTypes := match fnTypes.find? (·.1 == n) with
+          | some (_, ti) =>
+            let rec getParamsQ : ImpExpr → List String
+              | .letBind pn (.var pv) body => if pn == pv then pn :: getParamsQ body else []
+              | _ => []
+            let paramNames := getParamsQ e
+            paramNames.filterMap fun pname =>
+              match ti.paramTypes.find? (·.1 == pname) with
+              | some (_, pty) =>
+                let upty := unwrapRef pty
+                match upty with
+                | .adt adtName _ =>
+                  if structNames.contains adtName then some (pname, adtName) else none
+                | _ => none
+              | none => none
+          | none => []
+        -- Local var types: per-function params override global
+        let localVarTypes := fnParamTypes ++ allVarStructTypes
+        (n, qualifyProjectionsFromUsage allArrayElemTypes localVarTypes structMeta ambiguousFields e)
   -- Delegate to the standard certified file emitter
   toLeanCertifiedFile defs moduleName structMeta fnTypes callRetTypes callSigs varRefTypes
 
