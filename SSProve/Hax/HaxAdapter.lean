@@ -304,10 +304,11 @@ partial def parseHaxType (j : Json) : ImpType :=
       match elemType with
       | some et => .slice et
       | none => .slice .unknown
-    else if let .ok paramData := tyKind.getObjVal? "Param" then
-      match paramData.getObjValAs? String "name" with
-      | .ok n => .typeVar n
-      | _ => .unknown
+    else if let .ok _paramData := tyKind.getObjVal? "Param" then
+      -- Generic type parameter: in the untyped extraction model,
+      -- crypto type params are almost always byte arrays.
+      -- Map to slice (Array Int) as a safe default.
+      .slice .int
     else if let .ok arrayRef := tyKind.getObjVal? "Array" then
       -- Array: {id, value: {def_id: ...<array>..., generic_args: [{Type: elemTy}, {Const: len}]}}
       let genArgs := extractGenericArgs arrayRef
@@ -1687,6 +1688,10 @@ private def classifyFieldType (tyVal : Json) : String :=
   else if tyVal.getObjVal? "Usize" |>.isOk then "int"
   -- Bool
   else if tyVal.getObjVal? "Bool" |>.isOk then "int"
+  -- Param: generic type parameter (e.g., `E` in `struct Foo<E> { field: E }`)
+  -- In crypto crates, generic params are almost always byte arrays.
+  -- Classify as "array" (safe default; will get `Array Int` type).
+  else if tyVal.getObjVal? "Param" |>.isOk then "array"
   -- Array: {"Array": {id: ..., value: ...}}
   else if tyVal.getObjVal? "Array" |>.isOk then "array"
   -- Slice
