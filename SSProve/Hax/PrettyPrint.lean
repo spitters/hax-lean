@@ -3692,6 +3692,431 @@ private def detectStructDeps (structMeta : StructMeta)
       | _ => acc
     | none => acc) []
 
+/-! ### Pass T-A: Initialize missing fold accumulators
+
+When a fold accumulator tuple `(a, b)` references a variable `b` not bound in
+the enclosing scope, inserts `let b := (0 : Int)` before the fold.
+Merged from PrettyPrintT.lean. -/
+
+/-- Collect all variable names bound by let-bindings at the top level. -/
+private partial def collectBoundNamesT : ImpExpr → List String
+  | .letBind n _ body => n :: collectBoundNamesT body
+  | .seq a b => collectBoundNamesT a ++ collectBoundNamesT b
+  | _ => []
+
+/-- Extract accumulator variable names from a fold body by detecting mutation patterns. -/
+private partial def extractAccumNamesFromBody : ImpExpr → List String
+  | .seq (.seq a b) c => extractAccumNamesFromBody (.seq a (.seq b c))
+  | .seq (.letBind n _ (.var v)) rest =>
+    if n == v && !n.startsWith "_assign" then
+      let restAccs := extractAccumNamesFromBody rest
+      if restAccs.contains n then restAccs else n :: restAccs
+    else extractAccumNamesFromBody rest
+  | .seq (.ifThenElse _ thn _) rest =>
+    let thnAccs := extractCondMutsT thn |>.filter (!·.startsWith "_assign")
+    let restAccs := extractAccumNamesFromBody rest
+    (thnAccs ++ restAccs).eraseDups
+  | .seq _ rest => extractAccumNamesFromBody rest
+  | .letBind n _ (.var v) =>
+    if n == v && !n.startsWith "_assign" then [n] else []
+  | .letBind _ _ body => extractAccumNamesFromBody body
+  | .ifThenElse _ thn _ =>
+    (extractCondMutsT thn).filter (!·.startsWith "_assign") |>.eraseDups
+  | _ => []
+where
+  extractCondMutsT : ImpExpr → List String
+    | .seq (.seq a b) c => extractCondMutsT (.seq a (.seq b c))
+    | .seq (.letBind n _ (.var v)) rest =>
+      if n == v then n :: extractCondMutsT rest else extractCondMutsT rest
+    | .seq .unitVal rest => extractCondMutsT rest
+    | .seq _ rest => extractCondMutsT rest
+    | .letBind n _ (.var v) => if n == v then [n] else []
+    | .letBind _ _ body => extractCondMutsT body
+    | .unitVal => []
+    | _ => []
+
+/-- Walk an ImpExpr and insert `let v := (0 : Int)` before any fold whose
+    accumulator references a variable not bound in the enclosing scope. -/
+private partial def initMissingFoldAccums (bound : List String := []) : ImpExpr → ImpExpr
+  | .letBind n v body =>
+    let v' := initMissingFoldAccums bound v
+    let body' := initMissingFoldAccums (n :: bound) body
+    .letBind n v' body'
+  | .seq a b =>
+    let a' := initMissingFoldAccums bound a
+    let boundsFromA := collectBoundNamesT a
+    .seq a' (initMissingFoldAccums (bound ++ boundsFromA) b)
+  | .forFold v lo hi body =>
+    let lo' := initMissingFoldAccums bound lo
+    let hi' := initMissingFoldAccums bound hi
+    let body' := initMissingFoldAccums (v :: bound) body
+    let fold := ImpExpr.forFold v lo' hi' body'
+    let accumNames := extractAccumNamesFromBody body'
+    let freeAccums := accumNames.filter fun n => !bound.contains n
+    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
+  | .forFoldRev v lo hi body =>
+    let lo' := initMissingFoldAccums bound lo
+    let hi' := initMissingFoldAccums bound hi
+    let body' := initMissingFoldAccums (v :: bound) body
+    let fold := ImpExpr.forFoldRev v lo' hi' body'
+    let accumNames := extractAccumNamesFromBody body'
+    let freeAccums := accumNames.filter fun n => !bound.contains n
+    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
+  | .forFoldReturn v lo hi body =>
+    let lo' := initMissingFoldAccums bound lo
+    let hi' := initMissingFoldAccums bound hi
+    let body' := initMissingFoldAccums (v :: bound) body
+    let fold := ImpExpr.forFoldReturn v lo' hi' body'
+    let accumNames := extractAccumNamesFromBody body'
+    let freeAccums := accumNames.filter fun n => !bound.contains n
+    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
+  | .forFoldRevReturn v lo hi body =>
+    let lo' := initMissingFoldAccums bound lo
+    let hi' := initMissingFoldAccums bound hi
+    let body' := initMissingFoldAccums (v :: bound) body
+    let fold := ImpExpr.forFoldRevReturn v lo' hi' body'
+    let accumNames := extractAccumNamesFromBody body'
+    let freeAccums := accumNames.filter fun n => !bound.contains n
+    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
+  | .ifThenElse c t e =>
+    .ifThenElse (initMissingFoldAccums bound c)
+      (initMissingFoldAccums bound t) (initMissingFoldAccums bound e)
+  | .match_ scrut arms =>
+    .match_ (initMissingFoldAccums bound scrut)
+      (arms.map fun (p, b) => (p, initMissingFoldAccums bound b))
+  | .whileFold c body =>
+    .whileFold (initMissingFoldAccums bound c) (initMissingFoldAccums bound body)
+  | .whileFoldReturn c body =>
+    .whileFoldReturn (initMissingFoldAccums bound c) (initMissingFoldAccums bound body)
+  | .tuple es => .tuple (es.map (initMissingFoldAccums bound))
+  | .proj e i => .proj (initMissingFoldAccums bound e) i
+  | .app f args => .app f (args.map (initMissingFoldAccums bound))
+  | .cfBreak e => .cfBreak (initMissingFoldAccums bound e)
+  | .cfContinue e => .cfContinue (initMissingFoldAccums bound e)
+  | .cfBreakContinue e => .cfBreakContinue (initMissingFoldAccums bound e)
+  | e => e
+
+/-! ### Pass T-B: Reconcile function types with call-site types -/
+
+/-- Unwrap ImpType.ref wrappers to get the inner type. -/
+private def unwrapRefT : ImpType → ImpType
+  | .ref inner _ => unwrapRefT inner
+  | ty => ty
+
+/-- Check if a type resolves to a struct tuple (not just Array Int or Int). -/
+private def isStructTupleType (ty : ImpType) (structLookup : String → Option String) : Bool :=
+  let ty := unwrapRefT ty
+  match ty with
+  | .adt name _ =>
+    match structLookup name with
+    | some s => (s.splitOn " × ").length > 1
+    | none =>
+      let shortName := match name.splitOn "::" with
+        | [] => name
+        | segs => segs.getLast!
+      match structLookup shortName with
+      | some s => (s.splitOn " × ").length > 1
+      | none => false
+  | .tuple elems => elems.length > 1
+  | _ => false
+
+/-- Reconcile fnTypes with call-site types. When a locally-defined function has struct-typed
+    params but is called with Array Int args, replace the param types from call-site info. -/
+def reconcileFnTypes
+    (defs : List (String × ImpExpr))
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (structLookup : String → Option String)
+    (callSigs : List (String × HaxAdapter.FnTypeInfo) := []) :
+    List (String × HaxAdapter.FnTypeInfo) :=
+  let definedNames := defs.map (·.1)
+  let reconciled := fnTypes.map fun (fname, ti) =>
+    if !definedNames.contains fname then (fname, ti)
+    else
+      let hasStructParams := ti.paramTypes.any fun (_, pty) =>
+        isStructTupleType pty structLookup
+      if !hasStructParams then (fname, ti)
+      else
+        match callSigs.find? (·.1 == fname) with
+        | some (_, callTi) =>
+          let callHasStruct := callTi.paramTypes.any fun (_, pty) =>
+            isStructTupleType pty structLookup
+          if callHasStruct then (fname, ti)
+          else
+            let indexed := (List.range ti.paramTypes.length).zip ti.paramTypes
+            let newParamTypes := indexed.map fun (i, (pname, _)) =>
+              match callTi.paramTypes[i]? with
+              | some (_, callPty) => (pname, callPty)
+              | none => (pname, ImpType.int)
+            let newRetType := if callTi.retType.isUnknown then ti.retType else callTi.retType
+            (fname, { paramTypes := newParamTypes, retType := newRetType })
+        | none => (fname, ti)
+  reconciled.foldl (fun (acc : List (String × HaxAdapter.FnTypeInfo)) (n, ti) =>
+    if acc.any (·.1 == n) then acc else acc ++ [(n, ti)]) []
+
+/-! ### Pass T-C: Type-aware projection qualification from usage -/
+
+/-- Detect the struct constructor used with `Hax.push arr (StructName ...)` patterns. -/
+private partial def detectArrayElementTypes : ImpExpr → List (String × String)
+  | .app "push" [.var arr, .app ctor _] => [(arr, ctor)]
+  | .letBind _ v body =>
+    detectArrayElementTypes v ++ detectArrayElementTypes body
+  | .seq a b => detectArrayElementTypes a ++ detectArrayElementTypes b
+  | .ifThenElse c t e =>
+    detectArrayElementTypes c ++ detectArrayElementTypes t ++ detectArrayElementTypes e
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    detectArrayElementTypes lo ++ detectArrayElementTypes hi ++ detectArrayElementTypes body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    detectArrayElementTypes lo ++ detectArrayElementTypes hi ++ detectArrayElementTypes body
+  | .whileFold c body | .whileFoldReturn c body =>
+    detectArrayElementTypes c ++ detectArrayElementTypes body
+  | .match_ scrut arms =>
+    detectArrayElementTypes scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ detectArrayElementTypes b) []
+  | .app _ args => args.foldl (fun acc a => acc ++ detectArrayElementTypes a) []
+  | .tuple es => es.foldl (fun acc e => acc ++ detectArrayElementTypes e) []
+  | _ => []
+
+/-- Detect the struct type from `let x := StructName args` patterns. -/
+private partial def detectLetBindStructTypes : ImpExpr → List (String × String)
+  | .letBind n (.app ctor _) body =>
+    [(n, ctor)] ++ detectLetBindStructTypes body
+  | .letBind _ v body =>
+    detectLetBindStructTypes v ++ detectLetBindStructTypes body
+  | .seq a b => detectLetBindStructTypes a ++ detectLetBindStructTypes b
+  | .ifThenElse c t e =>
+    detectLetBindStructTypes c ++ detectLetBindStructTypes t ++ detectLetBindStructTypes e
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    detectLetBindStructTypes lo ++ detectLetBindStructTypes hi ++ detectLetBindStructTypes body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    detectLetBindStructTypes lo ++ detectLetBindStructTypes hi ++ detectLetBindStructTypes body
+  | .whileFold c body | .whileFoldReturn c body =>
+    detectLetBindStructTypes c ++ detectLetBindStructTypes body
+  | .match_ scrut arms =>
+    detectLetBindStructTypes scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ detectLetBindStructTypes b) []
+  | _ => []
+
+/-- Rewrite ambiguous projections on array elements or variables whose struct type
+    can be inferred from constructor usage patterns. -/
+private partial def qualifyProjectionsFromUsageT
+    (arrayElemTypes : List (String × String))
+    (varStructTypes : List (String × String))
+    (structMeta : StructMeta)
+    (ambiguousFields : List String) : ImpExpr → ImpExpr
+  | .app projName [.app idxFn [.var arr, idx]] =>
+    if idxFn == "index" || idxFn == "Hax.index" then
+      let fieldName := if projName.startsWith "." then projName.drop 1
+        else if projName.contains '.' then
+          match projName.splitOn "." with | _ :: f :: _ => f | _ => projName
+        else projName
+      if ambiguousFields.contains fieldName then
+        match arrayElemTypes.find? (·.1 == arr) with
+        | some (_, structName) =>
+          let hasField := structMeta.any fun (sn, fields) =>
+            sn == structName && fields.any (·.1 == fieldName)
+          let newName := if hasField then s!"{structName}.{fieldName}" else projName
+          .app newName [.app idxFn [.var arr,
+            qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields idx]]
+        | none =>
+          .app projName [.app idxFn [.var arr,
+            qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields idx]]
+      else
+        .app projName [.app idxFn [.var arr,
+          qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields idx]]
+    else
+      .app projName [.app idxFn
+        ((.var arr :: [idx]).map (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields))]
+  | .app projName [.var v] =>
+    let fieldName := if projName.startsWith "." then projName.drop 1
+      else if projName.contains '.' then
+        match projName.splitOn "." with | _ :: f :: _ => f | _ => projName
+      else projName
+    if ambiguousFields.contains fieldName then
+      match varStructTypes.find? (·.1 == v) with
+      | some (_, structName) =>
+        let hasField := structMeta.any fun (sn, fields) =>
+          sn == structName && fields.any (·.1 == fieldName)
+        if hasField then .app s!"{structName}.{fieldName}" [.var v]
+        else .app projName [.var v]
+      | none => .app projName [.var v]
+    else .app projName [.var v]
+  | .app f args =>
+    .app f (args.map (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields))
+  | .letBind n v body =>
+    .letBind n
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields v)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .seq a b =>
+    .seq (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields a)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields b)
+  | .ifThenElse c t e =>
+    .ifThenElse
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields c)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields t)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields e)
+  | .tuple es =>
+    .tuple (es.map (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields))
+  | .proj e i =>
+    .proj (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields e) i
+  | .match_ scrut arms =>
+    .match_ (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields scrut)
+      (arms.map fun (p, b) =>
+        (p, qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields b))
+  | .forFold v lo hi body =>
+    .forFold v
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields lo)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields hi)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields lo)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields hi)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .forFoldReturn v lo hi body =>
+    .forFoldReturn v
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields lo)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields hi)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .forFoldRevReturn v lo hi body =>
+    .forFoldRevReturn v
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields lo)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields hi)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .whileFold c body =>
+    .whileFold
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields c)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .whileFoldReturn c body =>
+    .whileFoldReturn
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields c)
+      (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields body)
+  | .cfBreak e =>
+    .cfBreak (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields e)
+  | .cfContinue e =>
+    .cfContinue (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields e)
+  | .cfBreakContinue e =>
+    .cfBreakContinue (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields e)
+  | e => e
+
+/-- Propagate return element types through call chains. -/
+private partial def propagateReturnElemTypes
+    (funcRetElemTypes : List (String × String)) : ImpExpr → List (String × String)
+  | .letBind varName (.app fname _) body =>
+    let fromCall := match funcRetElemTypes.find? (·.1 == fname) with
+      | some (_, sn) => [(varName, sn)]
+      | none => []
+    fromCall ++ propagateReturnElemTypes funcRetElemTypes body
+  | .letBind _ v body =>
+    propagateReturnElemTypes funcRetElemTypes v ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .seq a b =>
+    propagateReturnElemTypes funcRetElemTypes a ++
+    propagateReturnElemTypes funcRetElemTypes b
+  | .ifThenElse c t e =>
+    propagateReturnElemTypes funcRetElemTypes c ++
+    propagateReturnElemTypes funcRetElemTypes t ++
+    propagateReturnElemTypes funcRetElemTypes e
+  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
+    propagateReturnElemTypes funcRetElemTypes lo ++
+    propagateReturnElemTypes funcRetElemTypes hi ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
+    propagateReturnElemTypes funcRetElemTypes lo ++
+    propagateReturnElemTypes funcRetElemTypes hi ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .whileFold c body | .whileFoldReturn c body =>
+    propagateReturnElemTypes funcRetElemTypes c ++
+    propagateReturnElemTypes funcRetElemTypes body
+  | .match_ scrut arms =>
+    propagateReturnElemTypes funcRetElemTypes scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ propagateReturnElemTypes funcRetElemTypes b) []
+  | _ => []
+
+/-- Find field names that appear in multiple structs (ambiguous projections). -/
+private def findAmbiguousFieldsT (structMeta : StructMeta) : List String :=
+  let allFields := structMeta.foldl (fun acc (_, fields) =>
+    acc ++ fields.map (·.1)) []
+  let dupes := allFields.filter fun f =>
+    Nat.blt 1 (allFields.filter (· == f)).length
+  dupes.eraseDups
+
+/-- Apply the three type-aware passes from PrettyPrintT as pre-processing steps. -/
+private def applyTypedPasses (defs : List (String × ImpExpr))
+    (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (callSigs : List (String × HaxAdapter.FnTypeInfo)) :
+    (List (String × ImpExpr)) × (List (String × HaxAdapter.FnTypeInfo)) :=
+  -- Pass T-A: Fix missing fold accumulators
+  let defs := defs.map fun (n, e) =>
+    let rec getParams : ImpExpr → List String
+      | .letBind pn (.var pv) body => if pn == pv then pn :: getParams body else []
+      | _ => []
+    let params := getParams e
+    (n, initMissingFoldAccums params e)
+  -- Pass T-B: Reconcile function types with call-site types
+  let structIsPassthrough := computeStructPassthrough structMeta defs
+  let structLookup := mkStructLookup structMeta structIsPassthrough
+  let fnTypes := reconcileFnTypes defs fnTypes structLookup callSigs
+  -- Pass T-C: Qualify projections from usage (array element types)
+  let ambiguousFields := findAmbiguousFieldsT structMeta
+  let defs := if ambiguousFields.isEmpty then defs
+    else
+      let structNames := structMeta.map (·.1)
+      let arrayElemTypes := defs.foldl (fun acc (_, e) =>
+        acc ++ detectArrayElementTypes e) []
+      let varStructTypes := defs.foldl (fun acc (_, e) =>
+        acc ++ detectLetBindStructTypes e) []
+      let arrayElemTypes := arrayElemTypes.filter fun (_, sn) => structNames.contains sn
+      let varStructTypes := varStructTypes.filter fun (_, sn) => structNames.contains sn
+      let funcRetElemTypes := defs.filterMap fun (fname, e) =>
+        let pushTypes := detectArrayElementTypes e
+        let structPushes := pushTypes.filter fun (_, sn) => structNames.contains sn
+        match structPushes.head? with
+        | some (_, sn) => some (fname, sn)
+        | none => none
+      let crossFuncElemTypes := defs.foldl (fun acc (_, e) =>
+        acc ++ propagateReturnElemTypes funcRetElemTypes e) []
+      let paramStructTypes := defs.foldl (fun acc (fname, e) =>
+        match fnTypes.find? (·.1 == fname) with
+        | some (_, ti) =>
+          let rec getParamsT : ImpExpr → List String
+            | .letBind pn (.var pv) body => if pn == pv then pn :: getParamsT body else []
+            | _ => []
+          let paramNames := getParamsT e
+          acc ++ paramNames.filterMap fun pname =>
+            match ti.paramTypes.find? (·.1 == pname) with
+            | some (_, pty) =>
+              let upty := unwrapRefT pty
+              match upty with
+              | .adt adtName _ =>
+                if structNames.contains adtName then some (pname, adtName) else none
+              | _ => none
+            | none => none
+        | none => acc) ([] : List (String × String))
+      let allArrayElemTypes := (arrayElemTypes ++ crossFuncElemTypes).eraseDups
+      let allVarStructTypes := (varStructTypes ++ crossFuncElemTypes ++ paramStructTypes).eraseDups
+      if allArrayElemTypes.isEmpty && allVarStructTypes.isEmpty && paramStructTypes.isEmpty then defs
+      else defs.map fun (n, e) =>
+        let fnParamTypes := match fnTypes.find? (·.1 == n) with
+          | some (_, ti) =>
+            let rec getParamsQ : ImpExpr → List String
+              | .letBind pn (.var pv) body => if pn == pv then pn :: getParamsQ body else []
+              | _ => []
+            let paramNames := getParamsQ e
+            paramNames.filterMap fun pname =>
+              match ti.paramTypes.find? (·.1 == pname) with
+              | some (_, pty) =>
+                let upty := unwrapRefT pty
+                match upty with
+                | .adt adtName _ =>
+                  if structNames.contains adtName then some (pname, adtName) else none
+                | _ => none
+              | none => none
+          | none => []
+        let localVarTypes := fnParamTypes ++ allVarStructTypes
+        (n, qualifyProjectionsFromUsageT allArrayElemTypes localVarTypes structMeta ambiguousFields e)
+  (defs, fnTypes)
+
 def toLeanCertifiedFile (defs : List (String × ImpExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -3703,6 +4128,8 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
   -- multiple Rust modules. Keep the first occurrence, drop later duplicates.
   let defs := defs.foldl (fun (acc : List (String × ImpExpr)) (n, e) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, e)]) []
+  -- Apply typed passes (merged from PrettyPrintT)
+  let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes callSigs
   -- Pre-process: qualify ambiguous projection names
   let ambiguousFields := findAmbiguousFields structMeta
   let defs := if ambiguousFields.isEmpty then defs
