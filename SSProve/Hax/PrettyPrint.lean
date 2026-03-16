@@ -328,10 +328,20 @@ private partial def extractAccumulators : ImpExpr → List String
   -- Recurse into local let-bindings (non-mutation letBind)
   | .letBind _ _ body => extractAccumulators body
   -- Top-level ifThenElse (entire fold body is a conditional)
-  | .ifThenElse _ thn _ =>
+  -- Check both branches since the guard pattern may be inverted
+  -- (if cond then skip else work)
+  | .ifThenElse _ thn els =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
       |>.filter (!·.startsWith "_assign")
-    thnAccs.eraseDups
+    let elsAccs := if els == .unitVal then []
+      else extractCondMutations els |>.map (·.1)
+        |>.filter (!·.startsWith "_assign")
+    -- Also check deeply: the else branch might have mutations as
+    -- nested let-bindings (not wrapped in the mutation-discard pattern)
+    let elsDeep := if elsAccs.isEmpty && els != .unitVal then
+        extractAccumulators els
+      else elsAccs
+    (thnAccs ++ elsDeep).eraseDups
   | _ => []
 
 /-- Transform a forFold body for accumulator-based rendering.
@@ -535,6 +545,58 @@ private partial def transformWhileFoldBody (accs : List String) : ImpExpr → Im
   | .letBind n v body => .letBind n v (transformWhileFoldBody accs body)
   | e => transformWhileContinue accs e
 
+/-- Transform a forFold body for ControlFlow rendering.
+    Wraps bare `unitVal` / accumulator returns in `cfContinue (accs)` so
+    the body has type `ControlFlow β α` as expected by `Hax.forFold`.
+    Preserves existing cfBreak/cfContinue nodes. -/
+private partial def transformForFoldCfBody (accs : List String) : ImpExpr → ImpExpr
+  | .seq (.seq a b) c => transformForFoldCfBody accs (.seq a (.seq b c))
+  | .seq (.letBind n val (.var v)) rest =>
+    if n == v then .letBind n val (transformForFoldCfBody accs rest)
+    else .seq (.letBind n val (.var v)) (transformForFoldCfBody accs rest)
+  | .seq .unitVal rest => transformForFoldCfBody accs rest
+  -- Guard pattern in seq: seq (ifThenElse cond unitVal work) rest
+  -- The unitVal branch means "skip" (cfContinue), the work branch does mutations,
+  -- and rest continues the fold body. Transform: make the unitVal a cfContinue.
+  | .seq (.ifThenElse c thn els) rest =>
+    let thnHasCF := hasControlFlowNodes thn
+    let elsHasCF := hasControlFlowNodes els
+    -- If neither branch has CF, and one is unitVal (guard pattern),
+    -- we need to wrap the unitVal branch in cfContinue for ControlFlow fold
+    if !thnHasCF && thn == .unitVal then
+      -- Guard: if cond then skip else work; rest
+      -- In ControlFlow fold: skip = cfContinue, work continues to rest
+      let combined := if rest == .unitVal then els else .seq els rest
+      let result := ImpExpr.ifThenElse c (.cfContinue (accTuple accs)) (transformForFoldCfBody accs combined)
+      result
+    else if !elsHasCF && els == .unitVal then
+      -- Inverted guard: if cond then work else skip (cfContinue)
+      let combined := if rest == .unitVal then thn else .seq thn rest
+      .ifThenElse c (transformForFoldCfBody accs combined) (.cfContinue (accTuple accs))
+    else
+      .seq (.ifThenElse c thn els) (transformForFoldCfBody accs rest)
+  | .seq e1 rest => .seq e1 (transformForFoldCfBody accs rest)
+  | .letBind n val body => .letBind n val (transformForFoldCfBody accs body)
+  | .ifThenElse c thn els =>
+    let thnHasCF := hasControlFlowNodes thn
+    let elsHasCF := hasControlFlowNodes els
+    if thnHasCF && elsHasCF then
+      .ifThenElse c thn els
+    else if thnHasCF && !elsHasCF then
+      .ifThenElse c thn (transformForFoldCfBody accs els)
+    else if !thnHasCF && elsHasCF then
+      .ifThenElse c (transformForFoldCfBody accs thn) els
+    else
+      .ifThenElse c (transformForFoldCfBody accs thn) (transformForFoldCfBody accs els)
+  | .unitVal => .cfContinue (accTuple accs)
+  | .var n =>
+    if accs.contains n then .cfContinue (accTuple accs)
+    else if hasControlFlowNodes (.var n) then .var n
+    else .cfContinue (accTuple accs)
+  | e =>
+    if hasControlFlowNodes e then e
+    else .cfContinue (accTuple accs)
+
 /-- Nest `.cfBreak` inside `forFoldReturn` bodies.
     In `forFoldReturn`, the body returns `ControlFlow (ControlFlow β γ) α`.
     An early function return `cfBreak val` becomes `cfBreak (cfBreak val)`.
@@ -708,6 +770,17 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
     -- Prevents non-Unit _assign values from leaking as the block return value.
     if n.startsWith "_assign" && body == .var n then
       s!"{ind}let _ := {toLean val 0}\n{ind}()"
+    -- Conditional _assign with self-reference: let _assign := if ... then X else _assign
+    -- The else branch references the previous _assign which may have a different type.
+    -- Since _assign is always discarded, render as: let _ := if ... then (let _ := X; ()) else ()
+    else if n.startsWith "_assign" && (match val with | .ifThenElse _ _ (.var elsV) => elsV.startsWith "_assign" | _ => false) then
+      match val with
+      | .ifThenElse c thn _ =>
+        let ifLvl := max lvl 1
+        let ifInd := indent ifLvl
+        let ifInd1 := indent (ifLvl + 1)
+        s!"{ind}let _ := \n{ifInd}if {condToLean c} then\n{ifInd1}let _ := {toLean thn 0}\n{ifInd1}()\n{ifInd}else\n{ifInd1}()\n{atLine body lvl}"
+      | _ => s!"{ind}let _ := {toLean val 0}\n{atLine body lvl}"
     else
     -- Match-with-cfBreak pattern: let x := (match s with | p1 => v1 | p2 => cfBreak v2); body
     -- → if-else chain (for Option/Result patterns in untyped mode) or inlined match
@@ -830,12 +903,19 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
     let eStr := if e == .unitVal && hasControlFlowNodes t then
         s!"{ifInd1}Hax.cfContinue ()"
       else atLine e (ifLvl + 1)
+    -- When else-branch has ControlFlow but then is unitVal, then needs Hax.cfContinue ()
+    let tStr := if t == .unitVal && hasControlFlowNodes e then
+        s!"{ifInd1}Hax.cfContinue ()"
+      else ""  -- empty means use default rendering below
     let condStr := condToLean c
+    -- When then is unitVal but else has ControlFlow: use cfContinue for then-branch
+    if tStr != "" then
+      s!"{ifInd}if {condStr} then\n{tStr}\n{ifInd}else\n{eStr}"
     -- When else is unitVal and then is non-ControlFlow, non-unit:
     -- Wrap then-branch in `let _ := ...; ()` so both branches return Unit.
     -- This handles assert/panic patterns (if !cond then panic(...) else ())
     -- and avoids type mismatches between non-Unit then and Unit else.
-    if e == .unitVal && !hasControlFlowNodes t && t != .unitVal then
+    else if e == .unitVal && !hasControlFlowNodes t && t != .unitVal then
       s!"{ifInd}if {condStr} then\n{ifInd1}let _ := {toLean t (ifLvl + 1)}\n{ifInd1}()\n{ifInd}else\n{ifInd1}()"
     else
       s!"{ifInd}if {condStr} then\n{atLine t (ifLvl + 1)}\n{ifInd}else\n{eStr}"
@@ -995,7 +1075,9 @@ where
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
     else
       -- ControlFlow fold (has break/continue)
-      s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body (lvl + 1)}"
+      -- Transform body: wrap bare () and accumulator returns in cfContinue
+      let body' := if !accs.isEmpty then transformForFoldCfBody accs body else body
+      s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   /-- Flatten seq chains into proper let-bindings. -/
   seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=
     let ind := indent lvl
@@ -1011,6 +1093,15 @@ where
     | .letBind n (.cfBreak _) body, _ =>
       if n.startsWith "_" then seqToLean lvl body e2
       else s!"{ind}let {sanitizeName n} := {toLean (.cfBreak (.cfBreak .unitVal)) 0}\n{seqToLean lvl body e2}"
+    -- Conditional _assign with self-reference in seq context
+    | .letBind n (.ifThenElse c thn (.var elsV)) body, _ =>
+      if n.startsWith "_assign" && elsV.startsWith "_assign" then
+        let ifLvl := max lvl 1
+        let ifInd := indent ifLvl
+        let ifInd1 := indent (ifLvl + 1)
+        s!"{ind}let _ := \n{ifInd}if {condToLean c} then\n{ifInd1}let _ := {toLean thn 0}\n{ifInd1}()\n{ifInd}else\n{ifInd1}()\n{seqToLean lvl body e2}"
+      else
+        s!"{ind}let {sanitizeName n} := {toLean (.ifThenElse c thn (.var elsV)) 0}\n{seqToLean lvl body e2}"
     -- Lift letBind out of seq: seq (letBind n v body) e2 → let n := v; seq body e2
     | .letBind n v body, _ =>
       s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl body e2}"
@@ -1055,7 +1146,19 @@ where
           let ifInd := indent ifLvl
           s!"{ifInd}if !({condToLean cond}) then\n{atLine retVal (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | _, _ =>
-      if els == .unitVal then
+      -- Guard pattern in ControlFlow context: if cond then () else <work-with-CF>; rest
+      -- The () needs to become Hax.cfContinue () so both branches have ControlFlow type
+      if thn == .unitVal && (hasControlFlowNodes els || hasControlFlowNodes e2) then
+        let ifLvl := max lvl 1
+        let ifInd := indent ifLvl
+        let ifInd1 := indent (ifLvl + 1)
+        s!"{ifInd}if {condToLean cond} then\n{ifInd1}Hax.cfContinue ()\n{ifInd}else\n{atLine els (ifLvl + 1)}\n{seqToLean lvl .unitVal e2}"
+      else if els == .unitVal && (hasControlFlowNodes thn || hasControlFlowNodes e2) then
+        let ifLvl := max lvl 1
+        let ifInd := indent ifLvl
+        let ifInd1 := indent (ifLvl + 1)
+        s!"{ifInd}if {condToLean cond} then\n{atLine thn (ifLvl + 1)}\n{ifInd}else\n{ifInd1}Hax.cfContinue ()\n{seqToLean lvl .unitVal e2}"
+      else if els == .unitVal then
         -- One-sided: if cond then {let x := rhs; x} else unitVal
         let allBindings := extractCondAllBindings thn
         if allBindings.isEmpty then
