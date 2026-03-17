@@ -92,6 +92,7 @@ def main (args : List String) : IO UInt32 := do
       let collisionWarnings := detectFieldCollisions structMeta
       for w in collisionWarnings do
         IO.eprintln s!"WARNING: {w}"
+      -- (debug removed)
       IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
     | _ =>
       IO.println (toLeanDef opts.name result)

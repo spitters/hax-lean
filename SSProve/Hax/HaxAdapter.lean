@@ -1317,10 +1317,11 @@ partial def parseHaxFileWithTypes (j : Json) :
       match ← parseHaxItemWithTypes item with
       | some r => result := result ++ [r]
       | none =>
-        -- Recurse into Mod items: kind.Mod = [name_data, [sub_items]]
+        -- Recurse into Mod items
         let kind := (item.getObjVal? "kind").toOption
         match kind with
         | some kindJ =>
+          -- Try Mod: kind.Mod = [name_data, [sub_items]]
           match kindJ.getObjVal? "Mod" with
           | .ok (.arr modData) =>
             match modData.toList[1]? with
@@ -1331,7 +1332,16 @@ partial def parseHaxFileWithTypes (j : Json) :
                 result := result ++ sub
               | _ => pure ()
             | _ => pure ()
-          | _ => pure ()
+          | .ok modData =>
+            -- Mod might also be an object with items field
+            match modData.getObjValAs? (Array Json) "items" with
+            | .ok subItems =>
+              let sub ← parseItemsWithTypes subItems.toList
+              result := result ++ sub
+            | _ => pure ()
+          | _ =>
+            -- Skip Impl blocks for now (methods may lack bodies)
+            pure ()
         | none => pure ()
     return result
   match j with
