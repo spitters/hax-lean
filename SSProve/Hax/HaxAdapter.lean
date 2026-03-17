@@ -1636,49 +1636,514 @@ partial def parseHaxFileValidated (j : Json) : Except String (ImpExpr × List St
   let warnings := validateExtraction expr
   return (expr, warnings)
 
-/-- Parse a hax expression and also extract the type, returning a TExpr. -/
+/-- Extract the type from a hax Decorated JSON node's `ty` field. -/
+private def extractNodeType (j : Json) : ImpType :=
+  match j.getObjVal? "ty" with
+  | .ok tyJ => parseHaxType tyJ
+  | _ => .unknown
+
+/-- Parse a hax `Decorated<ExprKind>` JSON directly into a `TExpr`,
+    preserving the type annotation from every JSON node's `ty` field.
+    This is the principled typed extraction: every subexpression carries
+    its Rust type, eliminating the need for heuristic type recovery. -/
 partial def parseHaxTExpr (j : Json) : Except String TExpr := do
-  let expr ← parseHaxExpr j
-  let ty := match j.getObjVal? "ty" with
-    | .ok tyJ => parseHaxType tyJ
-    | _ => .unknown
-  return TExpr.ofImpExpr expr ty
+  let ty := extractNodeType j
+  let contents ← j.getObjVal? "contents"
+  let kind ← parseTExprKind contents j
+  return TExpr.mk kind ty
 where
-  /-- Lift an ImpExpr to TExpr with a given type (applied to the root, unknown for sub-exprs). -/
-  TExpr.ofImpExpr (e : ImpExpr) (ty : ImpType) : TExpr :=
-    .mk (liftKind e) ty
-  liftKind (e : ImpExpr) : TExprKind :=
-    match e with
-    | .lit v => .lit v
-    | .var n => .var n
-    | .unitVal => .unitVal
-    | .continue_ => .continue_
-    | .letBind n v b => .letBind n (TExpr.ofImpExpr v .unknown) (TExpr.ofImpExpr b .unknown)
-    | .app f args => .app f (args.map fun a => TExpr.ofImpExpr a .unknown)
-    | .tuple es => .tuple (es.map fun e => TExpr.ofImpExpr e .unknown)
-    | .proj e i => .proj (TExpr.ofImpExpr e .unknown) i
-    | .ifThenElse c t e => .ifThenElse (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr t .unknown) (TExpr.ofImpExpr e .unknown)
-    | .match_ s arms => .match_ (TExpr.ofImpExpr s .unknown) (arms.map fun (p, b) => (p, TExpr.ofImpExpr b .unknown))
-    | .seq e1 e2 => .seq (TExpr.ofImpExpr e1 .unknown) (TExpr.ofImpExpr e2 .unknown)
-    | .borrow e => .borrow (TExpr.ofImpExpr e .unknown)
-    | .deref e => .deref (TExpr.ofImpExpr e .unknown)
-    | .assign n rhs => .assign n (TExpr.ofImpExpr rhs .unknown)
-    | .forLoop v lo hi body => .forLoop v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
-    | .forLoopRev v lo hi body => .forLoopRev v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
-    | .whileLoop c body => .whileLoop (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr body .unknown)
-    | .break_ none => .break_ none
-    | .break_ (some e) => .break_ (some (TExpr.ofImpExpr e .unknown))
-    | .earlyReturn e => .earlyReturn (TExpr.ofImpExpr e .unknown)
-    | .questionMark e => .questionMark (TExpr.ofImpExpr e .unknown)
-    | .forFold v lo hi body => .forFold v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
-    | .forFoldRev v lo hi body => .forFoldRev v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
-    | .whileFold c body => .whileFold (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr body .unknown)
-    | .forFoldReturn v lo hi body => .forFoldReturn v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
-    | .forFoldRevReturn v lo hi body => .forFoldRevReturn v (TExpr.ofImpExpr lo .unknown) (TExpr.ofImpExpr hi .unknown) (TExpr.ofImpExpr body .unknown)
-    | .whileFoldReturn c body => .whileFoldReturn (TExpr.ofImpExpr c .unknown) (TExpr.ofImpExpr body .unknown)
-    | .cfBreak e => .cfBreak (TExpr.ofImpExpr e .unknown)
-    | .cfContinue e => .cfContinue (TExpr.ofImpExpr e .unknown)
-    | .cfBreakContinue e => .cfBreakContinue (TExpr.ofImpExpr e .unknown)
+  /-- Parse a hax ExprKind into a TExprKind, recursing into sub-expressions
+      with full type preservation. `parentJ` is the enclosing Decorated node
+      (used to access `ty` for the current node). -/
+  parseTExprKind (j _parentJ : Json) : Except String TExprKind := do
+    -- Unit variants
+    match j with
+    | .str "Todo" => return .app "hax_unsupported_Todo" []
+    | _ => pure ()
+
+    if let .ok data := j.getObjVal? "VarRef" then
+      let name := match data.getObjVal? "id" with
+        | .ok id => extractLocalIdentName id
+        | _ => "unknown_var"
+      return .var name
+
+    else if let .ok data := j.getObjVal? "GlobalName" then
+      let name := match data.getObjVal? "item" with
+        | .ok item => extractItemDefIdName item "global"
+        | _ => "global"
+      return .var name
+
+    else if let .ok data := j.getObjVal? "Literal" then
+      return .lit (parseTLiteral data)
+
+    else if let .ok data := j.getObjVal? "If" then
+      let cond ← parseHaxTExpr (← data.getObjVal? "cond")
+      let thn ← parseHaxTExpr (← data.getObjVal? "then")
+      let els ← match data.getObjVal? "else_opt" with
+        | .ok (.null) => pure (TExpr.mk .unitVal .unit)
+        | .ok elsJ => parseHaxTExpr elsJ
+        | _ => pure (TExpr.mk .unitVal .unit)
+      return .ifThenElse cond thn els
+
+    else if let .ok data := j.getObjVal? "Call" then
+      let funName := extractCallName (← data.getObjVal? "fun")
+      let argsJ ← data.getObjValAs? (Array Json) "args"
+      let args ← argsJ.toList.mapM parseHaxTExpr
+      return .app funName args
+
+    else if let .ok data := j.getObjVal? "Let" then
+      let rhs ← parseHaxTExpr (← data.getObjVal? "expr")
+      let pat := match data.getObjVal? "pat" with
+        | .ok p => parseHaxPat p
+        | _ => .wildcard
+      match pat with
+      | .tuplePat pats =>
+        let tmpName := "_tup"
+        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
+          let name := match p with
+            | .varPat n => if n.startsWith "_" then "_" else n
+            | _ => "_"
+          (name, TExpr.mk (.proj (TExpr.mk (.var tmpName) rhs.ty) i) .unknown)
+        let inner := bindings.foldr (fun (n, proj) acc =>
+          TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
+        return .letBind tmpName rhs inner
+      | .varPat n =>
+        return .letBind n rhs (TExpr.mk .unitVal .unit)
+      | _ =>
+        return .letBind "_let" rhs (TExpr.mk .unitVal .unit)
+
+    else if let .ok data := j.getObjVal? "Block" then
+      let stmts ← match data.getObjValAs? (Array Json) "stmts" with
+        | .ok ss => ss.toList.mapM parseTStmt
+        | _ => pure []
+      let tail ← match data.getObjVal? "expr" with
+        | .ok (.null) => pure (TExpr.mk .unitVal .unit)
+        | .ok e => parseHaxTExpr e
+        | _ => pure (TExpr.mk .unitVal .unit)
+      return (tStmtsToSeq stmts tail).kind
+
+    else if let .ok data := j.getObjVal? "Match" then
+      let scrut ← parseHaxTExpr (← data.getObjVal? "scrutinee")
+      let armsJ ← data.getObjValAs? (Array Json) "arms"
+      let arms ← armsJ.toList.mapM parseTArm
+      return .match_ scrut arms
+
+    else if let .ok data := j.getObjVal? "Tuple" then
+      let fieldsJ ← data.getObjValAs? (Array Json) "fields"
+      let fields ← fieldsJ.toList.mapM parseHaxTExpr
+      if fields.isEmpty then return .unitVal
+      return .tuple fields
+
+    else if let .ok data := j.getObjVal? "Array" then
+      let fieldsJ ← data.getObjValAs? (Array Json) "fields"
+      let fields ← fieldsJ.toList.mapM parseHaxTExpr
+      return .app "array_lit" fields
+
+    else if let .ok data := j.getObjVal? "Assign" then
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      let rec stripD : TExpr → TExpr
+        | .mk (.deref e) _ => stripD e
+        | e => e
+      let lhs' := stripD lhs
+      let getVarName : TExpr → String
+        | .mk (.var n) _ => n
+        | .mk (.deref (.mk (.var n) _)) _ => n
+        | _ => "_assign"
+      match lhs'.kind with
+      | .var n => return .assign n rhs
+      | .app "index" [arr, idx] =>
+        let arrName := getVarName (stripD arr)
+        return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, rhs]) rhs.ty)
+      | _ => return .assign "_assign" rhs
+
+    else if let .ok data := j.getObjVal? "AssignOp" then
+      let rawOp := match data.getObjVal? "op" with
+        | .ok opJ => binOpName opJ
+        | _ => "op"
+      let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      let rec stripD2 : TExpr → TExpr
+        | .mk (.deref e) _ => stripD2 e
+        | e => e
+      let lhs' := stripD2 lhs
+      match lhs'.kind with
+      | .var n => return .assign n (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
+      | .app "index" [arr, idx] =>
+        let arrName := match (stripD2 arr).kind with
+          | .var n => n | _ => "_assign"
+        return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs, rhs]) lhs.ty]) arr.ty)
+      | _ => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
+
+    else if let .ok data := j.getObjVal? "Borrow" then
+      let arg ← parseHaxTExpr (← data.getObjVal? "arg")
+      return .borrow arg
+
+    else if let .ok data := j.getObjVal? "Deref" then
+      let arg ← parseHaxTExpr (← data.getObjVal? "arg")
+      return .deref arg
+
+    else if let .ok data := j.getObjVal? "Loop" then
+      let body ← parseHaxTExpr (← data.getObjVal? "body")
+      return .whileLoop (TExpr.mk (.lit (.bool true)) .bool) body
+
+    else if let .ok data := j.getObjVal? "Break" then
+      let value ← match data.getObjVal? "value" with
+        | .ok (.null) => pure none
+        | .ok v => return .break_ (some (← parseHaxTExpr v))
+        | _ => pure none
+      return .break_ value
+
+    else if let .ok _data := j.getObjVal? "Continue" then
+      return .continue_
+
+    else if let .ok data := j.getObjVal? "Return" then
+      let value ← match data.getObjVal? "value" with
+        | .ok (.null) => pure (TExpr.mk .unitVal .unit)
+        | .ok v => parseHaxTExpr v
+        | _ => pure (TExpr.mk .unitVal .unit)
+      return .earlyReturn value
+
+    else if let .ok data := j.getObjVal? "Binary" then
+      let op := match data.getObjVal? "op" with
+        | .ok opJ => binOpName opJ
+        | _ => "binop"
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      return .app op [lhs, rhs]
+
+    else if let .ok data := j.getObjVal? "LogicalOp" then
+      let op := match data.getObjVal? "op" with
+        | .ok (.str "And") => "&&"
+        | .ok (.str "Or") => "||"
+        | _ => "logical_op"
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      return .app op [lhs, rhs]
+
+    else if let .ok data := j.getObjVal? "Unary" then
+      let op := match data.getObjVal? "op" with
+        | .ok opJ => unOpName opJ
+        | _ => "unop"
+      let arg ← parseHaxTExpr (← data.getObjVal? "arg")
+      return .app op [arg]
+
+    else if let .ok data := j.getObjVal? "Field" then
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let fieldName := match data.getObjVal? "field" with
+        | .ok fj => extractDefIdName fj
+        | _ => "field"
+      return .app ("." ++ fieldName) [lhs]
+
+    else if let .ok data := j.getObjVal? "TupleField" then
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let idx := match data.getObjValAs? Nat "field" with
+        | .ok n => n
+        | _ => 0
+      return .proj lhs idx
+
+    else if let .ok data := j.getObjVal? "Index" then
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let index ← parseHaxTExpr (← data.getObjVal? "index")
+      return .app "index" [lhs, index]
+
+    else if let .ok data := j.getObjVal? "Cast" then
+      let source ← parseHaxTExpr (← data.getObjVal? "source")
+      return .app "cast" [source]
+
+    else if let .ok data := j.getObjVal? "Use" then
+      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+
+    else if let .ok data := j.getObjVal? "NeverToAny" then
+      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+
+    else if let .ok data := j.getObjVal? "Box" then
+      return (← parseHaxTExpr (← data.getObjVal? "value")).kind
+
+    else if let .ok data := j.getObjVal? "Adt" then
+      parseTAdtExpr data
+
+    else if let .ok data := j.getObjVal? "Closure" then
+      return (← parseHaxTExpr (← data.getObjVal? "body")).kind
+
+    else if let .ok data := j.getObjVal? "Repeat" then
+      let value ← parseHaxTExpr (← data.getObjVal? "value")
+      let count ← match data.getObjVal? "count" with
+        | .ok countJ => parseHaxTExpr countJ
+        | _ => pure (TExpr.mk (.lit (.int 0)) .int)
+      return .app "repeat" [value, count]
+
+    else if let .ok data := j.getObjVal? "PlaceTypeAscription" then
+      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+
+    else if let .ok data := j.getObjVal? "ValueTypeAscription" then
+      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+
+    else if let .ok data := j.getObjVal? "PointerCoercion" then
+      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+
+    else if let .ok _data := j.getObjVal? "ConstBlock" then
+      return .app "const_block" []
+
+    else if let .ok data := j.getObjVal? "NamedConst" then
+      let name := match data.getObjVal? "item" with
+        | .ok item => extractItemDefIdName item "const"
+        | _ => "const"
+      return .var name
+
+    else if let .ok _data := j.getObjVal? "ConstParam" then
+      return .var "const_param"
+
+    else if let .ok data := j.getObjVal? "ConstRef" then
+      let name := match data.getObjVal? "id" with
+        | .ok id => match id.getObjValAs? String "name" with
+          | .ok n => n
+          | _ => "const_ref"
+        | _ => "const_ref"
+      return .var name
+
+    else if let .ok data := j.getObjVal? "StaticRef" then
+      let name := match data.getObjVal? "def_id" with
+        | .ok defId => extractDefIdName defId
+        | _ => "static"
+      return .var name
+
+    else if let .ok data := j.getObjVal? "Yield" then
+      let value ← parseHaxTExpr (← data.getObjVal? "value")
+      return .app "yield" [value]
+
+    else if let .ok s := j.getObjVal? "Todo" then
+      let msg := match s with
+        | .str m => m
+        | _ => "todo"
+      return .app ("todo:" ++ msg) []
+
+    else
+      throw s!"unknown hax ExprKind: {j.pretty}"
+
+  /-- Parse a hax literal into ImpLit. -/
+  parseTLiteral (data : Json) : ImpLit :=
+    let neg := match data.getObjValAs? Bool "neg" with
+      | .ok true => true
+      | _ => false
+    let litKind := match data.getObjVal? "lit" with
+      | .ok spanned => match spanned.getObjVal? "node" with
+        | .ok n => n
+        | _ => spanned
+      | _ => data
+    if let .ok b := litKind.getObjValAs? Bool "Bool" then .bool b
+    else if let .ok intData := litKind.getObjVal? "Int" then
+      let nArr := match intData with
+        | .arr a => some a
+        | _ =>
+          let tryUint := intData.getObjVal? "Uint"
+          let tryInt := intData.getObjVal? "Int"
+          match (tryUint.toOption.orElse fun _ => tryInt.toOption) with
+          | some (.arr a) => some a
+          | _ => none
+      match nArr with
+      | some #[nJ, _] =>
+        let n := match nJ.getStr? with
+          | .ok s => s.toInt?.getD 0
+          | _ => match nJ.getNat? with
+            | .ok n => n
+            | _ => 0
+        .int (if neg then -n else n)
+      | _ => .int 0
+    else if let .ok _bsData := litKind.getObjVal? "ByteStr" then
+      -- ByteStr not representable as single ImpLit; use int 0 as placeholder
+      .int 0
+    else .unit  -- char, float, etc.
+
+  /-- Parse a hax Stmt into TExpr. -/
+  parseTStmt (j : Json) : Except String TExpr := do
+    let kind ← j.getObjVal? "kind"
+    if let .ok data := kind.getObjVal? "Expr" then
+      match data.getObjVal? "expr" with
+      | .ok e => parseHaxTExpr e
+      | _ => return TExpr.mk .unitVal .unit
+    else if let .ok data := kind.getObjVal? "Let" then
+      let pat := match data.getObjVal? "pattern" with
+        | .ok p => parseHaxPat p
+        | _ => .wildcard
+      let init ← match data.getObjVal? "initializer" with
+        | .ok (.null) => pure (TExpr.mk .unitVal .unit)
+        | .ok e => parseHaxTExpr e
+        | _ => pure (TExpr.mk .unitVal .unit)
+      match pat with
+      | .tuplePat pats =>
+        let tmpName := "_tup"
+        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
+          let name := match p with
+            | .varPat n => if n.startsWith "_" then "_" else n
+            | _ => "_"
+          (name, TExpr.mk (.proj (TExpr.mk (.var tmpName) init.ty) i) .unknown)
+        let inner := bindings.foldr (fun (n, proj) acc =>
+          TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
+        return TExpr.mk (.letBind tmpName init inner) .unknown
+      | .varPat n =>
+        return TExpr.mk (.letBind n init (TExpr.mk .unitVal .unit)) .unknown
+      | _ =>
+        return TExpr.mk (.letBind "_let" init (TExpr.mk .unitVal .unit)) .unknown
+    else
+      return TExpr.mk .unitVal .unit
+
+  /-- Replace the deepest unitVal in a TExpr letBind chain with a continuation. -/
+  tReplaceDeepestUnit (e : TExpr) (cont : TExpr) : TExpr :=
+    match e.kind with
+    | .letBind n v (.mk .unitVal _) => TExpr.mk (.letBind n v cont) e.ty
+    | .letBind n v body => TExpr.mk (.letBind n v (tReplaceDeepestUnit body cont)) e.ty
+    | _ => TExpr.mk (.seq e cont) cont.ty
+
+  /-- Convert a list of TExpr statements into nested seq/letBind. -/
+  tStmtsToSeq (stmts : List TExpr) (tail : TExpr) : TExpr :=
+    match stmts with
+    | [] => tail
+    | [s] => tReplaceDeepestUnit s tail
+    | s :: rest => tReplaceDeepestUnit s (tStmtsToSeq rest tail)
+
+  /-- Parse a hax Arm into (ImpPat, TExpr). -/
+  parseTArm (j : Json) : Except String (ImpPat × TExpr) := do
+    let pat := match j.getObjVal? "pattern" with
+      | .ok p => parseHaxPat p
+      | _ => .wildcard
+    let body ← match j.getObjVal? "body" with
+      | .ok b => parseHaxTExpr b
+      | _ => pure (TExpr.mk .unitVal .unit)
+    return (pat, body)
+
+  /-- Parse a hax AdtExpr into TExprKind. -/
+  parseTAdtExpr (j : Json) : Except String TExprKind := do
+    let name := match j.getObjVal? "info" with
+      | .ok info => match info.getObjVal? "variant" with
+        | .ok variantDefId => extractDefIdName variantDefId
+        | _ => match info.getObjVal? "type_namespace" with
+          | .ok nsDefId => extractDefIdName nsDefId
+          | _ => match info.getObjValAs? String "variant_name" with
+            | .ok n => n
+            | _ => "Adt"
+      | _ => "Adt"
+    let fields ← match j.getObjValAs? (Array Json) "fields" with
+      | .ok fs => fs.toList.mapM fun fj =>
+        match fj.getObjVal? "value" with
+        | .ok v => parseHaxTExpr v
+        | _ => pure (TExpr.mk .unitVal .unit)
+      | _ => pure []
+    return .app name fields
+
+/-- Reconstruct for-loops in a TExpr (typed version of `reconstructForLoops`).
+    Since the loop pattern recognition is structural, we erase to ImpExpr,
+    apply the untyped pass, then re-attach the root type.
+    Inner types are lost (set to .unknown) but the root type is preserved. -/
+def reconstructForLoopsTExpr (te : TExpr) : TExpr :=
+  let imp := te.erase
+  let imp' := reconstructForLoops imp
+  TExpr.ofImpExpr imp'
+
+/-- Normalize compound assignment ops in a TExpr (typed version). -/
+def normalizeAssignOpsTExpr (te : TExpr) : TExpr :=
+  let imp := te.erase
+  let imp' := normalizeAssignOps imp
+  TExpr.ofImpExpr imp'
+
+/-- Parse a single hax Fn item into a typed TExpr with full type information.
+    Returns `some (name, texpr, fnTypeInfo)` for Fn items. -/
+partial def parseHaxItemTExpr (j : Json) :
+    Except String (Option (String × TExpr × FnTypeInfo)) := do
+  let kind ← j.getObjVal? "kind"
+  if let .ok fnData := kind.getObjVal? "Fn" then
+    let name := match fnData.getObjVal? "ident" with
+      | .ok ident => extractFnName ident
+      | _ => "unknown_fn"
+    let def_ := match fnData.getObjVal? "def" with
+      | .ok d => some d
+      | _ => none
+    let paramNames := match def_ with
+      | some d => match d.getObjValAs? (Array Json) "params" with
+        | .ok params => extractParamNames params
+        | _ => []
+      | none => []
+    let paramTypes := match def_ with
+      | some d => match d.getObjValAs? (Array Json) "params" with
+        | .ok params => extractParamTypes params
+        | _ => []
+      | none => []
+    let retType := match def_ with
+      | some d => match d.getObjVal? "ret" with
+        | .ok retJ => parseHaxType retJ
+        | _ => .unknown
+      | none => .unknown
+    let body ← match def_ with
+      | some d => parseHaxTExpr (← d.getObjVal? "body")
+      | none => throw s!"Fn item '{name}' missing def.body"
+    -- Apply for-loop reconstruction and assign normalization (via erase/lift roundtrip)
+    let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
+    -- Wrap body in identity let-bindings for parameters
+    let wrapped := if paramNames.isEmpty then processed
+      else paramNames.foldr (fun p acc =>
+        let paramTy := match paramTypes.find? (·.1 == p) with
+          | some (_, ty) => ty | none => .unknown
+        TExpr.mk (.letBind p (TExpr.mk (.var p) paramTy) acc) processed.ty) processed
+    return some (name, wrapped, ⟨paramTypes, retType⟩)
+  else if let .ok (.arr constData) := kind.getObjVal? "Const" then
+    let name := match constData.toList with
+      | (.arr ident) :: _ => extractFnName (.arr ident)
+      | _ => "unknown_const"
+    let body ← match constData.toList[3]? with
+      | some bodyJ => parseHaxTExpr bodyJ
+      | none => throw s!"Const item '{name}' missing body"
+    let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
+    return some (name, processed, ⟨[], .unknown⟩)
+  else return none
+
+/-- Parse a full hax export file into typed TExprs.
+    Returns (combined TExpr as ImpExpr for backward compat, fnTypes, and the typed defs list). -/
+partial def parseHaxFileWithTExpr (j : Json) :
+    Except String (ImpExpr × List (String × FnTypeInfo) × List (String × TExpr)) := do
+  let rec parseItemsTExpr (items : List Json) :
+      Except String (List (String × TExpr × FnTypeInfo)) := do
+    let mut result : List (String × TExpr × FnTypeInfo) := []
+    for item in items do
+      match ← parseHaxItemTExpr item with
+      | some r => result := result ++ [r]
+      | none =>
+        let kind := (item.getObjVal? "kind").toOption
+        match kind with
+        | some kindJ =>
+          match kindJ.getObjVal? "Mod" with
+          | .ok (.arr modData) =>
+            match modData.toList[1]? with
+            | some subJ =>
+              match subJ with
+              | .arr subItems =>
+                let sub ← parseItemsTExpr subItems.toList
+                result := result ++ sub
+              | _ => pure ()
+            | _ => pure ()
+          | .ok modData =>
+            match modData.getObjValAs? (Array Json) "items" with
+            | .ok subItems =>
+              let sub ← parseItemsTExpr subItems.toList
+              result := result ++ sub
+            | _ => pure ()
+          | _ => pure ()
+        | none => pure ()
+    return result
+  match j with
+  | .arr items =>
+    let parsed ← parseItemsTExpr items.toList
+    match parsed with
+    | [] => throw "no functions or constants found in hax export"
+    | _ =>
+      let expr := parsed.foldr (fun (name, te, _) acc => .letBind name te.erase acc) .unitVal
+      let fnTypes := parsed.map fun (name, _, ti) => (name, ti)
+      let texprs := parsed.map fun (name, te, _) => (name, te)
+      return (expr, fnTypes, texprs)
+  | _ =>
+    let te ← parseHaxTExpr j
+    let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr te)
+    return (processed.erase, [], [("expr", processed)])
 
 /-! ## Struct Definition Extraction
 
