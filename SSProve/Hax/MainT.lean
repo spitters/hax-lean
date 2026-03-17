@@ -39,9 +39,10 @@ open SSProve.Hax
 open Lean (toJson Json)
 
 /-- Parse hax JSON input into typed TExprs.
-    Returns the untyped ImpExpr (for backward compat), fnTypes, and typed defs. -/
+    Returns (untyped ImpExpr, fnTypes, raw TExprs with hax types, processed TExprs for pipeline). -/
 def parseHaxInputTyped (input : String) :
-    IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo) × List (String × TExpr)) := do
+    IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo)
+        × List (String × TExpr) × List (String × TExpr)) := do
   let json ← IO.ofExcept (Json.parse input)
   IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
 
@@ -58,19 +59,24 @@ def main (args : List String) : IO UInt32 := do
   let useTypedPath := opts.haxFormat && opts.emitMode == "certified"
 
   if useTypedPath then
-    let (expr, fnTypes, tdefs) ← parseHaxInputTyped input
+    let (_expr, fnTypes, rawTdefs, procTdefs) ← parseHaxInputTyped input
     let structMeta ← parseHaxStructMeta input
 
     -- Filter if requested
-    let tdefs := match opts.filterFns with
-      | some fns => tdefs.filter fun (p : String × TExpr) => fns.any (fun f => p.1.endsWith f || p.1 == f)
-      | none => tdefs
+    let rawTdefs := match opts.filterFns with
+      | some fns => rawTdefs.filter fun (p : String × TExpr) =>
+          fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | none => rawTdefs
+    let procTdefs := match opts.filterFns with
+      | some fns => procTdefs.filter fun (p : String × TExpr) =>
+          fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | none => procTdefs
 
-    -- Apply typed pipeline to each TExpr
-    let tdefs := tdefs.map fun (n, te) => (n, tPipeline te)
+    -- Apply typed pipeline to processed TExprs (for rendering)
+    let postPipelineTdefs := procTdefs.map fun (n, te) => (n, tPipeline te)
 
     -- Validate via erasure
-    let erased := tdefs.map fun (n, te) => (n, te.erase)
+    let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
     let allWarnings := erased.foldl (fun acc (_, e) =>
       acc ++ HaxAdapter.validateExtraction e) ([] : List String)
     if !allWarnings.isEmpty then
@@ -79,7 +85,9 @@ def main (args : List String) : IO UInt32 := do
       IO.eprintln s!"Total warnings: {allWarnings.length}"
 
     -- Generate typed certified output
-    IO.println (toLeanCertifiedFileTyped tdefs opts.name structMeta fnTypes)
+    -- rawTdefs has hax types preserved (for deps class + param annotations)
+    -- postPipelineTdefs has pipeline-transformed bodies (for rendering)
+    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs)
     return 0
 
   -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===

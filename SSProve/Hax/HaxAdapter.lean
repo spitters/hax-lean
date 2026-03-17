@@ -2048,9 +2048,12 @@ def normalizeAssignOpsTExpr (te : TExpr) : TExpr :=
   TExpr.ofImpExpr imp'
 
 /-- Parse a single hax Fn item into a typed TExpr with full type information.
-    Returns `some (name, texpr, fnTypeInfo)` for Fn items. -/
+    Returns `some (name, rawTExpr, processedTExpr, fnTypeInfo)` for Fn items.
+    `rawTExpr` preserves types from hax JSON (for type extraction).
+    `processedTExpr` has for-loop reconstruction and assign normalization applied
+    (types may be lost due to ImpExpr roundtrip, used for pipeline/rendering). -/
 partial def parseHaxItemTExpr (j : Json) :
-    Except String (Option (String × TExpr × FnTypeInfo)) := do
+    Except String (Option (String × TExpr × TExpr × FnTypeInfo)) := do
   let kind ← j.getObjVal? "kind"
   if let .ok fnData := kind.getObjVal? "Fn" then
     let name := match fnData.getObjVal? "ident" with
@@ -2077,15 +2080,21 @@ partial def parseHaxItemTExpr (j : Json) :
     let body ← match def_ with
       | some d => parseHaxTExpr (← d.getObjVal? "body")
       | none => throw s!"Fn item '{name}' missing def.body"
+    -- Save the raw TExpr (with full types from hax JSON) for type extraction
+    let rawWrapped := if paramNames.isEmpty then body
+      else paramNames.foldr (fun p acc =>
+        let paramTy := match paramTypes.find? (·.1 == p) with
+          | some (_, ty) => ty | none => .unknown
+        TExpr.mk (.letBind p (TExpr.mk (.var p) paramTy) acc) body.ty) body
     -- Apply for-loop reconstruction and assign normalization (via erase/lift roundtrip)
+    -- This loses types but produces correct ImpExpr structure for the pipeline
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
-    -- Wrap body in identity let-bindings for parameters
-    let wrapped := if paramNames.isEmpty then processed
+    let procWrapped := if paramNames.isEmpty then processed
       else paramNames.foldr (fun p acc =>
         let paramTy := match paramTypes.find? (·.1 == p) with
           | some (_, ty) => ty | none => .unknown
         TExpr.mk (.letBind p (TExpr.mk (.var p) paramTy) acc) processed.ty) processed
-    return some (name, wrapped, ⟨paramTypes, retType⟩)
+    return some (name, rawWrapped, procWrapped, ⟨paramTypes, retType⟩)
   else if let .ok (.arr constData) := kind.getObjVal? "Const" then
     let name := match constData.toList with
       | (.arr ident) :: _ => extractFnName (.arr ident)
@@ -2094,16 +2103,18 @@ partial def parseHaxItemTExpr (j : Json) :
       | some bodyJ => parseHaxTExpr bodyJ
       | none => throw s!"Const item '{name}' missing body"
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
-    return some (name, processed, ⟨[], .unknown⟩)
+    return some (name, body, processed, ⟨[], .unknown⟩)
   else return none
 
 /-- Parse a full hax export file into typed TExprs.
-    Returns (combined TExpr as ImpExpr for backward compat, fnTypes, and the typed defs list). -/
+    Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
+    processed typed defs (for pipeline/rendering)). -/
 partial def parseHaxFileWithTExpr (j : Json) :
-    Except String (ImpExpr × List (String × FnTypeInfo) × List (String × TExpr)) := do
+    Except String (ImpExpr × List (String × FnTypeInfo)
+                   × List (String × TExpr) × List (String × TExpr)) := do
   let rec parseItemsTExpr (items : List Json) :
-      Except String (List (String × TExpr × FnTypeInfo)) := do
-    let mut result : List (String × TExpr × FnTypeInfo) := []
+      Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
+    let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
     for item in items do
       match ← parseHaxItemTExpr item with
       | some r => result := result ++ [r]
@@ -2136,14 +2147,16 @@ partial def parseHaxFileWithTExpr (j : Json) :
     match parsed with
     | [] => throw "no functions or constants found in hax export"
     | _ =>
-      let expr := parsed.foldr (fun (name, te, _) acc => .letBind name te.erase acc) .unitVal
-      let fnTypes := parsed.map fun (name, _, ti) => (name, ti)
-      let texprs := parsed.map fun (name, te, _) => (name, te)
-      return (expr, fnTypes, texprs)
+      let expr := parsed.foldr (fun (name, _, procTe, _) acc =>
+        .letBind name procTe.erase acc) .unitVal
+      let fnTypes := parsed.map fun (name, _, _, ti) => (name, ti)
+      let rawTexprs := parsed.map fun (name, rawTe, _, _) => (name, rawTe)
+      let procTexprs := parsed.map fun (name, _, procTe, _) => (name, procTe)
+      return (expr, fnTypes, rawTexprs, procTexprs)
   | _ =>
     let te ← parseHaxTExpr j
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr te)
-    return (processed.erase, [], [("expr", processed)])
+    return (processed.erase, [], [("expr", te)], [("expr", processed)])
 
 /-! ## Struct Definition Extraction
 
