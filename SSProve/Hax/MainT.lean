@@ -4,16 +4,46 @@ Released under Apache 2.0 license as described in the file LICENSE.
 Authors: SSProve-Lean4 Contributors
 -/
 import SSProve.Hax.CLI
+import SSProve.Hax.PrettyPrintT
+import SSProve.Hax.TPipeline
 
 /-!
-# haxpipeT CLI — now identical to haxpipe
+# haxpipeT CLI — Typed Extraction Pipeline
 
-The typed passes from PrettyPrintT.lean have been merged into PrettyPrint.lean.
-Both `haxpipe` and `haxpipeT` now produce the same output.
+Uses `parseHaxTExpr` to preserve types from hax JSON at every subexpression,
+then routes through `tPipeline` (typed verified pipeline) and `toLeanCertifiedFileTyped`
+(type-directed code generation).
+
+## Architecture
+
+```
+hax JSON → parseHaxFileWithTExpr → List (name × TExpr)
+                                       │
+                              ┌────────┘
+                              ↓
+                    tPipeline (each TExpr)
+                              │
+                              ↓
+              toLeanCertifiedFileTyped → Lean source
+```
+
+For `--emit-certified`, the typed path uses TExpr types for:
+- Parameter type annotations (from TExpr.ty on param bindings)
+- Deps class field signatures (from call-site TExpr.ty)
+- No heuristic type recovery needed
+
+Other emit modes (`lean`, `json`, `bridge`) fall back to the untyped path.
 -/
 
 open SSProve.Hax
-open Lean (toJson)
+open Lean (toJson Json)
+
+/-- Parse hax JSON input into typed TExprs.
+    Returns the untyped ImpExpr (for backward compat), fnTypes, and typed defs. -/
+def parseHaxInputTyped (input : String) :
+    IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo) × List (String × TExpr)) := do
+  let json ← IO.ofExcept (Json.parse input)
+  IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
 
 def main (args : List String) : IO UInt32 := do
   let opts := parseArgs args
@@ -24,6 +54,35 @@ def main (args : List String) : IO UInt32 := do
 
   let input ← readInput opts.inputFile
 
+  -- === TYPED PATH: parse into TExpr with full type preservation ===
+  let useTypedPath := opts.haxFormat && opts.emitMode == "certified"
+
+  if useTypedPath then
+    let (expr, fnTypes, tdefs) ← parseHaxInputTyped input
+    let structMeta ← parseHaxStructMeta input
+
+    -- Filter if requested
+    let tdefs := match opts.filterFns with
+      | some fns => tdefs.filter fun (p : String × TExpr) => fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | none => tdefs
+
+    -- Apply typed pipeline to each TExpr
+    let tdefs := tdefs.map fun (n, te) => (n, tPipeline te)
+
+    -- Validate via erasure
+    let erased := tdefs.map fun (n, te) => (n, te.erase)
+    let allWarnings := erased.foldl (fun acc (_, e) =>
+      acc ++ HaxAdapter.validateExtraction e) ([] : List String)
+    if !allWarnings.isEmpty then
+      for w in allWarnings do
+        IO.eprintln s!"WARNING: {w}"
+      IO.eprintln s!"Total warnings: {allWarnings.length}"
+
+    -- Generate typed certified output
+    IO.println (toLeanCertifiedFileTyped tdefs opts.name structMeta fnTypes)
+    return 0
+
+  -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===
   let (expr, fnTypes, callRetTypes, callSigs, varRefTypes) ←
     if opts.haxFormat && (opts.emitMode == "certified" || opts.emitMode == "debug-meta") then
       parseHaxInputWithTypes input

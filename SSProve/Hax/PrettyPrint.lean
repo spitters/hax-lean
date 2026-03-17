@@ -26,7 +26,7 @@ private def indent (n : Nat) : String :=
   String.ofList (List.replicate (2 * n) ' ')
 
 /-- Sanitize a name for Lean 4: wrap in French quotes if needed. -/
-private def sanitizeName (n : String) : String :=
+def sanitizeName (n : String) : String :=
   -- Lean keywords and names with special chars need quoting
   if n.isEmpty then "«»"
   else if n.any fun c => !c.isAlphanum && c != '_' && c != '\'' then s!"«{n}»"
@@ -782,7 +782,7 @@ private partial def hasGuardRecGo (fname : String) : ImpExpr → Bool
 /-- Check if a function body contains the early-return guard pattern:
     seq (ifThenElse cond <cfBreak> <unitVal/cfContinue>) rest
     AND the function calls itself (self-recursive). -/
-private def hasGuardRecursion (fname : String) (e : ImpExpr) : Bool :=
+def hasGuardRecursion (fname : String) (e : ImpExpr) : Bool :=
   hasGuardRecGo fname e
 
 /-- Is this expression simple enough to not need parentheses as an argument? -/
@@ -1874,7 +1874,7 @@ private def isRuntimeName (f : String) : Bool :=
 /-- Check if a name is ALWAYS a builtin runtime op and NEVER a cross-crate dep.
     This is the exclusion list from `generatePreamble`, factored out for reuse.
     Names like `mul` are NOT here because they can be cross-crate deps. -/
-private def isAlwaysBuiltin (f : String) : Bool :=
+def isAlwaysBuiltin (f : String) : Bool :=
   match f with
   | "index" | "array_update" | "repeat" | "array_lit" | "push" | "len"
   | "copy_from_slice" | "extend_from_slice" | "truncate"
@@ -1897,12 +1897,12 @@ private def isAlwaysBuiltin (f : String) : Bool :=
   | _ => false
 
 /-- Check if a name looks like a struct field projection (starts with "." or is "Struct.field"). -/
-private def isFieldProjection (f : String) : Bool :=
+def isFieldProjection (f : String) : Bool :=
   f.startsWith "." || f.contains '.'
 
 /-- Collect free variables: `.var` names not bound by enclosing `letBind`.
     Returns (name, 0) pairs so they can be merged with `collectAppCalls` results. -/
-private partial def collectFreeVars (bound : List String := []) : ImpExpr → List String
+partial def collectFreeVars (bound : List String := []) : ImpExpr → List String
   | .var n => if bound.contains n then [] else [n]
   | .app _ args => args.foldl (fun acc a => acc ++ collectFreeVars bound a) []
   | .letBind n (.var v) body =>
@@ -1937,7 +1937,7 @@ private partial def collectFreeVars (bound : List String := []) : ImpExpr → Li
   | _ => []
 
 /-- Collect all (function_name, arg_count) pairs from app calls in an expression. -/
-private partial def collectAppCalls : ImpExpr → List (String × Nat)
+partial def collectAppCalls : ImpExpr → List (String × Nat)
   | .app f args => (f, args.length) :: args.foldl (fun acc a => acc ++ collectAppCalls a) []
   | .letBind _ v body => collectAppCalls v ++ collectAppCalls body
   | .seq a b => collectAppCalls a ++ collectAppCalls b
@@ -1958,7 +1958,7 @@ private partial def collectAppCalls : ImpExpr → List (String × Nat)
 /-- Detect the return tuple arity of a function by analyzing its call sites.
     Pattern: letBind "_tup" (.app f args) (letBind "a" (.proj (.var "_tup") 0) ...)
     Returns max number of projections seen on the result. -/
-private partial def detectReturnArity (fname : String) : ImpExpr → Nat
+partial def detectReturnArity (fname : String) : ImpExpr → Nat
   | .letBind n (.app f _) body =>
     if f == fname then
       -- Count how many projections of `n` follow
@@ -2816,7 +2816,7 @@ private partial def resolveStructType (structMeta : StructMeta) (name : String)
 /-- Resolve a type tag to a Lean type string.
     When `impTy` is available (not `.unknown`), uses the full type info for precision.
     Otherwise falls back to heuristic: "int" → Int, everything else → Array Int. -/
-private def typeTagToLean (_structs : StructMeta) (tag : String)
+def typeTagToLean (_structs : StructMeta) (tag : String)
     (impTy : ImpType := .unknown)
     (structLookup : String → Option String := fun _ => none) : String :=
   match impTy with
@@ -2825,7 +2825,7 @@ private def typeTagToLean (_structs : StructMeta) (tag : String)
 
 /-- Generate the tuple type for a struct given its fields.
     Composite field types (containing ×) are parenthesized to preserve associativity. -/
-private def structTupleType (structs : StructMeta)
+def structTupleType (structs : StructMeta)
     (fields : List (String × String × ImpType))
     (structLookup : String → Option String := fun _ => none) : String :=
   if fields.length == 0 then "Array Int"
@@ -2841,7 +2841,7 @@ private def structTupleType (structs : StructMeta)
 
 /-- Generate the projection path for field index i out of N fields.
     0-indexed. Right-associated tuples: (A × B × C) = (A × (B × C)). -/
-private def projPath (i n : Nat) : String :=
+def projPath (i n : Nat) : String :=
   if n <= 1 then ""
   else if i == 0 then ".1"
   else if n == 2 then ".2"
@@ -3323,7 +3323,7 @@ def detectFieldCollisions (structMeta : StructMeta) : List String :=
 /-- Post-process generated code: replace `Hax.{dep}` with bare `{dep}` for dependency names.
     This is needed because `runtimeName` maps names like `mul` to `Hax.mul`, but when
     `mul` is a cross-crate dependency (exported by the Deps class), we need the bare name. -/
-private def fixDepReferences (code : String) (depNames : List String) : String :=
+def fixDepReferences (code : String) (depNames : List String) : String :=
   depNames.foldl (fun acc dep =>
     -- Replace "Hax.{dep}" with "{dep}" only when followed by a word boundary
     -- (space, newline, paren, comma, etc. — NOT by a letter/digit/underscore/dot)
@@ -3336,7 +3336,7 @@ private def fixDepReferences (code : String) (depNames : List String) : String :
     ) code
 
 /-- Find field names that appear in multiple structs. -/
-private def findAmbiguousFields (structMeta : StructMeta) : List String :=
+def findAmbiguousFields (structMeta : StructMeta) : List String :=
   let allFields := structMeta.foldl (fun acc (_, fields) =>
     acc ++ fields.map (·.1)) []
   -- A field is ambiguous if it appears more than once
@@ -3507,7 +3507,7 @@ where
 
 /-- Qualify ambiguous projections in an ImpExpr: `.field` → `StructName.field`
     when the argument is known to be of a specific struct type. -/
-private partial def qualifyProjections (structMeta : StructMeta)
+partial def qualifyProjections (structMeta : StructMeta)
     (ambiguous : List String) (ctx : ImpExpr) : ImpExpr → ImpExpr
   | .app f [arg] =>
     if f.startsWith "." then
@@ -3575,7 +3575,7 @@ private partial def qualifyProjections (structMeta : StructMeta)
   | e => e
 
 /-- Rewrite all occurrences of `.app oldName args` to `.app newName args` in an ImpExpr. -/
-private partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
+partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
   | .app f args =>
     let f' := if f == oldName then newName else f
     .app f' (args.map (rewriteAppName oldName newName))
@@ -3617,7 +3617,7 @@ private partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpE
     When multiple structs match the arity, uses context (struct projections applied to
     the result) to disambiguate. Also replaces bare `.var "new"` refs that have
     a qualifying struct context. -/
-private partial def rewriteNewToStructCtor (structMeta : StructMeta) : ImpExpr → ImpExpr
+partial def rewriteNewToStructCtor (structMeta : StructMeta) : ImpExpr → ImpExpr
   | .app "new" args =>
     if args.isEmpty then .app "new" args  -- Vec::new() → keep as "new" → "#[]" (unless overridden by letBind context)
     else
@@ -3912,7 +3912,7 @@ where
     `arityMap` maps names to their return arities:
     - struct names → struct field count
     - dep names → return tuple arity (from callRetTypes or heuristic) -/
-private partial def fixProjectionPaths (arityMap : List (String × Nat)) : ImpExpr → ImpExpr
+partial def fixProjectionPaths (arityMap : List (String × Nat)) : ImpExpr → ImpExpr
   | .letBind n (.proj e idx) body =>
     -- DON'T fix projections on variables — they are part of tuple destructuring
     -- patterns handled by `extractTupleDestr` in `toLean`.
@@ -4362,7 +4362,7 @@ private def findAmbiguousFieldsT (structMeta : StructMeta) : List String :=
   dupes.eraseDups
 
 /-- Apply the three type-aware passes from PrettyPrintT as pre-processing steps. -/
-private def applyTypedPasses (defs : List (String × ImpExpr))
+def applyTypedPasses (defs : List (String × ImpExpr))
     (structMeta : StructMeta)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (callSigs : List (String × HaxAdapter.FnTypeInfo)) :
