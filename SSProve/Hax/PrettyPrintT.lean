@@ -356,8 +356,34 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let arityMap := (structArities ++ depRetArities ++ usageArities).eraseDups
   let defs := if arityMap.isEmpty then defs
     else defs.map fun (n, e) => (n, fixProjectionPaths arityMap e)
-  -- Generate preamble using typed information from RAW TExprs (types preserved)
-  let (preamble, projConflicts) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes
+  -- Generate preamble: struct definitions use post-passes defs (for qualified names),
+  -- type information comes from raw TExprs. We pass defs for structural analysis
+  -- and rawTdefs for type extraction.
+  -- But generatePreambleTyped expects TExprs for type info. Since the defs have been
+  -- qualified, we need the preamble to match. Use the untyped generatePreamble which
+  -- already handles this correctly, augmented with types from rawTdefs.
+  -- Actually, the simplest approach: delegate struct+deps generation to the untyped
+  -- generatePreamble (which uses the post-passes defs and has all the qualification
+  -- logic), then override deps types from rawTdefs.
+  let callRetTypes := fnTypes.filterMap fun (n, ti) =>
+    if !ti.retType.isUnknown then some (n, ti.retType) else none
+  -- Collect call signatures from raw TExprs for typed deps generation
+  let rawCallSigs := rawTdefs.foldl (fun acc (_, te) =>
+    acc ++ collectTAppCalls te) ([] : List (String × Nat × List ImpType × ImpType))
+  -- Convert to FnTypeInfo for generatePreamble compatibility
+  let callSigs := rawCallSigs.foldl (fun (acc : List (String × HaxAdapter.FnTypeInfo)) (f, _n, argTys, retTy) =>
+    match acc.find? (·.1 == f) with
+    | some _ => acc  -- keep first
+    | none =>
+      let paramTypes := (argTys.zip (List.range argTys.length)).map fun (ty, i) => (s!"arg{i}", ty)
+      acc ++ [(f, ⟨paramTypes, retTy⟩)]) []
+  -- Collect var ref types from raw TExprs
+  let rawFreeVars := rawTdefs.foldl (fun acc (fname, te) =>
+    acc ++ collectTFreeVars [fname] te) ([] : List (String × ImpType))
+  let varRefTypes := rawFreeVars.foldl (fun (acc : List (String × ImpType)) (n, ty) =>
+    if acc.any (·.1 == n) then acc else acc ++ [(n, ty)]) []
+  -- Use the existing generatePreamble with typed info from raw TExprs
+  let (preamble, projConflicts) := generatePreamble defs moduleName structMeta fnTypes callRetTypes callSigs varRefTypes
   -- Rewrite function body projection references for conflicts
   let defs := if projConflicts.isEmpty then defs
     else defs.map fun (n, e) =>
