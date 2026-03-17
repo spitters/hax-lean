@@ -1674,7 +1674,29 @@ where
       return .var name
 
     else if let .ok data := j.getObjVal? "Literal" then
-      return .lit (parseTLiteral data)
+      -- ByteStr and Str can't be represented as ImpLit; handle before parseTLiteral
+      let litKind := match data.getObjVal? "lit" with
+        | .ok spanned => match spanned.getObjVal? "node" with
+          | .ok n => n
+          | _ => spanned
+        | _ => data
+      if let .ok bsData := litKind.getObjVal? "ByteStr" then
+        -- ByteStr: [[byte0, byte1, ...], "Cooked"] → array_lit [bytes]
+        match bsData with
+        | .arr #[.arr bytes, _] =>
+          let byteExprs : List TExpr := bytes.toList.filterMap fun b =>
+            match b.getNat? with
+            | .ok n => some (TExpr.mk (.lit (.int n)) (.uint .w8))
+            | _ => none
+          return .app "array_lit" byteExprs
+        | _ => return .app "array_lit" []
+      else if let .ok _strData := litKind.getObjVal? "Str" then
+        -- Str: string literal → opaque literal placeholder
+        return .app "literal" []
+      else if let .ok byteVal := litKind.getObjValAs? Nat "Byte" then
+        -- Byte: single byte b'X' → integer literal (byte value)
+        return .lit (.int byteVal)
+      else return .lit (parseTLiteral data)
 
     else if let .ok data := j.getObjVal? "If" then
       let cond ← parseHaxTExpr (← data.getObjVal? "cond")
@@ -1952,9 +1974,9 @@ where
         .int (if neg then -n else n)
       | _ => .int 0
     else if let .ok _bsData := litKind.getObjVal? "ByteStr" then
-      -- ByteStr not representable as single ImpLit; use int 0 as placeholder
-      .int 0
-    else .unit  -- char, float, etc.
+      -- ByteStr handled at call site; this is a fallback
+      .unit
+    else .unit  -- char, float, Str, etc.
 
   /-- Parse a hax Stmt into TExpr. -/
   parseTStmt (j : Json) : Except String TExpr := do
@@ -2032,20 +2054,268 @@ where
       | _ => pure []
     return .app name fields
 
-/-- Reconstruct for-loops in a TExpr (typed version of `reconstructForLoops`).
-    Since the loop pattern recognition is structural, we erase to ImpExpr,
-    apply the untyped pass, then re-attach the root type.
-    Inner types are lost (set to .unknown) but the root type is preserved. -/
-def reconstructForLoopsTExpr (te : TExpr) : TExpr :=
-  let imp := te.erase
-  let imp' := reconstructForLoops imp
-  TExpr.ofImpExpr imp'
+/-- Reconstruct for-loops in a TExpr, preserving type annotations.
+    Walks the TExpr tree directly, using untyped helpers (`tryExtractIterator`,
+    `tryExtractNextMatch`) only on erased sub-expressions for pattern recognition.
+    Structurally new nodes (produced by for-loop reconstruction) get `.unknown` type;
+    all other nodes preserve their original `ty`. -/
+partial def reconstructForLoopsTExpr : TExpr → TExpr
+  | .mk (.match_ scrut arms) ty =>
+    match tryExtractIterator scrut.erase, arms with
+    | some (.range _lo _hi reversed),
+      [(.varPat _iterVar, .mk (.whileLoop (.mk (.lit (.bool true)) _) innerBody) _)] =>
+      -- Found the iterator pattern! Extract loop var and body from the inner next() match
+      match tryExtractNextMatch innerBody.erase _iterVar with
+      | some (loopVar, _bodyImp) =>
+        -- We need to find the actual TExpr body from the arms.
+        -- The body is inside the inner match on next(). Walk the TExpr to find it.
+        let body' := extractNextMatchBodyT innerBody _iterVar
+        match body' with
+        | some bodyTE =>
+          let bodyRec := reconstructForLoopsTExpr bodyTE
+          -- lo and hi come from the scrut pattern; extract from erased and lift
+          match tryExtractIterator scrut.erase with
+          | some (.range loImp hiImp _reversed) =>
+            let loTE := reconstructForLoopsTExpr (findSubTExprForImp scrut loImp)
+            let hiTE := reconstructForLoopsTExpr (findSubTExprForImp scrut hiImp)
+            if reversed then .mk (.forLoopRev loopVar loTE hiTE bodyRec) ty
+            else .mk (.forLoop loopVar loTE hiTE bodyRec) ty
+          | _ => -- shouldn't happen, but fall through
+            .mk (.match_ (reconstructForLoopsTExpr scrut)
+              (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+        | none =>
+          .mk (.match_ (reconstructForLoopsTExpr scrut)
+            (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+      | none =>
+        .mk (.match_ (reconstructForLoopsTExpr scrut)
+          (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+    | some (.collection _collImp),
+      [(.varPat _iterVar, .mk (.whileLoop (.mk (.lit (.bool true)) _) innerBody) _)] =>
+      -- Collection iteration pattern
+      match tryExtractNextMatch innerBody.erase _iterVar with
+      | some (loopVar, _bodyImp) =>
+        match extractNextMatchBodyT innerBody _iterVar with
+        | some bodyTE =>
+          let bodyRec := reconstructForLoopsTExpr bodyTE
+          -- The collection is the argument inside into_iter in scrut
+          let collTE := extractCollectionTExpr scrut
+          let idxVar := "_ci"
+          let loopBody := TExpr.mk (.letBind loopVar
+            (TExpr.mk (.app "index" [collTE, TExpr.mk (.var idxVar) .unknown]) .unknown)
+            bodyRec) .unknown
+          .mk (.forLoop idxVar
+            (TExpr.mk (.lit (.int 0)) .unknown)
+            (TExpr.mk (.app "len" [collTE]) .unknown)
+            loopBody) ty
+        | none =>
+          .mk (.match_ (reconstructForLoopsTExpr scrut)
+            (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+      | none =>
+        .mk (.match_ (reconstructForLoopsTExpr scrut)
+          (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+    | _, _ =>
+      .mk (.match_ (reconstructForLoopsTExpr scrut)
+        (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+  -- Recursive descent into all other constructors, preserving ty
+  | .mk (.lit v) ty => .mk (.lit v) ty
+  | .mk (.var n) ty => .mk (.var n) ty
+  | .mk (.letBind n v b) ty =>
+    .mk (.letBind n (reconstructForLoopsTExpr v) (reconstructForLoopsTExpr b)) ty
+  | .mk (.app f args) ty =>
+    .mk (.app f (args.map reconstructForLoopsTExpr)) ty
+  | .mk (.tuple es) ty =>
+    .mk (.tuple (es.map reconstructForLoopsTExpr)) ty
+  | .mk (.proj e i) ty =>
+    .mk (.proj (reconstructForLoopsTExpr e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+    .mk (.ifThenElse (reconstructForLoopsTExpr c) (reconstructForLoopsTExpr t) (reconstructForLoopsTExpr e)) ty
+  | .mk .unitVal ty => .mk .unitVal ty
+  | .mk (.seq e1 e2) ty =>
+    .mk (.seq (reconstructForLoopsTExpr e1) (reconstructForLoopsTExpr e2)) ty
+  | .mk (.borrow e) ty =>
+    .mk (.borrow (reconstructForLoopsTExpr e)) ty
+  | .mk (.deref e) ty =>
+    .mk (.deref (reconstructForLoopsTExpr e)) ty
+  | .mk (.assign n rhs) ty =>
+    .mk (.assign n (reconstructForLoopsTExpr rhs)) ty
+  | .mk (.forLoop v lo hi body) ty =>
+    .mk (.forLoop v (reconstructForLoopsTExpr lo) (reconstructForLoopsTExpr hi) (reconstructForLoopsTExpr body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+    .mk (.forLoopRev v (reconstructForLoopsTExpr lo) (reconstructForLoopsTExpr hi) (reconstructForLoopsTExpr body)) ty
+  | .mk (.whileLoop c body) ty =>
+    .mk (.whileLoop (reconstructForLoopsTExpr c) (reconstructForLoopsTExpr body)) ty
+  | .mk (.break_ (some e)) ty =>
+    .mk (.break_ (some (reconstructForLoopsTExpr e))) ty
+  | .mk (.break_ none) ty => .mk (.break_ none) ty
+  | .mk .continue_ ty => .mk .continue_ ty
+  | .mk (.earlyReturn e) ty =>
+    .mk (.earlyReturn (reconstructForLoopsTExpr e)) ty
+  | .mk (.questionMark e) ty =>
+    .mk (.questionMark (reconstructForLoopsTExpr e)) ty
+  | .mk (.forFold v lo hi body) ty =>
+    .mk (.forFold v (reconstructForLoopsTExpr lo) (reconstructForLoopsTExpr hi) (reconstructForLoopsTExpr body)) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+    .mk (.forFoldRev v (reconstructForLoopsTExpr lo) (reconstructForLoopsTExpr hi) (reconstructForLoopsTExpr body)) ty
+  | .mk (.whileFold c body) ty =>
+    .mk (.whileFold (reconstructForLoopsTExpr c) (reconstructForLoopsTExpr body)) ty
+  | .mk (.forFoldReturn v lo hi body) ty =>
+    .mk (.forFoldReturn v (reconstructForLoopsTExpr lo) (reconstructForLoopsTExpr hi) (reconstructForLoopsTExpr body)) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+    .mk (.forFoldRevReturn v (reconstructForLoopsTExpr lo) (reconstructForLoopsTExpr hi) (reconstructForLoopsTExpr body)) ty
+  | .mk (.whileFoldReturn c body) ty =>
+    .mk (.whileFoldReturn (reconstructForLoopsTExpr c) (reconstructForLoopsTExpr body)) ty
+  | .mk (.cfBreak e) ty =>
+    .mk (.cfBreak (reconstructForLoopsTExpr e)) ty
+  | .mk (.cfContinue e) ty =>
+    .mk (.cfContinue (reconstructForLoopsTExpr e)) ty
+  | .mk (.cfBreakContinue e) ty =>
+    .mk (.cfBreakContinue (reconstructForLoopsTExpr e)) ty
+where
+  /-- Walk the TExpr tree to find the body of the `next()` match inside a while-loop body.
+      Mirrors `tryExtractNextMatch` but returns the typed body TExpr. -/
+  extractNextMatchBodyT (innerBody : TExpr) (iterVar : String) : Option TExpr :=
+    match innerBody with
+    | .mk (.match_ scrut arms) _ =>
+      let isNext := match scrut.erase with
+        | .app f _ => isIterNext f
+        | _ => false
+      if !isNext then none
+      else
+        let findSome := arms.findSome? fun (pat, body) =>
+          match pat with
+          | .somePat (.varPat _) => some body
+          | .somePat .wildcard => some body
+          | .varPat _ => some body
+          | _ => none
+        let hasBreak := arms.any fun (pat, body) =>
+          match pat with
+          | .nonePat | .wildcard => match body.kind with
+            | .break_ _ => true
+            | _ => false
+          | _ => false
+        match findSome, hasBreak with
+        | some body, true => some body
+        | _, _ => none
+    | .mk (.letBind _ inner rest) _ =>
+      match extractNextMatchBodyT inner iterVar with
+      | some r => some r
+      | none => extractNextMatchBodyT rest iterVar
+    | .mk (.seq e1 e2) _ =>
+      match extractNextMatchBodyT e1 iterVar with
+      | some r => some r
+      | none => extractNextMatchBodyT e2 iterVar
+    | _ => none
+  /-- Find the sub-TExpr whose erasure matches the given ImpExpr.
+      Used to recover typed lo/hi from the scrutinee.
+      Falls back to lifting the ImpExpr with `.unknown` types if not found. -/
+  findSubTExprForImp (te : TExpr) (target : ImpExpr) : TExpr :=
+    if te.erase == target then te
+    else match te with
+    | .mk (.app _ args) _ =>
+      match args.find? (fun a => a.erase == target) with
+      | some found => found
+      | none =>
+        -- Search deeper
+        match args.findSome? (fun a => findSubTExprDeep a target) with
+        | some found => found
+        | none => TExpr.ofImpExpr target
+    | _ => TExpr.ofImpExpr target
+  /-- Deep search for a sub-TExpr matching the target ImpExpr. -/
+  findSubTExprDeep (te : TExpr) (target : ImpExpr) : Option TExpr :=
+    if te.erase == target then some te
+    else match te with
+    | .mk (.app _ args) _ =>
+      args.findSome? (fun a => findSubTExprDeep a target)
+    | .mk (.letBind _ v b) _ =>
+      findSubTExprDeep v target |>.orElse (fun _ => findSubTExprDeep b target)
+    | .mk (.seq e1 e2) _ =>
+      findSubTExprDeep e1 target |>.orElse (fun _ => findSubTExprDeep e2 target)
+    | .mk (.tuple es) _ =>
+      es.findSome? (fun a => findSubTExprDeep a target)
+    | _ => none
+  /-- Extract the collection TExpr from inside into_iter(...) in the scrutinee. -/
+  extractCollectionTExpr (scrut : TExpr) : TExpr :=
+    match scrut with
+    | .mk (.app f [arg]) _ =>
+      if isIntoIter f then arg
+      else scrut
+    | _ => scrut
 
-/-- Normalize compound assignment ops in a TExpr (typed version). -/
-def normalizeAssignOpsTExpr (te : TExpr) : TExpr :=
-  let imp := te.erase
-  let imp' := normalizeAssignOps imp
-  TExpr.ofImpExpr imp'
+/-- Normalize compound assignment ops in a TExpr, preserving type annotations.
+    Converts `app "XAssign" [target, val]` into proper `assign` nodes.
+    Structurally new nodes get `.unknown` type; recursive cases preserve `ty`. -/
+partial def normalizeAssignOpsTExpr : TExpr → TExpr
+  | .mk (.app f [target, val]) ty =>
+    match stripAssignSuffix f with
+    | some baseOp =>
+      let target' := normalizeAssignOpsTExpr target
+      let val' := normalizeAssignOpsTExpr val
+      let name := extractLValueName target'.erase
+      match stripDeref target'.erase with
+      | .app "index" [arr, idx] =>
+        -- Array element mutation: arr = array_update(arr, idx, X(arr[idx], val))
+        .mk (.assign name (TExpr.mk (.app "array_update"
+          [TExpr.ofImpExpr arr, TExpr.ofImpExpr idx,
+           TExpr.mk (.app baseOp [target', val']) .unknown]) .unknown)) ty
+      | _ =>
+        -- Simple variable mutation: x = X(x, val)
+        .mk (.assign name (TExpr.mk (.app baseOp [target', val']) .unknown)) ty
+    | none => .mk (.app f [normalizeAssignOpsTExpr target, normalizeAssignOpsTExpr val]) ty
+  | .mk (.app f args) ty =>
+    .mk (.app f (args.map normalizeAssignOpsTExpr)) ty
+  | .mk (.lit v) ty => .mk (.lit v) ty
+  | .mk (.var n) ty => .mk (.var n) ty
+  | .mk .unitVal ty => .mk .unitVal ty
+  | .mk (.letBind n v b) ty =>
+    .mk (.letBind n (normalizeAssignOpsTExpr v) (normalizeAssignOpsTExpr b)) ty
+  | .mk (.tuple es) ty =>
+    .mk (.tuple (es.map normalizeAssignOpsTExpr)) ty
+  | .mk (.proj e i) ty =>
+    .mk (.proj (normalizeAssignOpsTExpr e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+    .mk (.ifThenElse (normalizeAssignOpsTExpr c) (normalizeAssignOpsTExpr t) (normalizeAssignOpsTExpr e)) ty
+  | .mk (.match_ s arms) ty =>
+    .mk (.match_ (normalizeAssignOpsTExpr s) (arms.map fun (p, b) => (p, normalizeAssignOpsTExpr b))) ty
+  | .mk (.seq e1 e2) ty =>
+    .mk (.seq (normalizeAssignOpsTExpr e1) (normalizeAssignOpsTExpr e2)) ty
+  | .mk (.borrow e) ty =>
+    .mk (.borrow (normalizeAssignOpsTExpr e)) ty
+  | .mk (.deref e) ty =>
+    .mk (.deref (normalizeAssignOpsTExpr e)) ty
+  | .mk (.assign n rhs) ty =>
+    .mk (.assign n (normalizeAssignOpsTExpr rhs)) ty
+  | .mk (.forLoop v lo hi body) ty =>
+    .mk (.forLoop v (normalizeAssignOpsTExpr lo) (normalizeAssignOpsTExpr hi) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+    .mk (.forLoopRev v (normalizeAssignOpsTExpr lo) (normalizeAssignOpsTExpr hi) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.whileLoop c body) ty =>
+    .mk (.whileLoop (normalizeAssignOpsTExpr c) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.break_ (some e)) ty =>
+    .mk (.break_ (some (normalizeAssignOpsTExpr e))) ty
+  | .mk (.break_ none) ty => .mk (.break_ none) ty
+  | .mk .continue_ ty => .mk .continue_ ty
+  | .mk (.earlyReturn e) ty =>
+    .mk (.earlyReturn (normalizeAssignOpsTExpr e)) ty
+  | .mk (.questionMark e) ty =>
+    .mk (.questionMark (normalizeAssignOpsTExpr e)) ty
+  | .mk (.forFold v lo hi body) ty =>
+    .mk (.forFold v (normalizeAssignOpsTExpr lo) (normalizeAssignOpsTExpr hi) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+    .mk (.forFoldRev v (normalizeAssignOpsTExpr lo) (normalizeAssignOpsTExpr hi) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.whileFold c body) ty =>
+    .mk (.whileFold (normalizeAssignOpsTExpr c) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.forFoldReturn v lo hi body) ty =>
+    .mk (.forFoldReturn v (normalizeAssignOpsTExpr lo) (normalizeAssignOpsTExpr hi) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+    .mk (.forFoldRevReturn v (normalizeAssignOpsTExpr lo) (normalizeAssignOpsTExpr hi) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.whileFoldReturn c body) ty =>
+    .mk (.whileFoldReturn (normalizeAssignOpsTExpr c) (normalizeAssignOpsTExpr body)) ty
+  | .mk (.cfBreak e) ty =>
+    .mk (.cfBreak (normalizeAssignOpsTExpr e)) ty
+  | .mk (.cfContinue e) ty =>
+    .mk (.cfContinue (normalizeAssignOpsTExpr e)) ty
+  | .mk (.cfBreakContinue e) ty =>
+    .mk (.cfBreakContinue (normalizeAssignOpsTExpr e)) ty
 
 /-- Parse a single hax Fn item into a typed TExpr with full type information.
     Returns `some (name, rawTExpr, processedTExpr, fnTypeInfo)` for Fn items.

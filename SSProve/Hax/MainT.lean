@@ -84,7 +84,7 @@ def main (args : List String) : IO UInt32 := do
         IO.eprintln s!"WARNING: {w}"
       IO.eprintln s!"Total warnings: {allWarnings.length}"
 
-    -- Generate typed certified output
+    -- Generate typed certified output (rawTdefs for param annotations, postPipelineTdefs for bodies)
     -- rawTdefs has hax types preserved (for deps class + param annotations)
     -- postPipelineTdefs has pipeline-transformed bodies (for rendering)
     IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs)

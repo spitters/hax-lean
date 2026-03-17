@@ -743,7 +743,7 @@ private partial def exprContainsApp (fname : String) : ImpExpr → Bool
 
 /-- Check if `.app projName [.var varName]` appears in an expression.
     Used to detect struct projection usage on a specific variable. -/
-private partial def checkProjOnVar (varName projName : String) : ImpExpr → Bool
+partial def checkProjOnVar (varName projName : String) : ImpExpr → Bool
   | .app f [.var v] => f == projName && v == varName
   | .app _ args => args.any (checkProjOnVar varName projName)
   | .letBind _ v body =>
@@ -2099,7 +2099,7 @@ private def isIntExpr (intProjNames : List String := []) : ImpExpr → Bool
 /-- Check if a free variable is used in Int-context positions
     (as an arg to arithmetic, comparison, repeat_, foldRange, etc.).
     Used to classify 0-arity deps as Int vs Array Int. -/
-private partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
+partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
   | .app f args =>
     -- Use raw ImpExpr names (before runtimeName mapping)
     -- Functions where ALL arguments are Int
@@ -3619,7 +3619,7 @@ partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
     a qualifying struct context. -/
 partial def rewriteNewToStructCtor (structMeta : StructMeta) : ImpExpr → ImpExpr
   | .app "new" args =>
-    if args.isEmpty then .app "new" args  -- Vec::new() → keep as "new" → "#[]" (unless overridden by letBind context)
+    if args.isEmpty then .app "new" args  -- Vec::new() → keep as "new" → "#[]"
     else
       -- Find structs whose field count matches arg count
       let candidates := structMeta.filter fun (_, fields) => fields.length == args.length
@@ -3746,7 +3746,7 @@ where
     struct's field types (all initialized to the same ZERO dep value).
     Also annotates the dep's type in the deps class by tracking which structs use which
     zero initializers. -/
-private partial def rewriteStructFromElem (structMeta : StructMeta)
+partial def rewriteStructFromElem (structMeta : StructMeta)
     (fnRetTypes : List (String × ImpType))
     (allDefs : List (String × ImpExpr)) : ImpExpr → ImpExpr
   | .letBind arrVar (.app "from_elem" [initVal, sz]) body =>
