@@ -1513,9 +1513,25 @@ private def inferParamStructType
     else
       let candidates := structMeta.filter fun (_, fields) =>
         projs.any fun proj => fields.any (·.1 == proj)
+      -- Resolve struct type as tuple (never pass-through).
+      -- When a parameter has field projections, it MUST be the tuple type.
+      -- Use structLookup but override pass-through structs with tuple representation.
+      let tupleResolve : String → Option String := fun name =>
+        match structMeta.find? (·.1 == name) with
+        | some (_, fields) =>
+          if fields.length == 0 then some "Array Int"
+          else if fields.length == 1 then
+            let (_, tag, _) := fields.head!
+            some (if tag == "int" then "Int" else "Array Int")
+          else
+            let strs := fields.map fun (_, t, _) =>
+              let s := if t == "int" then "Int" else "Array Int"
+              s
+            some (" × ".intercalate strs)
+        | none => none
       match candidates with
       | [] => none
-      | [(sname, _)] => structLookup sname
+      | [(sname, _)] => tupleResolve sname
       | _ =>
         let scored := candidates.map fun (sname, fields) =>
           let matchCount := (projs.filter fun proj => fields.any (·.1 == proj)).length
@@ -1527,7 +1543,7 @@ private def inferParamStructType
             if mc > bestMc then some (sname, mc, fl)
             else if mc == bestMc && fl < bestFl then some (sname, mc, fl)
             else acc) none
-        best.bind fun (sname, _, _) => structLookup sname
+        best.bind fun (sname, _, _) => tupleResolve sname
 
 /-- Extract leading identity let-bindings (let x := x) as function parameters.
     These are emitted by HaxAdapter for Rust function parameters. -/
