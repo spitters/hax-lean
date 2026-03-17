@@ -818,8 +818,9 @@ private def isLeafExpr : ImpExpr → Bool
   | _ => false
 
 /-- Pretty-print an ImpExpr as Lean 4 source code.
-    `lvl` is the current indentation level. -/
-partial def toLean (e : ImpExpr) (lvl : Nat := 0) : String :=
+    `lvl` is the current indentation level.
+    `boolNames` is a list of function names known to return Bool (from TExpr types). -/
+partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []) : String :=
   let ind := indent lvl
   let ind1 := indent (lvl + 1)
   match e with
@@ -1119,26 +1120,21 @@ where
     if isLeafExpr expr then s!"{indent l}{s}" else s
   /-- Render an expression as a Bool condition for `if`.
       - Known-Bool expressions (comparisons, logical ops) pass through.
-      - Function applications pass through (preamble functions return Bool).
+      - Function applications known to return Bool (via `boolNames` from TExpr types) pass through.
       - `Not x` on a variable → `Hax.beq x (0 : Int)` (correct negation for Int).
       - `Not x` on a Bool expr → `!x`.
       - Bare variables → `Hax.bne x (0 : Int)` (forces Int, C-style truth). -/
   condToLean (c : ImpExpr) : String :=
+    -- Type-directed Bool detection: check boolNames from TExpr types
+    let isTypedBool (e : ImpExpr) : Bool := match e with
+      | .app f _ => boolNames.contains f | _ => false
     match c with
     | .app "Not" [x] | .app "not" [x] =>
-      -- Not on a known-Bool expression: use logical negation (!)
-      if isKnownBool x then
+      if isKnownBool x || isTypedBool x then
         s!"!{parensIf (toLean x 0) (!isAtom x)}"
-      -- Not on a function call or variable: use Hax.beq _ 0 for correct negation
-      -- This handles both Int-returning functions and Bool-returning deps
-      -- (Hax.beq works on both since it uses HaxEq typeclass)
       else s!"Hax.beq {parensIf (toLean x 0) (!isAtom x)} 0"
     | .app _ _ =>
-      -- Function applications: either runtime op (known Bool) or preamble function
-      -- For non-runtime function calls (user-defined or dep), add `= true` to ensure
-      -- Decidable instance is available, especially in mutual blocks where the
-      -- return type may not yet be inferred.
-      if isKnownBool c then toLean c 0
+      if isKnownBool c || isTypedBool c then toLean c 0
       else s!"{parensIf (toLean c 0) (!isAtom c)} = true"
     | _ =>
       if isKnownBool c then toLean c 0
