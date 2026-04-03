@@ -176,12 +176,12 @@ inductive TImpPat where
 
 ### Step 1: Define Types (new files, no existing changes)
 
-**New file: `SSProve/Hax/ImpType.lean`** (~80 LOC)
+**New file: `CatCrypt/Hax/ImpType.lean`** (~80 LOC)
 - `ImpType` inductive
 - `ImpType.toString` for debugging
 - Basic operations: `ImpType.isRef`, `ImpType.stripRef`
 
-**New file: `SSProve/Hax/TExpr.lean`** (~250 LOC)
+**New file: `CatCrypt/Hax/TExpr.lean`** (~250 LOC)
 - `TExpr` / `TExprKind` mutual inductive
 - `TExpr.erase` / `TExprKind.erase` (type erasure to `ImpExpr`)
 - `TExpr.ind` custom induction principle (mirrors `ImpExpr.ind`)
@@ -192,7 +192,7 @@ inductive TImpPat where
 
 ### Step 2: Lift Feature Predicates
 
-**New file: `SSProve/Hax/TFeatures.lean`** (~150 LOC)
+**New file: `CatCrypt/Hax/TFeatures.lean`** (~150 LOC)
 - `TNoReferences`, `TNoMutation`, `TNoLoops`, `TNoEarlyExit` on `TExpr`
 - Commuting lemma for each:
   ```lean
@@ -213,7 +213,7 @@ inductive TImpPat where
 
 For each phase, define the typed version and prove it commutes with erasure.
 
-**New file: `SSProve/Hax/TPhase/DropReferences.lean`** (~120 LOC)
+**New file: `CatCrypt/Hax/TPhase/DropReferences.lean`** (~120 LOC)
 ```lean
 def tDropReferences : TExpr → TExpr
   | .mk (.borrow e) (.ref inner _) => tDropReferences e
@@ -264,7 +264,7 @@ Define `tDenote` directly on `TExpr`. More work (~400 LOC) but enables future ty
 
 ### Step 5: Typed Pipeline Composition
 
-**New file: `SSProve/Hax/TPipeline.lean`** (~100 LOC)
+**New file: `CatCrypt/Hax/TPipeline.lean`** (~100 LOC)
 ```lean
 def tPipeline (e : TExpr) : TExpr :=
   tCfIntoMonads (tFunctionalizeLoops (tLocalMutation (tMutatedVars e) (tDropReferences e)))
@@ -286,13 +286,13 @@ theorem tPipeline_correct ... :=
 
 ### Step 6: JSON Interface
 
-**New file: `SSProve/Hax/Json.lean`** (~200 LOC)
+**New file: `CatCrypt/Hax/Json.lean`** (~200 LOC)
 - `FromJson ImpType`, `ToJson ImpType`
 - `FromJson TExpr`, `ToJson TExpr`
 - `FromJson TImpPat`, `ToJson TImpPat`
 - Round-trip theorem: `fromJson (toJson e) = some e`
 
-**New file: `SSProve/Hax/HaxAdapter.lean`** (~150 LOC)
+**New file: `CatCrypt/Hax/HaxAdapter.lean`** (~150 LOC)
 - Parse hax's JSON AST format into `TExpr`
 - Strip hax-specific fields (spans, attributes, hir_id)
 - Map hax type constructors to `ImpType`
@@ -301,7 +301,7 @@ theorem tPipeline_correct ... :=
 
 ### Step 7: Typed Pretty Printer
 
-**New file: `SSProve/Hax/TPrint.lean`** (~200 LOC)
+**New file: `CatCrypt/Hax/TPrint.lean`** (~200 LOC)
 - `TExpr → Format` for Lean 4 syntax output
 - Uses type annotations for:
   - Function signatures
@@ -313,7 +313,7 @@ theorem tPipeline_correct ... :=
 ## File Layout (after refactor)
 
 ```
-SSProve/Hax/
+CatCrypt/Hax/
 ├── AST.lean                      # ImpExpr (UNCHANGED)
 ├── ImpType.lean                  # NEW: type representation
 ├── TExpr.lean                    # NEW: typed expressions

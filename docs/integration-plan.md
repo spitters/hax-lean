@@ -117,9 +117,9 @@ Full engine replacement requires verifying 25+ phases, generics, traits, closure
 
 5. **Report**: "Lowering certified correct" or "Mismatch at expression X — potential bug in hax"
 
-### Secondary: Verified SSProve Backend
+### Secondary: Verified CatCrypt Backend
 
-**Goal**: When targeting SSProve, use our pipeline directly instead of hax's, producing `RawCode` with a correctness certificate.
+**Goal**: When targeting CatCrypt, use our pipeline directly instead of hax's, producing `RawCode` with a correctness certificate.
 
 ```
 Rust Source
@@ -127,19 +127,19 @@ Rust Source
   → adapter: strip to TExpr
   → tPipeline (verified)
   → toRawCode (verified)
-  → RawCode Value (SSProve deep embedding)
+  → RawCode Value (CatCrypt deep embedding)
 ```
 
 This is the most natural fit because:
-- SSProve is already our target (`toRawCode` exists)
-- The SSProve hax backend already skips some phases (e.g., `LocalMutation`)
+- CatCrypt is already our target (`toRawCode` exists)
+- The CatCrypt hax backend already skips some phases (e.g., `LocalMutation`)
 - We can produce a correctness certificate alongside the `RawCode`
 
 ## Concrete Implementation Plan
 
 ### Step 1: JSON Serialization (~200 LOC)
 
-New file: `SSProve/Hax/Json.lean`
+New file: `CatCrypt/Hax/Json.lean`
 
 ```lean
 import Lean.Data.Json
@@ -191,10 +191,10 @@ PR to `cryspen/hax`:
 2. Serialize pre/post-lowering AST to JSON at the phase boundaries
 3. Add CI job: for each test case, run translation validator
 
-### Step 5: SSProve Backend (~400 LOC Lean)
+### Step 5: CatCrypt Backend (~400 LOC Lean)
 
 New files:
-- `SSProve/Hax/TToRawCode.lean` — typed version of `toRawCode`
+- `CatCrypt/Hax/TToRawCode.lean` — typed version of `toRawCode`
 - Certified pipeline: `TExpr → tPipeline → tToRawCode → RawCode Value`
 - Certificate type:
   ```lean
@@ -223,7 +223,7 @@ New files:
 | Hax AST adapter (Rust/Python) | ~300 | 3-4 days |
 | Comparison harness | ~250 | 2-3 days |
 | Hax PR (dump flag) | ~200 | 2-3 days |
-| SSProve backend | ~400 | 1 week |
+| CatCrypt backend | ~400 | 1 week |
 | **Total** | **~1,350** | **3-4 weeks** |
 
 ## Success Criteria
@@ -236,7 +236,7 @@ New files:
 
 3. **PR accepted to hax** with `--dump-lowering-ast` flag
 
-4. **SSProve backend produces certified `RawCode`** for test programs
+4. **CatCrypt backend produces certified `RawCode`** for test programs
 
 ## Comparison with v1 Plan
 
@@ -248,4 +248,4 @@ New files:
 | Hax engine | Assumed OCaml | Now known to be Rust for Lean backend |
 | Phase count | Assumed ~12 | Now known to be 25+ |
 | Integration point | JSON AST (vague) | Specific: between pre-processing and post-processing |
-| SSProve backend | Not in v1 | Primary deliverable (most natural fit) |
+| CatCrypt backend | Not in v1 | Primary deliverable (most natural fit) |

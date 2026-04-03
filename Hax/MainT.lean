@@ -1,0 +1,162 @@
+/-
+Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
+Released under MIT license as described in the file LICENSE.
+Authors: CatCrypt Contributors
+-/
+import Hax.CLI
+import Hax.PrettyPrintT
+import Hax.TPipeline
+
+/-!
+# haxpipeT CLI — Typed Extraction Pipeline
+
+Uses `parseHaxTExpr` to preserve types from hax JSON at every subexpression,
+then routes through `tPipeline` (typed verified pipeline) and `toLeanCertifiedFileTyped`
+(type-directed code generation).
+
+## Architecture
+
+```
+hax JSON → parseHaxFileWithTExpr → List (name × TExpr)
+                                       │
+                              ┌────────┘
+                              ↓
+                    tPipeline (each TExpr)
+                              │
+                              ↓
+              toLeanCertifiedFileTyped → Lean source
+```
+
+For `--emit-certified`, the typed path uses TExpr types for:
+- Parameter type annotations (from TExpr.ty on param bindings)
+- Deps class field signatures (from call-site TExpr.ty)
+- No heuristic type recovery needed
+
+Other emit modes (`lean`, `json`, `bridge`) fall back to the untyped path.
+-/
+
+open Hax
+open Lean (toJson Json)
+
+/-- Parse hax JSON input into typed TExprs.
+    Returns (untyped ImpExpr, fnTypes, raw TExprs with hax types, processed TExprs for pipeline). -/
+def parseHaxInputTyped (input : String) :
+    IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo)
+        × List (String × TExpr) × List (String × TExpr)) := do
+  let json ← IO.ofExcept (Json.parse input)
+  IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
+
+def main (args : List String) : IO UInt32 := do
+  let opts := parseArgs args
+
+  if opts.help then
+    IO.println helpText
+    return 0
+
+  let input ← readInput opts.inputFile
+
+  -- === TYPED PATH: parse into TExpr with full type preservation ===
+  let useTypedPath := opts.haxFormat && opts.emitMode == "certified"
+
+  if useTypedPath then
+    let (_expr, fnTypes, rawTdefs, procTdefs) ← parseHaxInputTyped input
+    let structMeta ← parseHaxStructMeta input
+
+    -- Filter if requested
+    let rawTdefs := match opts.filterFns with
+      | some fns => rawTdefs.filter fun (p : String × TExpr) =>
+          fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | none => rawTdefs
+    let procTdefs := match opts.filterFns with
+      | some fns => procTdefs.filter fun (p : String × TExpr) =>
+          fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | none => procTdefs
+
+    -- Apply typed pipeline to processed TExprs (for rendering)
+    let postPipelineTdefs := procTdefs.map fun (n, te) => (n, tPipeline te)
+
+    -- Validate via erasure
+    let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
+    let allWarnings := erased.foldl (fun acc (_, e) =>
+      acc ++ HaxAdapter.validateExtraction e) ([] : List String)
+    if !allWarnings.isEmpty then
+      for w in allWarnings do
+        IO.eprintln s!"WARNING: {w}"
+      IO.eprintln s!"Total warnings: {allWarnings.length}"
+
+    -- Generate typed certified output (rawTdefs for param annotations, postPipelineTdefs for bodies)
+    -- rawTdefs has hax types preserved (for deps class + param annotations)
+    -- postPipelineTdefs has pipeline-transformed bodies (for rendering)
+    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs)
+    return 0
+
+  -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===
+  let (expr, fnTypes, callRetTypes, callSigs, varRefTypes) ←
+    if opts.haxFormat && (opts.emitMode == "certified" || opts.emitMode == "debug-meta") then
+      parseHaxInputWithTypes input
+    else do
+      let e ← if opts.haxFormat then parseHaxInput input else parseExpr input
+      pure (e, [], [], [], [])
+
+  let structMeta ← if opts.haxFormat && (opts.emitMode == "certified" || opts.emitMode == "debug-meta") then
+      parseHaxStructMeta input
+    else pure []
+
+  let expr := match opts.filterFns with
+    | some fns => filterExpr fns expr
+    | none => expr
+
+  let warnings := HaxAdapter.validateExtraction expr
+  if !warnings.isEmpty then
+    for w in warnings do
+      IO.eprintln s!"WARNING: {w}"
+    IO.eprintln s!"Total warnings: {warnings.length}"
+
+  let result := if opts.extended then pipelineExt expr else pipeline expr
+
+  match opts.validateFile with
+  | some vfile =>
+    let expectedInput ← IO.FS.readFile vfile
+    let expected ← if opts.haxFormat then parseHaxInput expectedInput else parseExpr expectedInput
+    match diffExpr "" result expected with
+    | none =>
+      IO.println "PASS: Pipeline output matches expected output."
+      return 0
+    | some diff =>
+      IO.eprintln s!"FAIL: {diff}"
+      return 1
+  | none =>
+    IO.eprintln s!"DEBUG: emitMode = '{opts.emitMode}'"
+    match opts.emitMode with
+    | "json" =>
+      IO.println ((toJson result).pretty)
+    | "bridge" =>
+      let fnNames := extractFnNames expr
+      IO.println (toHaxBridgeTemplate opts.name fnNames)
+    | "debug-meta" =>
+      IO.eprintln s!"DEBUG: entering debug-meta branch"
+      let fnDefs := extractFnDefs result
+      let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
+      IO.eprintln s!"DEBUG: defs count = {defs.length}"
+      let sl : String → Option String := fun n =>
+        let passthrough := computeStructPassthrough structMeta defs
+        mkStructLookup structMeta passthrough n
+      IO.eprintln s!"=== STRUCT META ({structMeta.length} structs) ==="
+      for (sname, fields) in structMeta do
+        IO.eprintln s!"  struct {sname} -> {sl sname |>.getD "none"}:"
+        for (fname, ftag, fty) in fields do
+          IO.eprintln s!"    {fname} : tag={ftag}, leanType={fty.toLeanTypeStr sl}"
+      IO.eprintln s!"=== CALL SIGS ({callSigs.length} sigs) ==="
+      for (name, sig) in callSigs do
+        let args := sig.paramTypes.map fun (n, t) => s!"{n}:{t.toLeanTypeStr sl}"
+        IO.eprintln s!"  {name}({", ".intercalate args}) -> {sig.retType.toLeanTypeStr sl}"
+      IO.eprintln s!"=== CALL RET TYPES ({callRetTypes.length} types) ==="
+      for (name, ty) in callRetTypes do
+        IO.eprintln s!"  {name} -> {ty.toLeanTypeStr sl}"
+    | "certified" =>
+      let fnDefs := extractFnDefs result
+      let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
+      IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
+    | _ =>
+      IO.println (toLeanDef opts.name result)
+    return 0

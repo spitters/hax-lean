@@ -5,8 +5,8 @@ package «hax-lean» where
   leanOptions := #[⟨`autoImplicit, false⟩]
 
 @[default_target]
-lean_lib SSProve where
+lean_lib Hax where
   srcDir := "."
 
 lean_exe haxpipeT where
-  root := `SSProve.Hax.MainT
+  root := `Hax.MainT

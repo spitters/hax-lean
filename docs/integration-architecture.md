@@ -17,12 +17,12 @@ Everything that IS Lean 4 or consumes hax output:
 
 | Component | Purpose |
 |-----------|---------|
-| `SSProve/Hax/*.lean` | Verified pipeline, proofs, semantics |
-| `SSProve/Hax/Runtime.lean` | Runtime for generated code |
-| `SSProve/Hax/HaxAdapter.lean` | Parse hax's `Decorated<ExprKind>` JSON |
-| `SSProve/Hax/Main.lean` | `haxpipe` CLI tool |
+| `CatCrypt/Hax/*.lean` | Verified pipeline, proofs, semantics |
+| `CatCrypt/Hax/Runtime.lean` | Runtime for generated code |
+| `CatCrypt/Hax/HaxAdapter.lean` | Parse hax's `Decorated<ExprKind>` JSON |
+| `CatCrypt/Hax/Main.lean` | `haxpipe` CLI tool |
 | Translation validator | Compare our pipeline output with hax's |
-| SSProve backend | `toRawCode` and certified translation |
+| CatCrypt backend | `toRawCode` and certified translation |
 
 ### What goes to `cryspen/hax` as a PR
 
@@ -63,7 +63,7 @@ echo '{"forLoop": ...}' | haxpipe --emit-lean --extended --name my_fn
 lake env lean generated.lean
 ```
 
-### For SSProve backend
+### For CatCrypt backend
 
 ```bash
 # Parse hax output → run verified pipeline → produce RawCode
@@ -78,7 +78,7 @@ What works now:
 - `haxpipe` reads ImpExpr JSON or hax's `Decorated<ExprKind>` format
 - Runs verified 5-phase pipeline
 - Outputs Lean 4 source or transformed JSON
-- Generated code compiles with `import SSProve.Hax.Runtime`
+- Generated code compiles with `import CatCrypt.Hax.Runtime`
 
 This is sufficient for:
 - Validating individual expressions manually
@@ -108,13 +108,13 @@ Add to hax's CI:
    - A bug in hax's lowering phases, or
    - A feature our pipeline doesn't model (closures, generics)
 
-### Phase 4: SSProve certified backend
+### Phase 4: CatCrypt certified backend
 
 Extend `haxpipe` with `--emit-rawcode` that:
 1. Parses hax AST
 2. Runs `tPipeline` (typed, verified)
 3. Applies `tToRawCode` → `RawCode Value`
-4. Outputs SSProve-compatible Lean 4
+4. Outputs CatCrypt-compatible Lean 4
 
 ## What NOT to Put in hax
 

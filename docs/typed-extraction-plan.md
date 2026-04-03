@@ -44,7 +44,7 @@ instead of `generatePreamble(defs, ..., callRetTypes, callSigs, varRefTypes)`.
 ### Build verification
 - 73/94 extraction files use typed preamble (haxpipeT), all build
 - 21/94 reverted to untyped (haxpipe), all build
-- Full SSProve.Crypto: 3927/3927 jobs, 0 failures
+- Full CatCrypt.Crypto: 3927/3927 jobs, 0 failures
 
 ## Phases
 

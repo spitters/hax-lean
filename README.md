@@ -45,7 +45,7 @@ Each individual phase also has its own correctness theorem:
 ## File structure
 
 ```
-SSProve/
+CatCrypt/
 ├── Hax.lean                         # Root import
 ├── Hax/
 │   ├── AST.lean                     # ImpExpr: imperative expression AST
@@ -87,11 +87,11 @@ lowering pipeline:
 | 3. `functionalizeLoops` | Functionalize loops | `forLoop`, `whileLoop`, `break_`, `continue_` |
 | 4. `cfIntoMonads` | CF into monads | `earlyReturn`, `questionMark` |
 
-## Relationship to SSProve
+## Relationship to CatCrypt
 
-The `RawCode` stub in `SSProve/Deep/RawCode.lean` is a minimal extract of
-SSProve's free-monad deep embedding (ret/bind/fail only). In the full
-SSProve project the output of `toRawCode` connects to game-based
+The `RawCode` stub in `CatCrypt/Deep/RawCode.lean` is a minimal extract of
+CatCrypt's free-monad deep embedding (ret/bind/fail only). In the full
+CatCrypt project the output of `toRawCode` connects to game-based
 cryptographic proofs via the deep embedding.
 
 ## License
