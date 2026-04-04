@@ -214,11 +214,11 @@ Capitalized variants match hax's Rust operator names. -/
 @[inline] def bitxor (a b : Int) : Int := ↑(a.toNat ^^^ b.toNat)
 @[inline] def bitnot (a : Int) : Int := -(a + 1)
 
--- Indexing — uses sorry for empty array fallback (never reached in extracted code)
-@[inline] def index {α : Type} (a : Array α) (i : Int) : α :=
+-- Indexing — returns `default` for empty array fallback (never reached in extracted code)
+@[inline] def index {α : Type} [Inhabited α] (a : Array α) (i : Int) : α :=
   if h : i.toNat < a.size then a[i.toNat]
   else if h2 : 0 < a.size then a[0]
-  else have : Inhabited α := ⟨sorry⟩; default
+  else default
 
 -- Capitalized aliases (hax's Rust operator names)
 -- These are polymorphic so they work with both Int and fixed-width UInt types.
