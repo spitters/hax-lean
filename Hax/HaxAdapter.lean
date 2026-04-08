@@ -608,6 +608,13 @@ where
         | _ => "_assign"
       match lhs' with
       | .var n => return .assign n rhs
+      -- Nested array element assignment: arr[i][j] = v
+      -- → assign arr (array_update arr i (array_update (index arr i) j v))
+      | .app "index" [.app "index" [outerArr, outerIdx], innerIdx] =>
+        let outerName := getVarName (stripD outerArr)
+        let innerUpdate := ImpExpr.app "array_update"
+          [.app "index" [outerArr, outerIdx], innerIdx, rhs]
+        return .assign outerName (.app "array_update" [outerArr, outerIdx, innerUpdate])
       -- Array element assignment: arr[i] = v → assign arr (array_update arr i v)
       | .app "index" [arr, idx] =>
         let arrName := getVarName (stripD arr)
@@ -1868,6 +1875,12 @@ where
         | _ => "_assign"
       match lhs'.kind with
       | .var n => return .assign n rhs
+      -- Nested: arr[i][j] = v → assign arr (array_update arr i (array_update (index arr i) j v))
+      | .app "index" [.mk (.app "index" [outerArr, outerIdx]) _, innerIdx] =>
+        let outerName := getVarName (stripD outerArr)
+        let innerUpdate := TExpr.mk (.app "array_update"
+          [TExpr.mk (.app "index" [outerArr, outerIdx]) rhs.ty, innerIdx, rhs]) rhs.ty
+        return .assign outerName (TExpr.mk (.app "array_update" [outerArr, outerIdx, innerUpdate]) outerArr.ty)
       | .app "index" [arr, idx] =>
         let arrName := getVarName (stripD arr)
         return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, rhs]) rhs.ty)
