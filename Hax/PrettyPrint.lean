@@ -367,53 +367,55 @@ private partial def hasSurfaceControlFlow : ImpExpr → Bool
     which came from `assign n rhs`. Returns unique names in order.
     Filters out `_assign`-prefixed names which are intermediate mutation
     temporaries from nested field/index assignments (not real accumulators). -/
-private partial def extractAccumulators : ImpExpr → List String
-  | .seq (.seq a b) c => extractAccumulators (.seq a (.seq b c))
+private partial def extractAccumulatorsAux (locals : List String) : ImpExpr → List String
+  | .seq (.seq a b) c => extractAccumulatorsAux locals (.seq a (.seq b c))
   | .seq (.letBind n _ (.var v)) rest =>
-    if n == v && !n.startsWith "_assign" then
-      let restAccs := extractAccumulators rest
+    if n == v && !n.startsWith "_assign" && !locals.contains n then
+      let restAccs := extractAccumulatorsAux locals rest
       if restAccs.contains n then restAccs else n :: restAccs
-    else extractAccumulators rest
+    else extractAccumulatorsAux locals rest
   -- Look inside conditional mutations for hidden accumulators
   | .seq (.ifThenElse _ thn _) rest =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
-      |>.filter (!·.startsWith "_assign")
-    let restAccs := extractAccumulators rest
+      |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
+    let restAccs := extractAccumulatorsAux locals rest
     let all := thnAccs ++ restAccs
     all.eraseDups
   -- Recurse into nested loops in seq position to find transitive accumulators
-  -- (fixes nested-loop accumulator loss; see docs/haxpipe-nested-loop-bug.md)
   | .seq (.forFold _ _ _ body) rest =>
-    (extractAccumulators body ++ extractAccumulators rest).eraseDups
+    (extractAccumulatorsAux locals body ++ extractAccumulatorsAux locals rest).eraseDups
   | .seq (.forFoldRev _ _ _ body) rest =>
-    (extractAccumulators body ++ extractAccumulators rest).eraseDups
+    (extractAccumulatorsAux locals body ++ extractAccumulatorsAux locals rest).eraseDups
   | .seq (.whileFold _ body) rest =>
-    (extractAccumulators body ++ extractAccumulators rest).eraseDups
-  | .seq _ rest => extractAccumulators rest
-  | .letBind n _ (.var v) =>
-    if n == v && !n.startsWith "_assign" then [n] else []
-  -- Recurse into local let-bindings (non-mutation letBind)
-  | .letBind _ _ body => extractAccumulators body
-  -- Top-level ifThenElse (entire fold body is a conditional)
-  -- Check both branches since the guard pattern may be inverted
-  -- (if cond then skip else work)
+    (extractAccumulatorsAux locals body ++ extractAccumulatorsAux locals rest).eraseDups
+  | .seq _ rest => extractAccumulatorsAux locals rest
+  | .letBind n val (.var v) =>
+    if n == v && !n.startsWith "_assign" && !locals.contains n then [n] else []
+  -- Non-mutation letBind: if `n` is freshly initialized (val doesn't reference n
+  -- and n isn't already an outer accumulator), then n is loop-local. Add to locals
+  -- before recursing so subsequent mutations don't promote it to an accumulator.
+  | .letBind n val body =>
+    let isFreshLocal := !exprContainsVar n val && !locals.contains n
+    let newLocals := if isFreshLocal then n :: locals else locals
+    extractAccumulatorsAux newLocals body
   | .ifThenElse _ thn els =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
-      |>.filter (!·.startsWith "_assign")
+      |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let elsAccs := if els == .unitVal then []
       else extractCondMutations els |>.map (·.1)
-        |>.filter (!·.startsWith "_assign")
-    -- Also check deeply: the else branch might have mutations as
-    -- nested let-bindings (not wrapped in the mutation-discard pattern)
+        |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let elsDeep := if elsAccs.isEmpty && els != .unitVal then
-        extractAccumulators els
+        extractAccumulatorsAux locals els
       else elsAccs
     (thnAccs ++ elsDeep).eraseDups
-  -- Recurse into nested loops at top level
-  | .forFold _ _ _ body => extractAccumulators body
-  | .forFoldRev _ _ _ body => extractAccumulators body
-  | .whileFold _ body => extractAccumulators body
+  | .forFold _ _ _ body => extractAccumulatorsAux locals body
+  | .forFoldRev _ _ _ body => extractAccumulatorsAux locals body
+  | .whileFold _ body => extractAccumulatorsAux locals body
   | _ => []
+
+/-- Top-level wrapper. -/
+private partial def extractAccumulators (e : ImpExpr) : List String :=
+  extractAccumulatorsAux [] e
 
 /-- Transform a forFold body for accumulator-based rendering.
     Converts env-based mutation patterns to let-chain with accumulator return.
@@ -1328,9 +1330,13 @@ where
               -- Already seen this name — emit as conditional mutation
               (inits, conds ++ [s!"{ind}let {sanitizeName name} := if {condToLean cond} then {toLean rhs 0} else {sanitizeName name}"], seen)
             else
-              -- First occurrence: check if this name has a later mutation (self-ref fix)
+              -- First occurrence: check if this name has a later mutation (self-ref fix).
+              -- BUT: only treat as "fresh init" if the rhs does NOT reference `name` itself.
+              -- If `rhs` references `name` (e.g. `temp[0] = SBOX[temp[1]]`), then this is
+              -- a real conditional mutation, not an init, and must be emitted conditionally.
               let hasDuplicate := (trueMuts.filter fun p => p.1 == name).length > 1
-              if hasDuplicate then
+              let isSelfRef := exprContainsVar name rhs
+              if hasDuplicate && !isSelfRef then
                 -- Emit first as unconditional init (prevents self-reference in else branch)
                 (inits ++ [s!"{ind}let {sanitizeName name} := {toLean rhs 0}"], conds, name :: seen)
               else
