@@ -2846,7 +2846,8 @@ private partial def resolveStructType (structMeta : StructMeta) (name : String)
     let resolveField := fun (_fname : String) (tag : String) (impTy : ImpType) =>
       match impTy with
       | .unknown => if tag == "int" then "Int" else "Array Int"
-      | ty => ty.toLeanTypeStr lookup
+      -- Use surface types (Int/Array Int) to match the surface code representation
+      | ty => ty.toLeanTypeStrSurface lookup
     if fields.length == 0 then some "Array Int"
     else if fields.length == 1 then
       let (fn, tag, ty) := fields.head!
@@ -2866,7 +2867,11 @@ def typeTagToLean (_structs : StructMeta) (tag : String)
     (structLookup : String → Option String := fun _ => none) : String :=
   match impTy with
   | .unknown => if tag == "int" then "Int" else "Array Int"
-  | ty => ty.toLeanTypeStr structLookup
+  -- Use surface types (Int/Array Int) for struct fields, matching the
+  -- surface code that operates on Array Int. This avoids type mismatches
+  -- between struct constructors (which would use Array UInt8) and the
+  -- surface code (which uses Hax.repeat_ producing Array Int).
+  | ty => ty.toLeanTypeStrSurface structLookup
 
 /-- Generate the tuple type for a struct given its fields.
     Composite field types (containing ×) are parenthesized to preserve associativity. -/
