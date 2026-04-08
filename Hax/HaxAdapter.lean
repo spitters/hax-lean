@@ -504,10 +504,12 @@ where
 partial def parseHaxExpr (j : Json) : Except String ImpExpr := do
   -- Extract the ExprKind from the Decorated wrapper
   let contents ← j.getObjVal? "contents"
-  parseExprKind contents
+  parseExprKind j contents
 where
-  /-- Parse a hax ExprKind (externally tagged enum). -/
-  parseExprKind (j : Json) : Except String ImpExpr := do
+  /-- Parse a hax ExprKind (externally tagged enum).
+      `outerJ` is the full Decorated expression (for extracting `ty`).
+      `j` is the `contents` (ExprKind). -/
+  parseExprKind (outerJ j : Json) : Except String ImpExpr := do
     -- Unit variants come as plain strings
     match j with
     | .str "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
@@ -722,10 +724,13 @@ where
       return .app "index" [lhs, index]
 
     else if let .ok data := j.getObjVal? "Cast" then
-      -- Cast: emit as app "cast" so the pretty-printer can select the right
-      -- width-specific cast function using the TExpr type annotation.
+      -- Cast: annotate with target bit width from the outer expression's ty.
+      -- e.g., `x as u8` → app "cast#8" [x], `x as u32` → app "cast#32" [x]
       let source ← parseHaxExpr (← data.getObjVal? "source")
-      return .app "cast" [source]
+      let targetWidth := extractExprWidth outerJ  -- outer ty = target type
+      match targetWidth with
+      | some w => return .app s!"cast#{w}" [source]
+      | none => return .app "cast" [source]
 
     else if let .ok data := j.getObjVal? "Use" then
       parseHaxExpr (← data.getObjVal? "source")
@@ -1983,7 +1988,10 @@ where
 
     else if let .ok data := j.getObjVal? "Cast" then
       let source ← parseHaxTExpr (← data.getObjVal? "source")
-      return .app "cast" [source]
+      let targetWidth := extractExprWidth _parentJ  -- outer decorated node has target ty
+      match targetWidth with
+      | some w => return .app s!"cast#{w}" [source]
+      | none => return .app "cast" [source]
 
     else if let .ok data := j.getObjVal? "Use" then
       return (← parseHaxTExpr (← data.getObjVal? "source")).kind

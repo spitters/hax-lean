@@ -68,6 +68,7 @@ private def widthAwareRuntime (f : String) : String :=
       | "bitor"  | "BitOr"  => s!"Hax.bitor_w {w}"
       | "bitxor" | "BitXor" => s!"Hax.bitxor_w {w}"
       | "bitnot" | "Not"    => s!"Hax.bitnot_w {w}"
+      | "cast"               => s!"Hax.castVal_w {w}"
       | _ => s!"Hax.{op}"
     | _ => f
   else sanitizeName f
