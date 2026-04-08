@@ -100,8 +100,36 @@ private partial def extractDefIdName (j : Json) : String :=
           | _, .ok (.str n) => some n
           | _, _ => none
       | _ => none
+    -- Check for Impl discriminator to infer integer width.
+    -- In Rust's core::num, the Impl discriminators map to integer types:
+    --   Impl_1=u8, Impl_4=u16, Impl_8=u32, Impl_9=u64, Impl_10=u128
+    -- We suffix width-sensitive operations (wrapping_add, rotate_right, shr, shl)
+    -- with the bit-width so the runtime can truncate correctly.
+    let implWidth : Option Nat := do
+      let segs := segments.toList
+      let implSeg ← segs.find? fun seg =>
+        match seg.getObjVal? "data" with
+        | .ok (.str "Impl") => true
+        | _ => false
+      let disambiguator ← (implSeg.getObjValAs? Nat "disambiguator").toOption
+      match disambiguator with
+      | 1 => some 8    -- u8
+      | 4 => some 16   -- u16
+      | 8 => some 32   -- u32
+      | 9 => some 64   -- u64
+      | 10 => some 128 -- u128
+      | _ => none
+    let widthSensitiveOps := ["wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
+      "rotate_right", "rotate_left", "shr", "shl",
+      "bitand", "bitor", "bitxor", "bitnot", "Not"]
     match names.getLast? with
-    | some n => n
+    | some n =>
+      -- Suffix width-sensitive ops with bit width (e.g. wrapping_add → wrapping_add#32)
+      if widthSensitiveOps.contains n then
+        match implWidth with
+        | some w => s!"{n}#{w}"
+        | none => n
+      else n
     | none =>
       match inner.getObjValAs? String "krate" with
       | .ok k => k

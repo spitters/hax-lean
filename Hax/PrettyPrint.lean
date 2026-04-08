@@ -48,6 +48,30 @@ def sanitizeName (n : String) : String :=
     | "Empty" | "Decidable" | "Inhabited" | "Nonempty" => s!"«{n}»"
     | _ => n
 
+/-- Handle width-annotated operation names (e.g. "wrapping_add#32").
+    The HaxAdapter annotates width-sensitive Rust ops with `#bitwidth` when
+    it can infer the type from the Impl discriminator. -/
+private def widthAwareRuntime (f : String) : String :=
+  if f.any (· == '#') then
+    let parts := f.splitOn "#"
+    match parts with
+    | [op, w] => match op with
+      | "wrapping_add" => s!"Hax.wrapping_add_w {w}"
+      | "wrapping_sub" => s!"Hax.wrapping_sub_w {w}"
+      | "wrapping_mul" => s!"Hax.wrapping_mul_w {w}"
+      | "wrapping_neg" => s!"Hax.wrapping_neg_w {w}"
+      | "rotate_right" => s!"Hax.rotate_right_w {w}"
+      | "rotate_left"  => s!"Hax.rotate_left_w {w}"
+      | "shr" | "Shr"  => s!"Hax.shr_w {w}"
+      | "shl" | "Shl"  => s!"Hax.shl_w {w}"
+      | "bitand" | "BitAnd" => s!"Hax.bitand_w {w}"
+      | "bitor"  | "BitOr"  => s!"Hax.bitor_w {w}"
+      | "bitxor" | "BitXor" => s!"Hax.bitxor_w {w}"
+      | "bitnot" | "Not"    => s!"Hax.bitnot_w {w}"
+      | _ => s!"Hax.{op}"
+    | _ => f
+  else sanitizeName f
+
 /-- Map builtin function names to qualified Lean 4 identifiers.
     Known builtins get `Hax.` prefix; constructors map to Lean equivalents. -/
 private def runtimeName (f : String) : String :=
@@ -120,8 +144,9 @@ private def runtimeName (f : String) : String :=
   | "count_ones" => "Hax.count_ones"
   | "assert_failed" => "Hax.assert_failed"
   | "cast" => "Hax.castVal"
-  -- Everything else: sanitize and pass through
-  | _ => sanitizeName f
+  -- Width-annotated variants (from HaxAdapter, e.g. wrapping_add#32)
+  -- or everything else: sanitize and pass through
+  | f => widthAwareRuntime f
 
 /-- Map an operator name and result type to a width-specific runtime function.
     Falls back to `runtimeName` when the type is not a fixed-width integer. -/
@@ -1902,7 +1927,8 @@ def isAlwaysBuiltin (f : String) : Bool :=
   | "and" | "And" | "or" | "Or" | "&&" | "||"
   | "lt" | "le" | "gt" | "ge" | "Lt" | "Le" | "Gt" | "Ge"
   | "min" | "max" => true
-  | _ => false
+  -- Width-annotated ops (wrapping_add#32, rotate_right#32, etc.)
+  | f => f.any (· == '#')
 
 /-- Check if a name looks like a struct field projection (starts with "." or is "Struct.field"). -/
 def isFieldProjection (f : String) : Bool :=
