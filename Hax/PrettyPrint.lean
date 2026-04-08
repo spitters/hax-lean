@@ -1883,7 +1883,7 @@ partial def toLeanImpExpr (e : ImpExpr) : String :=
 
 /-- Generate a certified extraction definition: ImpExpr literal. -/
 def toLeanImpExprDef (name : String) (e : ImpExpr) : String :=
-  s!"def {sanitizeName (name ++ "_impExpr")} : Hax.ImpExpr :=\n  {toLeanImpExpr e}\n"
+  s!"def {sanitizeName (name ++ "_impExpr")} : ImpExpr :=\n  {toLeanImpExpr e}\n"
 
 /-! ## Auto-Preamble Generation
 
