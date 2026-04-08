@@ -161,9 +161,66 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
   | .ref inner _ => inner.toLeanTypeStr structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStr structLookup})"
-  | .array inner len => s!"Vector ({inner.toLeanTypeStr structLookup}) {len}"
+  | .array inner _len => s!"Array ({inner.toLeanTypeStr structLookup})"
   | .typeVar _ => "Int"
   | .unknown => "Int"
+
+/-- Convert an ImpType to a surface Lean type string, collapsing all
+    integer-like types to `Int` and array/vector types to `Array (Int)`.
+    This produces types compatible with the untyped Runtime (Hax.add etc.
+    are polymorphic over `Int`). Structural types (Bool, Option, tuples)
+    are preserved. -/
+partial def toLeanTypeStrSurface (ty : ImpType)
+    (structLookup : String → Option String := fun _ => none) : String :=
+  match ty with
+  | .bool => "Bool"
+  | .int | .uint _ | .sint _ | .typeVar _ | .unknown | .fn _ _ => "Int"
+  | .unit => "Unit"
+  | .str => "String"
+  | .tuple elems =>
+    if elems.isEmpty then "Unit"
+    else
+      let strs := elems.map fun e =>
+        let s := e.toLeanTypeStrSurface structLookup
+        if (s.splitOn " × ").length > 1 then s!"({s})" else s
+      " × ".intercalate strs
+  | .option inner => s!"Option ({inner.toLeanTypeStrSurface structLookup})"
+  | .result ok err =>
+    s!"Except ({err.toLeanTypeStrSurface structLookup}) ({ok.toLeanTypeStrSurface structLookup})"
+  | .controlFlow brk cont =>
+    s!"ControlFlow ({brk.toLeanTypeStrSurface structLookup}) ({cont.toLeanTypeStrSurface structLookup})"
+  | .adt name args =>
+    match structLookup name with
+    | some s => s
+    | none =>
+      if name == "Vec" || name.endsWith "::Vec" then
+        match args with
+        | inner :: _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
+        | _ => "Array (Int)"
+      else if name == "Box" || name.endsWith "::Box" then
+        match args with
+        | inner :: _ => inner.toLeanTypeStrSurface structLookup
+        | _ => "Int"
+      else if name == "Option" || name.endsWith "::Option" then
+        match args with
+        | inner :: _ => s!"Option ({inner.toLeanTypeStrSurface structLookup})"
+        | _ => "Option Int"
+      else if name == "Result" || name.endsWith "::Result" then
+        match args with
+        | ok :: err :: _ =>
+          s!"Except ({err.toLeanTypeStrSurface structLookup}) ({ok.toLeanTypeStrSurface structLookup})"
+        | ok :: _ => s!"Except Int ({ok.toLeanTypeStrSurface structLookup})"
+        | _ => "Except Int Int"
+      else
+        let shortName := match name.splitOn "::" with
+          | [] => name
+          | segs => segs.getLast!
+        match structLookup shortName with
+        | some s => s
+        | none => "Int"
+  | .ref inner _ => inner.toLeanTypeStrSurface structLookup
+  | .slice inner => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
+  | .array inner _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
 
 end ImpType
 

@@ -356,6 +356,14 @@ private partial def extractAccumulators : ImpExpr → List String
     let restAccs := extractAccumulators rest
     let all := thnAccs ++ restAccs
     all.eraseDups
+  -- Recurse into nested loops in seq position to find transitive accumulators
+  -- (fixes nested-loop accumulator loss; see docs/haxpipe-nested-loop-bug.md)
+  | .seq (.forFold _ _ _ body) rest =>
+    (extractAccumulators body ++ extractAccumulators rest).eraseDups
+  | .seq (.forFoldRev _ _ _ body) rest =>
+    (extractAccumulators body ++ extractAccumulators rest).eraseDups
+  | .seq (.whileFold _ body) rest =>
+    (extractAccumulators body ++ extractAccumulators rest).eraseDups
   | .seq _ rest => extractAccumulators rest
   | .letBind n _ (.var v) =>
     if n == v && !n.startsWith "_assign" then [n] else []
@@ -376,6 +384,10 @@ private partial def extractAccumulators : ImpExpr → List String
         extractAccumulators els
       else elsAccs
     (thnAccs ++ elsDeep).eraseDups
+  -- Recurse into nested loops at top level
+  | .forFold _ _ _ body => extractAccumulators body
+  | .forFoldRev _ _ _ body => extractAccumulators body
+  | .whileFold _ body => extractAccumulators body
   | _ => []
 
 /-- Transform a forFold body for accumulator-based rendering.
@@ -827,7 +839,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- Literals
   | .lit (.bool true) => "true"
   | .lit (.bool false) => "false"
-  | .lit (.int n) => if n < 0 then s!"({n})" else s!"{n}"
+  | .lit (.int n) => if n < 0 then s!"({n} : Int)" else s!"({n} : Int)"
   | .lit .unit => "()"
   | .lit (.uintLit w n) => s!"({n} : {w.toLeanType})"
   | .lit (.sintLit _ n) =>
@@ -931,9 +943,9 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- Iterator iter: iter(arr) → arr (identity in untyped mode)
   | .app "iter" [arrExpr] => toLean arrExpr lvl
   | .app "array_lit" args =>
-    -- Emit as Lean Vector literal: #v[a, b, c] (fixed-length, matches Vector types)
+    -- Emit as Lean Array literal: #[a, b, c] (matches Array types in surface code)
     let argStrs := args.map fun a => toLean a 0
-    s!"#v[{", ".intercalate argStrs}]"
+    s!"#[{", ".intercalate argStrs}]"
   | .app "Not" [x] | .app "not" [x] =>
     -- For Bool args, use logical negation; for Int args, use polymorphic Hax.Not
     -- (Hax.Not uses HaxNot typeclass: Bool → !, Int → bitwise complement)
@@ -1465,7 +1477,7 @@ private partial def collectProjectionsOnVar' (varName : String) : ImpExpr → Li
   | .app f [.var v] =>
     if v == varName && (f.startsWith "." || f.contains '.') then
       -- Extract the field name from ".field" or "Struct.field"
-      let fname := if f.startsWith "." then f.drop 1
+      let fname := if f.startsWith "." then (f.drop 1).toString
         else match f.splitOn "." with | [_, n] => n | _ => ""
       if fname.isEmpty then [] else [fname]
     else []
@@ -3343,7 +3355,7 @@ def findAmbiguousFields (structMeta : StructMeta) : List String :=
 /-- Collect all projection names applied to a given variable in an expression. -/
 private partial def collectProjectionsOnVar (varName : String) : ImpExpr → List String
   | .app f [.var v] =>
-    if f.startsWith "." && v == varName then [f.drop 1] else []
+    if f.startsWith "." && v == varName then [(f.drop 1).toString] else []
   | .app _ args => args.foldl (fun acc a => acc ++ collectProjectionsOnVar varName a) []
   | .letBind _ v body =>
     collectProjectionsOnVar varName v ++ collectProjectionsOnVar varName body
@@ -3507,7 +3519,7 @@ partial def qualifyProjections (structMeta : StructMeta)
     (ambiguous : List String) (ctx : ImpExpr) : ImpExpr → ImpExpr
   | .app f [arg] =>
     if f.startsWith "." then
-      let fname := f.drop 1
+      let fname := (f.drop 1).toString
       if ambiguous.contains fname then
         -- Try to infer the struct type: first from expression structure, then from variable
         let structType := inferExprStructType structMeta ctx arg
@@ -4222,7 +4234,7 @@ private partial def qualifyProjectionsFromUsageT
     (ambiguousFields : List String) : ImpExpr → ImpExpr
   | .app projName [.app idxFn [.var arr, idx]] =>
     if idxFn == "index" || idxFn == "Hax.index" then
-      let fieldName := if projName.startsWith "." then projName.drop 1
+      let fieldName := if projName.startsWith "." then (projName.drop 1).toString
         else if projName.contains '.' then
           match projName.splitOn "." with | _ :: f :: _ => f | _ => projName
         else projName
@@ -4244,7 +4256,7 @@ private partial def qualifyProjectionsFromUsageT
       .app projName [.app idxFn
         ((.var arr :: [idx]).map (qualifyProjectionsFromUsageT arrayElemTypes varStructTypes structMeta ambiguousFields))]
   | .app projName [.var v] =>
-    let fieldName := if projName.startsWith "." then projName.drop 1
+    let fieldName := if projName.startsWith "." then (projName.drop 1).toString
       else if projName.contains '.' then
         match projName.splitOn "." with | _ :: f :: _ => f | _ => projName
       else projName
