@@ -473,30 +473,34 @@ private partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
     This handles patterns like:
       `let w := ZERO_WORD; let w := array_update w 0 ...; w`
     where the first binding is a fresh init that should be the fold's initial value. -/
-private partial def extractAccInit (accName : String) : ImpExpr → Option ImpExpr
-  | .seq (.seq a b) c => extractAccInit accName (.seq a (.seq b c))
+private partial def extractAccInit (accName : String) (allAccs : List String := [])
+    : ImpExpr → Option ImpExpr
+  | .seq (.seq a b) c => extractAccInit accName allAccs (.seq a (.seq b c))
   -- seq (letBind accName init (var accName)) rest
   -- This is a mutation pattern (let n := val; n), BUT if val does NOT reference
-  -- accName, then it's a fresh init (e.g., `let w := ZERO_WORD; w`).
+  -- accName OR any other accumulator, then it's a fresh init.
+  -- (Mutating to the value of another accumulator is NOT a fresh init —
+  --  e.g., `h = g` in SHA-256's compress rotation is true mutation, not init.)
   | .seq (.letBind n val (.var v)) rest =>
+    let refsAnyAcc := allAccs.any fun a => exprContainsVar a val
     if n == accName && n == v then
-      -- Check if the RHS is a fresh init (doesn't reference accName)
-      if exprContainsVar accName val then none  -- true mutation (self-referencing)
+      if refsAnyAcc then none  -- true mutation (references some accumulator)
       else some val  -- fresh init disguised as mutation
     else if n == accName then
-      if exprContainsVar accName val then none
+      if refsAnyAcc then none
       else some val
-    else extractAccInit accName rest
+    else extractAccInit accName allAccs rest
   -- seq (letBind n val body) rest — local binding, recurse into rest
-  | .seq (.letBind _ _ _) rest => extractAccInit accName rest
+  | .seq (.letBind _ _ _) rest => extractAccInit accName allAccs rest
   -- seq (non-letBind) rest — skip and recurse
-  | .seq _ rest => extractAccInit accName rest
+  | .seq _ rest => extractAccInit accName allAccs rest
   -- Direct letBind accName init body — check if it's fresh (not self-referencing)
   | .letBind n val body =>
     if n == accName then
-      if exprContainsVar accName val then none
+      let refsAnyAcc := allAccs.any fun a => exprContainsVar a val
+      if refsAnyAcc then none
       else some val
-    else extractAccInit accName body
+    else extractAccInit accName allAccs body
   | _ => none
 
 /-- Format accumulator initial value and lambda parameter for fold rendering. -/
@@ -520,7 +524,7 @@ private def accInitOverrides (accs : List String) (body : ImpExpr) :
   -- Collect all locally-bound variable names inside the fold body
   let locallyBound := collectLetBindVars body
   accs.filterMap fun acc =>
-    match extractAccInit acc body with
+    match extractAccInit acc accs body with
     | some initExpr =>
       -- Only emit override if the init expression doesn't reference any
       -- fold-body-local variable (which wouldn't exist in the outer scope)

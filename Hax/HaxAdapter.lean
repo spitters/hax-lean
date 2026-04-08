@@ -365,6 +365,36 @@ partial def parseHaxType (j : Json) : ImpType :=
     else if let .ok _ := tyKind.getObjVal? "Arrow" then .unknown
     else .unknown
 
+/-- Extract integer bit width from a hax expression's `ty` field.
+    Returns `some w` for `uN`/`iN` types (where w ∈ {8, 16, 32, 64, 128}),
+    or `none` for non-integer types. Used by `Binary`/`Unary` parsers to
+    annotate trait-based operators (>>, ^, &, |, !) with their bit width
+    so the runtime can truncate correctly. -/
+def extractExprWidth (j : Json) : Option Nat :=
+  match j.getObjVal? "ty" with
+  | .ok tyJ =>
+    match parseHaxType tyJ with
+    | .uint .w8 | .sint .w8 => some 8
+    | .uint .w16 | .sint .w16 => some 16
+    | .uint .w32 | .sint .w32 => some 32
+    | .uint .w64 | .sint .w64 => some 64
+    | .uint .w128 | .sint .w128 => some 128
+    | .uint .wsize | .sint .wsize => some 64  -- usize/isize: assume 64-bit
+    | _ => none
+  | _ => none
+
+/-- Suffix a width-sensitive operator name with its bit width if known. -/
+def annotateOpWidth (op : String) (width : Option Nat) : String :=
+  let widthSensitive := ["BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Not",
+                         "bitand", "bitor", "bitxor", "shl", "shr", "bitnot",
+                         "wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
+                         "rotate_right", "rotate_left"]
+  if widthSensitive.contains op then
+    match width with
+    | some w => s!"{op}#{w}"
+    | none => op
+  else op
+
 /-! ## Pattern mapping -/
 
 /-- Map hax's `Decorated<PatKind>` to our `ImpPat`. -/
@@ -640,9 +670,12 @@ where
       let op := match data.getObjVal? "op" with
         | .ok opJ => binOpName opJ
         | _ => "binop"
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
+      let lhsJ ← data.getObjVal? "lhs"
+      let lhs ← parseHaxExpr lhsJ
       let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      return .app op [lhs, rhs]
+      -- Annotate width-sensitive ops with the bit width of the lhs operand
+      let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
+      return .app opAnnotated [lhs, rhs]
 
     else if let .ok data := j.getObjVal? "LogicalOp" then
       let op := match data.getObjVal? "op" with
@@ -657,8 +690,10 @@ where
       let op := match data.getObjVal? "op" with
         | .ok opJ => unOpName opJ
         | _ => "unop"
-      let arg ← parseHaxExpr (← data.getObjVal? "arg")
-      return .app op [arg]
+      let argJ ← data.getObjVal? "arg"
+      let arg ← parseHaxExpr argJ
+      let opAnnotated := annotateOpWidth op (extractExprWidth argJ)
+      return .app opAnnotated [arg]
 
     else if let .ok data := j.getObjVal? "Field" then
       let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
@@ -1890,9 +1925,11 @@ where
       let op := match data.getObjVal? "op" with
         | .ok opJ => binOpName opJ
         | _ => "binop"
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let lhsJ ← data.getObjVal? "lhs"
+      let lhs ← parseHaxTExpr lhsJ
       let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
-      return .app op [lhs, rhs]
+      let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
+      return .app opAnnotated [lhs, rhs]
 
     else if let .ok data := j.getObjVal? "LogicalOp" then
       let op := match data.getObjVal? "op" with
@@ -1907,8 +1944,10 @@ where
       let op := match data.getObjVal? "op" with
         | .ok opJ => unOpName opJ
         | _ => "unop"
-      let arg ← parseHaxTExpr (← data.getObjVal? "arg")
-      return .app op [arg]
+      let argJ ← data.getObjVal? "arg"
+      let arg ← parseHaxTExpr argJ
+      let opAnnotated := annotateOpWidth op (extractExprWidth argJ)
+      return .app opAnnotated [arg]
 
     else if let .ok data := j.getObjVal? "Field" then
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
