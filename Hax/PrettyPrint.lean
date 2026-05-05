@@ -370,10 +370,18 @@ private partial def hasSurfaceControlFlow : ImpExpr → Bool
     temporaries from nested field/index assignments (not real accumulators). -/
 private partial def extractAccumulatorsAux (locals : List String) : ImpExpr → List String
   | .seq (.seq a b) c => extractAccumulatorsAux locals (.seq a (.seq b c))
-  | .seq (.letBind n _ (.var v)) rest =>
+  | .seq (.letBind n val (.var v)) rest =>
     if n == v && !n.startsWith "_assign" && !locals.contains n then
-      let restAccs := extractAccumulatorsAux locals rest
-      if restAccs.contains n then restAccs else n :: restAccs
+      -- Discriminate between fresh init (`let n := init` where init is
+      -- independent of n) and true mutation (`let n := f(n) ...`).
+      -- A fresh init means `n` is loop-local, not an outer accumulator.
+      if exprContainsVar n val then
+        -- True mutation: n is an accumulator candidate.
+        let restAccs := extractAccumulatorsAux locals rest
+        if restAccs.contains n then restAccs else n :: restAccs
+      else
+        -- Fresh init: n is loop-local. Add to locals; don't promote.
+        extractAccumulatorsAux (n :: locals) rest
     else extractAccumulatorsAux locals rest
   -- Look inside conditional mutations for hidden accumulators
   | .seq (.ifThenElse _ thn _) rest =>
@@ -4108,7 +4116,7 @@ where
 
 /-- Walk an ImpExpr and insert `let v := (0 : Int)` before any fold whose
     accumulator references a variable not bound in the enclosing scope. -/
-private partial def initMissingFoldAccums (bound : List String := []) : ImpExpr → ImpExpr
+partial def initMissingFoldAccums (bound : List String := []) : ImpExpr → ImpExpr
   | .letBind n v body =>
     let v' := initMissingFoldAccums bound v
     let body' := initMissingFoldAccums (n :: bound) body

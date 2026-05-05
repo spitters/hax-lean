@@ -552,6 +552,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let arityMap := (structArities ++ depRetArities ++ usageArities).eraseDups
   let defs := if arityMap.isEmpty then defs
     else defs.map fun (n, e) => (n, fixProjectionPaths arityMap e)
+  -- Pass T-A: insert `let v := 0` before any fold whose accumulator
+  -- references a variable not bound in the enclosing scope. (Defined
+  -- at PrettyPrint.lean:4117 but historically unwired.)
+  let defs := defs.map fun (n, e) => (n, initMissingFoldAccums [] e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
   let (preamble, projConflicts) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs)
