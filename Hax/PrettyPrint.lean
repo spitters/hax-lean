@@ -305,18 +305,38 @@ private partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr
     Looks for the localMutation pattern: `seq (letBind n rhs (var n)) rest`
     which came from `assign n rhs`. Returns unique names in order.
     Also looks inside `ifThenElse` branches for conditional mutations. -/
-private partial def extractCondMutations : ImpExpr → List (String × ImpExpr)
-  | .seq (.seq a b) c => extractCondMutations (.seq a (.seq b c))
+private partial def extractCondMutationsAux (locals : List String) :
+    ImpExpr → List (String × ImpExpr)
+  | .seq (.seq a b) c => extractCondMutationsAux locals (.seq a (.seq b c))
   | .seq (.letBind n rhs (.var v)) rest =>
-    if n == v then (n, rhs) :: extractCondMutations rest
-    else extractCondMutations rest
-  | .seq .unitVal rest => extractCondMutations rest
-  | .seq _ rest => extractCondMutations rest
-  | .letBind n rhs (.var v) => if n == v then [(n, rhs)] else []
-  -- Recurse into non-mutation letBind (local variables before mutations)
-  | .letBind _ _ body => extractCondMutations body
+    -- Treat `let n := rhs; n` as a mutation pattern UNLESS `n` was
+    -- previously introduced as a local in this same sub-tree (via a
+    -- `letBind n init body` whose body contains us). Locals tracked
+    -- via the `letBind n val body` arm below.
+    if n == v && !locals.contains n then
+      (n, rhs) :: extractCondMutationsAux locals rest
+    else extractCondMutationsAux locals rest
+  | .seq .unitVal rest => extractCondMutationsAux locals rest
+  | .seq _ rest => extractCondMutationsAux locals rest
+  | .letBind n rhs (.var v) =>
+    if n == v && !locals.contains n then [(n, rhs)] else []
+  -- Recurse into non-mutation letBind. Track fresh-init locals so that
+  -- subsequent mutation-shaped `let n := X; n` patterns whose `n` is the
+  -- inner-introduced local are NOT mistaken for outer accumulators.
+  -- (This is the BLS fr_mul fix: inside the inner whileFold's then-branch,
+  -- `letBind "temp" (repeat_ 0 7) <body>` introduces `temp` locally; later
+  -- `letBind "temp" (array_update temp ti ...) (var "temp")` is a true
+  -- mutation but ONLY of the inner-local `temp`, not an outer accumulator.)
+  | .letBind n val body =>
+    let isFreshLocal := !exprContainsVar n val && !locals.contains n
+    let newLocals := if isFreshLocal then n :: locals else locals
+    extractCondMutationsAux newLocals body
   | .unitVal => []
   | _ => []
+
+/-- Top-level wrapper. -/
+private partial def extractCondMutations (e : ImpExpr) : List (String × ImpExpr) :=
+  extractCondMutationsAux [] e
 
 /-- Transform a forFold body for accumulator-based rendering.
     Converts env-based mutation patterns to let-chain with accumulator return.
@@ -362,6 +382,33 @@ private partial def hasSurfaceControlFlow : ImpExpr → Bool
   | .app _ args => args.any hasSurfaceControlFlow
   | .tuple elems => elems.any hasSurfaceControlFlow
   | _ => false
+
+/-- Wrap a tail-position forFold/forFoldRev whose body has surface
+    ControlFlow (cfBreak/cfContinue) in a synthetic `_HAX_MERGE` marker.
+    Used when the inner fold sits at a non-CF context (e.g. body of an
+    outer `Hax.foldRange` lambda whose return type is the accumulator
+    type). The marker is recognized by `toLean` and rendered as
+    `(<rendered fold>).merge`, extracting the value from `ControlFlow`.
+
+    Recurses through let-chains, seq-tails, and if/match arms to find
+    the tail expression. Inner-loop bodies and non-tail positions are
+    left untouched (their context is determined locally by the renderer). -/
+private partial def wrapTailForFoldWithMerge : ImpExpr → ImpExpr
+  | .letBind n v body => .letBind n v (wrapTailForFoldWithMerge body)
+  | .seq a b => .seq a (wrapTailForFoldWithMerge b)
+  | .ifThenElse c t e =>
+    .ifThenElse c (wrapTailForFoldWithMerge t) (wrapTailForFoldWithMerge e)
+  | .match_ scrut arms =>
+    .match_ scrut (arms.map fun (p, b) => (p, wrapTailForFoldWithMerge b))
+  | .forFold v lo hi body =>
+    if hasSurfaceControlFlow body then
+      .app "_HAX_MERGE" [.forFold v lo hi body]
+    else .forFold v lo hi body
+  | .forFoldRev v lo hi body =>
+    if hasSurfaceControlFlow body then
+      .app "_HAX_MERGE" [.forFoldRev v lo hi body]
+    else .forFoldRev v lo hi body
+  | e => e
 
 /-- Extract accumulator variable names from a fold body.
     Looks for the localMutation pattern: `seq (letBind n rhs (var n)) rest`
@@ -425,6 +472,71 @@ private partial def extractAccumulatorsAux (locals : List String) : ImpExpr → 
 /-- Top-level wrapper. -/
 private partial def extractAccumulators (e : ImpExpr) : List String :=
   extractAccumulatorsAux [] e
+
+/-- Build a destructure-and-return wrapper for an inner fold whose
+    accumulator shape doesn't match the outer fold's. Emits
+    `let <inner_destr> := <inner-fold>; <outer-tuple>` so that:
+      * Inner accumulators NOT in the outer's list are bound but unused
+        (named `_acc` to silence linters).
+      * Outer accumulators NOT in the inner's list keep their current
+        binding (untouched).
+      * Outer accumulators present in inner are rebound by destructure.
+
+    Uses a fresh `_innerTuple` name and `extractTupleDestr`-shaped
+    `proj` chain so the renderer prints the standard
+    `let (a, b, _c) := <fold>` Lean idiom. -/
+private def buildDestructureAndTuple (fold : ImpExpr) (innerAccs outerAccs : List String) :
+    ImpExpr :=
+  let tmp := "_innerTuple"
+  let outerTuple : ImpExpr :=
+    if outerAccs.length == 1 then .var outerAccs.head!
+    else .tuple (outerAccs.map .var)
+  let mkLetChain (accs : List String) (body : ImpExpr) : ImpExpr :=
+    -- Build chain right-to-left over accs paired with their indices.
+    let indexed := accs.zipIdx
+    indexed.foldr (init := body) fun (name, i) acc =>
+      let bindName := if outerAccs.contains name then name else s!"_{name}"
+      .letBind bindName (.proj (.var tmp) i) acc
+  if innerAccs.length == 1 then
+    let n := innerAccs.head!
+    let bindName := if outerAccs.contains n then n else s!"_{n}"
+    .letBind bindName fold outerTuple
+  else
+    .letBind tmp fold (mkLetChain innerAccs outerTuple)
+
+/-- Wrap a tail-position forFold/forFoldRev whose accumulator shape
+    differs from the enclosing outer fold's. Emits a destructure +
+    outer-tuple-return. Used to fix `Application type mismatch` errors
+    where an inner fold's result type (e.g. `(result, b, word)`) doesn't
+    match the outer's expected accumulator type (e.g. `(result, b)`).
+
+    Recurses through let-chains, seq-tails, and if/match arms. Inner
+    folds NOT in tail position are left untouched. -/
+private partial def wrapTailFoldForOuterAccs (outerAccs : List String) :
+    ImpExpr → ImpExpr
+  | .letBind n v body =>
+    .letBind n v (wrapTailFoldForOuterAccs outerAccs body)
+  | .seq a b => .seq a (wrapTailFoldForOuterAccs outerAccs b)
+  | .ifThenElse c t e =>
+    .ifThenElse c (wrapTailFoldForOuterAccs outerAccs t)
+                   (wrapTailFoldForOuterAccs outerAccs e)
+  | .match_ scrut arms =>
+    .match_ scrut (arms.map fun (p, b) => (p, wrapTailFoldForOuterAccs outerAccs b))
+  | .forFold v lo hi body =>
+    let innerAccs := extractAccumulators body
+    if innerAccs == outerAccs || outerAccs.length <= 1 ||
+       hasSurfaceControlFlow body then
+      .forFold v lo hi body
+    else
+      buildDestructureAndTuple (.forFold v lo hi body) innerAccs outerAccs
+  | .forFoldRev v lo hi body =>
+    let innerAccs := extractAccumulators body
+    if innerAccs == outerAccs || outerAccs.length <= 1 ||
+       hasSurfaceControlFlow body then
+      .forFoldRev v lo hi body
+    else
+      buildDestructureAndTuple (.forFoldRev v lo hi body) innerAccs outerAccs
+  | e => e
 
 /-- Transform a forFold body for accumulator-based rendering.
     Converts env-based mutation patterns to let-chain with accumulator return.
@@ -963,6 +1075,15 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
                     else s!"\n{toLean val (lvl + 1)}"
       s!"{ind}let {sanitizeName n} := {valStr}\n{atLine body lvl}"
 
+  -- Synthetic marker: a tail-position forFold/forFoldRev returning
+  -- `ControlFlow α α` that needs to be `.merge`d to extract the value.
+  -- Inserted by `wrapTailForFoldWithMerge`; consumed here.
+  -- `atLine` will prepend `indent lvl` since this is treated as a leaf
+  -- (it's an `.app`); we therefore don't add `{ind}` ourselves.
+  | .app "_HAX_MERGE" [inner] =>
+    let innerStr := (toLean inner lvl).trimLeft
+    s!"({innerStr}).merge"
+
   -- Function application
   -- Iterator map: map(iter_expr, func_expr) → (iter_expr).map (fun v => func_expr)
   -- The func_expr typically contains a free variable (the iterator element).
@@ -1205,6 +1326,11 @@ where
     if !hasSurfaceControlFlow body && !accs.isEmpty then
       -- Simple fold with accumulators, no ControlFlow
       let body' := simplifyFoldBody (transformFoldBody accs body)
+      -- Inner forFold-with-CF in tail position would return ControlFlow; wrap with .merge
+      let body' := wrapTailForFoldWithMerge body'
+      -- Inner fold whose accumulator shape differs from outer's needs
+      -- a destructure + outer-tuple-return wrapper.
+      let body' := wrapTailFoldForOuterAccs accs body'
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
     else if accs.isEmpty && !hasSurfaceControlFlow body then
       -- Unit-accumulator fold (side-effect loop, no surface ControlFlow)
