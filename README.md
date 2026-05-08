@@ -106,19 +106,32 @@ lake build haxpipeT     # build the CLI: .lake/build/bin/haxpipeT
 
 ## Running the CLI
 
-`haxpipeT` reads a hax JSON dump and emits Lean 4. Two main modes:
+`haxpipeT` reads a hax JSON dump and emits one of five output formats,
+selected by flag:
+
+| Flag | Output |
+|------|--------|
+| `--emit-lean` (default) | Lean 4 surface code (purely functional, imports `Hax.Runtime`) |
+| `--emit-certified` | Surface code **plus** the post-pipeline `ImpExpr` literal, for agreement proofs |
+| `--emit-json` | The transformed `ImpExpr` AST serialized as JSON (the imperative IR) |
+| `--emit-bridge` | A CatCrypt `HaxBridge.lean` template wiring extraction into a protocol |
+| `--emit-debug-meta` | Debug metadata about hax types and struct layouts |
 
 ```bash
-# Untyped surface code (depends only on Hax.Runtime)
+# Default: untyped surface code
 haxpipeT --hax INPUT.json --emit-lean --name MyModule -o out.lean
 
 # Typed certified output (surface code + ImpExpr literals)
 haxpipeT --hax INPUT.json --emit-certified --name MyModule -o out.lean
+
+# Transformed AST as JSON
+haxpipeT --hax INPUT.json --emit-json --name MyModule -o out.json
 ```
 
 To produce the JSON input from a Rust crate, run `cargo hax json` from the
-[hax](https://github.com/hacspec/hax) toolchain. Generated files compile
-standalone against this repo's `Hax.*` modules — no Mathlib, no other deps.
+[hax](https://github.com/hacspec/hax) toolchain. Generated Lean files
+compile standalone against this repo's `Hax.*` modules — no Mathlib, no
+other deps.
 
 ## Relationship to hax
 
