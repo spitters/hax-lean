@@ -11,7 +11,7 @@ AST (`ImpExpr`) and equipped with:
 
 The project also includes a **typed pipeline** (`TExpr`) with commuting
 diagrams between the untyped and typed phases, a **width-aware runtime**
-for integer/bitwise/array operations, and a **CLI tool** (`haxpipe`) for
+for integer/bitwise/array operations, and a **CLI tool** (`haxpipeT`) for
 extracting Rust functions from hax JSON into Lean.
 
 ## Pipeline
@@ -100,8 +100,25 @@ Hax/
 ## Building
 
 ```bash
-lake build
+lake build              # verify the proofs (0 sorry, 0 axiom)
+lake build haxpipeT     # build the CLI: .lake/build/bin/haxpipeT
 ```
+
+## Running the CLI
+
+`haxpipeT` reads a hax JSON dump and emits Lean 4. Two main modes:
+
+```bash
+# Untyped surface code (depends only on Hax.Runtime)
+haxpipeT --hax INPUT.json --emit-lean --name MyModule -o out.lean
+
+# Typed certified output (surface code + ImpExpr literals)
+haxpipeT --hax INPUT.json --emit-certified --name MyModule -o out.lean
+```
+
+To produce the JSON input from a Rust crate, run `cargo hax json` from the
+[hax](https://github.com/hacspec/hax) toolchain. Generated files compile
+standalone against this repo's `Hax.*` modules — no Mathlib, no other deps.
 
 ## Relationship to hax
 
@@ -126,4 +143,4 @@ cryptographic proofs via the deep embedding.
 
 ## License
 
-Apache 2.0
+MIT — see [LICENSE](LICENSE).
