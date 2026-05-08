@@ -1,147 +1,92 @@
-# Integration Architecture: Where Does What Live?
+# Integration Architecture
+
+How `hax-lean` relates to the upstream hax compiler and to downstream Lean
+consumers.
 
 ## Repository Boundary
 
 ```
 spitters/hax-lean (this repo)          cryspen/hax (upstream)
-├── Lean 4 verification               ├── Rust engine (25+ phases)
-├── Runtime library                    ├── Lean 4 backend printer
-├── haxpipe CLI                        ├── cargo hax CLI
-├── JSON adapter (Lean-side)           └── Phase pipeline
-└── Translation validator (Lean-side)
+├── Verified 5-phase pipeline           ├── Rust engine (25+ phases)
+├── Typed layer (TExpr, commuting)      ├── Lean 4 backend / printer
+├── Runtime.lean                        ├── cargo hax CLI
+├── haxpipeT CLI                        └── Phase pipeline (OCaml + Rust)
+├── JSON adapter (HaxAdapter.lean)
+└── Pretty-printer (PrettyPrint{T}.lean)
 ```
 
-### What stays in `spitters/hax-lean`
+This repo is self-contained Lean 4. It does not depend on any hax Rust crate;
+it consumes hax's JSON AST dumps and emits Lean 4 source.
 
-Everything that IS Lean 4 or consumes hax output:
+## Pipeline Correspondence
 
-| Component | Purpose |
-|-----------|---------|
-| `CatCrypt/Hax/*.lean` | Verified pipeline, proofs, semantics |
-| `CatCrypt/Hax/Runtime.lean` | Runtime for generated code |
-| `CatCrypt/Hax/HaxAdapter.lean` | Parse hax's `Decorated<ExprKind>` JSON |
-| `CatCrypt/Hax/Main.lean` | `haxpipe` CLI tool |
-| Translation validator | Compare our pipeline output with hax's |
-| CatCrypt backend | `toRawCode` and certified translation |
+The 5 verified phases line up 1-to-1 with hax's core lowering:
 
-### What goes to `cryspen/hax` as a PR
+| Our phase                 | Hax phase                                    |
+|--------------------------|----------------------------------------------|
+| `dropReferences`         | `DropReferences`                             |
+| `localMutation`          | `LocalMutation`                              |
+| `functionalizeLoops`     | `FunctionalizeLoops`                         |
+| `cfIntoMonads`           | `RewriteControlFlow` + `DropReturnBreakContinue` |
+| `explicitMonadic`        | `ExplicitMonadic`                            |
 
-The minimal hook to expose hax's intermediate ASTs:
+Hax has ~11 pre-processing and ~10 post-processing phases on either side.
+Those are syntactic rewrites (assert reconstruction, for/while recovery,
+item sorting, etc.) that do not change evaluation semantics; they are
+outside the verified core.
 
-| Component | Purpose | Where in hax |
-|-----------|---------|-------------|
-| `--dump-pre-lowering` flag | Serialize AST before core lowering | `engine/src/` |
-| `--dump-post-lowering` flag | Serialize AST after core lowering | `engine/src/` |
-| JSON schema for `Decorated<ExprKind>` | Stable interchange format | `engine/src/` |
-| CI integration (optional) | Run translation validator on test suite | `.github/workflows/` |
+## Workflows
 
-The PR to hax should be small (~200 LOC Rust) — just two serialization
-points in the phase pipeline, outputting the AST as JSON at the boundaries
-between pre-processing ↔ core lowering ↔ post-processing.
+### Standalone extraction
 
-## Integration Workflow
-
-### For validation (primary use case)
+Input is hax's JSON AST dump; output is Lean 4 source plus a deps class.
 
 ```bash
-# 1. Run hax, dumping intermediate ASTs
-cargo hax into lean4 --dump-pre-lowering pre.json --dump-post-lowering post.json
-
-# 2. Run our verified pipeline on the pre-lowering AST
-haxpipe --hax --extended pre.json --validate post.json
-
-# Output: PASS or FAIL with diff at first divergence
+haxpipeT --emit-certified input.json --name my_fn -o out.lean
 ```
 
-### For standalone use (no hax dependency)
+Generated files import `Hax.Runtime` and use the width-aware runtime
+builtins. They compile standalone against this repo (no hax, no Mathlib).
+
+### Translation validation
+
+Given hax's pre- and post-lowering AST dumps, verify that hax's core
+lowering is structurally equivalent to the verified pipeline:
 
 ```bash
-# Run pipeline on hand-written or test JSON
-echo '{"forLoop": ...}' | haxpipe --emit-lean --extended --name my_fn
-
-# Generated code compiles with just Runtime.lean
-lake env lean generated.lean
+haxpipeT --validate --pre pre.json --post post.json
 ```
 
-### For CatCrypt backend
+The comparator runs `tPipeline` on `pre.json` and compares the erased
+output with `post.json`. A mismatch flags a potential hax bug; a match is
+a per-invocation certificate for the 5 core phases.
 
-```bash
-# Parse hax output → run verified pipeline → produce RawCode
-cargo hax into lean4 --dump-pre-lowering - | haxpipe --emit-rawcode
-```
+### Downstream deep embedding
 
-## Phased Integration Plan
+`Hax/Deep/RawCode.lean` carries a minimal free-monad stub (`ret`/`bind`/`fail`).
+Downstream projects can replace it with their own deep embedding; the
+certified `tToRawCode` path lifts extracted code into that embedding with
+a commuting-diagram correspondence.
 
-### Phase 1: No hax changes needed (current state)
+## Trusted Computing Base
 
-What works now:
-- `haxpipe` reads ImpExpr JSON or hax's `Decorated<ExprKind>` format
-- Runs verified 5-phase pipeline
-- Outputs Lean 4 source or transformed JSON
-- Generated code compiles with `import CatCrypt.Hax.Runtime`
+| Component                 | Role                             |
+|---------------------------|----------------------------------|
+| `HaxAdapter.lean`         | hax JSON → ImpExpr / TExpr       |
+| `Json.lean`               | JSON (de)serialization           |
+| `PrettyPrint{T}.lean`     | AST → Lean 4 source              |
+| `Runtime.lean`            | Width-aware builtins             |
+| Lean 4 compiler           | Compiles generated code          |
 
-This is sufficient for:
-- Validating individual expressions manually
-- Demonstrating the verified pipeline on examples
-- Testing against hand-crafted hax JSON dumps
+This matches the standard CompCert-style verified-core architecture: the
+AST-to-AST transformation is proved; the parser, printer, and runtime
+are the TCB.
 
-### Phase 2: hax PR for AST dump (~200 LOC Rust)
+## What NOT to do
 
-PR to `cryspen/hax`:
-1. Add `--dump-lowering-ast` flag to the engine CLI
-2. Serialize `Decorated<ExprKind>` to JSON at two points:
-   - After pre-processing (before `DropReferences`)
-   - After core lowering (after `FunctionalizeLoops`)
-3. Use existing `serde_json` serialization (hax already has `Serialize` on its AST)
-
-This enables automated translation validation.
-
-### Phase 3: CI integration
-
-Add to hax's CI:
-1. Build `haxpipe` from `spitters/hax-lean`
-2. For each test in `lean-tests/`:
-   - Run `cargo hax into lean4 --dump-lowering-ast`
-   - Run `haxpipe --hax --validate`
-   - Report match/mismatch
-3. Failures indicate either:
-   - A bug in hax's lowering phases, or
-   - A feature our pipeline doesn't model (closures, generics)
-
-### Phase 4: CatCrypt certified backend
-
-Extend `haxpipe` with `--emit-rawcode` that:
-1. Parses hax AST
-2. Runs `tPipeline` (typed, verified)
-3. Applies `tToRawCode` → `RawCode Value`
-4. Outputs CatCrypt-compatible Lean 4
-
-## What NOT to Put in hax
-
-- **Do not add Lean 4 verification code to hax** — it would be an unrelated dependency
-- **Do not modify hax's phase implementations** — we validate, not replace
-- **Do not add our Runtime.lean to hax** — hax has its own `rust_primitives` library
-- The hax PR should be minimal: just expose what's already there via JSON serialization
-
-## Dependency Diagram
-
-```
-cryspen/hax
-  │
-  │ (cargo hax --dump-lowering-ast)
-  │ produces JSON
-  ↓
-spitters/hax-lean
-  │
-  ├── HaxAdapter.lean (parses JSON)
-  ├── Pipeline + proofs (verified transformation)
-  ├── PrettyPrint.lean (generates Lean 4)
-  └── Runtime.lean (runtime for generated code)
-       │
-       ↓
-  Generated Lean 4 code
-  (standalone, no hax dependency)
-```
-
-The key principle: **hax produces, we consume**. The coupling is a JSON
-interchange format, not a code dependency.
+- Do not add Lean proofs to the upstream hax repo — they are independent
+  concerns. The coupling is the JSON interchange format, not code.
+- Do not modify hax's phase implementations from this repo — we validate,
+  not replace.
+- Do not vendor `Runtime.lean` into hax — hax has its own
+  `rust_primitives` library.
