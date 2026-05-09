@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 import Hax.AST
 import Hax.ImpType
 import Hax.TExpr
+import Hax.JsonSize
 import Lean.Data.Json
 
 /-!
@@ -499,55 +500,173 @@ where
 
 /-! ## Expression mapping -/
 
+/-- Parse a hax literal. -/
+private def parseLiteral (data : Json) : ImpExpr :=
+  -- Literal { lit: Spanned<LitKind>, neg: bool }
+  let neg := match data.getObjValAs? Bool "neg" with
+    | .ok true => true
+    | _ => false
+  let litKind := match data.getObjVal? "lit" with
+    | .ok spanned => match spanned.getObjVal? "node" with
+      | .ok n => n
+      | _ => spanned
+    | _ => data
+  if let .ok b := litKind.getObjValAs? Bool "Bool" then .lit (.bool b)
+  else if let .ok intData := litKind.getObjVal? "Int" then
+    -- Format 1: "Int": [n_string, suffix]
+    -- Format 2: "Int": {"Uint": [n_string, suffix]} or {"Int": [n_string, suffix]}
+    let nArr := match intData with
+      | .arr a => some a
+      | _ =>
+        let tryUint := intData.getObjVal? "Uint"
+        let tryInt := intData.getObjVal? "Int"
+        match (tryUint.toOption.orElse fun _ => tryInt.toOption) with
+        | some (.arr a) => some a
+        | _ => none
+    match nArr with
+    | some #[nJ, suffJ] =>
+      let n := match nJ.getStr? with
+        | .ok s => s.toInt?.getD 0
+        | _ => match nJ.getNat? with
+          | .ok n => n
+          | _ => 0
+      let val := if neg then -n else n
+      -- Parse suffix to determine width: "U8", "U16", {"Unsigned":"U8"}, etc.
+      let suffix := match suffJ with
+        | .str "Unsuffixed" => ""
+        | .str s => s
+        | _ =>
+          -- Try {"Unsigned": "U8"} format (lit expressions)
+          match suffJ.getObjVal? "Unsigned" with
+          | .ok (.str s) => "U" ++ s.replace "U" ""
+          | _ => match suffJ.getObjVal? "Signed" with
+            | .ok (.str s) => "I" ++ s.replace "I" ""
+            | _ => match suffJ.getObjVal? "Uint" with
+              | .ok (.str s) => s
+              | _ => match suffJ.getObjVal? "Int" with
+                | .ok (.str s) => "I" ++ s
+                | _ => ""
+      let nval := val.toNat
+      match suffix with
+      | "U8"  => .lit (.uintLit .w8 nval)
+      | "U16" => .lit (.uintLit .w16 nval)
+      | "U32" => .lit (.uintLit .w32 nval)
+      | "U64" => .lit (.uintLit .w64 nval)
+      | "U128" => .lit (.uintLit .w128 nval)
+      | "Usize" => .lit (.uintLit .wsize nval)
+      | _ => .lit (.int val)
+    | some #[nJ] =>
+      let n := match nJ.getStr? with
+        | .ok s => s.toInt?.getD 0
+        | _ => match nJ.getNat? with
+          | .ok n => n
+          | _ => 0
+      .lit (.int (if neg then -n else n))
+    | _ => .lit (.int 0)
+  else if let .ok bsData := litKind.getObjVal? "ByteStr" then
+    -- ByteStr: [[byte0, byte1, ...], "Cooked"]
+    match bsData with
+    | .arr #[.arr bytes, _] =>
+      let byteExprs : List ImpExpr := (bytes.toList.filterMap fun b =>
+        match b.getNat? with
+        | .ok n => some (ImpExpr.lit (.int n))
+        | _ => none)
+      .app "array_lit" byteExprs
+    | _ => .app "array_lit" []
+  else if let .ok _strData := litKind.getObjVal? "Str" then
+    -- Str: string literal → opaque in untyped extraction
+    .app "literal" []
+  else .app "literal" []  -- char, float, etc.
+
+/-- Replace the deepest unitVal in a letBind chain with a continuation.
+    letBind a v1 (letBind b v2 unitVal) → letBind a v1 (letBind b v2 cont) -/
+def replaceDeepestUnit (e : ImpExpr) (cont : ImpExpr) : ImpExpr :=
+  match e with
+  | .letBind n v .unitVal => .letBind n v cont
+  | .letBind n v body => .letBind n v (replaceDeepestUnit body cont)
+  | _ => .seq e cont
+
+/-- Convert a list of statement expressions into nested seq/letBind. -/
+def stmtsToSeq (stmts : List ImpExpr) (tail : ImpExpr) : ImpExpr :=
+  match stmts with
+  | [] => tail
+  | [s] => replaceDeepestUnit s tail
+  | s :: rest => replaceDeepestUnit s (stmtsToSeq rest tail)
+
+open Hax.JsonSize
+
+/-! ### `parseHaxExpr` and friends (mutually recursive on JSON sub-tree). -/
+
+mutual
+
 /-- Map hax's `Decorated<ExprKind>` JSON to our `ImpExpr`.
     Strips metadata (span, hir_id, attributes), keeping only the expression and type. -/
-partial def parseHaxExpr (j : Json) : Except String ImpExpr := do
-  -- Extract the ExprKind from the Decorated wrapper
-  let contents ← j.getObjVal? "contents"
-  parseExprKind j contents
-where
-  /-- Parse a hax ExprKind (externally tagged enum).
-      `outerJ` is the full Decorated expression (for extracting `ty`).
-      `j` is the `contents` (ExprKind). -/
-  parseExprKind (outerJ j : Json) : Except String ImpExpr := do
-    -- Unit variants come as plain strings
-    match j with
-    | .str "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
-    | _ => pure ()
+def parseHaxExpr (j : Json) : Except String ImpExpr := do
+  match h_c : j.getObjVal? "contents" with
+  | .ok contents => parseExprKind j contents
+  | .error e => throw e
+termination_by jsonSize j
+decreasing_by exact getObjVal?_decreases h_c
 
-    -- Struct variants: {"VariantName": {fields...}}
-    if let .ok data := j.getObjVal? "VarRef" then
-      let name := match data.getObjVal? "id" with
-        | .ok id => extractLocalIdentName id
-        | _ => "unknown_var"
-      return .var name
+/-- Parse a hax ExprKind (externally tagged enum).
+    `outerJ` is the full Decorated expression (for extracting `ty`).
+    `j` is the `contents` (ExprKind). -/
+def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
+  -- Unit variants come as plain strings
+  match j with
+  | .str "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
+  | _ => pure ()
 
-    else if let .ok data := j.getObjVal? "GlobalName" then
-      let name := match data.getObjVal? "item" with
-        | .ok item => extractItemDefIdName item "global"
-        | _ => "global"
-      return .var name
-
-    else if let .ok data := j.getObjVal? "Literal" then
-      return parseLiteral data
-
-    else if let .ok data := j.getObjVal? "If" then
-      let cond ← parseHaxExpr (← data.getObjVal? "cond")
-      let thn ← parseHaxExpr (← data.getObjVal? "then")
-      let els ← match data.getObjVal? "else_opt" with
-        | .ok (.null) => pure .unitVal
-        | .ok elsJ => parseHaxExpr elsJ
-        | _ => pure .unitVal
-      return .ifThenElse cond thn els
-
-    else if let .ok data := j.getObjVal? "Call" then
-      let funName := extractCallName (← data.getObjVal? "fun")
-      let argsJ ← data.getObjValAs? (Array Json) "args"
-      let args ← argsJ.toList.mapM parseHaxExpr
+  -- Struct variants: {"VariantName": {fields...}}
+  match h_VarRef : j.getObjVal? "VarRef" with
+  | .ok data =>
+    let name := match data.getObjVal? "id" with
+      | .ok id => extractLocalIdentName id
+      | _ => "unknown_var"
+    return .var name
+  | .error _ =>
+  match h_GlobalName : j.getObjVal? "GlobalName" with
+  | .ok data =>
+    let name := match data.getObjVal? "item" with
+      | .ok item => extractItemDefIdName item "global"
+      | _ => "global"
+    return .var name
+  | .error _ =>
+  match h_Literal : j.getObjVal? "Literal" with
+  | .ok data => return parseLiteral data
+  | .error _ =>
+  match h_If : j.getObjVal? "If" with
+  | .ok data =>
+    match h_If_cond : data.getObjVal? "cond" with
+    | .ok condJ =>
+      let cond ← parseHaxExpr condJ
+      match h_If_then : data.getObjVal? "then" with
+      | .ok thnJ =>
+        let thn ← parseHaxExpr thnJ
+        let els ← match h_If_else : data.getObjVal? "else_opt" with
+          | .ok (.null) => pure .unitVal
+          | .ok elsJ => parseHaxExpr elsJ
+          | _ => pure .unitVal
+        return .ifThenElse cond thn els
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_Call : j.getObjVal? "Call" with
+  | .ok data =>
+    let funName := match data.getObjVal? "fun" with
+      | .ok fj => extractCallName fj
+      | _ => "unknown_fn"
+    match h_Call_args : data.getObjValAs? (Array Json) "args" with
+    | .ok argsJ =>
+      let args ← argsJ.toList.attach.mapM (fun ⟨a, ha⟩ => parseHaxExpr a)
       return .app funName args
-
-    else if let .ok data := j.getObjVal? "Let" then
-      let rhs ← parseHaxExpr (← data.getObjVal? "expr")
+    | .error e => throw e
+  | .error _ =>
+  match h_Let : j.getObjVal? "Let" with
+  | .ok data =>
+    match h_Let_expr : data.getObjVal? "expr" with
+    | .ok rhsJ =>
+      let rhs ← parseHaxExpr rhsJ
       let pat := match data.getObjVal? "pat" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
@@ -566,334 +685,377 @@ where
         return .letBind n rhs .unitVal
       | _ =>
         return .letBind "_let" rhs .unitVal
-
-    else if let .ok data := j.getObjVal? "Block" then
-      -- Block: {stmts: [...], expr: Option<Expr>, ...}
-      -- #[serde(flatten)] means Block fields are inlined into the ExprKind
-      let stmts ← match data.getObjValAs? (Array Json) "stmts" with
-        | .ok ss => ss.toList.mapM parseStmt
-        | _ => pure []
-      let tail ← match data.getObjVal? "expr" with
-        | .ok (.null) => pure .unitVal
-        | .ok e => parseHaxExpr e
-        | _ => pure .unitVal
-      return stmtsToSeq stmts tail
-
-    else if let .ok data := j.getObjVal? "Match" then
-      let scrut ← parseHaxExpr (← data.getObjVal? "scrutinee")
-      let armsJ ← data.getObjValAs? (Array Json) "arms"
-      let arms ← armsJ.toList.mapM parseArm
-      return .match_ scrut arms
-
-    else if let .ok data := j.getObjVal? "Tuple" then
-      let fieldsJ ← data.getObjValAs? (Array Json) "fields"
-      let fields ← fieldsJ.toList.mapM parseHaxExpr
+    | .error e => throw e
+  | .error _ =>
+  match h_Block : j.getObjVal? "Block" with
+  | .ok data =>
+    -- Block: {stmts: [...], expr: Option<Expr>, ...}
+    -- #[serde(flatten)] means Block fields are inlined into the ExprKind
+    let stmts ← match h_Block_stmts : data.getObjValAs? (Array Json) "stmts" with
+      | .ok ss => ss.toList.attach.mapM (fun ⟨s, hs⟩ => parseStmt s)
+      | _ => pure []
+    let tail ← match h_Block_expr : data.getObjVal? "expr" with
+      | .ok (.null) => pure .unitVal
+      | .ok e => parseHaxExpr e
+      | _ => pure .unitVal
+    return stmtsToSeq stmts tail
+  | .error _ =>
+  match h_Match : j.getObjVal? "Match" with
+  | .ok data =>
+    match h_Match_scrut : data.getObjVal? "scrutinee" with
+    | .ok scrutJ =>
+      let scrut ← parseHaxExpr scrutJ
+      match h_Match_arms : data.getObjValAs? (Array Json) "arms" with
+      | .ok armsJ =>
+        let arms ← armsJ.toList.attach.mapM (fun ⟨a, ha⟩ => parseArm a)
+        return .match_ scrut arms
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_Tuple : j.getObjVal? "Tuple" with
+  | .ok data =>
+    match h_Tuple_fields : data.getObjValAs? (Array Json) "fields" with
+    | .ok fieldsJ =>
+      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, hf⟩ => parseHaxExpr f)
       if fields.isEmpty then return .unitVal
       return .tuple fields
-
-    else if let .ok data := j.getObjVal? "Array" then
-      let fieldsJ ← data.getObjValAs? (Array Json) "fields"
-      let fields ← fieldsJ.toList.mapM parseHaxExpr
+    | .error e => throw e
+  | .error _ =>
+  match h_Array : j.getObjVal? "Array" with
+  | .ok data =>
+    match h_Array_fields : data.getObjValAs? (Array Json) "fields" with
+    | .ok fieldsJ =>
+      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, hf⟩ => parseHaxExpr f)
       return .app "array_lit" fields
-
-    else if let .ok data := j.getObjVal? "Assign" then
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
-      let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      -- Strip deref wrappers from LHS (references erased by dropReferences)
-      let rec stripD : ImpExpr → ImpExpr
-        | .deref e => stripD e
-        | e => e
-      let lhs' : ImpExpr := stripD lhs
-      let getVarName : ImpExpr → String
-        | .var n => n
-        | .deref (.var n) => n
-        | _ => "_assign"
-      match lhs' with
-      | .var n => return .assign n rhs
-      -- Nested array element assignment: arr[i][j] = v
-      -- → assign arr (array_update arr i (array_update (index arr i) j v))
-      | .app "index" [.app "index" [outerArr, outerIdx], innerIdx] =>
-        let outerName := getVarName (stripD outerArr)
-        let innerUpdate := ImpExpr.app "array_update"
-          [.app "index" [outerArr, outerIdx], innerIdx, rhs]
-        return .assign outerName (.app "array_update" [outerArr, outerIdx, innerUpdate])
-      -- Array element assignment: arr[i] = v → assign arr (array_update arr i v)
-      | .app "index" [arr, idx] =>
-        let arrName := getVarName (stripD arr)
-        return .assign arrName (.app "array_update" [arr, idx, rhs])
-      | _ => return .assign "_assign" rhs
-
-    else if let .ok data := j.getObjVal? "AssignOp" then
-      let rawOp := match data.getObjVal? "op" with
-        | .ok opJ => binOpName opJ
-        | _ => "op"
-      -- Strip "Assign" suffix to get base op (BitXorAssign → BitXor)
-      let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
-      let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      -- Strip deref wrappers from LHS
-      let rec stripD2 : ImpExpr → ImpExpr
-        | .deref e => stripD2 e
-        | e => e
-      let lhs' : ImpExpr := stripD2 lhs
-      match lhs' with
-      | .var n => return .assign n (.app op [lhs, rhs])
-      | .app "index" [arr, idx] =>
-        -- arr[i] op= v → assign arr (array_update arr idx (op(arr[i], v)))
-        let arrName := match stripD2 arr with
-          | .var n => n | .deref (.var n) => n | _ => "_assign"
-        return .assign arrName (.app "array_update" [arr, idx, .app op [lhs, rhs]])
-      | _ => return .assign "_assign" (.app op [lhs, rhs])
-
-    else if let .ok data := j.getObjVal? "Borrow" then
-      let arg ← parseHaxExpr (← data.getObjVal? "arg")
+    | .error e => throw e
+  | .error _ =>
+  match h_Assign : j.getObjVal? "Assign" with
+  | .ok data =>
+    match h_Assign_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
+      let lhs ← parseHaxExpr lhsJ
+      match h_Assign_rhs : data.getObjVal? "rhs" with
+      | .ok rhsJ =>
+        let rhs ← parseHaxExpr rhsJ
+        -- Strip deref wrappers from LHS (references erased by dropReferences)
+        let rec stripD : ImpExpr → ImpExpr
+          | .deref e => stripD e
+          | e => e
+        let lhs' : ImpExpr := stripD lhs
+        let getVarName : ImpExpr → String
+          | .var n => n
+          | .deref (.var n) => n
+          | _ => "_assign"
+        match lhs' with
+        | .var n => return .assign n rhs
+        -- Nested array element assignment: arr[i][j] = v
+        -- → assign arr (array_update arr i (array_update (index arr i) j v))
+        | .app "index" [.app "index" [outerArr, outerIdx], innerIdx] =>
+          let outerName := getVarName (stripD outerArr)
+          let innerUpdate := ImpExpr.app "array_update"
+            [.app "index" [outerArr, outerIdx], innerIdx, rhs]
+          return .assign outerName (.app "array_update" [outerArr, outerIdx, innerUpdate])
+        -- Array element assignment: arr[i] = v → assign arr (array_update arr i v)
+        | .app "index" [arr, idx] =>
+          let arrName := getVarName (stripD arr)
+          return .assign arrName (.app "array_update" [arr, idx, rhs])
+        | _ => return .assign "_assign" rhs
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_AssignOp : j.getObjVal? "AssignOp" with
+  | .ok data =>
+    let rawOp := match data.getObjVal? "op" with
+      | .ok opJ => binOpName opJ
+      | _ => "op"
+    -- Strip "Assign" suffix to get base op (BitXorAssign → BitXor)
+    let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
+    match h_AO_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
+      let lhs ← parseHaxExpr lhsJ
+      match h_AO_rhs : data.getObjVal? "rhs" with
+      | .ok rhsJ =>
+        let rhs ← parseHaxExpr rhsJ
+        -- Strip deref wrappers from LHS
+        let rec stripD2 : ImpExpr → ImpExpr
+          | .deref e => stripD2 e
+          | e => e
+        let lhs' : ImpExpr := stripD2 lhs
+        match lhs' with
+        | .var n => return .assign n (.app op [lhs, rhs])
+        | .app "index" [arr, idx] =>
+          -- arr[i] op= v → assign arr (array_update arr idx (op(arr[i], v)))
+          let arrName := match stripD2 arr with
+            | .var n => n | .deref (.var n) => n | _ => "_assign"
+          return .assign arrName (.app "array_update" [arr, idx, .app op [lhs, rhs]])
+        | _ => return .assign "_assign" (.app op [lhs, rhs])
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_Borrow : j.getObjVal? "Borrow" with
+  | .ok data =>
+    match h_Borrow_arg : data.getObjVal? "arg" with
+    | .ok argJ =>
+      let arg ← parseHaxExpr argJ
       return .borrow arg
-
-    else if let .ok data := j.getObjVal? "Deref" then
-      let arg ← parseHaxExpr (← data.getObjVal? "arg")
+    | .error e => throw e
+  | .error _ =>
+  match h_Deref : j.getObjVal? "Deref" with
+  | .ok data =>
+    match h_Deref_arg : data.getObjVal? "arg" with
+    | .ok argJ =>
+      let arg ← parseHaxExpr argJ
       return .deref arg
-
-    else if let .ok data := j.getObjVal? "Loop" then
-      let body ← parseHaxExpr (← data.getObjVal? "body")
+    | .error e => throw e
+  | .error _ =>
+  match h_Loop : j.getObjVal? "Loop" with
+  | .ok data =>
+    match h_Loop_body : data.getObjVal? "body" with
+    | .ok bodyJ =>
+      let body ← parseHaxExpr bodyJ
       -- hax Loop is a general loop (while true), not a for-range
       return .whileLoop (.lit (.bool true)) body
-
-    else if let .ok data := j.getObjVal? "Break" then
-      let value ← match data.getObjVal? "value" with
-        | .ok (.null) => pure none
-        | .ok v => return .break_ (some (← parseHaxExpr v))
-        | _ => pure none
-      return .break_ value
-
-    else if let .ok _data := j.getObjVal? "Continue" then
-      return .continue_
-
-    else if let .ok data := j.getObjVal? "Return" then
-      let value ← match data.getObjVal? "value" with
-        | .ok (.null) => pure .unitVal
-        | .ok v => parseHaxExpr v
-        | _ => pure .unitVal
-      return .earlyReturn value
-
-    else if let .ok data := j.getObjVal? "Binary" then
-      let op := match data.getObjVal? "op" with
-        | .ok opJ => binOpName opJ
-        | _ => "binop"
-      let lhsJ ← data.getObjVal? "lhs"
+    | .error e => throw e
+  | .error _ =>
+  match h_Break : j.getObjVal? "Break" with
+  | .ok data =>
+    let value ← match h_Break_v : data.getObjVal? "value" with
+      | .ok (.null) => pure none
+      | .ok v => return .break_ (some (← parseHaxExpr v))
+      | _ => pure none
+    return .break_ value
+  | .error _ =>
+  match h_Continue : j.getObjVal? "Continue" with
+  | .ok _data => return .continue_
+  | .error _ =>
+  match h_Return : j.getObjVal? "Return" with
+  | .ok data =>
+    let value ← match h_Return_v : data.getObjVal? "value" with
+      | .ok (.null) => pure .unitVal
+      | .ok v => parseHaxExpr v
+      | _ => pure .unitVal
+    return .earlyReturn value
+  | .error _ =>
+  match h_Binary : j.getObjVal? "Binary" with
+  | .ok data =>
+    let op := match data.getObjVal? "op" with
+      | .ok opJ => binOpName opJ
+      | _ => "binop"
+    match h_Bin_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
       let lhs ← parseHaxExpr lhsJ
-      let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      -- Annotate width-sensitive ops with the bit width of the lhs operand
-      let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
-      return .app opAnnotated [lhs, rhs]
-
-    else if let .ok data := j.getObjVal? "LogicalOp" then
-      let op := match data.getObjVal? "op" with
-        | .ok (.str "And") => "&&"
-        | .ok (.str "Or") => "||"
-        | _ => "logical_op"
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
-      let rhs ← parseHaxExpr (← data.getObjVal? "rhs")
-      return .app op [lhs, rhs]
-
-    else if let .ok data := j.getObjVal? "Unary" then
-      let op := match data.getObjVal? "op" with
-        | .ok opJ => unOpName opJ
-        | _ => "unop"
-      let argJ ← data.getObjVal? "arg"
+      match h_Bin_rhs : data.getObjVal? "rhs" with
+      | .ok rhsJ =>
+        let rhs ← parseHaxExpr rhsJ
+        -- Annotate width-sensitive ops with the bit width of the lhs operand
+        let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
+        return .app opAnnotated [lhs, rhs]
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_Logical : j.getObjVal? "LogicalOp" with
+  | .ok data =>
+    let op := match data.getObjVal? "op" with
+      | .ok (.str "And") => "&&"
+      | .ok (.str "Or") => "||"
+      | _ => "logical_op"
+    match h_LO_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
+      let lhs ← parseHaxExpr lhsJ
+      match h_LO_rhs : data.getObjVal? "rhs" with
+      | .ok rhsJ =>
+        let rhs ← parseHaxExpr rhsJ
+        return .app op [lhs, rhs]
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_Unary : j.getObjVal? "Unary" with
+  | .ok data =>
+    let op := match data.getObjVal? "op" with
+      | .ok opJ => unOpName opJ
+      | _ => "unop"
+    match h_Un_arg : data.getObjVal? "arg" with
+    | .ok argJ =>
       let arg ← parseHaxExpr argJ
       let opAnnotated := annotateOpWidth op (extractExprWidth argJ)
       return .app opAnnotated [arg]
-
-    else if let .ok data := j.getObjVal? "Field" then
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
+    | .error e => throw e
+  | .error _ =>
+  match h_Field : j.getObjVal? "Field" with
+  | .ok data =>
+    match h_Field_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
+      let lhs ← parseHaxExpr lhsJ
       let fieldName := match data.getObjVal? "field" with
         | .ok fj => extractDefIdName fj
         | _ => "field"
       return .app ("." ++ fieldName) [lhs]
-
-    else if let .ok data := j.getObjVal? "TupleField" then
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
+    | .error e => throw e
+  | .error _ =>
+  match h_TF : j.getObjVal? "TupleField" with
+  | .ok data =>
+    match h_TF_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
+      let lhs ← parseHaxExpr lhsJ
       let idx := match data.getObjValAs? Nat "field" with
         | .ok n => n
         | _ => 0
       return .proj lhs idx
-
-    else if let .ok data := j.getObjVal? "Index" then
-      let lhs ← parseHaxExpr (← data.getObjVal? "lhs")
-      let index ← parseHaxExpr (← data.getObjVal? "index")
-      return .app "index" [lhs, index]
-
-    else if let .ok data := j.getObjVal? "Cast" then
-      -- Cast: annotate with target bit width from the outer expression's ty.
-      -- e.g., `x as u8` → app "cast#8" [x], `x as u32` → app "cast#32" [x]
-      let source ← parseHaxExpr (← data.getObjVal? "source")
+    | .error e => throw e
+  | .error _ =>
+  match h_Index : j.getObjVal? "Index" with
+  | .ok data =>
+    match h_Idx_lhs : data.getObjVal? "lhs" with
+    | .ok lhsJ =>
+      let lhs ← parseHaxExpr lhsJ
+      match h_Idx_idx : data.getObjVal? "index" with
+      | .ok indexJ =>
+        let index ← parseHaxExpr indexJ
+        return .app "index" [lhs, index]
+      | .error e => throw e
+    | .error e => throw e
+  | .error _ =>
+  match h_Cast : j.getObjVal? "Cast" with
+  | .ok data =>
+    -- Cast: annotate with target bit width from the outer expression's ty.
+    -- e.g., `x as u8` → app "cast#8" [x], `x as u32` → app "cast#32" [x]
+    match h_Cast_src : data.getObjVal? "source" with
+    | .ok srcJ =>
+      let source ← parseHaxExpr srcJ
       let targetWidth := extractExprWidth outerJ  -- outer ty = target type
       match targetWidth with
       | some w => return .app s!"cast#{w}" [source]
       | none => return .app "cast" [source]
-
-    else if let .ok data := j.getObjVal? "Use" then
-      parseHaxExpr (← data.getObjVal? "source")
-
-    else if let .ok data := j.getObjVal? "NeverToAny" then
-      parseHaxExpr (← data.getObjVal? "source")
-
-    else if let .ok data := j.getObjVal? "Box" then
-      parseHaxExpr (← data.getObjVal? "value")
-
-    else if let .ok data := j.getObjVal? "Adt" then
-      parseAdtExpr data
-
-    else if let .ok data := j.getObjVal? "Closure" then
-      -- Approximate: just use the body
-      parseHaxExpr (← data.getObjVal? "body")
-
-    else if let .ok data := j.getObjVal? "Repeat" then
-      let value ← parseHaxExpr (← data.getObjVal? "value")
-      let count ← match data.getObjVal? "count" with
+    | .error e => throw e
+  | .error _ =>
+  match h_Use : j.getObjVal? "Use" with
+  | .ok data =>
+    match h_Use_src : data.getObjVal? "source" with
+    | .ok srcJ => parseHaxExpr srcJ
+    | .error e => throw e
+  | .error _ =>
+  match h_NTA : j.getObjVal? "NeverToAny" with
+  | .ok data =>
+    match h_NTA_src : data.getObjVal? "source" with
+    | .ok srcJ => parseHaxExpr srcJ
+    | .error e => throw e
+  | .error _ =>
+  match h_Box : j.getObjVal? "Box" with
+  | .ok data =>
+    match h_Box_v : data.getObjVal? "value" with
+    | .ok vJ => parseHaxExpr vJ
+    | .error e => throw e
+  | .error _ =>
+  match h_Adt : j.getObjVal? "Adt" with
+  | .ok data => parseAdtExpr data
+  | .error _ =>
+  match h_Closure : j.getObjVal? "Closure" with
+  | .ok data =>
+    -- Approximate: just use the body
+    match h_Cl_body : data.getObjVal? "body" with
+    | .ok bodyJ => parseHaxExpr bodyJ
+    | .error e => throw e
+  | .error _ =>
+  match h_Repeat : j.getObjVal? "Repeat" with
+  | .ok data =>
+    match h_Rpt_v : data.getObjVal? "value" with
+    | .ok vJ =>
+      let value ← parseHaxExpr vJ
+      let count ← match h_Rpt_c : data.getObjVal? "count" with
         | .ok countJ => parseHaxExpr countJ
         | _ => pure (.lit (.int 0))
       return .app "repeat" [value, count]
-
-    else if let .ok data := j.getObjVal? "PlaceTypeAscription" then
-      parseHaxExpr (← data.getObjVal? "source")
-
-    else if let .ok data := j.getObjVal? "ValueTypeAscription" then
-      parseHaxExpr (← data.getObjVal? "source")
-
-    else if let .ok data := j.getObjVal? "PointerCoercion" then
-      parseHaxExpr (← data.getObjVal? "source")
-
-    else if let .ok _data := j.getObjVal? "ConstBlock" then
-      return .app "const_block" []
-
-    else if let .ok data := j.getObjVal? "NamedConst" then
-      let name := match data.getObjVal? "item" with
-        | .ok item => extractItemDefIdName item "const"
-        | _ => "const"
-      return .var name
-
-    else if let .ok _data := j.getObjVal? "ConstParam" then
-      return .var "const_param"
-
-    else if let .ok data := j.getObjVal? "ConstRef" then
-      let name := match data.getObjVal? "id" with
-        | .ok id => match id.getObjValAs? String "name" with
-          | .ok n => n
-          | _ => "const_ref"
-        | _ => "const_ref"
-      return .var name
-
-    else if let .ok data := j.getObjVal? "StaticRef" then
-      let name := match data.getObjVal? "def_id" with
-        | .ok defId => extractDefIdName defId
-        | _ => "static"
-      return .var name
-
-    else if let .ok data := j.getObjVal? "Yield" then
-      let value ← parseHaxExpr (← data.getObjVal? "value")
-      return .app "yield" [value]
-
-    else if let .ok s := j.getObjVal? "Todo" then
-      let msg := match s with
-        | .str m => m
-        | _ => "todo"
-      return .app ("todo:" ++ msg) []
-
-    else
-      throw s!"unknown hax ExprKind: {j.pretty}"
-
-  /-- Parse a hax literal. -/
-  parseLiteral (data : Json) : ImpExpr :=
-    -- Literal { lit: Spanned<LitKind>, neg: bool }
-    let neg := match data.getObjValAs? Bool "neg" with
-      | .ok true => true
-      | _ => false
-    let litKind := match data.getObjVal? "lit" with
-      | .ok spanned => match spanned.getObjVal? "node" with
+    | .error e => throw e
+  | .error _ =>
+  match h_PTA : j.getObjVal? "PlaceTypeAscription" with
+  | .ok data =>
+    match h_PTA_src : data.getObjVal? "source" with
+    | .ok srcJ => parseHaxExpr srcJ
+    | .error e => throw e
+  | .error _ =>
+  match h_VTA : j.getObjVal? "ValueTypeAscription" with
+  | .ok data =>
+    match h_VTA_src : data.getObjVal? "source" with
+    | .ok srcJ => parseHaxExpr srcJ
+    | .error e => throw e
+  | .error _ =>
+  match h_PC : j.getObjVal? "PointerCoercion" with
+  | .ok data =>
+    match h_PC_src : data.getObjVal? "source" with
+    | .ok srcJ => parseHaxExpr srcJ
+    | .error e => throw e
+  | .error _ =>
+  match h_CB : j.getObjVal? "ConstBlock" with
+  | .ok _data => return .app "const_block" []
+  | .error _ =>
+  match h_NC : j.getObjVal? "NamedConst" with
+  | .ok data =>
+    let name := match data.getObjVal? "item" with
+      | .ok item => extractItemDefIdName item "const"
+      | _ => "const"
+    return .var name
+  | .error _ =>
+  match h_CP : j.getObjVal? "ConstParam" with
+  | .ok _data => return .var "const_param"
+  | .error _ =>
+  match h_CR : j.getObjVal? "ConstRef" with
+  | .ok data =>
+    let name := match data.getObjVal? "id" with
+      | .ok id => match id.getObjValAs? String "name" with
         | .ok n => n
-        | _ => spanned
-      | _ => data
-    if let .ok b := litKind.getObjValAs? Bool "Bool" then .lit (.bool b)
-    else if let .ok intData := litKind.getObjVal? "Int" then
-      -- Format 1: "Int": [n_string, suffix]
-      -- Format 2: "Int": {"Uint": [n_string, suffix]} or {"Int": [n_string, suffix]}
-      let nArr := match intData with
-        | .arr a => some a
-        | _ =>
-          let tryUint := intData.getObjVal? "Uint"
-          let tryInt := intData.getObjVal? "Int"
-          match (tryUint.toOption.orElse fun _ => tryInt.toOption) with
-          | some (.arr a) => some a
-          | _ => none
-      match nArr with
-      | some #[nJ, suffJ] =>
-        let n := match nJ.getStr? with
-          | .ok s => s.toInt?.getD 0
-          | _ => match nJ.getNat? with
-            | .ok n => n
-            | _ => 0
-        let val := if neg then -n else n
-        -- Parse suffix to determine width: "U8", "U16", {"Unsigned":"U8"}, etc.
-        let suffix := match suffJ with
-          | .str "Unsuffixed" => ""
-          | .str s => s
-          | _ =>
-            -- Try {"Unsigned": "U8"} format (lit expressions)
-            match suffJ.getObjVal? "Unsigned" with
-            | .ok (.str s) => "U" ++ s.replace "U" ""
-            | _ => match suffJ.getObjVal? "Signed" with
-              | .ok (.str s) => "I" ++ s.replace "I" ""
-              | _ => match suffJ.getObjVal? "Uint" with
-                | .ok (.str s) => s
-                | _ => match suffJ.getObjVal? "Int" with
-                  | .ok (.str s) => "I" ++ s
-                  | _ => ""
-        let nval := val.toNat
-        match suffix with
-        | "U8"  => .lit (.uintLit .w8 nval)
-        | "U16" => .lit (.uintLit .w16 nval)
-        | "U32" => .lit (.uintLit .w32 nval)
-        | "U64" => .lit (.uintLit .w64 nval)
-        | "U128" => .lit (.uintLit .w128 nval)
-        | "Usize" => .lit (.uintLit .wsize nval)
-        | _ => .lit (.int val)
-      | some #[nJ] =>
-        let n := match nJ.getStr? with
-          | .ok s => s.toInt?.getD 0
-          | _ => match nJ.getNat? with
-            | .ok n => n
-            | _ => 0
-        .lit (.int (if neg then -n else n))
-      | _ => .lit (.int 0)
-    else if let .ok bsData := litKind.getObjVal? "ByteStr" then
-      -- ByteStr: [[byte0, byte1, ...], "Cooked"]
-      match bsData with
-      | .arr #[.arr bytes, _] =>
-        let byteExprs : List ImpExpr := (bytes.toList.filterMap fun b =>
-          match b.getNat? with
-          | .ok n => some (ImpExpr.lit (.int n))
-          | _ => none)
-        .app "array_lit" byteExprs
-      | _ => .app "array_lit" []
-    else if let .ok _strData := litKind.getObjVal? "Str" then
-      -- Str: string literal → opaque in untyped extraction
-      .app "literal" []
-    else .app "literal" []  -- char, float, etc.
+        | _ => "const_ref"
+      | _ => "const_ref"
+    return .var name
+  | .error _ =>
+  match h_SR : j.getObjVal? "StaticRef" with
+  | .ok data =>
+    let name := match data.getObjVal? "def_id" with
+      | .ok defId => extractDefIdName defId
+      | _ => "static"
+    return .var name
+  | .error _ =>
+  match h_Yield : j.getObjVal? "Yield" with
+  | .ok data =>
+    match h_Yield_v : data.getObjVal? "value" with
+    | .ok vJ =>
+      let value ← parseHaxExpr vJ
+      return .app "yield" [value]
+    | .error e => throw e
+  | .error _ =>
+  match h_Todo : j.getObjVal? "Todo" with
+  | .ok s =>
+    let msg := match s with
+      | .str m => m
+      | _ => "todo"
+    return .app ("todo:" ++ msg) []
+  | .error _ =>
+    throw s!"unknown hax ExprKind: {j.pretty}"
+termination_by jsonSize j
+decreasing_by
+  all_goals first
+    | exact getObjVal?_chain_decreases ‹_› ‹_›
+    | exact getObjVal?_decreases ‹_›
+    | (have ha := Array.mem_toList_iff.mp ‹_ ∈ Array.toList _›
+       exact Nat.lt_trans
+         (getObjValAs?_arr_mem_decreases ‹_› ha)
+         (getObjVal?_decreases ‹_›))
 
-  /-- Parse a hax Stmt (from Block). -/
-  parseStmt (j : Json) : Except String ImpExpr := do
-    let kind ← j.getObjVal? "kind"
-    -- StmtKind is an enum with variants like Expr, Let
-    if let .ok data := kind.getObjVal? "Expr" then
-      match data.getObjVal? "expr" with
+/-- Parse a hax Stmt (from Block). -/
+def parseStmt (j : Json) : Except String ImpExpr := do
+  match h_kind : j.getObjVal? "kind" with
+  | .ok kind =>
+    match h_Expr : kind.getObjVal? "Expr" with
+    | .ok data =>
+      match h_E_e : data.getObjVal? "expr" with
       | .ok e => parseHaxExpr e
       | _ => return .unitVal
-    else if let .ok data := kind.getObjVal? "Let" then
+    | .error _ =>
+    match h_Let : kind.getObjVal? "Let" with
+    | .ok data =>
       let pat := match data.getObjVal? "pattern" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
-      let init ← match data.getObjVal? "initializer" with
+      let init ← match h_init : data.getObjVal? "initializer" with
         | .ok (.null) => pure .unitVal
         | .ok e => parseHaxExpr e
         | _ => pure .unitVal
@@ -907,60 +1069,67 @@ where
             | .varPat n => if n.startsWith "_" then "_" else n
             | _ => "_"
           (name, ImpExpr.proj (.var tmpName) i)
-        -- Build nested letBinds: letBind _tup rhs (letBind a _tup.0 (letBind b _tup.1 unitVal))
         let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
         return .letBind tmpName init inner
       | .varPat n =>
         return .letBind n init .unitVal  -- body filled in by stmtsToSeq
       | _ =>
         return .letBind "_let" init .unitVal
-    else
-      return .unitVal
+    | .error _ => return .unitVal
+  | .error _ => return .unitVal
+termination_by jsonSize j
+decreasing_by
+  all_goals first
+    | (-- 3-level chain: j → kind → data → e (via h_kind, h_Let, h_init)
+       exact Nat.lt_trans (getObjVal?_decreases h_init)
+              (Nat.lt_trans (getObjVal?_decreases h_Let)
+                            (getObjVal?_decreases h_kind)))
+    | (-- 2-level chain
+       exact Nat.lt_trans (getObjVal?_decreases h_E_e)
+                          (Nat.lt_trans (getObjVal?_decreases h_Expr)
+                                        (getObjVal?_decreases h_kind)))
 
-  /-- Replace the deepest unitVal in a letBind chain with a continuation.
-      letBind a v1 (letBind b v2 unitVal) → letBind a v1 (letBind b v2 cont) -/
-  replaceDeepestUnit (e : ImpExpr) (cont : ImpExpr) : ImpExpr :=
-    match e with
-    | .letBind n v .unitVal => .letBind n v cont
-    | .letBind n v body => .letBind n v (replaceDeepestUnit body cont)
-    | _ => .seq e cont
+/-- Parse a hax Arm (from Match). -/
+def parseArm (j : Json) : Except String (ImpPat × ImpExpr) := do
+  let pat := match j.getObjVal? "pattern" with
+    | .ok p => parseHaxPat p
+    | _ => .wildcard
+  let body ← match h_body : j.getObjVal? "body" with
+    | .ok b => parseHaxExpr b
+    | _ => pure .unitVal
+  return (pat, body)
+termination_by jsonSize j
+decreasing_by exact getObjVal?_decreases ‹_›
 
-  /-- Convert a list of statement expressions into nested seq/letBind. -/
-  stmtsToSeq (stmts : List ImpExpr) (tail : ImpExpr) : ImpExpr :=
-    match stmts with
-    | [] => tail
-    | [s] => replaceDeepestUnit s tail
-    | s :: rest => replaceDeepestUnit s (stmtsToSeq rest tail)
-
-  /-- Parse a hax Arm (from Match). -/
-  parseArm (j : Json) : Except String (ImpPat × ImpExpr) := do
-    let pat := match j.getObjVal? "pattern" with
-      | .ok p => parseHaxPat p
-      | _ => .wildcard
-    let body ← match j.getObjVal? "body" with
-      | .ok b => parseHaxExpr b
+/-- Parse a hax AdtExpr (struct/enum construction). -/
+def parseAdtExpr (j : Json) : Except String ImpExpr := do
+  -- hax JSON: info.variant is a DefId, info.type_namespace is a DefId
+  let name := match j.getObjVal? "info" with
+    | .ok info => match info.getObjVal? "variant" with
+      | .ok variantDefId => extractDefIdName variantDefId
+      | _ => match info.getObjVal? "type_namespace" with
+        | .ok nsDefId => extractDefIdName nsDefId
+        | _ => match info.getObjValAs? String "variant_name" with
+          | .ok n => n
+          | _ => "Adt"
+    | _ => "Adt"
+  let fields ← match h_flds : j.getObjValAs? (Array Json) "fields" with
+    | .ok fs => fs.toList.attach.mapM fun ⟨fj, hf⟩ =>
+      match h_v : fj.getObjVal? "value" with
+      | .ok v => parseHaxExpr v
       | _ => pure .unitVal
-    return (pat, body)
+    | _ => pure []
+  return .app name fields
+termination_by jsonSize j
+decreasing_by
+  all_goals first
+    | (have ha := Array.mem_toList_iff.mp ‹_ ∈ Array.toList _›
+       exact Nat.lt_trans
+         (getObjVal?_decreases ‹_›)
+         (getObjValAs?_arr_mem_decreases ‹_› ha))
+    | exact getObjVal?_decreases ‹_›
 
-  /-- Parse a hax AdtExpr (struct/enum construction). -/
-  parseAdtExpr (j : Json) : Except String ImpExpr := do
-    -- hax JSON: info.variant is a DefId, info.type_namespace is a DefId
-    let name := match j.getObjVal? "info" with
-      | .ok info => match info.getObjVal? "variant" with
-        | .ok variantDefId => extractDefIdName variantDefId
-        | _ => match info.getObjVal? "type_namespace" with
-          | .ok nsDefId => extractDefIdName nsDefId
-          | _ => match info.getObjValAs? String "variant_name" with
-            | .ok n => n
-            | _ => "Adt"
-      | _ => "Adt"
-    let fields ← match j.getObjValAs? (Array Json) "fields" with
-      | .ok fs => fs.toList.mapM fun fj =>
-        match fj.getObjVal? "value" with
-        | .ok v => parseHaxExpr v
-        | _ => pure .unitVal
-      | _ => pure []
-    return .app name fields
+end -- mutual
 
 /-! ## For-Loop Reconstruction
 
@@ -1816,7 +1985,7 @@ where
     else if let .ok data := j.getObjVal? "Call" then
       let funName := extractCallName (← data.getObjVal? "fun")
       let argsJ ← data.getObjValAs? (Array Json) "args"
-      let args ← argsJ.toList.mapM parseHaxTExpr
+      let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a)
       return .app funName args
 
     else if let .ok data := j.getObjVal? "Let" then
@@ -1842,7 +2011,7 @@ where
 
     else if let .ok data := j.getObjVal? "Block" then
       let stmts ← match data.getObjValAs? (Array Json) "stmts" with
-        | .ok ss => ss.toList.mapM parseTStmt
+        | .ok ss => ss.toList.attach.mapM (fun ⟨s, _h⟩ => parseTStmt s)
         | _ => pure []
       let tail ← match data.getObjVal? "expr" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
@@ -1853,18 +2022,18 @@ where
     else if let .ok data := j.getObjVal? "Match" then
       let scrut ← parseHaxTExpr (← data.getObjVal? "scrutinee")
       let armsJ ← data.getObjValAs? (Array Json) "arms"
-      let arms ← armsJ.toList.mapM parseTArm
+      let arms ← armsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseTArm a)
       return .match_ scrut arms
 
     else if let .ok data := j.getObjVal? "Tuple" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
-      let fields ← fieldsJ.toList.mapM parseHaxTExpr
+      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f)
       if fields.isEmpty then return .unitVal
       return .tuple fields
 
     else if let .ok data := j.getObjVal? "Array" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
-      let fields ← fieldsJ.toList.mapM parseHaxTExpr
+      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f)
       return .app "array_lit" fields
 
     else if let .ok data := j.getObjVal? "Assign" then
@@ -2166,7 +2335,7 @@ where
             | _ => "Adt"
       | _ => "Adt"
     let fields ← match j.getObjValAs? (Array Json) "fields" with
-      | .ok fs => fs.toList.mapM fun fj =>
+      | .ok fs => fs.toList.attach.mapM fun ⟨fj, _h⟩ =>
         match fj.getObjVal? "value" with
         | .ok v => parseHaxTExpr v
         | _ => pure (TExpr.mk .unitVal .unit)
