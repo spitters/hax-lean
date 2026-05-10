@@ -162,7 +162,7 @@ theorem getObjVal?_decreases {j : Json} {k : String} {j' : Json}
       subst h
       exact jsonSize_obj_value_lt hg
 
-/-! ### Phase 3b infrastructure: chained and `getObjValAs?`-based decreases -/
+/-! ### Chained and `getObjValAs?`-based decreases -/
 
 open Lean (FromJson)
 

@@ -501,7 +501,7 @@ where
 /-! ## Expression mapping -/
 
 /-- Parse a hax literal. -/
-private def parseLiteral (data : Json) : ImpExpr :=
+def parseLiteral (data : Json) : ImpExpr :=
   -- Literal { lit: Spanned<LitKind>, neg: bool }
   let neg := match data.getObjValAs? Bool "neg" with
     | .ok true => true
