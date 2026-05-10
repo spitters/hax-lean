@@ -505,6 +505,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       rawDefs.map fun (n, e) => (n, pipeline e)
     else
       procTdefs.map fun (n, te) => (n, te.erase)
+  -- Canonicalization passes (Hax.Canonicalize): drop dead CF bindings,
+  -- rewrite panic to unit, normalise _assign discard. After this, the
+  -- corresponding detection logic in `toLean` is redundant.
+  let defs := defs.map fun (n, e) => (n, Hax.Canonicalize.canonicalize e)
   -- Apply typed passes (struct projection disambiguation, etc.)
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
