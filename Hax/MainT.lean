@@ -43,7 +43,7 @@ open Lean (toJson Json)
 def parseHaxInputTyped (input : String) :
     IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo)
         × List (String × TExpr) × List (String × TExpr)) := do
-  let json ← IO.ofExcept (Json.parse input)
+  let json ← IO.ofExcept (Json.parseVerified input)
   IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
 
 def main (args : List String) : IO UInt32 := do
