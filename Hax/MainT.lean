@@ -158,5 +158,12 @@ def main (args : List String) : IO UInt32 := do
       let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
       IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
     | _ =>
-      IO.println (toLeanDef opts.name result)
+      -- --emit-lean: surface code only (no ImpExpr literals). Route through
+      -- the same module-file emitter as --emit-certified so each Rust fn
+      -- becomes its own top-level `def` with proper parameters, instead of
+      -- collapsing everything into one nested-let `def`.
+      let fnDefs := extractFnDefs result
+      let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
+      IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes
+                    callRetTypes callSigs varRefTypes (withImpExprs := false))
     return 0
