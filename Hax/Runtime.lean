@@ -669,6 +669,14 @@ the `UInt{w}` level can call the named variants directly. -/
     emitted Lean code is already typed at the target. -/
 @[inline] def into {α : Type} (x : α) : α := x
 
+/-- Tuple-newtype positional projection: `Commitment(inner).0` style access.
+    The Rust source has `struct Commitment(Vec<u8>)` and bodies use `c.0`
+    to unwrap. The typed extraction emits `«.0» c` and we treat the
+    newtype as an identity wrapper at the Lean surface, matching the
+    bridge-adapter pattern: the concrete protocol instance unwraps as
+    needed at its boundary. -/
+@[inline] def «.0» {α : Type} (x : α) : α := x
+
 /-- SHA-256 placeholder: opaque axiomatic hash. Cross-crate `hash::sha256`
     references in the typed extraction resolve here rather than as a
     `<Crate>Deps` field. Replaced by the protocol's concrete instance via
