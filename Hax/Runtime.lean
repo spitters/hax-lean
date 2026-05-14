@@ -191,6 +191,14 @@ Capitalized variants match hax's Rust operator names. -/
 @[inline] def neg (a : Int) : Int := -a
 
 -- Comparison (Int-specialized to avoid typeclass issues with untyped parameters)
+-- Coercion `Bool → Int`: extracted code can produce `Hax.bne (x : Bool) (0 : Int)`
+-- because the typed extraction widens Rust `bool` flags into `Int` comparisons
+-- (see `crates/hash`'s `have_prev` flag in HKDF expansion). With this Coe,
+-- `Hax.bne x 0` resolves with `x` coerced to `(if x then 1 else 0 : Int)`.
+-- Keeping `beq`/`bne` Int-only avoids the Nat-vs-Int unification problem that
+-- a polymorphic `[BEq α]` version triggers in other call sites.
+instance : Coe Bool Int where coe b := if b then 1 else 0
+
 @[inline] def beq (a b : Int) : Bool := a == b
 @[inline] def bne (a b : Int) : Bool := !(a == b)
 -- Polymorphic versions for typed extraction
@@ -654,6 +662,19 @@ the `UInt{w}` level can call the named variants directly. -/
 
 /-- `Vec::to_vec` placeholder: identity on `Array`. -/
 @[inline] def to_vec {α : Type} (xs : Array α) : Array α := xs
+
+/-- `Into::into` placeholder: identity. The typed extraction emits
+    `Hax.into x` for Rust `x.into()` calls where the target type is
+    deduced from context; we collapse this to identity since the
+    emitted Lean code is already typed at the target. -/
+@[inline] def into {α : Type} (x : α) : α := x
+
+/-- Constructor placeholder: collapsing `T::new(arg)` to the arg itself.
+    Used when a Rust constructor wraps its arg trivially (e.g. newtype
+    wrappers, `Cipher::new(key)`-style adapters where the cipher state
+    is itself the key). When the result type differs from the arg,
+    callers must thread a separate adapter. -/
+@[inline] def «new» {α : Type} (x : α) : α := x
 
 /-- Rust `assert!`/`assert_eq!` failure placeholder. Returns a default value
     of the goal type so callers don't need a result-type proof obligation;
