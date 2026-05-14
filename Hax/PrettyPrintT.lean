@@ -186,6 +186,17 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
         let tupleT := structTupleType structMeta fields structLookup
         let projectionsUsed := fields.any fun (fname, _, _) =>
           allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}"
+        -- Emit a type abbreviation `abbrev <sname>_T := <tupleT>` so per-field
+        -- projection signatures don't repeat the full nested tuple type. Lean
+        -- treats `abbrev` transparently, so this is purely cosmetic and
+        -- non-passthrough structs benefit the most. Skipped for empty / unused
+        -- structs and for passthrough structs (which use raw `Array Int`).
+        let abbrevName := s!"{sanitizeName sname}_T"
+        let hasAnyEmit := isUsed || projectionsUsed
+        let abbrevDefs := if hasAnyEmit && !isPassthrough then
+            [s!"/-- Tuple-encoded type for Rust struct `{sname}` (auto-generated). -/\nabbrev {abbrevName} := {tupleT}"]
+          else []
+        let typeRef := if !isPassthrough && hasAnyEmit then abbrevName else tupleT
         let ctorDefs := if isUsed || projectionsUsed then
           if isPassthrough then
             let paramDecls := fields.map fun (fname, ftag, fty) =>
@@ -202,9 +213,9 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
             let paramStr := " ".intercalate paramDecls
             let tupleStr := ", ".intercalate (fields.map fun (fname, _, _) => sanitizeName fname)
             let ctorDef := if fields.length == 1 then
-                s!"def {sanitizeName sname} {paramStr} : {tupleT} := {sanitizeName fields.head!.1}"
+                s!"def {sanitizeName sname} {paramStr} : {typeRef} := {sanitizeName fields.head!.1}"
               else
-                s!"def {sanitizeName sname} {paramStr} : {tupleT} := ({tupleStr})"
+                s!"def {sanitizeName sname} {paramStr} : {typeRef} := ({tupleStr})"
             [s!"/-- Struct constructor + projections (auto-generated from Rust struct). -/\n{ctorDef}"]
         else []
         let (projDefs, emittedProjs') := (fields.zip (List.range fields.length)).foldl
@@ -218,13 +229,13 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
               if !ep.contains projName then
                 if !isPassthrough then
                   let path := projPath i fields.length
-                  (pdefs ++ [s!"def «{emitName}» (x : {tupleT}) := x{path}"], ep ++ [projName])
+                  (pdefs ++ [s!"def «{emitName}» (x : {typeRef}) := x{path}"], ep ++ [projName])
                 else
                   (pdefs ++ [s!"def «{emitName}» (x : Array Int) := x"], ep ++ [projName])
               else
                 if !isPassthrough then
                   let path := projPath i fields.length
-                  (pdefs ++ [s!"def «{qualName}» (x : {tupleT}) := x{path}"], ep)
+                  (pdefs ++ [s!"def «{qualName}» (x : {typeRef}) := x{path}"], ep)
                 else
                   (pdefs ++ [s!"def «{qualName}» (x : Array Int) := x"], ep)
             else (pdefs, ep))
@@ -237,7 +248,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
             if unqualUsed && emittedProjs.contains projName then
               cs ++ [(projName, qualName)]
             else cs) ([] : List (String × String))
-        (acc ++ ctorDefs ++ projDefs, emittedProjs', conflicts ++ newConflicts))
+        (acc ++ abbrevDefs ++ ctorDefs ++ projDefs, emittedProjs', conflicts ++ newConflicts))
     ([], ([] : List String), ([] : List (String × String)))
 
   -- === Generate deps class using TYPED information ===

@@ -3192,6 +3192,20 @@ def generatePreamble (defs : List (String × ImpExpr))
       -- so that rewriteNewToStructCtor can rewrite `new []` calls)
       let projectionsUsed := fields.any fun (fname, _, _) =>
         allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}"
+      -- Emit a type abbreviation `abbrev <sname>_T := <tupleT>` so per-field
+      -- projection signatures don't repeat the full nested tuple type. Lean
+      -- treats `abbrev` transparently, so this is purely cosmetic; values
+      -- typed as `<sname>_T` are still tuples for any downstream consumer.
+      -- Only useful for non-passthrough structs that we'll actually emit
+      -- projections / ctor for; skip otherwise to keep noise out.
+      let abbrevName := s!"{sanitizeName sname}_T"
+      let hasAnyEmit := isUsed || projectionsUsed
+      let abbrevDefs := if hasAnyEmit && !isPassthrough then
+          [s!"/-- Tuple-encoded type for Rust struct `{sname}` (auto-generated). -/\nabbrev {abbrevName} := {tupleT}"]
+        else []
+      -- Use the abbrev when we have one; otherwise fall back to the raw tuple
+      -- type string (passthrough cases use `Array Int` directly).
+      let typeRef := if !isPassthrough && hasAnyEmit then abbrevName else tupleT
       let ctorDefs := if isUsed || projectionsUsed then
         if isPassthrough then
           -- Pass-through: struct constructor is identity (returns first Array Int arg)
@@ -3210,9 +3224,9 @@ def generatePreamble (defs : List (String × ImpExpr))
           let paramStr := " ".intercalate paramDecls
           let tupleStr := ", ".intercalate (fields.map fun (fname, _, _) => sanitizeName fname)
           let ctorDef := if fields.length == 1 then
-              s!"def {sanitizeName sname} {paramStr} : {tupleT} := {sanitizeName fields.head!.1}"
+              s!"def {sanitizeName sname} {paramStr} : {typeRef} := {sanitizeName fields.head!.1}"
             else
-              s!"def {sanitizeName sname} {paramStr} : {tupleT} := ({tupleStr})"
+              s!"def {sanitizeName sname} {paramStr} : {typeRef} := ({tupleStr})"
           [s!"/-- Struct constructor + projections (auto-generated from Rust struct). -/\n{ctorDef}"]
       else []
       -- Projections: if struct is used with tuple type, project from tuple;
@@ -3231,14 +3245,14 @@ def generatePreamble (defs : List (String × ImpExpr))
               -- First struct to emit this projection (gets the chosen name)
               if !isPassthrough then
                 let path := projPath i fields.length
-                (pdefs ++ [s!"def «{emitName}» (x : {tupleT}) := x{path}"], ep ++ [projName])
+                (pdefs ++ [s!"def «{emitName}» (x : {typeRef}) := x{path}"], ep ++ [projName])
               else
                 (pdefs ++ [s!"def «{emitName}» (x : Array Int) := x"], ep ++ [projName])
             else
               -- Conflict: always emit with qualified name
               if !isPassthrough then
                 let path := projPath i fields.length
-                (pdefs ++ [s!"def «{qualName}» (x : {tupleT}) := x{path}"], ep)
+                (pdefs ++ [s!"def «{qualName}» (x : {typeRef}) := x{path}"], ep)
               else
                 (pdefs ++ [s!"def «{qualName}» (x : Array Int) := x"], ep)
           else (pdefs, ep))
@@ -3252,7 +3266,7 @@ def generatePreamble (defs : List (String × ImpExpr))
           if unqualUsed && emittedProjs.contains projName then
             cs ++ [(projName, qualName)]
           else cs) ([] : List (String × String))
-      (acc ++ ctorDefs ++ projDefs, emittedProjs', conflicts ++ newConflicts))
+      (acc ++ abbrevDefs ++ ctorDefs ++ projDefs, emittedProjs', conflicts ++ newConflicts))
     ([], ([] : List String), ([] : List (String × String)))
   -- Collect free variables that appear as .var (not .app) — these are 0-arity deps
   -- like AES_SBOX, AEGIS_C0, etc. that aren't function calls
