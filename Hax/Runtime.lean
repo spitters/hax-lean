@@ -669,6 +669,12 @@ the `UInt{w}` level can call the named variants directly. -/
     emitted Lean code is already typed at the target. -/
 @[inline] def into {α : Type} (x : α) : α := x
 
+/-- SHA-256 placeholder: opaque axiomatic hash. Cross-crate `hash::sha256`
+    references in the typed extraction resolve here rather than as a
+    `<Crate>Deps` field. Replaced by the protocol's concrete instance via
+    the standard bridge-adapter pattern at the CatCrypt surface. -/
+axiom sha256 : Array Int → Array Int
+
 /-- Constructor placeholder: collapsing `T::new(arg)` to the arg itself.
     Used when a Rust constructor wraps its arg trivially (e.g. newtype
     wrappers, `Cipher::new(key)`-style adapters where the cipher state
