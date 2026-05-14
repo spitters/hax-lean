@@ -109,24 +109,32 @@ lake build haxpipeT     # build the CLI: .lake/build/bin/haxpipeT
 `haxpipeT` reads a hax JSON dump and emits one of five output formats,
 selected by flag:
 
-| Flag | Output |
-|------|--------|
-| `--emit-lean` (default) | Lean 4 surface code (purely functional, imports `Hax.Runtime`) |
-| `--emit-certified` | Surface code **plus** the post-pipeline `ImpExpr` literal, for agreement proofs |
-| `--emit-json` | The transformed `ImpExpr` AST serialized as JSON (the imperative IR) |
-| `--emit-bridge` | A CatCrypt `HaxBridge.lean` template wiring extraction into a protocol |
-| `--emit-debug-meta` | Debug metadata about hax types and struct layouts |
+| Flag | Output | Status |
+|------|--------|--------|
+| `--emit-certified --hax` | Surface code **plus** post-pipeline `ImpExpr` literals, with hax-JSON types preserved end-to-end | **Recommended.** Used by all 100+ production extractions in `SSProve-lean/CatCrypt/.../*_haxpipe.lean`. |
+| `--emit-certified` (no `--hax`) | Same shape, untyped pipeline | **Deprecated (2026-05-14).** Legacy expression-parser path. Emits a runtime warning on stderr. |
+| `--emit-lean` (default) | Lean 4 surface code, no ImpExpr literals | **Deprecated (2026-05-14).** Untyped pipeline; no production consumer. Use `--emit-certified --hax` instead. |
+| `--emit-json` | The transformed `ImpExpr` AST serialized as JSON | Debug/inspection. |
+| `--emit-bridge` | A CatCrypt `HaxBridge.lean` template wiring extraction into a protocol | **Deprecated.** `HaxBridge.lean` is the legacy pattern; new bridges should be `SurfaceDeps.lean`. |
+| `--emit-debug-meta` | Debug metadata about hax types and struct layouts | Debug/inspection. |
 
 ```bash
-# Default: untyped surface code
-haxpipeT --hax INPUT.json --emit-lean --name MyModule -o out.lean
-
-# Typed certified output (surface code + ImpExpr literals)
+# Recommended: typed certified output (used by every production extraction)
 haxpipeT --hax INPUT.json --emit-certified --name MyModule -o out.lean
 
 # Transformed AST as JSON
 haxpipeT --hax INPUT.json --emit-json --name MyModule -o out.json
 ```
+
+### Deprecation note
+
+The *untyped* pipeline (`Hax/PrettyPrint.lean` → `toLeanCertifiedFile`)
+is deprecated. Every consumer in `SSProve-lean` uses the typed path
+(`--emit-certified --hax`, `Hax/PrettyPrintT.lean` →
+`toLeanCertifiedFileTyped`), which preserves hax JSON types through to
+the emitted Lean. The untyped path is retained only for the legacy
+expression-parser entry point and tests, and is slated for removal once
+those are migrated. See `Hax/PrettyPrint.lean`'s module docstring.
 
 To produce the JSON input from a Rust crate, run `cargo hax json` from the
 [hax](https://github.com/hacspec/hax) toolchain. Generated Lean files

@@ -32,8 +32,16 @@ For `--emit-certified`, the typed path uses TExpr types for:
 - Deps class field signatures (from call-site TExpr.ty)
 - No heuristic type recovery needed
 
-Other emit modes (`lean`, `json`, `bridge`) fall back to the untyped path.
+Other emit modes (`lean`, `json`, `bridge`) fall back to the **deprecated**
+untyped path (`Hax.PrettyPrint.toLeanCertifiedFile`, since 2026-05-14). New
+consumers should use `--emit-certified --hax`. See `Hax/PrettyPrint.lean`
+module docstring for the removal plan.
 -/
+
+-- Intentional calls into the deprecated untyped emitter for the fallback
+-- emit modes (`--emit-lean`, `--emit-certified` without `--hax-format`).
+-- A runtime warning is emitted on stderr at the call sites below.
+set_option linter.deprecated false
 
 open Hax
 open Lean (toJson Json)
@@ -154,6 +162,11 @@ def main (args : List String) : IO UInt32 := do
       for (name, ty) in callRetTypes do
         IO.eprintln s!"  {name} -> {ty.toLeanTypeStr sl}"
     | "certified" =>
+      -- DEPRECATED 2026-05-14: --emit-certified without --hax-format routes
+      -- through the untyped pipeline. All production extractions use
+      -- `--emit-certified --hax` (typed path). See PrettyPrint.lean module
+      -- docstring for removal plan.
+      IO.eprintln "WARNING: --emit-certified without --hax-format uses the deprecated untyped pipeline (since 2026-05-14). Add --hax to use the typed path (PrettyPrintT.toLeanCertifiedFileTyped)."
       let fnDefs := extractFnDefs result
       let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
       IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes callRetTypes callSigs varRefTypes)
@@ -162,6 +175,10 @@ def main (args : List String) : IO UInt32 := do
       -- the same module-file emitter as --emit-certified so each Rust fn
       -- becomes its own top-level `def` with proper parameters, instead of
       -- collapsing everything into one nested-let `def`.
+      -- DEPRECATED 2026-05-14: --emit-lean is the untyped pipeline.
+      -- No production consumer; the typed path (--emit-certified --hax)
+      -- supersedes it.
+      IO.eprintln "WARNING: --emit-lean uses the deprecated untyped pipeline (since 2026-05-14). Use --emit-certified --hax for production extraction."
       let fnDefs := extractFnDefs result
       let defs := if fnDefs.isEmpty then [(opts.name, result)] else fnDefs
       IO.println (toLeanCertifiedFile defs opts.name structMeta fnTypes
