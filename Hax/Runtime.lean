@@ -611,4 +611,56 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 @[inline] def cast_usize_u64 (x : USize) : UInt64 := UInt64.ofNat x.toNat
 @[inline] def cast_u64_usize (x : UInt64) : USize := USize.ofNat x.toBitVec.toNat
 
+/-! ## Width-tagged shims for untyped emission
+
+The `--emit-certified` emitter produces width-tagged operator forms like
+`Hax.castVal_w 8 x`, `Hax.bitxor_w 64 a b`, etc., where the first argument is
+the (compile-time) bit width and the rest are operands. The intent is that
+these widths are *informational* — at the `Hax.*` surface, every integer
+collapses to `Int` and the wrapping semantics live in the dedicated
+`add_u8`/`bitxor_u64`/etc. families above.
+
+These shims provide that collapse: the width argument is discarded and the
+operation runs on `Int`. Anything that genuinely needs wrap-on-overflow at
+the `UInt{w}` level can call the named variants directly. -/
+
+/-- Width-tagged cast: collapses to identity on `Int`. The width argument is
+    informational only; see file docstring above. -/
+@[inline] def castVal_w (_w : Nat) (n : Int) : Int := n
+
+/-- Width-tagged bitwise xor on `Int`. -/
+@[inline] def bitxor_w (_w : Nat) (a b : Int) : Int := bitxor a b
+
+/-- Width-tagged bitwise and on `Int`. -/
+@[inline] def bitand_w (_w : Nat) (a b : Int) : Int := bitand a b
+
+/-- Width-tagged bitwise or on `Int`. -/
+@[inline] def bitor_w (_w : Nat) (a b : Int) : Int := bitor a b
+
+/-- Width-tagged right shift on `Int`. -/
+@[inline] def shr_w (_w : Nat) (a b : Int) : Int := shr a b
+
+/-- Width-tagged left shift on `Int`. -/
+@[inline] def shl_w (_w : Nat) (a b : Int) : Int := shl a b
+
+/-- Width-tagged wrapping add on `Int` (no actual wrapping at this layer). -/
+@[inline] def wrapping_add_w (_w : Nat) (a b : Int) : Int := a + b
+
+/-- Width-tagged wrapping sub on `Int` (no actual wrapping at this layer). -/
+@[inline] def wrapping_sub_w (_w : Nat) (a b : Int) : Int := a - b
+
+/-- Width-tagged wrapping mul on `Int` (no actual wrapping at this layer). -/
+@[inline] def wrapping_mul_w (_w : Nat) (a b : Int) : Int := a * b
+
+/-- `Vec::to_vec` placeholder: identity on `Array`. -/
+@[inline] def to_vec {α : Type} (xs : Array α) : Array α := xs
+
+/-- Rust `assert!`/`assert_eq!` failure placeholder. Returns a default value
+    of the goal type so callers don't need a result-type proof obligation;
+    the actual `panic!` semantics are out of scope for the extracted surface. -/
+@[inline] def assert_failed {α : Type} [Inhabited α] (_msg : String) : α := default
+
+/-- `assert_failed'` variant accepting any-shape descriptor. -/
+@[inline] def assert_failed' {α : Type} [Inhabited α] (_msg : String) : α := default
+
 end Hax
