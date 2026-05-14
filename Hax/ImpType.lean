@@ -103,6 +103,50 @@ def isIntLike : ImpType → Bool
   | .sint _ => true
   | _ => false
 
+/-- Sanitize a Rust path/identifier into a valid Lean identifier.
+    Strips path prefix (keeps last `::` segment), then maps non-alphanum
+    chars to `_`. Used to preserve opaque ADT names through the emit
+    instead of collapsing them to `Int`. -/
+def sanitizeAdtShortName (name : String) : String :=
+  let short := match name.splitOn "::" with
+    | [] => name
+    | segs => segs.getLast!
+  -- Strip generic args if present: `MyType<u8, u32>` → `MyType`
+  let bareIdent := (short.splitOn "<").head!
+  -- Replace any non-alphanum/non-underscore char with underscore
+  let chars := bareIdent.toList.map fun c =>
+    if c.isAlphanum || c == '_' then c else '_'
+  let s := String.mk chars
+  -- Lean identifiers must start with a letter or underscore
+  if s.isEmpty || (s.front.isDigit) then "T_" ++ s else s
+
+/-- Walk a type and return the set of "opaque" ADT short names — names that
+    are not in `structLookup` and not a recognized wrapper (Vec/Box/Option/
+    Result). These are the names that would otherwise collapse to `Int`
+    in the surface stringifier; they need `axiom <Name> : Type` declarations
+    emitted at the top of the certified file so Lean has a target type. -/
+partial def collectOpaqueAdtNames (structLookup : String → Option String := fun _ => none) :
+    ImpType → List String
+  | .adt name args =>
+    let argNames := args.foldl (fun acc a => acc ++ a.collectOpaqueAdtNames structLookup) []
+    if structLookup name |>.isSome then argNames
+    else if name == "Vec" || name.endsWith "::Vec"
+        || name == "Box" || name.endsWith "::Box"
+        || name == "Option" || name.endsWith "::Option"
+        || name == "Result" || name.endsWith "::Result" then argNames
+    else
+      let short := sanitizeAdtShortName name
+      if structLookup short |>.isSome then argNames
+      else short :: argNames
+  | .tuple es => es.foldl (fun acc a => acc ++ a.collectOpaqueAdtNames structLookup) []
+  | .option inner => inner.collectOpaqueAdtNames structLookup
+  | .result a b => a.collectOpaqueAdtNames structLookup ++ b.collectOpaqueAdtNames structLookup
+  | .controlFlow a b => a.collectOpaqueAdtNames structLookup ++ b.collectOpaqueAdtNames structLookup
+  | .ref inner _ => inner.collectOpaqueAdtNames structLookup
+  | .slice inner => inner.collectOpaqueAdtNames structLookup
+  | .array inner _ => inner.collectOpaqueAdtNames structLookup
+  | _ => []
+
 /-- Convert an ImpType to a Lean 4 type string for code generation.
     `structLookup` resolves ADT names to their Lean tuple type strings. -/
 partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option String := fun _ => none) : String :=
@@ -150,14 +194,16 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
         | ok :: _ => s!"Except Int ({ok.toLeanTypeStr structLookup})"
         | _ => "Except Int Int"
       else
-        -- Try matching the last segment of the Rust path against structLookup
-        -- e.g., "softspoken_hax::types::WordVec" → try "WordVec"
-        let shortName := match name.splitOn "::" with
-          | [] => name
-          | segs => segs.getLast!
+        -- Try matching the sanitized last segment of the Rust path against
+        -- structLookup. e.g., "softspoken_hax::types::WordVec" → try "WordVec".
+        let shortName := sanitizeAdtShortName name
         match structLookup shortName with
         | some s => s
-        | none => "Int"
+        | none =>
+          -- Preserve opaque ADT name. Mirrors the surface-stringifier change;
+          -- the emitter declares `axiom <ShortName> : Type` for any name that
+          -- reaches this branch.
+          shortName
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
   | .ref inner _ => inner.toLeanTypeStr structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStr structLookup})"
@@ -212,12 +258,16 @@ partial def toLeanTypeStrSurface (ty : ImpType)
         | ok :: _ => s!"Except Int ({ok.toLeanTypeStrSurface structLookup})"
         | _ => "Except Int Int"
       else
-        let shortName := match name.splitOn "::" with
-          | [] => name
-          | segs => segs.getLast!
+        let shortName := sanitizeAdtShortName name
         match structLookup shortName with
         | some s => s
-        | none => "Int"
+        | none =>
+          -- Preserve opaque ADT name instead of collapsing to `Int`.
+          -- The emitter declares `axiom <ShortName> : Type` at the top of
+          -- the certified file via `collectOpaqueAdtNames`, so Lean sees
+          -- this name as a valid (uninhabited) type. Consumers provide
+          -- concrete instances via the bridge-adapter pattern.
+          shortName
   | .ref inner _ => inner.toLeanTypeStrSurface structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
   | .array inner _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"

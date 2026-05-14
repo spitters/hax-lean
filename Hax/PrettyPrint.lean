@@ -4781,7 +4781,27 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
     "import Hax.Runtime\nimport Hax.AST\nimport Hax.Semantics"
   else
     "import Hax.Runtime"
-  let header := s!"{headerComment}\n{imports}\n\nset_option linter.unusedVariables false\n\nnamespace {moduleName}\n\nopen Hax\n{preamble}\nmutual\n\n"
+  -- Step 2: collect opaque ADT names from every type the emit will reference
+  -- and emit `axiom <Name> : Type` declarations. This lets the emitter
+  -- preserve cipher / block / newtype names in Deps signatures and let-binding
+  -- annotations rather than collapsing them to `Int`.
+  let collectFromFnTypeInfo (ti : HaxAdapter.FnTypeInfo) : List String :=
+    ti.paramTypes.foldl (fun acc (_, t) => acc ++ t.collectOpaqueAdtNames structLookup) []
+      ++ ti.retType.collectOpaqueAdtNames structLookup
+  let opaqueFromFnTypes := fnTypes.foldl (fun acc (_, ti) =>
+    acc ++ collectFromFnTypeInfo ti) ([] : List String)
+  let opaqueFromCallSigs := callSigs.foldl (fun acc (_, ti) =>
+    acc ++ collectFromFnTypeInfo ti) ([] : List String)
+  let opaqueFromCallRet := callRetTypes.foldl (fun acc (_, t) =>
+    acc ++ t.collectOpaqueAdtNames structLookup) ([] : List String)
+  let opaqueFromVarRefs := varRefTypes.foldl (fun acc (_, t) =>
+    acc ++ t.collectOpaqueAdtNames structLookup) ([] : List String)
+  let allOpaque := (opaqueFromFnTypes ++ opaqueFromCallSigs ++
+                    opaqueFromCallRet ++ opaqueFromVarRefs).eraseDups
+  let axiomsBlock := if allOpaque.isEmpty then ""
+    else "/-- Opaque types extracted from the hax JSON. Concrete instances\n    are provided by the protocol's bridge-adapter at the CatCrypt surface. -/\n"
+      ++ "\n".intercalate (allOpaque.map fun n => s!"axiom {n} : Type") ++ "\n\n"
+  let header := s!"{headerComment}\n{imports}\n\nset_option linter.unusedVariables false\n\nnamespace {moduleName}\n\nopen Hax\n\n{axiomsBlock}{preamble}\nmutual\n\n"
   let body := "\n".intercalate (defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     let surfaceDef := toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
