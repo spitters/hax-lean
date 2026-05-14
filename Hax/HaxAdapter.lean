@@ -318,10 +318,17 @@ partial def parseHaxType (j : Json) : ImpType :=
       if elemTypes.isEmpty then .unknown
       else .tuple elemTypes
     else if let .ok refData := tyKind.getObjVal? "Ref" then
-      -- Ref(Region, Box<Ty>, Mutability)
+      -- Ref encoding. Older hax emits `[Region, inner, Mutability]` (3-elt);
+      -- current hax emits `[Region, inner]` (2-elt, with mutability elsewhere
+      -- or defaulting to immutable). Handle both, falling back to the inner
+      -- type's parse rather than `.unknown` so refs don't collapse the
+      -- type-inference cascade — `Ref Array Int` should typecheck against
+      -- `Array Int` thanks to the AutoDerefCoe at the consumer surface.
       match refData with
       | .arr #[_, inner, mut_] =>
         .ref (parseHaxType inner) (mut_ == .str "Mut")
+      | .arr #[_, inner] =>
+        .ref (parseHaxType inner) false
       | _ => .unknown
     else if let .ok sliceRef := tyKind.getObjVal? "Slice" then
       -- Slice: similar to Array but without const length
