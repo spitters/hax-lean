@@ -2040,7 +2040,43 @@ where
       let funName := extractCallName (← data.getObjVal? "fun")
       let argsJ ← data.getObjValAs? (Array Json) "args"
       let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a)
-      return .app funName args
+      -- Type-aware disambiguation of method-shaped calls.
+      --
+      -- Issue: when Rust source has `crs.len()` where `crs : Crs`,
+      -- hax resolves the call to `core::slice::Impl::len` (rather than
+      -- the user-defined `Crs::len`). The extracted name is bare `len`,
+      -- which our pipeline routes to `Hax.array_len` — failing because
+      -- `crs` is a struct, not an array.
+      --
+      -- Fix: when the function name is a known "method-shaped" name
+      -- (`len`, `is_empty`) and the first argument's type is an
+      -- ADT that isn't a stdlib collection (Vec/Box/Array/Option/
+      -- Result), rewrite the call to `<TypeName>_<method>` so the
+      -- pipeline routes it to a Deps method instead of the runtime
+      -- builtin.
+      let methodShaped := ["len", "is_empty"]
+      let unwrapRefImp : ImpType → ImpType := fun t =>
+        match t with
+        | .ref inner _ => inner
+        | t => t
+      let funName' := if !methodShaped.contains funName then funName
+        else match args with
+          | a :: _ =>
+            match unwrapRefImp a.ty with
+            | .adt rawName _ =>
+              -- Get short name; skip stdlib collection wrappers.
+              let short := ImpType.sanitizeAdtShortName rawName
+              let isStdlib := rawName == "Vec" || rawName.endsWith "::Vec"
+                || rawName == "Box" || rawName.endsWith "::Box"
+                || rawName == "Option" || rawName.endsWith "::Option"
+                || rawName == "Result" || rawName.endsWith "::Result"
+                || rawName == "GenericArray" || rawName.endsWith "::GenericArray"
+                || ImpType.isStdlibCollapseName short
+              if isStdlib then funName
+              else s!"{short}_{funName}"
+            | _ => funName
+          | [] => funName
+      return .app funName' args
 
     else if let .ok data := j.getObjVal? "Let" then
       let rhs ← parseHaxTExpr (← data.getObjVal? "expr")

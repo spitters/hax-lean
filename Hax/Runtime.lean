@@ -686,12 +686,17 @@ the `UInt{w}` level can call the named variants directly. -/
     emitted Lean code is already typed at the target. -/
 @[inline] def into {α : Type} (x : α) : α := x
 
+/-- Bridge cast: heterogeneous-polymorphic uninterpreted constant used
+    to model Rust constructors and trait conversions at the type level
+    without committing to a concrete implementation. The CatCrypt-side
+    bridge provides the actual semantics (e.g. via a `Coe` instance or
+    a concrete `instance : <CipherDeps>` that interprets the type). -/
+private axiom bridgeCast : {α β : Type} → α → β
+
 /-- Tuple-newtype positional projection: `Commitment(inner).0` style access.
     The Rust source has `struct Commitment(Vec<u8>)` and bodies use `c.0`
-    to unwrap. The typed extraction emits `«.0» c` and we treat the
-    newtype as an identity wrapper at the Lean surface, matching the
-    bridge-adapter pattern: the concrete protocol instance unwraps as
-    needed at its boundary. -/
+    to unwrap. Identity at the surface — the bridge adapter materializes
+    the actual unwrap. -/
 @[inline] def «.0» {α : Type} (x : α) : α := x
 
 /-- SHA-256 placeholder: opaque axiomatic hash. Cross-crate `hash::sha256`
@@ -699,13 +704,6 @@ the `UInt{w}` level can call the named variants directly. -/
     `<Crate>Deps` field. Replaced by the protocol's concrete instance via
     the standard bridge-adapter pattern at the CatCrypt surface. -/
 axiom sha256 : Array Int → Array Int
-
-/-- Bridge cast: heterogeneous-polymorphic uninterpreted constant used
-    to model Rust constructors and trait conversions at the type level
-    without committing to a concrete implementation. The CatCrypt-side
-    bridge provides the actual semantics (e.g. via a `Coe` instance or
-    a concrete `instance : <CipherDeps>` that interprets the type). -/
-private axiom bridgeCast : {α β : Type} → α → β
 
 /-- Constructor placeholder for tuple-struct / wrapper constructors
     (`T::new(arg)`). Heterogeneous-polymorphic so the typed-pipeline
@@ -720,12 +718,15 @@ noncomputable def «new» {α β : Type} (x : α) : β := bridgeCast x
     hax desugars `assert_eq!(left, right)` to a 4-arg call:
       `assert_failed(kind, left_val, right_val, msg)`
     where `kind : AssertKind`, `left_val`/`right_val` are the values
-    being compared, and `msg : Option<Arguments>`. We make this
-    placeholder fully polymorphic in all 4 positions so the call
-    typechecks regardless of how each arg was emitted, and return
-    `default` of the goal type. -/
-@[inline] def assert_failed {α β γ δ ε : Type} [Inhabited ε]
-    (_kind : α) (_left : β) (_right : γ) (_msg : δ) : ε := default
+    being compared, and `msg : Option<Arguments>`. We make the inputs
+    fully polymorphic (regardless of how each arg got emitted), but
+    pin the return type to `Unit` — assert failures in Rust have type
+    `!` (never), and at the Lean surface they appear only in
+    `let _ := assert_failed ... ; ()` discard positions, so `Unit`
+    is the natural concrete type and avoids the Inhabited-resolution
+    metavariable problem that polymorphic ε would produce. -/
+@[inline] def assert_failed {α β γ δ : Type}
+    (_kind : α) (_left : β) (_right : γ) (_msg : δ) : Unit := ()
 
 /-- `assert_failed'` variant accepting any-shape descriptor. -/
 @[inline] def assert_failed' {α : Type} [Inhabited α] (_msg : String) : α := default
