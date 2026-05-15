@@ -9,6 +9,7 @@ import Hax.TPhase.DropReferences
 import Hax.TPhase.LocalMutation
 import Hax.TPhase.FunctionalizeLoops
 import Hax.TPhase.CfIntoMonads
+import Hax.TPhase.WrapMatchArms
 import Hax.TPhase.ExplicitMonadic
 import Hax.TPhase.AnnotateLets
 import Hax.Pipeline
@@ -39,6 +40,15 @@ def tMutatedVars (e : TExpr) : List String := mutatedVars e.erase
 def tPipeline (e : TExpr) : TExpr :=
   tAnnotateLetBindings
     (tCfIntoMonads (tFunctionalizeLoops (tLocalMutation (tMutatedVars e) (tDropReferences e))))
+
+/-- Extended typed pipeline with the match-arms-cfContinue wrap.
+    Applied as a post-pipeline correction for Rust's "fall-through-as-
+    continue" semantic. Erase commutativity (with a hypothetical
+    `pipelineWithWrap := wrapMatchArmsCF ∘ pipeline`) is supported by
+    `TExpr.endsInCF_erase` and `TExpr.maybeWrapContinue_erase`
+    (defined in `TPhase/WrapMatchArms.lean`). -/
+def tPipelineWithCFWrap (e : TExpr) : TExpr :=
+  tWrapMatchArmsCF (tPipeline e)
 
 /-- Commuting diagram: `erase ∘ tPipeline = pipeline ∘ erase`. -/
 theorem tPipeline_erase (e : TExpr) :
