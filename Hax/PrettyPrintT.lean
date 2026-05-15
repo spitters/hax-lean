@@ -290,10 +290,13 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     ([], ([] : List String), ([] : List (String × String)))
 
   -- === Generate deps class using TYPED information ===
-  -- Names that should NEVER be classified as Int-returning (collection operations)
+  -- Names that should NEVER be classified as Int-returning (collection operations).
+  -- NB: `next` is not here — Rust's `Iterator::next` returns `Option<T>`,
+  -- not a collection. Forcing it to `Array Int` breaks Option pattern
+  -- matching in extracted while-let-Some loops.
   let collectionOps := ["iter", "map", "collect", "filter", "zip", "fold",
     "flat_map", "chain", "take", "skip", "enumerate", "rev", "sort",
-    "into_iter", "next", "deref"]
+    "into_iter", "deref"]
   -- Build a map: depName → (maxArity, bestArgTypes, bestRetType)
   -- by scanning the TExpr calls directly
   let depInfo : List (String × Nat × List ImpType × ImpType) := deps.map fun d =>

@@ -544,8 +544,12 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 -- Array literal — surface code uses `#[...]` syntax instead.
 -- Not called directly; `array_lit` in ImpExpr maps to `#[...]` in surface Lean.
 
-/-- Byte string literal placeholder (untyped extraction). -/
-@[inline] def literal : Array Int := #[]
+/-- String / byte-literal placeholder. Polymorphic with `Inhabited`
+    constraint so it can stand in for `String`, `Array Int`, or any
+    other literal type the bridge expects — Lean's bidirectional
+    elaboration picks the type from context. Used by hax's panic
+    message machinery (`assert_failed`, format args). -/
+@[inline] def literal {α : Type} [Inhabited α] : α := default
 
 /-- Copy from slice — identity in untyped extraction. -/
 @[inline] def copy_from_slice {α : Type} (_dst : Array α) (src : Array α) : Array α := src
@@ -559,8 +563,21 @@ modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 /-- Into vec — identity in untyped extraction. -/
 @[inline] def into_vec {α : Type} (x : α) : α := x
 
-/-- Next (iterator) — identity in untyped extraction. -/
-@[inline] def next {α : Type} (x : α) : α := x
+/-- Next (iterator) — returns `Option α` modeling Rust's `Iterator::next`
+    which produces `Option<Item>` (the *element* type, not the iterator
+    type). Polymorphic over both the iterator type (for `into_iter`
+    wrappers) and the element type. Without two separate type params,
+    `match next iter with | some (v, g) => ...` would force the iter's
+    element type to equal the iter's own type. The extracted body
+    pattern-matches `none`/`some`. Returns `none` in the untyped
+    extraction since we don't model iterator state. -/
+@[inline] def next {ι α : Type} (_iter : ι) : Option α := none
+
+/-- Zip — pairs two iterables element-wise. Polymorphic in both element
+    types so that `Hax.zip (xs : Array A) (ys : Array B) : Array (A × B)`
+    typechecks for any A, B. Returns the empty array in the untyped
+    extraction (semantics provided by the bridge for verification). -/
+@[inline] def zip {α β : Type} (_xs : Array α) (_ys : Array β) : Array (α × β) := #[]
 
 /-- Enumerate — identity in untyped extraction. -/
 @[inline] def enumerate {α : Type} (x : α) : α := x
@@ -698,10 +715,17 @@ private axiom bridgeCast : {α β : Type} → α → β
     to equal its return type, breaking opaque-type construction. -/
 noncomputable def «new» {α β : Type} (x : α) : β := bridgeCast x
 
-/-- Rust `assert!`/`assert_eq!` failure placeholder. Returns a default value
-    of the goal type so callers don't need a result-type proof obligation;
-    the actual `panic!` semantics are out of scope for the extracted surface. -/
-@[inline] def assert_failed {α : Type} [Inhabited α] (_msg : String) : α := default
+/-- Rust `assert!` / `assert_eq!` / `assert_ne!` failure placeholder.
+
+    hax desugars `assert_eq!(left, right)` to a 4-arg call:
+      `assert_failed(kind, left_val, right_val, msg)`
+    where `kind : AssertKind`, `left_val`/`right_val` are the values
+    being compared, and `msg : Option<Arguments>`. We make this
+    placeholder fully polymorphic in all 4 positions so the call
+    typechecks regardless of how each arg was emitted, and return
+    `default` of the goal type. -/
+@[inline] def assert_failed {α β γ δ ε : Type} [Inhabited ε]
+    (_kind : α) (_left : β) (_right : γ) (_msg : δ) : ε := default
 
 /-- `assert_failed'` variant accepting any-shape descriptor. -/
 @[inline] def assert_failed' {α : Type} [Inhabited α] (_msg : String) : α := default

@@ -151,6 +151,7 @@ private def runtimeName (f : String) : String :=
   | "map" => "Hax.map_arr"
   | "collect" => "Hax.collect"
   | "flat_map" => "Hax.flat_map"
+  | "zip" => "Hax.zip"
   | "into_vec" => "Hax.into_vec"
   | "next" => "Hax.next"
   | "enumerate" => "Hax.enumerate"
@@ -2089,7 +2090,7 @@ def isAlwaysBuiltin (f : String) : Bool :=
   match f with
   | "index" | "array_update" | "repeat" | "array_lit" | "push" | "len"
   | "copy_from_slice" | "extend_from_slice" | "truncate"
-  | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "flat_map" | "next" | "new"
+  | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "flat_map" | "zip" | "next" | "new"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range"
   | "count_ones" | "assert_failed" | "index_mut" | "enumerate" | "is_empty"
   | "from" | "into" | "literal" | "deref" | "clone" | "to_vec" | "cast" | "castVal"
