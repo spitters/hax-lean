@@ -10,6 +10,7 @@ import Hax.TPhase.LocalMutation
 import Hax.TPhase.FunctionalizeLoops
 import Hax.TPhase.CfIntoMonads
 import Hax.TPhase.ExplicitMonadic
+import Hax.TPhase.AnnotateLets
 import Hax.Pipeline
 
 /-!
@@ -31,16 +32,20 @@ namespace Hax
 /-- Typed mutated variables: computed via erasure. -/
 def tMutatedVars (e : TExpr) : List String := mutatedVars e.erase
 
-/-- The full typed 4-phase pipeline. -/
+/-- The full typed 4-phase pipeline, followed by the post-pipeline
+    annotation phase. `tAnnotateLetBindings` is denotation-identity
+    (wraps non-trivial let-RHSs in `.ann` markers that erase away),
+    so the same correctness theorems apply unchanged. -/
 def tPipeline (e : TExpr) : TExpr :=
-  tCfIntoMonads (tFunctionalizeLoops (tLocalMutation (tMutatedVars e) (tDropReferences e)))
+  tAnnotateLetBindings
+    (tCfIntoMonads (tFunctionalizeLoops (tLocalMutation (tMutatedVars e) (tDropReferences e))))
 
 /-- Commuting diagram: `erase ∘ tPipeline = pipeline ∘ erase`. -/
 theorem tPipeline_erase (e : TExpr) :
     (tPipeline e).erase = pipeline e.erase := by
   unfold tPipeline pipeline
-  rw [tCfIntoMonads_erase, tFunctionalizeLoops_erase, tLocalMutation_erase,
-    tDropReferences_erase]
+  rw [tAnnotateLetBindings_erase, tCfIntoMonads_erase, tFunctionalizeLoops_erase,
+    tLocalMutation_erase, tDropReferences_erase]
   rfl
 
 /-- The typed pipeline output is fully functional (via erasure + untyped proof). -/

@@ -60,6 +60,7 @@ def tDropReferences : TExpr → TExpr
   | .mk (.cfBreak e) ty => .mk (.cfBreak (tDropReferences e)) ty
   | .mk (.cfContinue e) ty => .mk (.cfContinue (tDropReferences e)) ty
   | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tDropReferences e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tDropReferences e)) ty
 where
   mapExpr : List TExpr → List TExpr
     | [] => []
@@ -119,6 +120,7 @@ theorem tDropReferences_erase (e : TExpr) :
   | cfBreak _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | cfContinue _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | cfBreakContinue _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
+  | ann _ _ ih => simp [tDropReferences, TExpr.erase, ih]
   | app _ _ args ih =>
     simp only [tDropReferences, tDropReferences.mapExpr_eq, TExpr.erase, TExpr.eraseList_eq,
       dropReferences, dropReferences.mapExpr_eq, List.map_map, Function.comp_def]

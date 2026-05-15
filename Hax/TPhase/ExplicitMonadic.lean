@@ -20,6 +20,10 @@ def tWrapReturns : TExpr → TExpr
   | .mk (.cfBreak e) ty => .mk (.cfBreak e) ty
   | .mk (.cfContinue e) ty => .mk (.cfContinue e) ty
   | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue e) ty
+  -- Annotation marker on a return position: preserve and recurse.
+  -- The annotation is denotationally identity, so wrapping cfContinue
+  -- around the inner e is equivalent to wrapping it around .ann e.
+  | .mk (.ann e) ty => .mk (.ann (tWrapReturns e)) ty
   -- Return spine: recurse into return positions
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n val (tWrapReturns body)) ty
@@ -100,6 +104,7 @@ def tExplicitMonadic : TExpr → TExpr
   | .mk .continue_ ty => .mk .continue_ ty
   | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tExplicitMonadic e)) ty
   | .mk (.questionMark e) ty => .mk (.questionMark (tExplicitMonadic e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tExplicitMonadic e)) ty
 where
   mapExpr : List TExpr → List TExpr
     | [] => []
@@ -142,6 +147,9 @@ theorem tWrapReturns_erase (e : TExpr) :
       List.map_map, Function.comp_def]
     congr 1; exact List.map_congr_left (fun ⟨p, e⟩ hpa => by
       simp only [ih2 (p, e) hpa])
+  -- Annotation marker: recursive case (annotation is denote-identity)
+  | ann _ _ ih =>
+    simp [tWrapReturns, TExpr.erase, wrapReturns, ih]
   -- Leaf cases: all map to cfContinue
   | lit | var | unitVal | app | tuple | proj
   | borrow | deref | assign
@@ -197,6 +205,7 @@ theorem tExplicitMonadic_erase (e : TExpr) :
   | cfBreak _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | cfContinue _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | cfBreakContinue _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
+  | ann _ _ ih => simp [tExplicitMonadic, TExpr.erase, ih]
   | app _ _ args ih =>
     simp only [tExplicitMonadic, tExplicitMonadic.mapExpr_eq, TExpr.erase,
       TExpr.eraseList_eq, explicitMonadic, explicitMonadic.mapExpr_eq,

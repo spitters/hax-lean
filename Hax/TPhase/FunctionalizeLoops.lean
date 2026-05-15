@@ -113,6 +113,8 @@ def tFunctionalizeLoopsAux (nested : Bool) : TExpr → TExpr
       .mk (.cfContinue (tFunctionalizeLoopsAux nested e)) ty
   | .mk (.cfBreakContinue e) ty =>
       .mk (.cfBreakContinue (tFunctionalizeLoopsAux nested e)) ty
+  | .mk (.ann e) ty =>
+      .mk (.ann (tFunctionalizeLoopsAux nested e)) ty
 where
   mapExpr (nested : Bool) : List TExpr → List TExpr
     | [] => []
@@ -199,6 +201,8 @@ theorem tFunctionalizeLoopsAux_erase (nested : Bool) (e : TExpr) :
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
   | cfBreakContinue _ _ ih =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
+  | ann _ _ ih =>
+    simp [tFunctionalizeLoopsAux, TExpr.erase, ih]
   | app _ _ args ih =>
     simp only [tFunctionalizeLoopsAux, tFunctionalizeLoopsAux.mapExpr_eq, TExpr.erase,
       TExpr.eraseList_eq, functionalizeLoopsAux, functionalizeLoopsAux.mapExpr_eq,

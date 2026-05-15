@@ -2465,6 +2465,8 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
     .mk (.cfContinue (reconstructForLoopsTExpr e)) ty
   | .mk (.cfBreakContinue e) ty =>
     .mk (.cfBreakContinue (reconstructForLoopsTExpr e)) ty
+  | .mk (.ann e) ty =>
+    .mk (.ann (reconstructForLoopsTExpr e)) ty
 where
   /-- Walk the TExpr tree to find the body of the `next()` match inside a while-loop body.
       Mirrors `tryExtractNextMatch` but returns the typed body TExpr. -/
@@ -2611,6 +2613,8 @@ partial def normalizeAssignOpsTExpr : TExpr → TExpr
     .mk (.cfContinue (normalizeAssignOpsTExpr e)) ty
   | .mk (.cfBreakContinue e) ty =>
     .mk (.cfBreakContinue (normalizeAssignOpsTExpr e)) ty
+  | .mk (.ann e) ty =>
+    .mk (.ann (normalizeAssignOpsTExpr e)) ty
 
 /-- Parse a single hax Fn item into a typed TExpr with full type information.
     Returns `some (name, rawTExpr, processedTExpr, fnTypeInfo)` for Fn items.

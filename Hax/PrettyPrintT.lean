@@ -7,6 +7,7 @@ import Hax.TExpr
 import Hax.PrettyPrint
 import Hax.Pipeline
 import Hax.HaxAdapter
+import Hax.TPhase.AnnotateLets
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -380,43 +381,42 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
 
 /-! ## Step 3: Let-Binding Type Annotation Injection
 
-Walk a raw `TExpr` (which has hax-JSON types preserved at every node) and
-collect `letBind` name→type pairs. Then walk the post-pipeline `ImpExpr`
-body and wrap each `letBind`'s RHS with an `::annot::<TyStr>` marker
-that `toLean` (PrettyPrint.lean) renders as a Lean type ascription
-`(val : T)`.
+The decision of WHICH let-bindings receive a type ascription is made by
+the verified pass `Hax.tAnnotateLetBindings` (`Hax/TPhase/AnnotateLets.lean`),
+which marks them with the denotation-identity `.ann` constructor. That
+pass has the formal property:
 
-This propagates the JSON-declared type through Lean's inference so that
-a body like
 ```
-let c := new (into key)           -- Lean infers `Array Int` from RHS
-encrypt_block c b                  -- expected `Aes256` — mismatch!
+(tAnnotateLetBindings e).erase = e.erase
 ```
-becomes
-```
-let c := (new (into key) : Aes256)   -- explicit ascription
-encrypt_block c b                     -- now `Aes256` — OK
-```
--/
 
-/-- Collect `(letBindingName, leanTypeStr)` pairs from a raw TExpr.
-    Skips bindings whose type is `.unknown` or `Int` (the default
-    surface type — no annotation needed). -/
+so it carries no semantic obligation.
+
+This module's job is purely to RENDER the marker: walk the post-pipeline
+`TExpr` to find `.ann` nodes on let-RHSs and produce a name→type-string
+map for the ImpExpr injection. -/
+
+/-- Walk a post-pipeline `TExpr` and collect `(letBindingName, tyStr)`
+    pairs for every let-binding whose RHS is wrapped in `.ann`.
+
+    Decisions of WHICH bindings to wrap come from the verified pass
+    `tAnnotateLetBindings`; this function only translates those
+    decisions into the rendering layer's representation. -/
 partial def collectLetBindingTypes (sl : String → Option String) :
     TExpr → List (String × String)
-  | .mk (.letBind n val body) _ =>
-    -- Skip param-shadowing pattern `let n := var n` — these will already
-    -- have type annotations in the def's param list. Annotating again
-    -- in the body causes redundant ascriptions like
-    -- `let commitment := (commitment : Commitment_T)` that can defeat
-    -- Lean's inference at use sites.
-    let isParamShadow := match val with
-      | .mk (.var v) _ => n == v
-      | _ => false
-    let tyStr := val.ty.toLeanTypeStrSurface sl
-    let here := if isParamShadow || val.ty.isUnknown || tyStr == "Int" then []
-                else [(n, tyStr)]
-    here ++ collectLetBindingTypes sl val ++ collectLetBindingTypes sl body
+  | .mk (.letBind n (.mk (.ann inner) annTy) body) _ =>
+    -- This let-RHS was marked for annotation by the verified pass.
+    -- The pass is conservative — it marks any non-trivial ImpType.
+    -- The renderer then makes the final call: skip if the type
+    -- stringifies to `Int` (a stdlib-collapse outcome, e.g.
+    -- `core::macros::AssertKind` → `Int`), since an `: Int`
+    -- ascription would be useless or harmful (the value's surface
+    -- type is `Int → Int → Bool` for kind-style bindings).
+    let tyStr := annTy.toLeanTypeStrSurface sl
+    let here := if tyStr == "Int" then [] else [(n, tyStr)]
+    here ++ collectLetBindingTypes sl inner ++ collectLetBindingTypes sl body
+  | .mk (.letBind _ val body) _ =>
+    collectLetBindingTypes sl val ++ collectLetBindingTypes sl body
   | .mk (.app _ args) _ => args.foldl (fun acc a => acc ++ collectLetBindingTypes sl a) []
   | .mk (.seq a b) _ => collectLetBindingTypes sl a ++ collectLetBindingTypes sl b
   | .mk (.ifThenElse c t e) _ =>
@@ -434,6 +434,7 @@ partial def collectLetBindingTypes (sl : String → Option String) :
   | .mk (.borrow e) _ | .mk (.deref e) _ => collectLetBindingTypes sl e
   | .mk (.cfBreak e) _ | .mk (.cfContinue e) _ | .mk (.cfBreakContinue e) _ =>
     collectLetBindingTypes sl e
+  | .mk (.ann e) _ => collectLetBindingTypes sl e
   | _ => []
 
 /-- Inject `::annot::<TyStr>` markers into letBind RHSs in an ImpExpr
@@ -491,11 +492,13 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
     | .letBind n (.var v) rest => if n == v then stripParamBindings rest else .letBind n (.var v) rest
     | e => e
-  -- Step 3: inject `::annot::<TyStr>` markers on let-bindings whose
-  -- raw TExpr type is non-trivial. `toLean` renders these as
-  -- `(val : T)` ascriptions so Lean's inference picks up the
-  -- JSON-declared type instead of inferring from the RHS.
-  let letTypes := collectLetBindingTypes structLookup rawTe
+  -- Step 3: apply the verified annotation pass to mark let-RHSs with
+  -- `.ann`, then walk the marked TExpr to collect (name → typeStr)
+  -- pairs for the renderer. The pass `tAnnotateLetBindings` is proven
+  -- denotation-preserving (see `Hax/TPhase/AnnotateLets.lean`); this
+  -- module only translates its decisions into ImpExpr injections.
+  let annotatedRawTe := tAnnotateLetBindings rawTe
+  let letTypes := collectLetBindingTypes structLookup annotatedRawTe
   let body := stripParamBindings (injectLetTypeAnnotations letTypes pipelinedBody)
   -- Return-type annotation: rawBody.ty is the function's return type per
   -- hax JSON. Emit `: T` after the param list when known AND non-trivial

@@ -69,6 +69,7 @@ def tLocalMutation (mvars : List String) : TExpr → TExpr
   | .mk (.cfBreak e) ty => .mk (.cfBreak (tLocalMutation mvars e)) ty
   | .mk (.cfContinue e) ty => .mk (.cfContinue (tLocalMutation mvars e)) ty
   | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tLocalMutation mvars e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tLocalMutation mvars e)) ty
 where
   mapExpr (mvars : List String) : List TExpr → List TExpr
     | [] => []
@@ -130,6 +131,7 @@ theorem tLocalMutation_erase (mvars : List String) (e : TExpr) :
   | cfBreak _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | cfContinue _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | cfBreakContinue _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
+  | ann _ _ ih => simp [tLocalMutation, TExpr.erase, ih]
   | app _ _ args ih =>
     simp only [tLocalMutation, tLocalMutation.mapExpr_eq, TExpr.erase, TExpr.eraseList_eq,
       localMutation, localMutation.mapExpr_eq, List.map_map, Function.comp_def]

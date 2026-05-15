@@ -68,6 +68,11 @@ inductive TExprKind where
   | cfBreak (e : TExpr)
   | cfContinue (e : TExpr)
   | cfBreakContinue (e : TExpr)
+  -- Type annotation marker (semantically identity; the outer `TExpr.mk _ ty`'s
+  -- `ty` field carries the annotation type). Inserted by `tAnnotateLetBindings`
+  -- to make Lean's elaborator pick up the JSON-declared type at let-bindings.
+  -- Erases to its inner expression — denotationally a no-op.
+  | ann (e : TExpr)
 end
 
 namespace TExpr
@@ -120,6 +125,10 @@ def TExpr.erase : TExpr → ImpExpr
   | .mk (.cfBreak e) _ => .cfBreak e.erase
   | .mk (.cfContinue e) _ => .cfContinue e.erase
   | .mk (.cfBreakContinue e) _ => .cfBreakContinue e.erase
+  -- `.ann` is a denotational no-op marker for Lean elaboration;
+  -- type erasure strips it, so all `pipeline` / `denote` proofs
+  -- pass through unchanged.
+  | .mk (.ann e) _ => e.erase
 where
   eraseList : List TExpr → List ImpExpr
     | [] => []
@@ -196,6 +205,7 @@ def TExpr.ind {motive : TExpr → Prop}
     (cfBreak : ∀ ty e, motive e → motive (.mk (.cfBreak e) ty))
     (cfContinue : ∀ ty e, motive e → motive (.mk (.cfContinue e) ty))
     (cfBreakContinue : ∀ ty e, motive e → motive (.mk (.cfBreakContinue e) ty))
+    (ann : ∀ ty e, motive e → motive (.mk (.ann e) ty))
     (e : TExpr) : motive e :=
   go e
 where
@@ -237,6 +247,7 @@ where
     | .mk (.cfBreak e) ty => cfBreak ty e (go e)
     | .mk (.cfContinue e) ty => cfContinue ty e (go e)
     | .mk (.cfBreakContinue e) ty => cfBreakContinue ty e (go e)
+    | .mk (.ann e) ty => ann ty e (go e)
   goList : (es : List TExpr) → ∀ a, a ∈ es → motive a
     | _ :: _, _, .head _ => go _
     | _ :: es, a, .tail _ h => goList es a h
