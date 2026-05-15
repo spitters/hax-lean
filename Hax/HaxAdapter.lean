@@ -159,9 +159,45 @@ private partial def extractItemDefIdName (item : Json) (fallback : String) : Str
   | some defId => extractDefIdName defId
   | none => fallback
 
+/-- Disambiguate a method-style call name when the callee resolves to
+    `<UserType>::<method>` in a non-stdlib crate. Returns `<UserType>_<method>`
+    so the typed pipeline can keep `<method>` (e.g. `len`) as the
+    runtime built-in while `<UserType>_<method>` becomes a Deps method.
+
+    Without this, `crs.len()` (Crs::len) and `values.len()` (slice::len)
+    both collapse to `"len"`, causing the typed pipeline to route both
+    to `Hax.array_len` — which fails on the struct receiver. -/
+private def disambiguateUserMethodName (j : Json) (baseName : String) : String :=
+  -- Look at the DefId's path. Format may be: {contents: {value: {path}}}.
+  let inner := match j.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with
+      | .ok v => v
+      | _ => c
+    | _ => j
+  let krate : String := (inner.getObjValAs? String "krate").toOption.getD ""
+  let isStdlibKrate := krate == "core" || krate == "std" || krate == "alloc"
+  if isStdlibKrate then baseName
+  else
+    match inner.getObjVal? "path" with
+    | .ok (.arr segs) =>
+      -- Walk segments and find the last TypeNs entry that ISN'T `Impl`.
+      -- This is the receiver type for the method.
+      let segData := segs.toList.filterMap fun seg =>
+        match seg.getObjVal? "data" with
+        | .ok data =>
+          match data.getObjVal? "TypeNs" with
+          | .ok (.str n) =>
+            if n == "Impl" then none else some n
+          | _ => none
+        | _ => none
+      match segData.getLast? with
+      | some tyName => s!"{tyName}_{baseName}"
+      | none => baseName
+    | _ => baseName
+
 /-- Extract a function name from a hax expression (for Call).
-    If the callee is a GlobalName, extract its item's DefId name.
-    Otherwise use a placeholder. -/
+    If the callee is a GlobalName, extract its item's DefId name and
+    disambiguate user methods.  Otherwise use a placeholder. -/
 private partial def extractCallName (j : Json) : String :=
   -- j is the `fun` expression (a Decorated<ExprKind>)
   match j.getObjVal? "contents" with
@@ -169,7 +205,18 @@ private partial def extractCallName (j : Json) : String :=
     match contents.getObjVal? "GlobalName" with
     | .ok gn =>
       match gn.getObjVal? "item" with
-      | .ok item => extractItemDefIdName item "unknown_fn"
+      | .ok item =>
+        let baseName := extractItemDefIdName item "unknown_fn"
+        -- Locate the DefId for disambiguation (same lookup pattern as
+        -- extractItemDefIdName).
+        let defIdJ := match item.getObjVal? "value" with
+          | .ok v => match v.getObjVal? "def_id" with
+            | .ok d => some d
+            | _ => item.getObjVal? "def_id" |>.toOption
+          | _ => item.getObjVal? "def_id" |>.toOption
+        match defIdJ with
+        | some defId => disambiguateUserMethodName defId baseName
+        | none => baseName
       | _ => "unknown_fn"
     | _ => "indirect_call"
   | _ => "unknown_fn"
