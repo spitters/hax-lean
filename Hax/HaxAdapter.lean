@@ -315,7 +315,7 @@ partial def parseHaxType (j : Json) : ImpType :=
         match ga.getObjVal? "Type" with
         | .ok tyJ => some (parseHaxType tyJ)
         | _ => none
-      if elemTypes.isEmpty then .unknown
+      if elemTypes.isEmpty then .unit
       else .tuple elemTypes
     else if let .ok refData := tyKind.getObjVal? "Ref" then
       -- Ref encoding. Older hax emits `[Region, inner, Mutability]` (3-elt);

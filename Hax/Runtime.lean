@@ -683,12 +683,20 @@ the `UInt{w}` level can call the named variants directly. -/
     the standard bridge-adapter pattern at the CatCrypt surface. -/
 axiom sha256 : Array Int → Array Int
 
-/-- Constructor placeholder: collapsing `T::new(arg)` to the arg itself.
-    Used when a Rust constructor wraps its arg trivially (e.g. newtype
-    wrappers, `Cipher::new(key)`-style adapters where the cipher state
-    is itself the key). When the result type differs from the arg,
-    callers must thread a separate adapter. -/
-@[inline] def «new» {α : Type} (x : α) : α := x
+/-- Bridge cast: heterogeneous-polymorphic uninterpreted constant used
+    to model Rust constructors and trait conversions at the type level
+    without committing to a concrete implementation. The CatCrypt-side
+    bridge provides the actual semantics (e.g. via a `Coe` instance or
+    a concrete `instance : <CipherDeps>` that interprets the type). -/
+private axiom bridgeCast : {α β : Type} → α → β
+
+/-- Constructor placeholder for tuple-struct / wrapper constructors
+    (`T::new(arg)`). Heterogeneous-polymorphic so the typed-pipeline
+    pattern `(new (into key) : Aes256)` typechecks: the outer
+    ascription pins β to `Aes256`, the inner `into key : α` keeps
+    `α = Array Int`. Without this, `new` would force its arg type
+    to equal its return type, breaking opaque-type construction. -/
+noncomputable def «new» {α β : Type} (x : α) : β := bridgeCast x
 
 /-- Rust `assert!`/`assert_eq!` failure placeholder. Returns a default value
     of the goal type so callers don't need a result-type proof obligation;

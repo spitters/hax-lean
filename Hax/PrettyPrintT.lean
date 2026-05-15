@@ -120,11 +120,18 @@ private def mergeType (a b : ImpType) : ImpType :=
 
 /-- Convert an ImpType to Lean type string for the deps class.
     Uses structLookup for ADT resolution.
-    Unknown/Unit map to "Array Int" to match the untyped pipeline default. -/
-private def depTypeStr (ty : ImpType) (sl : String → Option String) : String :=
+
+    Unknown maps to "Array Int" to match the untyped pipeline default.
+    Unit is preserved as "Unit" for argument positions (Rust does pass
+    `()` literals — e.g. `result.ok_or(())`). The legacy "side-effect
+    function" Unit→ArrayInt mapping is only applied to RETURN types
+    where `.unit` typically means hax-erased side-effects, not a
+    semantic Unit. Callers pass `(isReturn := true)` for return types. -/
+private def depTypeStr (ty : ImpType) (sl : String → Option String)
+    (isReturn : Bool := false) : String :=
   match ty with
   | .unknown => "Array Int"  -- no type info; match untyped default
-  | .unit => "Array Int"     -- side-effect functions; match untyped default
+  | .unit => if isReturn then "Array Int" else "Unit"
   | _ => ty.toLeanTypeStrSurface sl
 
 set_option linter.unusedVariables false in
@@ -317,7 +324,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
       -- All ImpExpr bodies for heuristic fallback on unknown types
       let allExprs := defs.map (·.2)
       let fields := depInfo.map fun (d, arity, argTypes, retType) =>
-        let retStr := depTypeStr retType structLookup
+        let retStr := depTypeStr retType structLookup (isReturn := true)
         -- u128 is always Array Int in the extraction model (byte array, not scalar)
         let retStr := match retType with
           | .uint .w128 | .sint .w128 => "Array Int"
@@ -476,7 +483,7 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
     (structMeta : StructMeta := [])
     (allFnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (boolNames : List String := []) : String :=
-  let (tparams, _rawBody) := extractTParams rawTe
+  let (tparams, rawBody) := extractTParams rawTe
   -- Use the pipelined body, but strip leading param bindings (same as extractParams on ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
     | .letBind n (.var v) rest => if n == v then stripParamBindings rest else .letBind n (.var v) rest
@@ -487,6 +494,34 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   -- JSON-declared type instead of inferring from the RHS.
   let letTypes := collectLetBindingTypes structLookup rawTe
   let body := stripParamBindings (injectLetTypeAnnotations letTypes pipelinedBody)
+  -- Return-type annotation: rawBody.ty is the function's return type per
+  -- hax JSON. Emit `: T` after the param list when known AND non-trivial
+  -- AND all params have annotations (Lean's explicit-return mode requires
+  -- all binders to be resolvable before body elaboration). This is needed
+  -- for ε-inference when the body returns `Except.ok x` and similar
+  -- Option/Result returns.
+  -- Skipped cases:
+  --   - Unknown / Int: defaults, no extra info
+  --   - Unit: hax often annotates side-effect-y functions as `.unit`
+  --     return even though the body's last expression is non-Unit
+  --     (the unit-ness is hax-erased semantic, not a real type)
+  --   - Any param missing a type annotation: switching to explicit
+  --     return-type mode in Lean disables body-driven param inference
+  -- A param is annotated only if the renderer below produces `(p : T)`.
+  -- Mirror that logic to predict whether all params will have explicit
+  -- types — otherwise emitting `: RetT` triggers Lean's no-body-inference
+  -- mode and the un-annotated param fails to elaborate.
+  let isParamAnnotated (ty : ImpType) : Bool :=
+    if ty.isUnknown then false
+    else
+      let s := ty.toLeanTypeStrSurface structLookup
+      s == "Int" || s.startsWith "Array" || s == "Bool" || (s.splitOn " × ").length > 1
+  let allParamsTyped := tparams.all fun (_, ty) => isParamAnnotated ty
+  let retTyStr : String :=
+    let ty := rawBody.ty
+    let s := ty.toLeanTypeStrSurface structLookup
+    if ty.isUnknown || s == "Int" || s == "Unit" || !allParamsTyped then ""
+    else s!" : {s}"
   let paramStr := if tparams.isEmpty then ""
     else " " ++ " ".intercalate (tparams.map fun (p, ty) =>
       let sn := sanitizeName p
@@ -501,7 +536,7 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
         else if (tyStr.splitOn " × ").length > 1 then s!"({sn} : {tyStr})"
         else sn)
   let bodyStr := toLean body 1 boolNames
-  s!"def {sanitizeName name}{paramStr} :=\n{bodyStr}\n"
+  s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
 
 /-! ## Typed Struct New Expansion
 
