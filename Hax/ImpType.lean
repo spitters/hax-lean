@@ -103,6 +103,35 @@ def isIntLike : ImpType → Bool
   | .sint _ => true
   | _ => false
 
+/-- Rust standard-library types that should NOT be preserved as opaque
+    axioms. These are iterator adapters, format helpers, ranges, etc. —
+    handled by the Lean runtime's polymorphic combinators (`Hax.into_iter`,
+    `Hax.next`, etc.) and have no protocol meaning. They collapse to
+    `Int` (the untyped runtime placeholder) in surface emission. -/
+def isStdlibCollapseName (n : String) : Bool :=
+  match n with
+  -- Iterator adapters (core::iter::*)
+  | "Iter" | "IterMut" | "IntoIter" | "Zip" | "Chain" | "Map"
+  | "FilterMap" | "Filter" | "FlatMap" | "Flatten" | "Take" | "TakeWhile"
+  | "Skip" | "SkipWhile" | "Enumerate" | "Rev" | "Cycle" | "Fuse"
+  | "Inspect" | "Empty" | "Once" | "OnceWith" | "Repeat" | "RepeatWith"
+  | "Successors" | "FromFn" | "StepBy" | "Peekable" | "Scan"
+  -- Ranges (core::ops::*)
+  | "Range" | "RangeInclusive" | "RangeFrom" | "RangeTo"
+  | "RangeToInclusive" | "RangeFull"
+  -- Formatting (core::fmt::*)
+  | "Arguments" | "Formatter"
+  -- Allocator (std::alloc) — hax surfaces `Vec<u8>`'s allocator param
+  | "Global"
+  -- typenum / generic-array stdlib types (Rust type-level numerics)
+  -- These appear in crypto code via GenericArray<u8, typenum::U16> etc.
+  | "GenericArray" | "UInt" | "UTerm" | "B0" | "B1"
+  -- AssertKind appears from core::macros::Eq (assert_eq machinery)
+  | "AssertKind"
+  -- Other common Rust stdlib types we don't carry semantics for
+  | "Cow" | "Borrow" | "Drain" => true
+  | _ => false
+
 /-- Sanitize a Rust path/identifier into a valid Lean identifier.
     Strips path prefix (keeps last `::` segment), then maps non-alphanum
     chars to `_`. Used to preserve opaque ADT names through the emit
@@ -137,6 +166,8 @@ partial def collectOpaqueAdtNames (structLookup : String → Option String := fu
     else
       let short := sanitizeAdtShortName name
       if structLookup short |>.isSome then argNames
+      -- Stdlib iterator/range/format types collapse to Int — no axiom.
+      else if isStdlibCollapseName short then argNames
       else short :: argNames
   | .tuple es => es.foldl (fun acc a => acc ++ a.collectOpaqueAdtNames structLookup) []
   | .option inner => inner.collectOpaqueAdtNames structLookup
@@ -200,10 +231,13 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
         match structLookup shortName with
         | some s => s
         | none =>
-          -- Preserve opaque ADT name. Mirrors the surface-stringifier change;
-          -- the emitter declares `axiom <ShortName> : Type` for any name that
-          -- reaches this branch.
-          shortName
+          -- Stdlib iterator/range/format types collapse to Int (no axiom).
+          if isStdlibCollapseName shortName then "Int"
+          else
+            -- Preserve opaque ADT name. Mirrors the surface-stringifier change;
+            -- the emitter declares `axiom <ShortName> : Type` for any name that
+            -- reaches this branch.
+            shortName
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
   | .ref inner _ => inner.toLeanTypeStr structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStr structLookup})"
@@ -262,12 +296,15 @@ partial def toLeanTypeStrSurface (ty : ImpType)
         match structLookup shortName with
         | some s => s
         | none =>
-          -- Preserve opaque ADT name instead of collapsing to `Int`.
-          -- The emitter declares `axiom <ShortName> : Type` at the top of
-          -- the certified file via `collectOpaqueAdtNames`, so Lean sees
-          -- this name as a valid (uninhabited) type. Consumers provide
-          -- concrete instances via the bridge-adapter pattern.
-          shortName
+          -- Stdlib iterator/range/format types collapse to Int (no axiom).
+          if isStdlibCollapseName shortName then "Int"
+          else
+            -- Preserve opaque ADT name instead of collapsing to `Int`.
+            -- The emitter declares `axiom <ShortName> : Type` at the top of
+            -- the certified file via `collectOpaqueAdtNames`, so Lean sees
+            -- this name as a valid (uninhabited) type. Consumers provide
+            -- concrete instances via the bridge-adapter pattern.
+            shortName
   | .ref inner _ => inner.toLeanTypeStrSurface structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
   | .array inner _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"

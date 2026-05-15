@@ -132,18 +132,49 @@ set_option linter.unusedVariables false in
     This replaces `generatePreamble` by using types directly from the TExpr tree
     instead of ~300 lines of heuristic detection.
     `processedDefs`: post-pipeline ImpExpr defs (with qualified projections etc.)
-    for structural analysis. If empty, erases `tdefs`. -/
+    for structural analysis. If empty, erases `tdefs`.
+
+    Return value:
+    - `preamble` : the emitted preamble text (struct defs + Deps class)
+    - `projConflicts` : projection-name conflicts to resolve
+    - `clashSet` : opaque ADT names that collide with a Deps method name
+      (these must be emitted as `axiom <Name>_T : Type` to avoid the
+      type-vs-function ambiguity at the namespace level). -/
 def generatePreambleTyped (tdefs : List (String × TExpr))
     (moduleName : String) (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (processedDefs : List (String × ImpExpr) := [])
-    : String × List (String × String) :=
+    : String × List (String × String) × List String :=
   -- Use processed defs for structural analysis (qualified projections etc.)
   let defs := if processedDefs.isEmpty then tdefs.map fun (n, te) => (n, te.erase) else processedDefs
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
   let structIsPassthrough := computeStructPassthrough structMeta defs
-  let structLookup := mkStructLookup structMeta structIsPassthrough
+  let baseStructLookup := mkStructLookup structMeta structIsPassthrough
+  -- Compute opaque-ADT-vs-Deps-method clashes: when a type used in a Deps
+  -- signature has the same short name as a Deps method, emit the axiom
+  -- with a `_T` suffix and route every type reference through that suffix.
+  -- Without this, `axiom VectorCommitment : Type` would collide with
+  -- `class XDeps where VectorCommitment : Array Int → VectorCommitment`
+  -- once the field is `export`ed at the top level.
+  let allTCallsForClash := tdefs.foldl (fun acc (_, te) => acc ++ collectTAppCalls te) []
+  let allOpaqueForClash :=
+    let fromCalls := allTCallsForClash.foldl (fun acc (_, _, argTys, retTy) =>
+      let argOpaque := argTys.foldl (fun a t => a ++ t.collectOpaqueAdtNames baseStructLookup) []
+      acc ++ argOpaque ++ retTy.collectOpaqueAdtNames baseStructLookup) ([] : List String)
+    let fromFnTypes := fnTypes.foldl (fun acc (_, ti) =>
+      acc ++ ti.paramTypes.foldl (fun a (_, t) => a ++ t.collectOpaqueAdtNames baseStructLookup) []
+          ++ ti.retType.collectOpaqueAdtNames baseStructLookup) ([] : List String)
+    (fromCalls ++ fromFnTypes).eraseDups
+  let clashDepsNames := allTCallsForClash.map (·.1) |>.eraseDups |>.map sanitizeName
+  let clashSet : List String := allOpaqueForClash.filter (clashDepsNames.contains)
+  -- Augmented lookup: clash names resolve to their `_T` alias (a fresh
+  -- axiom emitted at the top of the file). Non-clash struct lookups go
+  -- through the base lookup unchanged.
+  let structLookup : String → Option String := fun name =>
+    let short := ImpType.sanitizeAdtShortName name
+    if clashSet.contains short then some s!"{short}_T"
+    else baseStructLookup name
 
   -- App names from processed defs (has qualified projections)
   let allCalls := defs.foldl (fun acc (_, e) => acc ++ collectAppCalls e) []
@@ -335,7 +366,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
                (if depsStr.isEmpty then [] else [depsStr])
   let result := if parts.isEmpty then ""
     else "\n" ++ "\n\n".intercalate parts ++ "\n"
-  (result, projConflicts)
+  (result, projConflicts, clashSet)
 
 /-! ## Typed Definition Generator -/
 
@@ -573,7 +604,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let defs := defs.map fun (n, e) => (n, initMissingFoldAccums [] e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
-  let (preamble, projConflicts) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs)
+  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs)
   -- Rewrite function body projection references for conflicts
   let defs := if projConflicts.isEmpty then defs
     else defs.map fun (n, e) =>
@@ -614,7 +645,23 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       ++ ti.retType.collectOpaqueAdtNames structLookup
   let opaqueFromFnTypes := fnTypes.foldl (fun acc (_, ti) =>
     acc ++ collectFromFnTypeInfoT ti) ([] : List String)
-  let allOpaque := opaqueFromFnTypes.eraseDups
+  -- Also walk every external call's argument and return types so opaque
+  -- ADTs referenced only by Deps-class signatures (not by local return
+  -- types) are axiomed. Without this, types like `Commitment` in
+  -- `class XDeps where f : ... → Commitment` would be unresolved.
+  let allTCallsAxiom := rawTdefs.foldl (fun acc (_, te) => acc ++ collectTAppCalls te) []
+  let opaqueFromCalls := allTCallsAxiom.foldl (fun acc (_, _, argTys, retTy) =>
+    let argOpaque := argTys.foldl (fun a t => a ++ t.collectOpaqueAdtNames structLookup) []
+    acc ++ argOpaque ++ retTy.collectOpaqueAdtNames structLookup) ([] : List String)
+  -- Apply the clash-rename: names colliding with a Deps method are emitted
+  -- as `axiom <Name>_T : Type` and the augmented structLookup inside
+  -- generatePreambleTyped routes type references to `<Name>_T`. This
+  -- preserves the body's ability to call the Deps method by its plain
+  -- name while keeping the type unambiguous.
+  let renameForClash (n : String) : String :=
+    if axiomClashSet.contains n then s!"{n}_T" else n
+  let allOpaque := (opaqueFromFnTypes ++ opaqueFromCalls).eraseDups.map renameForClash
+  let allOpaque := allOpaque.eraseDups
   let axiomsBlock := if allOpaque.isEmpty then ""
     else "/-- Opaque types extracted from hax JSON. Concrete instances are\n    provided by the protocol's bridge-adapter at the CatCrypt surface. -/\n"
       ++ "\n".intercalate (allOpaque.map fun n => s!"axiom {n} : Type") ++ "\n\n"
