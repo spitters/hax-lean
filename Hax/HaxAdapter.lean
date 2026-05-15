@@ -195,6 +195,184 @@ private def disambiguateUserMethodName (j : Json) (baseName : String) : String :
       | none => baseName
     | _ => baseName
 
+/-! ## Impl-self-type map (principled method-call disambiguation)
+
+When hax extracts `crs.len()` for a user struct `Crs` with an inherent
+`impl Crs { fn len(&self) -> usize { ... } }`, the resolved DefId path
+ends `[Impl, ValueNs=len]` in the user's krate. There is no `TypeNs=Crs`
+segment — `Impl` is a positional discriminator and the receiver type is
+recorded separately in the Impl item's `self_ty` field.
+
+To disambiguate `Crs::len` from `slice::len` (which has path
+`[slice, Impl, ValueNs=len]` in the `core` krate), we pre-scan the
+top-level JSON items, find every `kind: Impl { self_ty: Adt(...) }`
+node, and record `Impl-DefId-id → SelfTypeName`. When a Call resolves
+to a DefId whose parent is in this map, we know the receiver type and
+emit `<SelfTypeName>_<methodName>`.
+
+This is the principled version of the earlier name-allowlist heuristic
+(`["len", "is_empty"]`): it uses hax's own structural metadata rather
+than guessing from method names.
+-/
+
+/-- Map from Impl-block DefId-interning-id to the short name of the
+    self-type that the impl is for. -/
+abbrev ImplSelfTypeMap := List (Nat × String)
+
+/-- Extract the short name of a struct/enum from an `Adt` type JSON.
+    Returns `none` if the JSON doesn't have the expected shape. -/
+private partial def extractAdtShortName (adtJ : Json) : Option String := do
+  -- adtJ is the Adt's `value` (containing `def_id`, `generic_args`, etc.)
+  let v ← (adtJ.getObjVal? "value").toOption
+  let defId ← (v.getObjVal? "def_id").toOption
+  let contents ← (defId.getObjVal? "contents").toOption
+  let did_v ← (contents.getObjVal? "value").toOption
+  let path ← (did_v.getObjVal? "path").toOption
+  match path with
+  | .arr segs =>
+    -- Last TypeNs entry is the type name
+    let names : List String := segs.toList.filterMap fun seg =>
+      match seg.getObjVal? "data" with
+      | .ok data =>
+        match data.getObjVal? "TypeNs" with
+        | .ok (.str n) => if n != "Impl" then some n else none
+        | _ => none
+      | _ => none
+    names.getLast?
+  | _ => none
+
+/-- Build the map by walking top-level JSON items.
+
+    For each `kind: Impl { of_trait: null, self_ty: Adt(...) }` (an
+    inherent impl block), record the impl's interning id (from
+    `owner_id.contents.id`) → self-type short name. Inherent impls are
+    the ones whose methods can be called as `<receiver>.<method>()`
+    and need disambiguation from stdlib methods of the same name. -/
+partial def buildImplSelfTypeMap (j : Json) : ImplSelfTypeMap :=
+  match j with
+  | .arr items =>
+    items.toList.filterMap fun it =>
+      match it.getObjVal? "kind" with
+      | .ok kindJ =>
+        match kindJ.getObjVal? "Impl" with
+        | .ok impl =>
+          -- Skip trait impls — `of_trait` is non-null only for trait
+          -- impls. Inherent impls have `of_trait: null`.
+          let isTraitImpl := match impl.getObjVal? "of_trait" with
+            | .ok Json.null => false
+            | .ok _ => true   -- any non-null value is a trait impl
+            | _ => false
+          if isTraitImpl then none
+          else
+            -- Get self_ty.value.Adt
+            match impl.getObjVal? "self_ty" with
+            | .ok selfTy =>
+              match selfTy.getObjVal? "value" with
+              | .ok stVal =>
+                match stVal.getObjVal? "Adt" with
+                | .ok adt =>
+                  -- Impl items have `def_id: null`; the interning id
+                  -- we want is in `owner_id.contents.id`.
+                  match it.getObjVal? "owner_id" with
+                  | .ok oid =>
+                    match oid.getObjVal? "contents" with
+                    | .ok c =>
+                      match c.getObjValAs? Nat "id" with
+                      | .ok implId =>
+                        match extractAdtShortName adt with
+                        | some name => some (implId, name)
+                        | none => none
+                      | _ => none
+                    | _ => none
+                  | _ => none
+                | _ => none
+              | _ => none
+            | _ => none
+        | _ => none
+      | _ => none
+  | _ => []
+
+/-- Resolve the `parent` chain of a DefId to find the nearest Impl
+    ancestor's interning-id. Returns `none` if no Impl ancestor is
+    found in the chain. Uses `getObjVal? "Impl"` rather than pattern-
+    matching on `Json.obj`'s internal RBNode representation. -/
+private partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Option Nat :=
+  if depth == 0 then none
+  else
+    match defIdJ.getObjVal? "contents" with
+    | .ok c =>
+      match c.getObjVal? "value" with
+      | .ok v =>
+        -- Check if THIS DefId points to an Impl. `kind` is either a
+        -- string variant or an object `{Impl: {of_trait: ...}}`. We
+        -- detect Impl by looking up the "Impl" key on the kind value.
+        let isImpl := match v.getObjVal? "kind" with
+          | .ok kindJ => (kindJ.getObjVal? "Impl").toOption.isSome
+          | _ => false
+        if isImpl then
+          (c.getObjValAs? Nat "id").toOption
+        else
+          -- Recurse into parent
+          match v.getObjVal? "parent" with
+          | .ok parent =>
+            match parent with
+            | .null => none
+            | parentJ =>
+              match parentJ.getObjVal? "contents" with
+              | .ok _ => findImplAncestorId parentJ (depth - 1)
+              | _ => none
+          | _ => none
+      | _ => none
+    | _ => none
+
+/-- Look up an Impl-DefId-id in the map. -/
+private def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String :=
+  m.find? (·.1 == id) |>.map (·.2)
+
+/-- Disambiguate a method-call name using the impl map. Given the
+    Call's `fun` JSON (a GlobalName) and the base method name, walk
+    the function's DefId.parent chain to find an Impl ancestor. If
+    that Impl's self-type is in the map, return `<TypeName>_<base>`. -/
+private def disambiguateMethodCallWithImplMap
+    (funJ : Json) (baseName : String) (implMap : ImplSelfTypeMap) : String :=
+  if implMap.isEmpty then baseName
+  else
+    match funJ.getObjVal? "contents" with
+    | .ok contents =>
+      match contents.getObjVal? "GlobalName" with
+      | .ok gn =>
+        match gn.getObjVal? "item" with
+        | .ok item =>
+          -- Get the function's DefId
+          let defIdJ := match item.getObjVal? "value" with
+            | .ok v => (v.getObjVal? "def_id").toOption
+            | _ => (item.getObjVal? "def_id").toOption
+          match defIdJ with
+          | some did =>
+            -- Walk parent chain to find Impl ancestor
+            match did.getObjVal? "contents" with
+            | .ok c =>
+              match c.getObjVal? "value" with
+              | .ok v =>
+                match v.getObjVal? "parent" with
+                | .ok parent =>
+                  match parent with
+                  | .null => baseName
+                  | parentJ =>
+                    match findImplAncestorId parentJ with
+                    | some implId =>
+                      match lookupImplSelfType implId implMap with
+                      | some tyName => s!"{tyName}_{baseName}"
+                      | none => baseName
+                    | none => baseName
+                | _ => baseName
+              | _ => baseName
+            | _ => baseName
+          | none => baseName
+        | _ => baseName
+      | _ => baseName
+    | _ => baseName
+
 /-- Extract a function name from a hax expression (for Call).
     If the callee is a GlobalName, extract its item's DefId name and
     disambiguate user methods.  Otherwise use a placeholder. -/
@@ -1974,8 +2152,13 @@ private def extractNodeType (j : Json) : ImpType :=
 /-- Parse a hax `Decorated<ExprKind>` JSON directly into a `TExpr`,
     preserving the type annotation from every JSON node's `ty` field.
     This is the principled typed extraction: every subexpression carries
-    its Rust type, eliminating the need for heuristic type recovery. -/
-partial def parseHaxTExpr (j : Json) : Except String TExpr := do
+    its Rust type, eliminating the need for heuristic type recovery.
+
+    `implMap` is the user-inherent-impl lookup table built by
+    `buildImplSelfTypeMap`. Used to disambiguate method calls into
+    `<TypeName>_<method>` based on the resolved DefId's Impl ancestor's
+    self-type. Defaults to `[]` (no disambiguation). -/
+partial def parseHaxTExpr (j : Json) (implMap : ImplSelfTypeMap := []) : Except String TExpr := do
   let ty := extractNodeType j
   let contents ← j.getObjVal? "contents"
   let kind ← parseTExprKind contents j
@@ -2028,58 +2211,37 @@ where
       else return .lit (parseTLiteral data)
 
     else if let .ok data := j.getObjVal? "If" then
-      let cond ← parseHaxTExpr (← data.getObjVal? "cond")
-      let thn ← parseHaxTExpr (← data.getObjVal? "then")
+      let cond ← parseHaxTExpr (← data.getObjVal? "cond") implMap
+      let thn ← parseHaxTExpr (← data.getObjVal? "then") implMap
       let els ← match data.getObjVal? "else_opt" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
-        | .ok elsJ => parseHaxTExpr elsJ
+        | .ok elsJ => parseHaxTExpr elsJ implMap
         | _ => pure (TExpr.mk .unitVal .unit)
       return .ifThenElse cond thn els
 
     else if let .ok data := j.getObjVal? "Call" then
-      let funName := extractCallName (← data.getObjVal? "fun")
+      let funJ ← data.getObjVal? "fun"
+      let funName := extractCallName funJ
       let argsJ ← data.getObjValAs? (Array Json) "args"
-      let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a)
-      -- Type-aware disambiguation of method-shaped calls.
+      let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a implMap)
+      -- Principled method-call disambiguation via the impl-self-type map.
       --
-      -- Issue: when Rust source has `crs.len()` where `crs : Crs`,
-      -- hax resolves the call to `core::slice::Impl::len` (rather than
-      -- the user-defined `Crs::len`). The extracted name is bare `len`,
-      -- which our pipeline routes to `Hax.array_len` — failing because
-      -- `crs` is a struct, not an array.
+      -- When the Rust source has `crs.len()` and hax resolves it via
+      -- the user's `impl Crs { fn len(&self) -> usize { ... } }`, the
+      -- function's DefId has parent = the inherent Impl block. The map
+      -- (built once per JSON, indexed by Impl-DefId-id) tells us the
+      -- self-type. We then emit `<SelfTypeName>_<methodName>` so the
+      -- typed pipeline routes the call to a Deps method.
       --
-      -- Fix: when the function name is a known "method-shaped" name
-      -- (`len`, `is_empty`) and the first argument's type is an
-      -- ADT that isn't a stdlib collection (Vec/Box/Array/Option/
-      -- Result), rewrite the call to `<TypeName>_<method>` so the
-      -- pipeline routes it to a Deps method instead of the runtime
-      -- builtin.
-      let methodShaped := ["len", "is_empty"]
-      let unwrapRefImp : ImpType → ImpType := fun t =>
-        match t with
-        | .ref inner _ => inner
-        | t => t
-      let funName' := if !methodShaped.contains funName then funName
-        else match args with
-          | a :: _ =>
-            match unwrapRefImp a.ty with
-            | .adt rawName _ =>
-              -- Get short name; skip stdlib collection wrappers.
-              let short := ImpType.sanitizeAdtShortName rawName
-              let isStdlib := rawName == "Vec" || rawName.endsWith "::Vec"
-                || rawName == "Box" || rawName.endsWith "::Box"
-                || rawName == "Option" || rawName.endsWith "::Option"
-                || rawName == "Result" || rawName.endsWith "::Result"
-                || rawName == "GenericArray" || rawName.endsWith "::GenericArray"
-                || ImpType.isStdlibCollapseName short
-              if isStdlib then funName
-              else s!"{short}_{funName}"
-            | _ => funName
-          | [] => funName
+      -- This works for ANY user-defined method (not a hardcoded
+      -- allowlist). If the call resolves outside any tracked Impl
+      -- (e.g., to `core::slice::Impl::len`), the lookup returns
+      -- `none` and we use the bare name.
+      let funName' := disambiguateMethodCallWithImplMap funJ funName implMap
       return .app funName' args
 
     else if let .ok data := j.getObjVal? "Let" then
-      let rhs ← parseHaxTExpr (← data.getObjVal? "expr")
+      let rhs ← parseHaxTExpr (← data.getObjVal? "expr") implMap
       let pat := match data.getObjVal? "pat" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
@@ -2105,30 +2267,30 @@ where
         | _ => pure []
       let tail ← match data.getObjVal? "expr" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
-        | .ok e => parseHaxTExpr e
+        | .ok e => parseHaxTExpr e implMap
         | _ => pure (TExpr.mk .unitVal .unit)
       return (tStmtsToSeq stmts tail).kind
 
     else if let .ok data := j.getObjVal? "Match" then
-      let scrut ← parseHaxTExpr (← data.getObjVal? "scrutinee")
+      let scrut ← parseHaxTExpr (← data.getObjVal? "scrutinee") implMap
       let armsJ ← data.getObjValAs? (Array Json) "arms"
       let arms ← armsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseTArm a)
       return .match_ scrut arms
 
     else if let .ok data := j.getObjVal? "Tuple" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
-      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f)
+      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f implMap)
       if fields.isEmpty then return .unitVal
       return .tuple fields
 
     else if let .ok data := j.getObjVal? "Array" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
-      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f)
+      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f implMap)
       return .app "array_lit" fields
 
     else if let .ok data := j.getObjVal? "Assign" then
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
-      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let rec stripD : TExpr → TExpr
         | .mk (.deref e) _ => stripD e
         | e => e
@@ -2155,8 +2317,8 @@ where
         | .ok opJ => binOpName opJ
         | _ => "op"
       let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
-      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let rec stripD2 : TExpr → TExpr
         | .mk (.deref e) _ => stripD2 e
         | e => e
@@ -2170,21 +2332,21 @@ where
       | _ => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
 
     else if let .ok data := j.getObjVal? "Borrow" then
-      let arg ← parseHaxTExpr (← data.getObjVal? "arg")
+      let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
       return .borrow arg
 
     else if let .ok data := j.getObjVal? "Deref" then
-      let arg ← parseHaxTExpr (← data.getObjVal? "arg")
+      let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
       return .deref arg
 
     else if let .ok data := j.getObjVal? "Loop" then
-      let body ← parseHaxTExpr (← data.getObjVal? "body")
+      let body ← parseHaxTExpr (← data.getObjVal? "body") implMap
       return .whileLoop (TExpr.mk (.lit (.bool true)) .bool) body
 
     else if let .ok data := j.getObjVal? "Break" then
       let value ← match data.getObjVal? "value" with
         | .ok (.null) => pure none
-        | .ok v => return .break_ (some (← parseHaxTExpr v))
+        | .ok v => return .break_ (some (← parseHaxTExpr v implMap))
         | _ => pure none
       return .break_ value
 
@@ -2194,7 +2356,7 @@ where
     else if let .ok data := j.getObjVal? "Return" then
       let value ← match data.getObjVal? "value" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
-        | .ok v => parseHaxTExpr v
+        | .ok v => parseHaxTExpr v implMap
         | _ => pure (TExpr.mk .unitVal .unit)
       return .earlyReturn value
 
@@ -2203,8 +2365,8 @@ where
         | .ok opJ => binOpName opJ
         | _ => "binop"
       let lhsJ ← data.getObjVal? "lhs"
-      let lhs ← parseHaxTExpr lhsJ
-      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      let lhs ← parseHaxTExpr lhsJ implMap
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
       return .app opAnnotated [lhs, rhs]
 
@@ -2213,8 +2375,8 @@ where
         | .ok (.str "And") => "&&"
         | .ok (.str "Or") => "||"
         | _ => "logical_op"
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
-      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs")
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
+      let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       return .app op [lhs, rhs]
 
     else if let .ok data := j.getObjVal? "Unary" then
@@ -2222,66 +2384,66 @@ where
         | .ok opJ => unOpName opJ
         | _ => "unop"
       let argJ ← data.getObjVal? "arg"
-      let arg ← parseHaxTExpr argJ
+      let arg ← parseHaxTExpr argJ implMap
       let opAnnotated := annotateOpWidth op (extractExprWidth argJ)
       return .app opAnnotated [arg]
 
     else if let .ok data := j.getObjVal? "Field" then
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let fieldName := match data.getObjVal? "field" with
         | .ok fj => extractDefIdName fj
         | _ => "field"
       return .app ("." ++ fieldName) [lhs]
 
     else if let .ok data := j.getObjVal? "TupleField" then
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let idx := match data.getObjValAs? Nat "field" with
         | .ok n => n
         | _ => 0
       return .proj lhs idx
 
     else if let .ok data := j.getObjVal? "Index" then
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs")
-      let index ← parseHaxTExpr (← data.getObjVal? "index")
+      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
+      let index ← parseHaxTExpr (← data.getObjVal? "index") implMap
       return .app "index" [lhs, index]
 
     else if let .ok data := j.getObjVal? "Cast" then
-      let source ← parseHaxTExpr (← data.getObjVal? "source")
+      let source ← parseHaxTExpr (← data.getObjVal? "source") implMap
       let targetWidth := extractExprWidth _parentJ  -- outer decorated node has target ty
       match targetWidth with
       | some w => return .app s!"cast#{w}" [source]
       | none => return .app "cast" [source]
 
     else if let .ok data := j.getObjVal? "Use" then
-      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
 
     else if let .ok data := j.getObjVal? "NeverToAny" then
-      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
 
     else if let .ok data := j.getObjVal? "Box" then
-      return (← parseHaxTExpr (← data.getObjVal? "value")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "value") implMap).kind
 
     else if let .ok data := j.getObjVal? "Adt" then
       parseTAdtExpr data
 
     else if let .ok data := j.getObjVal? "Closure" then
-      return (← parseHaxTExpr (← data.getObjVal? "body")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "body") implMap).kind
 
     else if let .ok data := j.getObjVal? "Repeat" then
-      let value ← parseHaxTExpr (← data.getObjVal? "value")
+      let value ← parseHaxTExpr (← data.getObjVal? "value") implMap
       let count ← match data.getObjVal? "count" with
-        | .ok countJ => parseHaxTExpr countJ
+        | .ok countJ => parseHaxTExpr countJ implMap
         | _ => pure (TExpr.mk (.lit (.int 0)) .int)
       return .app "repeat" [value, count]
 
     else if let .ok data := j.getObjVal? "PlaceTypeAscription" then
-      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
 
     else if let .ok data := j.getObjVal? "ValueTypeAscription" then
-      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
 
     else if let .ok data := j.getObjVal? "PointerCoercion" then
-      return (← parseHaxTExpr (← data.getObjVal? "source")).kind
+      return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
 
     else if let .ok _data := j.getObjVal? "ConstBlock" then
       return .app "const_block" []
@@ -2310,7 +2472,7 @@ where
       return .var name
 
     else if let .ok data := j.getObjVal? "Yield" then
-      let value ← parseHaxTExpr (← data.getObjVal? "value")
+      let value ← parseHaxTExpr (← data.getObjVal? "value") implMap
       return .app "yield" [value]
 
     else if let .ok s := j.getObjVal? "Todo" then
@@ -2361,7 +2523,7 @@ where
     let kind ← j.getObjVal? "kind"
     if let .ok data := kind.getObjVal? "Expr" then
       match data.getObjVal? "expr" with
-      | .ok e => parseHaxTExpr e
+      | .ok e => parseHaxTExpr e implMap
       | _ => return TExpr.mk .unitVal .unit
     else if let .ok data := kind.getObjVal? "Let" then
       let pat := match data.getObjVal? "pattern" with
@@ -2369,7 +2531,7 @@ where
         | _ => .wildcard
       let init ← match data.getObjVal? "initializer" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
-        | .ok e => parseHaxTExpr e
+        | .ok e => parseHaxTExpr e implMap
         | _ => pure (TExpr.mk .unitVal .unit)
       match pat with
       | .tuplePat pats =>
@@ -2409,7 +2571,7 @@ where
       | .ok p => parseHaxPat p
       | _ => .wildcard
     let body ← match j.getObjVal? "body" with
-      | .ok b => parseHaxTExpr b
+      | .ok b => parseHaxTExpr b implMap
       | _ => pure (TExpr.mk .unitVal .unit)
     return (pat, body)
 
@@ -2427,7 +2589,7 @@ where
     let fields ← match j.getObjValAs? (Array Json) "fields" with
       | .ok fs => fs.toList.attach.mapM fun ⟨fj, _h⟩ =>
         match fj.getObjVal? "value" with
-        | .ok v => parseHaxTExpr v
+        | .ok v => parseHaxTExpr v implMap
         | _ => pure (TExpr.mk .unitVal .unit)
       | _ => pure []
     return .app name fields
@@ -2704,7 +2866,7 @@ partial def normalizeAssignOpsTExpr : TExpr → TExpr
     `rawTExpr` preserves types from hax JSON (for type extraction).
     `processedTExpr` has for-loop reconstruction and assign normalization applied
     (types may be lost due to ImpExpr roundtrip, used for pipeline/rendering). -/
-partial def parseHaxItemTExpr (j : Json) :
+partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := []) :
     Except String (Option (String × TExpr × TExpr × FnTypeInfo)) := do
   let kind ← j.getObjVal? "kind"
   if let .ok fnData := kind.getObjVal? "Fn" then
@@ -2730,7 +2892,7 @@ partial def parseHaxItemTExpr (j : Json) :
         | _ => .unknown
       | none => .unknown
     let body ← match def_ with
-      | some d => parseHaxTExpr (← d.getObjVal? "body")
+      | some d => parseHaxTExpr (← d.getObjVal? "body") implMap
       | none => throw s!"Fn item '{name}' missing def.body"
     -- Save the raw TExpr (with full types from hax JSON) for type extraction
     let rawWrapped := if paramNames.isEmpty then body
@@ -2752,7 +2914,7 @@ partial def parseHaxItemTExpr (j : Json) :
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
     let body ← match constData.toList[3]? with
-      | some bodyJ => parseHaxTExpr bodyJ
+      | some bodyJ => parseHaxTExpr bodyJ implMap
       | none => throw s!"Const item '{name}' missing body"
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
     return some (name, body, processed, ⟨[], .unknown⟩)
@@ -2764,11 +2926,15 @@ partial def parseHaxItemTExpr (j : Json) :
 partial def parseHaxFileWithTExpr (j : Json) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
+  -- Build the impl-self-type map once from the full JSON. This lets the
+  -- recursive parse disambiguate user-defined methods (e.g. `Crs::len`)
+  -- from stdlib ones (`slice::len`) at every Call node.
+  let implMap := buildImplSelfTypeMap j
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
     for item in items do
-      match ← parseHaxItemTExpr item with
+      match ← parseHaxItemTExpr item implMap with
       | some r => result := result ++ [r]
       | none =>
         let kind := (item.getObjVal? "kind").toOption
@@ -2806,7 +2972,7 @@ partial def parseHaxFileWithTExpr (j : Json) :
       let procTexprs := parsed.map fun (name, _, procTe, _) => (name, procTe)
       return (expr, fnTypes, rawTexprs, procTexprs)
   | _ =>
-    let te ← parseHaxTExpr j
+    let te ← parseHaxTExpr j implMap
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr te)
     return (processed.erase, [], [("expr", te)], [("expr", processed)])
 
