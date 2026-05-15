@@ -123,9 +123,9 @@ def isStdlibCollapseName (n : String) : Bool :=
   | "Arguments" | "Formatter"
   -- Allocator (std::alloc) — hax surfaces `Vec<u8>`'s allocator param
   | "Global"
-  -- typenum / generic-array stdlib types (Rust type-level numerics)
-  -- These appear in crypto code via GenericArray<u8, typenum::U16> etc.
-  | "GenericArray" | "UInt" | "UTerm" | "B0" | "B1"
+  -- typenum stdlib types (Rust type-level numerics). NOTE: GenericArray
+  -- is treated specially as an array wrapper, not collapsed here.
+  | "UInt" | "UTerm" | "B0" | "B1"
   -- AssertKind appears from core::macros::Eq (assert_eq machinery)
   | "AssertKind"
   -- Other common Rust stdlib types we don't carry semantics for
@@ -210,6 +210,12 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
         match args with
         | inner :: _ => s!"Array ({inner.toLeanTypeStr structLookup})"
         | _ => "Array Int"
+      -- GenericArray<T, N> from the `generic-array` crate is semantically
+      -- an array of T (length encoded in N via typenum). Collapse like Vec.
+      else if name == "GenericArray" || name.endsWith "::GenericArray" then
+        match args with
+        | inner :: _ => s!"Array ({inner.toLeanTypeStr structLookup})"
+        | _ => "Array Int"
       else if name == "Box" || name.endsWith "::Box" then
         match args with
         | inner :: _ => inner.toLeanTypeStr structLookup
@@ -274,6 +280,12 @@ partial def toLeanTypeStrSurface (ty : ImpType)
     | some s => s
     | none =>
       if name == "Vec" || name.endsWith "::Vec" then
+        match args with
+        | inner :: _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
+        | _ => "Array (Int)"
+      -- GenericArray<T, N> from `generic-array` crate → Array T (length
+      -- encoded via typenum N).
+      else if name == "GenericArray" || name.endsWith "::GenericArray" then
         match args with
         | inner :: _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
         | _ => "Array (Int)"

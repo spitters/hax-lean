@@ -368,6 +368,103 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     else "\n" ++ "\n\n".intercalate parts ++ "\n"
   (result, projConflicts, clashSet)
 
+/-! ## Step 3: Let-Binding Type Annotation Injection
+
+Walk a raw `TExpr` (which has hax-JSON types preserved at every node) and
+collect `letBind` name→type pairs. Then walk the post-pipeline `ImpExpr`
+body and wrap each `letBind`'s RHS with an `::annot::<TyStr>` marker
+that `toLean` (PrettyPrint.lean) renders as a Lean type ascription
+`(val : T)`.
+
+This propagates the JSON-declared type through Lean's inference so that
+a body like
+```
+let c := new (into key)           -- Lean infers `Array Int` from RHS
+encrypt_block c b                  -- expected `Aes256` — mismatch!
+```
+becomes
+```
+let c := (new (into key) : Aes256)   -- explicit ascription
+encrypt_block c b                     -- now `Aes256` — OK
+```
+-/
+
+/-- Collect `(letBindingName, leanTypeStr)` pairs from a raw TExpr.
+    Skips bindings whose type is `.unknown` or `Int` (the default
+    surface type — no annotation needed). -/
+partial def collectLetBindingTypes (sl : String → Option String) :
+    TExpr → List (String × String)
+  | .mk (.letBind n val body) _ =>
+    -- Skip param-shadowing pattern `let n := var n` — these will already
+    -- have type annotations in the def's param list. Annotating again
+    -- in the body causes redundant ascriptions like
+    -- `let commitment := (commitment : Commitment_T)` that can defeat
+    -- Lean's inference at use sites.
+    let isParamShadow := match val with
+      | .mk (.var v) _ => n == v
+      | _ => false
+    let tyStr := val.ty.toLeanTypeStrSurface sl
+    let here := if isParamShadow || val.ty.isUnknown || tyStr == "Int" then []
+                else [(n, tyStr)]
+    here ++ collectLetBindingTypes sl val ++ collectLetBindingTypes sl body
+  | .mk (.app _ args) _ => args.foldl (fun acc a => acc ++ collectLetBindingTypes sl a) []
+  | .mk (.seq a b) _ => collectLetBindingTypes sl a ++ collectLetBindingTypes sl b
+  | .mk (.ifThenElse c t e) _ =>
+    collectLetBindingTypes sl c ++ collectLetBindingTypes sl t ++ collectLetBindingTypes sl e
+  | .mk (.tuple es) _ => es.foldl (fun acc e => acc ++ collectLetBindingTypes sl e) []
+  | .mk (.proj e _) _ => collectLetBindingTypes sl e
+  | .mk (.match_ scrut arms) _ =>
+    collectLetBindingTypes sl scrut ++
+    arms.foldl (fun acc (_, b) => acc ++ collectLetBindingTypes sl b) []
+  | .mk (.forFold _ lo hi body) _ | .mk (.forFoldRev _ lo hi body) _
+  | .mk (.forFoldReturn _ lo hi body) _ | .mk (.forFoldRevReturn _ lo hi body) _ =>
+    collectLetBindingTypes sl lo ++ collectLetBindingTypes sl hi ++ collectLetBindingTypes sl body
+  | .mk (.whileFold c body) _ | .mk (.whileFoldReturn c body) _ =>
+    collectLetBindingTypes sl c ++ collectLetBindingTypes sl body
+  | .mk (.borrow e) _ | .mk (.deref e) _ => collectLetBindingTypes sl e
+  | .mk (.cfBreak e) _ | .mk (.cfContinue e) _ | .mk (.cfBreakContinue e) _ =>
+    collectLetBindingTypes sl e
+  | _ => []
+
+/-- Inject `::annot::<TyStr>` markers into letBind RHSs in an ImpExpr
+    body, using the given name→type map. The marker is recognized by
+    `Hax.PrettyPrint.toLean` and renders as `(val : T)`. -/
+partial def injectLetTypeAnnotations (typeMap : List (String × String)) :
+    ImpExpr → ImpExpr
+  | .letBind n val body =>
+    let val' := injectLetTypeAnnotations typeMap val
+    let body' := injectLetTypeAnnotations typeMap body
+    match typeMap.find? (·.1 == n) with
+    | some (_, tyStr) => .letBind n (.app s!"::annot::{tyStr}" [val']) body'
+    | none => .letBind n val' body'
+  | .app f args => .app f (args.map (injectLetTypeAnnotations typeMap))
+  | .seq a b => .seq (injectLetTypeAnnotations typeMap a) (injectLetTypeAnnotations typeMap b)
+  | .ifThenElse c t e =>
+    .ifThenElse (injectLetTypeAnnotations typeMap c)
+                (injectLetTypeAnnotations typeMap t)
+                (injectLetTypeAnnotations typeMap e)
+  | .tuple es => .tuple (es.map (injectLetTypeAnnotations typeMap))
+  | .proj e i => .proj (injectLetTypeAnnotations typeMap e) i
+  | .match_ scrut arms => .match_ (injectLetTypeAnnotations typeMap scrut)
+      (arms.map fun (p, b) => (p, injectLetTypeAnnotations typeMap b))
+  | .forFold v lo hi body =>
+    .forFold v (injectLetTypeAnnotations typeMap lo)
+               (injectLetTypeAnnotations typeMap hi)
+               (injectLetTypeAnnotations typeMap body)
+  | .forFoldRev v lo hi body =>
+    .forFoldRev v (injectLetTypeAnnotations typeMap lo)
+                  (injectLetTypeAnnotations typeMap hi)
+                  (injectLetTypeAnnotations typeMap body)
+  | .whileFold c body =>
+    .whileFold (injectLetTypeAnnotations typeMap c)
+               (injectLetTypeAnnotations typeMap body)
+  | .borrow e => .borrow (injectLetTypeAnnotations typeMap e)
+  | .deref e => .deref (injectLetTypeAnnotations typeMap e)
+  | .cfBreak e => .cfBreak (injectLetTypeAnnotations typeMap e)
+  | .cfContinue e => .cfContinue (injectLetTypeAnnotations typeMap e)
+  | .cfBreakContinue e => .cfBreakContinue (injectLetTypeAnnotations typeMap e)
+  | e => e
+
 /-! ## Typed Definition Generator -/
 
 /-- Generate a Lean 4 definition using types from the raw TExpr for parameter
@@ -384,7 +481,12 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
     | .letBind n (.var v) rest => if n == v then stripParamBindings rest else .letBind n (.var v) rest
     | e => e
-  let body := stripParamBindings pipelinedBody
+  -- Step 3: inject `::annot::<TyStr>` markers on let-bindings whose
+  -- raw TExpr type is non-trivial. `toLean` renders these as
+  -- `(val : T)` ascriptions so Lean's inference picks up the
+  -- JSON-declared type instead of inferring from the RHS.
+  let letTypes := collectLetBindingTypes structLookup rawTe
+  let body := stripParamBindings (injectLetTypeAnnotations letTypes pipelinedBody)
   let paramStr := if tparams.isEmpty then ""
     else " " ++ " ".intercalate (tparams.map fun (p, ty) =>
       let sn := sanitizeName p
@@ -605,6 +707,19 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
   let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs)
+  -- Keep the BASE structLookup (no clash augment) for opaque-ADT
+  -- collection — augmenting it would make collectOpaqueAdtNames treat
+  -- clashing names as known structs and skip them, leaving `Commitment_T`
+  -- referenced but unaxiomed.
+  let baseStructLookup := structLookup
+  -- Augmented structLookup: clash names route to their `_T` alias.
+  -- Used for body emission (toLeanDefTyped) so let-binding type
+  -- ascriptions render as `(val : Commitment_T)` instead of
+  -- `(val : Commitment)` (which would resolve to the Deps function).
+  let structLookup : String → Option String := fun name =>
+    let short := ImpType.sanitizeAdtShortName name
+    if axiomClashSet.contains short then some s!"{short}_T"
+    else baseStructLookup name
   -- Rewrite function body projection references for conflicts
   let defs := if projConflicts.isEmpty then defs
     else defs.map fun (n, e) =>
@@ -641,18 +756,20 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- and emit `axiom <Name> : Type` declarations. With this, Deps signatures
   -- can name cipher / block / newtype types instead of collapsing to `Int`.
   let collectFromFnTypeInfoT (ti : HaxAdapter.FnTypeInfo) : List String :=
-    ti.paramTypes.foldl (fun acc (_, t) => acc ++ t.collectOpaqueAdtNames structLookup) []
-      ++ ti.retType.collectOpaqueAdtNames structLookup
+    ti.paramTypes.foldl (fun acc (_, t) => acc ++ t.collectOpaqueAdtNames baseStructLookup) []
+      ++ ti.retType.collectOpaqueAdtNames baseStructLookup
   let opaqueFromFnTypes := fnTypes.foldl (fun acc (_, ti) =>
     acc ++ collectFromFnTypeInfoT ti) ([] : List String)
   -- Also walk every external call's argument and return types so opaque
   -- ADTs referenced only by Deps-class signatures (not by local return
   -- types) are axiomed. Without this, types like `Commitment` in
   -- `class XDeps where f : ... → Commitment` would be unresolved.
+  -- Uses baseStructLookup (not the clash-augmented one) so clash names
+  -- still survive the "known struct" filter.
   let allTCallsAxiom := rawTdefs.foldl (fun acc (_, te) => acc ++ collectTAppCalls te) []
   let opaqueFromCalls := allTCallsAxiom.foldl (fun acc (_, _, argTys, retTy) =>
-    let argOpaque := argTys.foldl (fun a t => a ++ t.collectOpaqueAdtNames structLookup) []
-    acc ++ argOpaque ++ retTy.collectOpaqueAdtNames structLookup) ([] : List String)
+    let argOpaque := argTys.foldl (fun a t => a ++ t.collectOpaqueAdtNames baseStructLookup) []
+    acc ++ argOpaque ++ retTy.collectOpaqueAdtNames baseStructLookup) ([] : List String)
   -- Apply the clash-rename: names colliding with a Deps method are emitted
   -- as `axiom <Name>_T : Type` and the augmented structLookup inside
   -- generatePreambleTyped routes type references to `<Name>_T`. This

@@ -1007,6 +1007,18 @@ private def isLeafExpr : ImpExpr → Bool
 partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []) : String :=
   let ind := indent lvl
   let ind1 := indent (lvl + 1)
+  -- Typed-path let-binding type annotation marker (injected by
+  -- `Hax.PrettyPrintT.injectLetTypeAnnotations`). The marker is an
+  -- `.app` whose function name is `::annot::<TypeStr>`. Render as a
+  -- Lean type ascription `(val : T)`. This is the only intervention
+  -- in `toLean` needed for Step 3 of the type-preservation fix.
+  let annot : Option String := match e with
+    | .app f [inner] =>
+      if f.startsWith "::annot::" then
+        some s!"({toLean inner 0 boolNames} : {f.drop "::annot::".length})"
+      else none
+    | _ => none
+  if let some s := annot then s else
   match e with
   -- Literals
   | .lit (.bool true) => "true"
