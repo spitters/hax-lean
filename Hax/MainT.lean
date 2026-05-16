@@ -103,7 +103,7 @@ def main (args : List String) : IO UInt32 := do
     -- Generate typed certified output (rawTdefs for param annotations, postPipelineTdefs for bodies)
     -- rawTdefs has hax types preserved (for deps class + param annotations)
     -- postPipelineTdefs has pipeline-transformed bodies (for rendering)
-    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs)
+    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs newtypes)
     return 0
 
   -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===

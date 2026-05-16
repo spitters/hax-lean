@@ -1024,6 +1024,12 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     | .app f [inner] =>
       if f.startsWith "::annot::" then
         some s!"({toLean inner 0 boolNames} : {f.drop "::annot::".length})"
+      else if f.startsWith "::namedProj::" then
+        -- Newtype `.0` projection marker, injected by PrettyPrintT from
+        -- a `.namedProj T x` node. Render as the type-specific unwrap
+        -- `«T.0» x` (a definitional identity emitted in the preamble).
+        let tname := f.drop "::namedProj::".length
+        some s!"«{tname}.0» {parensIf (toLean inner 0 boolNames) (!isAtom inner)}"
       else none
     | _ => none
   if let some s := annot then s else

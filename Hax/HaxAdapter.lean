@@ -3119,16 +3119,66 @@ def parseStructDefsFromJson (j : Json) : List StructInfo :=
   raw.foldl (fun acc si =>
     if acc.any (·.name == si.name) then acc else acc ++ [si]) []
 
-/-- Build the newtype map from the top-level JSON.
-    A struct is a newtype iff it has exactly one positional (`"0"`-named)
-    field — i.e. `struct T(Inner)` in Rust. We record `(T.name, Inner)`
-    so `tElideToNamedProj` can rewrite `.app ".0" [x]` calls on values
-    of type `T`. -/
-def buildNewtypeMap (j : Json) : NewtypeMap :=
-  let structs := parseStructDefsFromJson j
-  structs.filterMap fun s =>
-    match s.fields with
-    | [f] => if f.name == "0" then some (s.name, f.impType) else none
+/-- Parse the inner ImpType from a Tuple-variant struct's field list.
+    Hax represents `struct T(Inner)` as `kind: Struct(..., {Tuple: [[field0_data]]})`.
+    Returns the inner ImpType of the first positional field, if any. -/
+private def parseTupleStructInner (structData : Array Json) : Option ImpType :=
+  let variantData := structData.toList[2]?
+  match variantData with
+  | some vd =>
+    match vd.getObjVal? "Tuple" with
+    | .ok (Json.arr tupleData) =>
+      match tupleData.toList with
+      | (Json.arr fields) :: _ =>
+        match fields.toList with
+        | fj :: _ =>
+          match fj.getObjVal? "ty" with
+          | .ok tyJ => some (parseHaxType tyJ)
+          | _ => none
+        | _ => none
+      | _ => none
     | _ => none
+  | _ => none
+
+/-- Walk top-level JSON items (including nested Mod items) and collect
+    every `struct T(Inner)` newtype (single-positional-field tuple
+    struct). Returns `(T.name, Inner)` pairs. Newtypes are distinct from
+    named-field structs (which `parseStructDefsFromJson` handles). -/
+partial def buildNewtypeMap (j : Json) : NewtypeMap :=
+  let parseItems (items : List Json) : NewtypeMap :=
+    items.foldl (init := []) fun acc item =>
+      match item.getObjVal? "kind" with
+      | .ok kindJ =>
+        -- Tuple struct: kind.Struct = [name, generics, {Tuple: ...}]
+        let here : NewtypeMap :=
+          match kindJ.getObjVal? "Struct" with
+          | .ok (.arr sd) =>
+            let name := match sd.toList with
+              | (Json.arr nameSpan) :: _ =>
+                match nameSpan.toList with
+                | (Json.str n) :: _ => n
+                | _ => ""
+              | _ => ""
+            if name.isEmpty then []
+            else match parseTupleStructInner sd with
+              | some inner => [(name, inner)]
+              | none => []
+          | _ => []
+        -- Recurse into Mod items: kind.Mod = [name_data, [sub_items]]
+        let modNewtypes : NewtypeMap :=
+          match kindJ.getObjVal? "Mod" with
+          | .ok (.arr modData) =>
+            match modData.toList[1]? with
+            | some (Json.arr subItems) => buildNewtypeMap (Json.arr subItems)
+            | _ => []
+          | _ => []
+        acc ++ here ++ modNewtypes
+      | _ => acc
+  match j with
+  | .arr items =>
+    let raw := parseItems items.toList
+    raw.foldl (fun acc (n, t) =>
+      if acc.any (·.1 == n) then acc else acc ++ [(n, t)]) []
+  | _ => []
 
 end Hax.HaxAdapter

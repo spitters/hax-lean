@@ -210,6 +210,11 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   let deps := allNamesWithVars.filter fun f =>
     !definedNames.contains f &&
     !structNames.contains f && !isFieldProjection f &&
+    -- Filter out the renderer's marker functions (`::annot::T`,
+    -- `::namedProj::T`). These are TCB-emitted into the post-pipeline
+    -- ImpExpr to communicate type info to `toLean`; they are not real
+    -- Deps methods and must not appear in the Deps class.
+    !f.startsWith "::" &&
     (!isAlwaysBuiltin f || freeVarDeps.contains f)
 
   -- === Generate struct definitions ===
@@ -666,15 +671,61 @@ partial def rewriteNewFromStructMap (sname : String) (fields : List (String × S
 
 /-! ## Full Typed Certified File Generator -/
 
+/-- TCB pre-process: rewrite `.namedProj T x` to `.app "::namedProj::T" [x]`
+    so the renderer can recognize newtype `.0` projections via the
+    function-name marker after erasure. This is the bridge between the
+    verified `.namedProj` constructor and the TCB renderer. -/
+partial def markNamedProj : TExpr → TExpr
+  | .mk (.namedProj tname e) ty =>
+    .mk (.app s!"::namedProj::{tname}" [markNamedProj e]) ty
+  | .mk (.app f args) ty => .mk (.app f (args.map markNamedProj)) ty
+  | .mk (.letBind n v b) ty => .mk (.letBind n (markNamedProj v) (markNamedProj b)) ty
+  | .mk (.tuple es) ty => .mk (.tuple (es.map markNamedProj)) ty
+  | .mk (.proj e i) ty => .mk (.proj (markNamedProj e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+    .mk (.ifThenElse (markNamedProj c) (markNamedProj t) (markNamedProj e)) ty
+  | .mk (.match_ s arms) ty =>
+    .mk (.match_ (markNamedProj s) (arms.map fun (p, e) => (p, markNamedProj e))) ty
+  | .mk (.seq a b) ty => .mk (.seq (markNamedProj a) (markNamedProj b)) ty
+  | .mk (.borrow e) ty => .mk (.borrow (markNamedProj e)) ty
+  | .mk (.deref e) ty => .mk (.deref (markNamedProj e)) ty
+  | .mk (.assign n r) ty => .mk (.assign n (markNamedProj r)) ty
+  | .mk (.forLoop v l h b) ty =>
+    .mk (.forLoop v (markNamedProj l) (markNamedProj h) (markNamedProj b)) ty
+  | .mk (.forLoopRev v l h b) ty =>
+    .mk (.forLoopRev v (markNamedProj l) (markNamedProj h) (markNamedProj b)) ty
+  | .mk (.whileLoop c b) ty => .mk (.whileLoop (markNamedProj c) (markNamedProj b)) ty
+  | .mk (.break_ (some e)) ty => .mk (.break_ (some (markNamedProj e))) ty
+  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (markNamedProj e)) ty
+  | .mk (.questionMark e) ty => .mk (.questionMark (markNamedProj e)) ty
+  | .mk (.forFold v l h b) ty =>
+    .mk (.forFold v (markNamedProj l) (markNamedProj h) (markNamedProj b)) ty
+  | .mk (.forFoldRev v l h b) ty =>
+    .mk (.forFoldRev v (markNamedProj l) (markNamedProj h) (markNamedProj b)) ty
+  | .mk (.whileFold c b) ty => .mk (.whileFold (markNamedProj c) (markNamedProj b)) ty
+  | .mk (.forFoldReturn v l h b) ty =>
+    .mk (.forFoldReturn v (markNamedProj l) (markNamedProj h) (markNamedProj b)) ty
+  | .mk (.forFoldRevReturn v l h b) ty =>
+    .mk (.forFoldRevReturn v (markNamedProj l) (markNamedProj h) (markNamedProj b)) ty
+  | .mk (.whileFoldReturn c b) ty => .mk (.whileFoldReturn (markNamedProj c) (markNamedProj b)) ty
+  | .mk (.cfBreak e) ty => .mk (.cfBreak (markNamedProj e)) ty
+  | .mk (.cfContinue e) ty => .mk (.cfContinue (markNamedProj e)) ty
+  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (markNamedProj e)) ty
+  | .mk (.ann e) ty => .mk (.ann (markNamedProj e)) ty
+  | e => e
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
-    If `procTdefs` is empty, bodies are rendered from rawTdefs (erased + pipelined). -/
+    If `procTdefs` is empty, bodies are rendered from rawTdefs (erased + pipelined).
+    `newtypes` is the JSON-derived newtype map; the renderer uses it to emit
+    `abbrev T_T := <Inner>` aliases plus definitional `«T.0»` unwraps. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
-    (procTdefs : List (String × TExpr) := []) : String :=
+    (procTdefs : List (String × TExpr) := [])
+    (newtypes : HaxAdapter.NewtypeMap := []) : String :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
@@ -682,6 +733,11 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
   -- Build struct-new mapping from rawTdefs (which have types from hax JSON)
   let newStructMap := buildNewStructMap rawTdefs structMeta
+  -- TCB pre-process: rewrite `.namedProj T x` in the post-pipeline TExpr
+  -- to `.app "::namedProj::T" [x]` (via the top-level `markNamedProj`)
+  -- so the renderer (operating on ImpExpr after erasure) can recognize
+  -- newtype-specific `.0` projections via the marker function-name.
+  let procTdefs := procTdefs.map fun (n, te) => (n, markNamedProj te)
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
   let defs : List (String × ImpExpr) :=
     if procTdefs.isEmpty then
@@ -782,6 +838,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let depNames := allNamesWithVars.filter fun f =>
     !definedNames.contains f &&
     !structNames.contains f && !isFieldProjection f &&
+    !f.startsWith "::" &&  -- exclude renderer markers
     !isAlwaysBuiltin f
   -- Detect guard-recursion for `partial`
   let needsPartial := defs.any fun (n, e) =>
@@ -818,12 +875,34 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- name while keeping the type unambiguous.
   let renameForClash (n : String) : String :=
     if axiomClashSet.contains n then s!"{n}_T" else n
+  -- Newtype-T aliases: for each `(name, innerImpType)` in `newtypes`,
+  -- the `<name>_T` axiom is REPLACED by an `abbrev <name>_T := <Inner>`
+  -- so that `«<name>.0» x` (a definitional unwrap) returns `<Inner>`
+  -- rather than the opaque alias. Build the set of clashed-renamed
+  -- newtype names so we can filter them out of the axiom emission.
+  let newtypeRenamed : List (String × String) :=  -- (T_T-name, renderedInner)
+    newtypes.map fun (n, innerTy) =>
+      let aliasName := renameForClash n  -- e.g. "VectorCommitment_T"
+      let innerStr := innerTy.toLeanTypeStrSurface baseStructLookup
+      (aliasName, innerStr)
+  let isNewtypeAlias (s : String) : Bool := newtypeRenamed.any (·.1 == s)
   let allOpaque := (opaqueFromFnTypes ++ opaqueFromCalls).eraseDups.map renameForClash
-  let allOpaque := allOpaque.eraseDups
+  let allOpaque := (allOpaque.filter (fun n => !isNewtypeAlias n)).eraseDups
   let axiomsBlock := if allOpaque.isEmpty then ""
     else "/-- Opaque types extracted from hax JSON. Concrete instances are\n    provided by the protocol's bridge-adapter at the CatCrypt surface. -/\n"
       ++ "\n".intercalate (allOpaque.map fun n => s!"axiom {n} : Type") ++ "\n\n"
-  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr literals for agreement proofs.\n-/\nimport Hax.Runtime\nimport Hax.AST\nimport Hax.Semantics\n\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\nset_option maxHeartbeats 6400000\n\nnamespace {moduleName}\n\nopen Hax\n\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{preamble}\nmutual\n\n"
+  -- Newtype preamble: emit `abbrev <T>_T := <Inner>` and the
+  -- definitional unwrap `def «<T>.0» x := x` per newtype.
+  let newtypeBlock : String :=
+    if newtypeRenamed.isEmpty then ""
+    else
+      let lines := newtypeRenamed.map fun (aliasName, innerStr) =>
+        -- Original short name (without `_T`): used for the projection name
+        let bareName := if aliasName.endsWith "_T" then aliasName.dropRight 2 else aliasName
+        s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x"
+      "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps. Inner types may themselves be\n    axiomatized (see the axiom block above). -/\n"
+        ++ "\n".intercalate lines ++ "\n\n"
+  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr literals for agreement proofs.\n-/\nimport Hax.Runtime\nimport Hax.AST\nimport Hax.Semantics\n\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\nset_option maxHeartbeats 6400000\n\nnamespace {moduleName}\n\nopen Hax\n\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{newtypeBlock}{preamble}\nmutual\n\n"
   let body := "\n".intercalate (defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
