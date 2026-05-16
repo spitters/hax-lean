@@ -70,6 +70,7 @@ def tCfIntoMonads : TExpr → TExpr
   | .mk (.cfContinue e) ty => .mk (.cfContinue (tCfIntoMonads e)) ty
   | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tCfIntoMonads e)) ty
   | .mk (.ann e) ty => .mk (.ann (tCfIntoMonads e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tCfIntoMonads e)) ty
 where
   mapExpr : List TExpr → List TExpr
     | [] => []
@@ -130,6 +131,8 @@ theorem tCfIntoMonads_erase (e : TExpr) :
   | cfContinue _ _ ih => simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
   | cfBreakContinue _ _ ih => simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
   | ann _ _ ih => simp [tCfIntoMonads, TExpr.erase, ih]
+  | namedProj _ _ _ ih =>
+    simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
   | app _ _ args ih =>
     simp only [tCfIntoMonads, tCfIntoMonads.mapExpr_eq, TExpr.erase, TExpr.eraseList_eq,
       cfIntoMonads, cfIntoMonads.mapExpr_eq, List.map_map, Function.comp_def]

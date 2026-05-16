@@ -12,6 +12,7 @@ import Hax.TPhase.CfIntoMonads
 import Hax.TPhase.WrapMatchArms
 import Hax.TPhase.ExplicitMonadic
 import Hax.TPhase.AnnotateLets
+import Hax.TPhase.ElideNewtypeProj
 import Hax.Pipeline
 
 /-!
@@ -49,6 +50,13 @@ def tPipeline (e : TExpr) : TExpr :=
     (defined in `TPhase/WrapMatchArms.lean`). -/
 def tPipelineWithCFWrap (e : TExpr) : TExpr :=
   tWrapMatchArmsCF (tPipeline e)
+
+/-- Extended typed pipeline including the newtype-projection elision.
+    Composed alongside `tPipeline` so the existing `tPipeline_erase` is
+    unchanged. The new pass is denotation-identity at erase
+    (`tElideToNamedProj_erase`), so the verified-core contracts hold. -/
+def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
+  tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e))
 
 /-- Commuting diagram: `erase ∘ tPipeline = pipeline ∘ erase`. -/
 theorem tPipeline_erase (e : TExpr) :

@@ -118,6 +118,7 @@ def tAnnotateLetBindings : TExpr → TExpr
   | .mk (.cfContinue e) ty => .mk (.cfContinue (tAnnotateLetBindings e)) ty
   | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tAnnotateLetBindings e)) ty
   | .mk (.ann e) ty => .mk (.ann (tAnnotateLetBindings e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tAnnotateLetBindings e)) ty
 where
   mapExpr : List TExpr → List TExpr
     | [] => []
@@ -192,6 +193,8 @@ theorem tAnnotateLetBindings_erase (e : TExpr) :
   | cfContinue _ _ ih => simp [tAnnotateLetBindings, TExpr.erase, ih]
   | cfBreakContinue _ _ ih => simp [tAnnotateLetBindings, TExpr.erase, ih]
   | ann _ _ ih => simp [tAnnotateLetBindings, TExpr.erase, ih]
+  | namedProj _ _ _ ih =>
+    simp [tAnnotateLetBindings, TExpr.erase, ih]
   | app _ _ args ih =>
     simp only [tAnnotateLetBindings, tAnnotateLetBindings.mapExpr_eq, TExpr.erase,
       TExpr.eraseList_eq, List.map_map, Function.comp_def]

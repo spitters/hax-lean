@@ -219,6 +219,12 @@ than guessing from method names.
     self-type that the impl is for. -/
 abbrev ImplSelfTypeMap := List (Nat × String)
 
+/-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
+    inner field type. Built once from the top-level JSON's Struct
+    items, used by `tElideToNamedProj` to rewrite `.app ".0" [x]`
+    calls into `.namedProj T x` markers when `x : T`. -/
+abbrev NewtypeMap := List (String × ImpType)
+
 /-- Extract the short name of a struct/enum from an `Adt` type JSON.
     Returns `none` if the JSON doesn't have the expected shape. -/
 private partial def extractAdtShortName (adtJ : Json) : Option String := do
@@ -2712,6 +2718,8 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
     .mk (.cfBreakContinue (reconstructForLoopsTExpr e)) ty
   | .mk (.ann e) ty =>
     .mk (.ann (reconstructForLoopsTExpr e)) ty
+  | .mk (.namedProj n e) ty =>
+    .mk (.namedProj n (reconstructForLoopsTExpr e)) ty
 where
   /-- Walk the TExpr tree to find the body of the `next()` match inside a while-loop body.
       Mirrors `tryExtractNextMatch` but returns the typed body TExpr. -/
@@ -2860,6 +2868,8 @@ partial def normalizeAssignOpsTExpr : TExpr → TExpr
     .mk (.cfBreakContinue (normalizeAssignOpsTExpr e)) ty
   | .mk (.ann e) ty =>
     .mk (.ann (normalizeAssignOpsTExpr e)) ty
+  | .mk (.namedProj n e) ty =>
+    .mk (.namedProj n (normalizeAssignOpsTExpr e)) ty
 
 /-- Parse a single hax Fn item into a typed TExpr with full type information.
     Returns `some (name, rawTExpr, processedTExpr, fnTypeInfo)` for Fn items.
@@ -3108,5 +3118,17 @@ def parseStructDefsFromJson (j : Json) : List StructInfo :=
   -- Deduplicate by struct name (keep first occurrence)
   raw.foldl (fun acc si =>
     if acc.any (·.name == si.name) then acc else acc ++ [si]) []
+
+/-- Build the newtype map from the top-level JSON.
+    A struct is a newtype iff it has exactly one positional (`"0"`-named)
+    field — i.e. `struct T(Inner)` in Rust. We record `(T.name, Inner)`
+    so `tElideToNamedProj` can rewrite `.app ".0" [x]` calls on values
+    of type `T`. -/
+def buildNewtypeMap (j : Json) : NewtypeMap :=
+  let structs := parseStructDefsFromJson j
+  structs.filterMap fun s =>
+    match s.fields with
+    | [f] => if f.name == "0" then some (s.name, f.impType) else none
+    | _ => none
 
 end Hax.HaxAdapter

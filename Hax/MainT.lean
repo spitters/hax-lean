@@ -80,14 +80,16 @@ def main (args : List String) : IO UInt32 := do
           fns.any (fun f => p.1.endsWith f || p.1 == f)
       | none => procTdefs
 
-    -- Apply typed pipeline to processed TExprs (for rendering)
-    -- `tPipelineWithCFWrap`: applies `tPipeline` then `tWrapMatchArmsCF`
-    -- to wrap fall-through match arms with `cfContinue` when sibling arms
-    -- have `cfBreak`. The wrap pass is verified (NoReferences-preserving
-    -- at the untyped layer; helper-lemma erase commutativity at the
-    -- typed layer; see `Hax/Phase/WrapMatchArms.lean` and
-    -- `Hax/TPhase/WrapMatchArms.lean`).
-    let postPipelineTdefs := procTdefs.map fun (n, te) => (n, tPipelineWithCFWrap te)
+    -- Apply typed pipeline to processed TExprs (for rendering).
+    -- `tPipelineFull` composes:
+    --   tPipeline → tWrapMatchArmsCF → tElideToNamedProj newtypes
+    -- The newtype-elision pass rewrites `.app ".0" [x]` to `.namedProj T x`
+    -- when `x : T` is a newtype struct, so the renderer can emit a
+    -- type-aware unwrap `«T.0» x` instead of the polymorphic-identity
+    -- `«.0»`. Pass is verified (`tElideToNamedProj_erase`).
+    let inputJson ← IO.ofExcept (Json.parseVerified input)
+    let newtypes := HaxAdapter.buildNewtypeMap inputJson
+    let postPipelineTdefs := procTdefs.map fun (n, te) => (n, tPipelineFull newtypes te)
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)

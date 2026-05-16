@@ -420,6 +420,8 @@ private partial def texprKindToJson : TExprKind → Json
   | .cfContinue e => Json.mkObj [("cfContinue", texprToJson e)]
   | .cfBreakContinue e => Json.mkObj [("cfBreakContinue", texprToJson e)]
   | .ann e => Json.mkObj [("ann", texprToJson e)]
+  | .namedProj n e =>
+    Json.mkObj [("namedProj", Json.mkObj [("ty", Json.str n), ("e", texprToJson e)])]
 end
 
 private partial def texprFromJson (j : Json) : Except String TExpr := do
@@ -537,6 +539,10 @@ where
         return .cfBreakContinue (← texprFromJson sub)
       else if let .ok sub := j.getObjVal? "ann" then
         return .ann (← texprFromJson sub)
+      else if let .ok sub := j.getObjVal? "namedProj" then
+        let ty ← sub.getObjValAs? String "ty"
+        let inner ← texprFromJson (← sub.getObjVal? "e")
+        return .namedProj ty inner
       else throw s!"expected TExprKind, got {j}"
 
 instance : ToJson TExpr where toJson := texprToJson

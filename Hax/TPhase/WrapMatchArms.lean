@@ -76,6 +76,7 @@ def tWrapMatchArmsCF : TExpr → TExpr
   | .mk (.cfContinue e) ty => .mk (.cfContinue (tWrapMatchArmsCF e)) ty
   | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tWrapMatchArmsCF e)) ty
   | .mk (.ann e) ty => .mk (.ann (tWrapMatchArmsCF e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tWrapMatchArmsCF e)) ty
 where
   mapExpr : List TExpr → List TExpr
     | [] => []
@@ -135,6 +136,12 @@ theorem TExpr.endsInCF_erase (e : TExpr) :
     simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF, ih2, ih3]
   | ann _ _ ih =>
     simp [TExpr.endsInCF, TExpr.erase, ih]
+  | namedProj _ _ _ _ =>
+    -- `.namedProj T e` erases to `.app ".0" [e.erase]` (an `.app` node),
+    -- which `Hax.endsInCF` answers `false` for. `TExpr.endsInCF` on a
+    -- `.namedProj` also recurses into `e`, which after the `.0` projection
+    -- isn't itself a CF marker. So both sides return false.
+    simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF]
   | cfBreak | cfContinue | cfBreakContinue =>
     simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF]
   -- Leaf-shaped cases all return false

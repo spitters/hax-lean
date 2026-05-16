@@ -73,6 +73,13 @@ inductive TExprKind where
   -- to make Lean's elaborator pick up the JSON-declared type at let-bindings.
   -- Erases to its inner expression — denotationally a no-op.
   | ann (e : TExpr)
+  -- Named tuple-struct projection: `commitment.0` where `commitment : T` and
+  -- `T` is a newtype. Inserted by `tElideToNamedProj` to mark `.0` calls
+  -- whose receiver type is a known newtype. Erases to `.app ".0" [e.erase]`
+  -- — the untyped pipeline still sees the same projection structure, so
+  -- `pipeline_correct` is unchanged. The renderer emits `«T.0» e` (a
+  -- definitional unwrap) instead of the polymorphic runtime `«.0»`.
+  | namedProj (typeName : String) (e : TExpr)
 end
 
 namespace TExpr
@@ -129,6 +136,11 @@ def TExpr.erase : TExpr → ImpExpr
   -- type erasure strips it, so all `pipeline` / `denote` proofs
   -- pass through unchanged.
   | .mk (.ann e) _ => e.erase
+  -- `.namedProj T e` is a renderer-side annotation on `.0` projections
+  -- whose receiver is a newtype. At the ImpExpr level we still see a
+  -- `.app ".0" [e.erase]` — equivalent to what hax originally emitted —
+  -- so `pipeline_correct` (parametric in builtins) is unaffected.
+  | .mk (.namedProj _ e) _ => .app ".0" [e.erase]
 where
   eraseList : List TExpr → List ImpExpr
     | [] => []
@@ -206,6 +218,7 @@ def TExpr.ind {motive : TExpr → Prop}
     (cfContinue : ∀ ty e, motive e → motive (.mk (.cfContinue e) ty))
     (cfBreakContinue : ∀ ty e, motive e → motive (.mk (.cfBreakContinue e) ty))
     (ann : ∀ ty e, motive e → motive (.mk (.ann e) ty))
+    (namedProj : ∀ ty n e, motive e → motive (.mk (.namedProj n e) ty))
     (e : TExpr) : motive e :=
   go e
 where
@@ -248,6 +261,7 @@ where
     | .mk (.cfContinue e) ty => cfContinue ty e (go e)
     | .mk (.cfBreakContinue e) ty => cfBreakContinue ty e (go e)
     | .mk (.ann e) ty => ann ty e (go e)
+    | .mk (.namedProj n e) ty => namedProj ty n e (go e)
   goList : (es : List TExpr) → ∀ a, a ∈ es → motive a
     | _ :: _, _, .head _ => go _
     | _ :: es, a, .tail _ h => goList es a h
