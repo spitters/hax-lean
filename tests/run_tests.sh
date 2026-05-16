@@ -45,12 +45,14 @@ else
 fi
 
 # Test 3: typed path on a real hax JSON fixture (if available)
-# Look for any verified-dalek crate JSON in a sibling checkout.
+# Look for a verified-dalek crate JSON in a sibling checkout. Set
+# VERIFIED_DALEK_DIR to override the default search paths.
 JSON_FIXTURE=""
-for candidate in \
+SEARCH_PATHS="\
+    ${VERIFIED_DALEK_DIR:+${VERIFIED_DALEK_DIR}/crates/lizard/hax_frontend_export.json} \
     ../../verified-dalek/crates/lizard/hax_frontend_export.json \
-    ../verified-dalek/crates/lizard/hax_frontend_export.json \
-    ~/Claude/verified-dalek/crates/lizard/hax_frontend_export.json ; do
+    ../verified-dalek/crates/lizard/hax_frontend_export.json"
+for candidate in $SEARCH_PATHS; do
   if [ -f "$candidate" ]; then
     JSON_FIXTURE="$candidate"
     break
