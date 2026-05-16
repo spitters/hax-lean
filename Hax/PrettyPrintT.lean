@@ -545,6 +545,12 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
         if tyStr == "Int" || tyStr.startsWith "Array" then s!"({sn} : {tyStr})"
         else if tyStr == "Bool" then s!"({sn} : Bool)"
         else if (tyStr.splitOn " × ").length > 1 then s!"({sn} : {tyStr})"
+        -- Axiom-typed parameters (single-token uppercase-start names like
+        -- `Commitment_T`, `VectorCommitment_T`, `SchnorrProof`) also need
+        -- annotation — otherwise Lean's binder-type inference fails
+        -- when the body never uses the param.
+        else if tyStr != "Unit" && tyStr.length > 0 && tyStr.front.isUpper then
+          s!"({sn} : {tyStr})"
         else sn)
   let bodyStr := toLean body 1 boolNames
   s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
