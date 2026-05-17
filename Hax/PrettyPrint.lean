@@ -1215,13 +1215,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     let ifLvl := max lvl 1
     let ifInd := indent ifLvl
     let ifInd1 := indent (ifLvl + 1)
-    -- When then-branch has ControlFlow but else is unitVal, else needs Hax.cfContinue (B := Unit) ()
+    -- When then-branch has ControlFlow but else is unitVal, else needs Hax.cfContinue ()
     let eStr := if e == .unitVal && hasControlFlowNodes t then
-        s!"{ifInd1}Hax.cfContinue (B := Unit) ()"
+        s!"{ifInd1}Hax.cfContinue ()"
       else atLine e (ifLvl + 1)
-    -- When else-branch has ControlFlow but then is unitVal, then needs Hax.cfContinue (B := Unit) ()
+    -- When else-branch has ControlFlow but then is unitVal, then needs Hax.cfContinue ()
     let tStr := if t == .unitVal && hasControlFlowNodes e then
-        s!"{ifInd1}Hax.cfContinue (B := Unit) ()"
+        s!"{ifInd1}Hax.cfContinue ()"
       else ""  -- empty means use default rendering below
     let condStr := condToLean c
     -- When then is unitVal but else has ControlFlow: use cfContinue for then-branch
@@ -1290,8 +1290,8 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     -- Match both `.unitVal` and `.tuple []` (the empty-accumulator case
     -- produces the latter via `accTuple []`).
     match e with
-    | .unitVal => "Hax.cfContinue (B := Unit) ()"
-    | .tuple [] => "Hax.cfContinue (B := Unit) ()"
+    | .unitVal => "Hax.cfContinue ()"
+    | .tuple [] => "Hax.cfContinue ()"
     | _ => s!"Hax.cfContinue {parensIf (toLean e 0) (!isAtom e)}"
   | .cfBreakContinue e =>
     s!"Hax.cfBreak (Hax.cfContinue {parensIf (toLean e 0) (!isAtom e)})"
@@ -1492,18 +1492,18 @@ where
           s!"{ifInd}if !({condToLean cond}) then\n{atLine elsStripped (ifLvl + 1)}\n{ifInd}else\n{atLine e2 (ifLvl + 1)}"
       | _, _ =>
       -- Guard pattern in ControlFlow context: if cond then () else <work-with-CF>; rest
-      -- The () needs to become Hax.cfContinue (B := Unit) () so both branches have ControlFlow type
+      -- The () needs to become Hax.cfContinue () so both branches have ControlFlow type
       if thn == .unitVal && (hasSurfaceControlFlow els || hasSurfaceControlFlow e2) then
         let ifLvl := max lvl 1
         let ifInd := indent ifLvl
         let ifInd1 := indent (ifLvl + 1)
-        s!"{ifInd}if {condToLean cond} then\n{ifInd1}Hax.cfContinue (B := Unit) ()\n{ifInd}else\n{atLine els (ifLvl + 1)}\n{seqToLean lvl .unitVal e2}"
+        s!"{ifInd}if {condToLean cond} then\n{ifInd1}Hax.cfContinue ()\n{ifInd}else\n{atLine els (ifLvl + 1)}\n{seqToLean lvl .unitVal e2}"
       else if els == .unitVal && hasSurfaceControlFlow thn then
         -- thn has surface CF (e.g., cfBreak/cfContinue), wrap the els in cfContinue to match types
         let ifLvl := max lvl 1
         let ifInd := indent ifLvl
         let ifInd1 := indent (ifLvl + 1)
-        s!"{ifInd}if {condToLean cond} then\n{atLine thn (ifLvl + 1)}\n{ifInd}else\n{ifInd1}Hax.cfContinue (B := Unit) ()\n{seqToLean lvl .unitVal e2}"
+        s!"{ifInd}if {condToLean cond} then\n{atLine thn (ifLvl + 1)}\n{ifInd}else\n{ifInd1}Hax.cfContinue ()\n{seqToLean lvl .unitVal e2}"
       else if els == .unitVal then
         -- One-sided: if cond then {let x := rhs; x} else unitVal
         let allBindings := extractCondAllBindings thn
