@@ -233,7 +233,7 @@ private def litIntTyped (n : Int) (ty : ImpType) : String :=
   | _ => numStr
 
 /-- Pretty-print a pattern. -/
-private def patToLean : ImpPat → String
+private partial def patToLean : ImpPat → String
   | .wildcard => "_"
   | .litPat (.bool true) => "true"
   | .litPat (.bool false) => "false"
@@ -247,6 +247,20 @@ private def patToLean : ImpPat → String
   | .nonePat => "none"
   | .okPat p => s!"Except.ok ({patToLean p})"
   | .errPat p => s!"Except.error ({patToLean p})"
+  -- General constructor pattern. The Plonky3-relevant cases are
+  -- `Break` and `Continue` from `Core_models.Ops.Control_flow`
+  -- (used by Rust's `?` operator); we emit fully-qualified names
+  -- for these to bypass namespace-lookup against the enclosing
+  -- extraction namespace. For other variants we still use the
+  -- anonymous-constructor `.Name` form so Lean resolves against
+  -- the scrutinee's expected type.
+  | .ctorPat name args =>
+      let head : String :=
+        if name == "Break" then "ControlFlow.Break"
+        else if name == "Continue" then "ControlFlow.Continue"
+        else s!".{name}"
+      if args.isEmpty then head
+      else s!"{head} {" ".intercalate (args.map patToLean)}"
 
 /-- Detect tuple destructuring pattern in letBind body.
     Pattern: letBind "a" (proj (var tmpName) 0) (letBind "b" (proj (var tmpName) 1) rest)
@@ -2020,6 +2034,8 @@ private partial def patToConstructor : ImpPat → String
   | .nonePat => ".nonePat"
   | .okPat p => s!".okPat ({patToConstructor p})"
   | .errPat p => s!".errPat ({patToConstructor p})"
+  | .ctorPat name args =>
+      s!".ctorPat \"{name}\" [{", ".intercalate (args.map patToConstructor)}]"
 
 /-- Emit a post-pipeline ImpExpr as Lean constructor syntax.
     This embeds the AST as a Lean term for use in agreement proofs. -/

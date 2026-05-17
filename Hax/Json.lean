@@ -63,7 +63,7 @@ instance : FromJson ImpLit where
 
 /-! ## ImpPat -/
 
-private def impPatToJson : ImpPat → Json
+private partial def impPatToJson : ImpPat → Json
   | .wildcard => Json.str "wildcard"
   | .nonePat => Json.str "nonePat"
   | .litPat l => Json.mkObj [("litPat", toJson l)]
@@ -72,6 +72,10 @@ private def impPatToJson : ImpPat → Json
   | .somePat p => Json.mkObj [("somePat", impPatToJson p)]
   | .okPat p => Json.mkObj [("okPat", impPatToJson p)]
   | .errPat p => Json.mkObj [("errPat", impPatToJson p)]
+  | .ctorPat name args =>
+      Json.mkObj [("ctorPat",
+        Json.mkObj [("name", Json.str name),
+                    ("args", Json.arr (args.map impPatToJson).toArray)])]
 
 private partial def impPatFromJson (j : Json) : Except String ImpPat := do
   if let .str "wildcard" := j then return .wildcard
@@ -87,6 +91,11 @@ private partial def impPatFromJson (j : Json) : Except String ImpPat := do
     return .okPat (← impPatFromJson sub)
   else if let .ok sub := j.getObjVal? "errPat" then
     return .errPat (← impPatFromJson sub)
+  else if let .ok sub := j.getObjVal? "ctorPat" then
+    let name ← sub.getObjValAs? String "name"
+    let argsJ ← sub.getObjValAs? (Array Json) "args"
+    let args ← argsJ.toList.mapM impPatFromJson
+    return .ctorPat name args
   else throw s!"expected ImpPat, got {j}"
 
 instance : ToJson ImpPat where toJson := impPatToJson

@@ -687,7 +687,12 @@ partial def parseHaxPat (j : Json) : ImpPat :=
         | "None", [] => .nonePat
         | "Ok", [p] => .okPat p
         | "Err", [p] => .errPat p
-        | _, _ => .varPat name  -- approximate: treat as a binding
+        -- All other variants: emit a general constructor pattern.
+        -- This includes `ControlFlow::Break` / `ControlFlow::Continue`
+        -- (which carry one arg each), user-defined enum variants, etc.
+        -- The renderer prints these as `.Name args` so Lean resolves
+        -- the constructor against the scrutinee's expected type.
+        | _, _ => .ctorPat name subpats
       | _ => .wildcard
     else if let .ok orData := patKind.getObjVal? "Or" then
       -- Or pattern: take the first alternative (simplified)

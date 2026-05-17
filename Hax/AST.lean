@@ -37,7 +37,14 @@ inductive ImpLit where
   | sintLit (w : IntWidth) (n : Int)   -- signed fixed-width literal
   deriving Inhabited, BEq, Repr
 
-/-- Pattern matching arms. -/
+/-- Pattern matching arms.
+
+    `ctorPat name args` is the general constructor pattern — used for
+    ADT variants that don't have one of the specialised constructors
+    below (e.g. `ControlFlow.Break`, user-defined enums). The
+    specialised forms `somePat`/`nonePat`/`okPat`/`errPat` exist for
+    `Option`/`Result` because they have first-class semantics in
+    `Value.lean`'s `matchPat`. -/
 inductive ImpPat where
   | wildcard
   | litPat (l : ImpLit)
@@ -47,6 +54,7 @@ inductive ImpPat where
   | nonePat
   | okPat (p : ImpPat)
   | errPat (p : ImpPat)
+  | ctorPat (name : String) (args : List ImpPat)
   deriving Inhabited, BEq, Repr
 
 /-- Imperative expression AST.
