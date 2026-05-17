@@ -1106,23 +1106,55 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     -- Match-with-cfBreak pattern: let x := (match s with | p1 => v1 | p2 => cfBreak v2); body
     -- → if-else chain (for Option/Result patterns in untyped mode) or inlined match
     -- Inlines the continuation into non-cfBreak arms to avoid type mismatch.
-    let matchCfBreak := match val with
+    -- Peek through `::annot::<T>` markers — when the typed pipeline
+    -- decides to annotate a let-binding's RHS, the marker hides the
+    -- underlying match from this pattern check; peel it so the
+    -- inline-into-arms transform can still fire.
+    let unwrappedVal : ImpExpr :=
+      match val with
+      | .app f [inner] => if f.startsWith "::annot::" then inner else val
+      | _ => val
+    let matchCfBreak := match unwrappedVal with
       | .match_ scrut arms =>
         if arms.any fun (_, b) => hasCfBreak b then some (scrut, arms) else none
       | _ => none
     match matchCfBreak with
     | some (scrut, arms) =>
-      -- Inline continuation into non-cfBreak arms, keep the cfBreak
-      -- wrapper in cfBreak arms so the match's overall type matches the
-      -- surrounding context (typically a `forFoldReturn` body that
-      -- expects `ControlFlow B Unit`). Previously we unwrapped to the
-      -- raw value, which left the arm with `Option`/etc. instead of
-      -- `ControlFlow`, type-mismatching the other arms.
+      -- Inline continuation into non-cfBreak arms. For the cfBreak arms,
+      -- whether to keep the `Hax.cfBreak` wrapper depends on the
+      -- surrounding context:
+      --   - inside a loop body: keep it (the loop expects ControlFlow);
+      --   - at function tail: unwrap to the raw early-return value (the
+      --     function returns `Option T`, not `ControlFlow`).
+      -- Heuristic: if the surrounding `body` (the rest of the block
+      -- after this letBind) eventually emits a `cfContinue` — i.e.
+      -- it's already wrapping its tail in ControlFlow constructors
+      -- because it's inside a loop body — keep the cfBreak. Otherwise
+      -- we're at a function tail and the cfBreak's wrapper would
+      -- type-mismatch the function's `Option`-typed return.
+      let surroundingIsLoop : Bool :=
+        let rec hasCfContinue : ImpExpr → Bool
+          | .cfContinue _ => true
+          | .letBind _ v b => hasCfContinue v || hasCfContinue b
+          | .seq a b => hasCfContinue a || hasCfContinue b
+          | .ifThenElse _ t e => hasCfContinue t || hasCfContinue e
+          | .match_ _ arms => arms.any (fun (_, b) => hasCfContinue b)
+          | _ => false
+        hasCfContinue body
       let armLvl := max lvl 1
         let armInd := indent armLvl
         let armStrs := arms.map fun (p, armBody) =>
           if hasCfBreak armBody then
-            s!"{armInd}| {patToLean p} => {toLean armBody (armLvl + 1)}"
+            let rendered :=
+              if surroundingIsLoop then
+                toLean armBody (armLvl + 1)
+              else
+                -- Unwrap the cfBreak to its inner value for the
+                -- function-tail case.
+                match extractCfBreak armBody with
+                | some v => toLean v (armLvl + 1)
+                | none => toLean armBody (armLvl + 1)
+            s!"{armInd}| {patToLean p} => {rendered}"
           else
             let inlined := ImpExpr.letBind n armBody body
             s!"{armInd}| {patToLean p} =>\n{atLine inlined (armLvl + 1)}"
@@ -1291,13 +1323,15 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
 
   -- ControlFlow constructors (post-pipeline)
   | .cfBreak e =>
-    -- Annotate `none` to avoid unresolvable implicit α in ControlFlow
-    let eStr := match e with
-      | .app "None" [] => "(none : Option (Array Int))"
-      -- Bool values in cfBreak: annotate type to help Lean resolve ControlFlow
-      | .lit (.bool true) => "(true : Bool)"
-      | .lit (.bool false) => "(false : Bool)"
-      | _ => parensIf (toLean e 0) (!isAtom e)
+    -- Render `Hax.cfBreak <e>` without a hardcoded type annotation on
+    -- `none` / Bool literals. Earlier the renderer wrote
+    -- `(none : Option (Array Int))` and `(true : Bool)` to "help" Lean,
+    -- but the `Option (Array Int)` was wrong whenever the surrounding
+    -- function returned `Option T` for any other `T` — this was a TCB
+    -- heuristic baked to one particular crate. The correct annotation
+    -- belongs in a verified TPhase that knows the surrounding return
+    -- type; in its absence, leave the value bare and let Lean infer.
+    let eStr := parensIf (toLean e 0) (!isAtom e)
     s!"Hax.cfBreak {eStr}"
   | .cfContinue e =>
     -- For `cfContinue ()` specifically, Lean cannot infer the implicit
