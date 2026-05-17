@@ -1684,14 +1684,16 @@ where
       else
         let accStr := ", ".intercalate (accs.map sanitizeName)
         let destr := if accs.length == 1 then sanitizeName accs.head! else s!"({accStr})"
-        -- If the tail is a Bool literal but Break returns Int, wrap in boolToInt.
-        -- But if cfBreak values are Bool (function returns Bool), don't convert.
-        let breakIsBool := extractAllCfBreakVals body |>.any fun v => match v with
-          | .lit (.bool _) => true | _ => false
-        let tailRendered := match tail with
-          | .lit (.bool true) => if breakIsBool then s!"{ind1}true" else s!"{ind1}Hax.boolToInt true"
-          | .lit (.bool false) => if breakIsBool then s!"{ind1}false" else s!"{ind1}Hax.boolToInt false"
-          | _ => atLine tail (lvl + 1)
+        -- Render the tail unchanged. Earlier versions wrapped Bool tail
+        -- literals in `Hax.boolToInt` whenever a heuristic guessed the
+        -- function's return type was Int. That decision belongs in the
+        -- typed pipeline (where the TExpr's annotated type is
+        -- authoritative), not in the renderer. Keeping the renderer
+        -- straight-line trivial removes TCB; any necessary type
+        -- adjustment must be performed by a verified TPhase that
+        -- normalises the AST so the trivial render produces well-typed
+        -- Lean.
+        let tailRendered := atLine tail (lvl + 1)
         s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
