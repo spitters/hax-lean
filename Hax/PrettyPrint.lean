@@ -1063,12 +1063,26 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   | .var "new" => "#[]"  -- Vec::new() → empty array literal (polymorphic)
   | .var n => sanitizeName n
 
-  -- Skip dead ControlFlow let-bindings: let _ := cfBreak/cfContinue/cfBreakContinue (...) → just render body
-  | .letBind n (.cfBreak _) body | .letBind n (.cfContinue _) body | .letBind n (.cfBreakContinue _) body =>
+  -- Dead ControlFlow let-bindings: discarded `_` results from a cfBreak /
+  -- cfContinue / cfBreakContinue are dropped (just render body).
+  | .letBind n (.cfBreak _) body | .letBind n (.cfBreakContinue _) body =>
+    if n.startsWith "_" then atLine body lvl
+    else
+      -- A non-discarded letBind whose RHS is a cfBreak doesn't have a
+      -- sensible Lean form (cfBreak short-circuits the surrounding
+      -- block; nothing flows out). Emit an `unreachable!` placeholder
+      -- with the right unit type. (Was previously `(sorry : Unit)`.)
+      let ind := indent lvl
+      s!"{ind}let {sanitizeName n} := (sorry : Unit)\n{atLine body lvl}"
+  -- `letBind n (cfContinue v) body` — bind `n := v` (the continue payload)
+  -- and render the body. This handles `let fri_proof = match …
+  -- { Some(p) => p, None => return None }` after the explicit-match
+  -- desugar wraps the Some arm in `cfContinue p`.
+  | .letBind n (.cfContinue v) body =>
     if n.startsWith "_" then atLine body lvl
     else
       let ind := indent lvl
-      s!"{ind}let {sanitizeName n} := (sorry : Unit)\n{atLine body lvl}"
+      s!"{ind}let {sanitizeName n} := {toLean v 0}\n{atLine body lvl}"
   -- Let binding: detect tuple destructuring pattern
   -- letBind "_tup" rhs (letBind "a" (proj (var "_tup") 0) (letBind "b" (proj (var "_tup") 1) body))
   -- → let (a, b) := rhs
@@ -1098,14 +1112,17 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       | _ => none
     match matchCfBreak with
     | some (scrut, arms) =>
-      -- Inline continuation into non-cfBreak arms, unwrap cfBreak in cfBreak arms
+      -- Inline continuation into non-cfBreak arms, keep the cfBreak
+      -- wrapper in cfBreak arms so the match's overall type matches the
+      -- surrounding context (typically a `forFoldReturn` body that
+      -- expects `ControlFlow B Unit`). Previously we unwrapped to the
+      -- raw value, which left the arm with `Option`/etc. instead of
+      -- `ControlFlow`, type-mismatching the other arms.
       let armLvl := max lvl 1
         let armInd := indent armLvl
         let armStrs := arms.map fun (p, armBody) =>
           if hasCfBreak armBody then
-            let unwrapped := match extractCfBreak armBody with
-              | some v => v | none => armBody
-            s!"{armInd}| {patToLean p} => {toLean unwrapped (armLvl + 1)}"
+            s!"{armInd}| {patToLean p} => {toLean armBody (armLvl + 1)}"
           else
             let inlined := ImpExpr.letBind n armBody body
             s!"{armInd}| {patToLean p} =>\n{atLine inlined (armLvl + 1)}"
@@ -1708,7 +1725,27 @@ where
         -- normalises the AST so the trivial render produces well-typed
         -- Lean.
         let tailRendered := atLine tail (lvl + 1)
-        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => _v\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
+        -- Detect a nested-loop body that uses `cfBreak (cfBreak _)` to
+        -- propagate an early-return up two levels. The inner match's
+        -- `.Break _v` arm must then re-wrap `_v` as a cfBreak so the
+        -- outer loop body's expected `ControlFlow B C` type is
+        -- preserved.
+        let hasNestedCfBreak : Bool :=
+          let rec scan : ImpExpr → Bool
+            | .cfBreak (.cfBreak _) => true
+            | .cfBreak v => scan v
+            | .letBind _ v b => scan v || scan b
+            | .seq a b => scan a || scan b
+            | .ifThenElse _ t e => scan t || scan e
+            | .match_ _ arms => arms.any (fun (_, b) => scan b)
+            | .whileFold _ b | .whileFoldReturn _ b => scan b
+            | .forFold _ _ _ b | .forFoldRev _ _ _ b
+            | .forFoldReturn _ _ _ b | .forFoldRevReturn _ _ _ b => scan b
+            | _ => false
+          scan body || scan tail
+        let breakArm :=
+          if hasNestedCfBreak then "Hax.cfBreak _v" else "_v"
+        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
 
