@@ -804,31 +804,42 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
   let structLookup := mkStructLookup structMeta structIsPassthrough
+  -- ====================================================================
+  -- QUARANTINED post-erase fallback (effective 2026-05-18).
+  --
+  -- These four type-dependent rewriters duplicate the work of the typed
+  -- phases (tQualifyProjections, tRewriteNewToStructCtor,
+  -- tRewriteStructFromElem, tFixProjectionPaths) which ran on the TExpr
+  -- layer before erase. They were kept here as a fallback because:
+  --
+  --   * The typed phases rely on accurate `arg.ty` annotations from the
+  --     hax JSON adapter; when those are `.unknown` or missing, the
+  --     typed phase silently no-ops while the untyped post-erase pass
+  --     (which uses body-walk heuristics) still fires.
+  --   * Removing them outright regressed SPDZ's `init_authentic_share`
+  --     (typed phase missed `vec![AuthShare::ZERO; n]` → `from_elem
+  --     (ZERO, ZERO) n` expansion).
+  --
+  -- To DELETE rather than QUARANTINE, the typed phases need either:
+  --   (a) full coverage equivalent to the untyped heuristics, or
+  --   (b) a JSON-adapter fix ensuring every relevant call carries
+  --       its container type.
+  --
+  -- When that holds, drop everything between the QUARANTINED markers.
+  -- ====================================================================
   let ambiguousFields := findAmbiguousFields structMeta
   let defs := if ambiguousFields.isEmpty then defs
     else defs.map fun (n, e) => (n, qualifyProjections structMeta ambiguousFields e e)
-  -- Pre-process: rewrite `new args` to struct constructor calls (handles non-empty args)
   let defs := if structMeta.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewToStructCtor structMeta e)
-  -- Rewrite `new()` (zero-arg) using struct types from rawTdefs
-  -- (procTdefs lose types due to erase/lift roundtrip, but rawTdefs preserve them)
   let defs := if newStructMap.isEmpty then defs
     else defs.map fun (fname, e) =>
       match newStructMap.find? (·.1 == fname) with
       | some (_, [sname]) =>
-        -- Unambiguous: all new() calls in this function use one struct type
         match structMeta.find? (·.1 == sname) with
         | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
         | none => (fname, e)
       | _ => (fname, e)
-  -- Pre-process: rewrite `from_elem ZERO n` for struct arrays.
-  -- Build per-function retTypes from fnTypes; pass the full list (not just
-  -- the calling function's own retType) so calls to other functions can
-  -- be resolved by the rewriter when an array of structs flows through.
-  -- Pass only the CALLING function's retType so the rewriter only applies
-  -- struct-from-elem expansion when the from_elem result feeds back to the
-  -- enclosing function's own return type. Using a global list incorrectly
-  -- matched other functions' struct-array signatures (SPDZ bug).
   let defs := if structMeta.isEmpty then defs
     else defs.map fun (n, e) =>
       let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
@@ -836,7 +847,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         | some ty => if ty.isUnknown then [] else [(n, ty)]
         | none => []
       (n, rewriteStructFromElem structMeta fnRetTypes defs e)
-  -- Fix projection paths for tuples with arity > 2
   let callRetTypes := fnTypes.filterMap fun (n, ti) =>
     if !ti.retType.isUnknown then some (n, ti.retType) else none
   let structArities := structMeta.map fun (sname, fields) => (sname, fields.length)
@@ -854,9 +864,12 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let arityMap := (structArities ++ depRetArities ++ usageArities).eraseDups
   let defs := if arityMap.isEmpty then defs
     else defs.map fun (n, e) => (n, fixProjectionPaths arityMap e)
-  -- Pass T-A: insert `let v := 0` before any fold whose accumulator
-  -- references a variable not bound in the enclosing scope. (Defined
-  -- at PrettyPrint.lean:4117 but historically unwired.)
+  -- ====================================================================
+  -- END QUARANTINED post-erase fallback.
+  -- ====================================================================
+  -- `initMissingFoldAccums` kept as an idempotent backup; the typed
+  -- `tInitMissingFoldAccums` already ran on the TExpr layer before erase
+  -- (and `tInitMissingFoldAccums_erase` proves the erased result matches).
   let defs := defs.map fun (n, e) => (n, initMissingFoldAccums [] e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
