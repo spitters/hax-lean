@@ -25,4 +25,5 @@ import Hax.TPhase.LocalMutation
 import Hax.TPhase.FunctionalizeLoops
 import Hax.TPhase.CfIntoMonads
 import Hax.TPhase.ExplicitMonadic
+import Hax.TPhase.RewriteAppName
 import Hax.TPipeline

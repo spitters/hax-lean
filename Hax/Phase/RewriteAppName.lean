@@ -31,33 +31,51 @@ is a follow-up.
 
 namespace Hax
 
-/-- Rewrite every `.app oldName args` to `.app newName args`. -/
-partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
+/-- Rewrite every `.app oldName args` to `.app newName args`. Explicit
+    per-constructor recursion + named helpers (mapExpr/mapArms) so that
+    Lean's structural-recursion termination check sees the recursive
+    calls and `simp` can generate per-constructor equation lemmas. -/
+def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
+  | .lit v => .lit v
+  | .var n => .var n
+  | .unitVal => .unitVal
+  | .continue_ => .continue_
+  | .break_ none => .break_ none
+  | .break_ (some e) => .break_ (some (rewriteAppName oldName newName e))
   | .app f args =>
     let f' := if f == oldName then newName else f
-    .app f' (args.map (rewriteAppName oldName newName))
+    .app f' (mapExpr oldName newName args)
   | .letBind n v body =>
     .letBind n (rewriteAppName oldName newName v) (rewriteAppName oldName newName body)
   | .seq a b => .seq (rewriteAppName oldName newName a) (rewriteAppName oldName newName b)
   | .ifThenElse c t e =>
     .ifThenElse (rewriteAppName oldName newName c)
       (rewriteAppName oldName newName t) (rewriteAppName oldName newName e)
-  | .whileFold c body =>
-    .whileFold (rewriteAppName oldName newName c) (rewriteAppName oldName newName body)
+  | .tuple es => .tuple (mapExpr oldName newName es)
+  | .proj e i => .proj (rewriteAppName oldName newName e) i
+  | .match_ scrut arms =>
+    .match_ (rewriteAppName oldName newName scrut) (mapArms oldName newName arms)
+  | .borrow e => .borrow (rewriteAppName oldName newName e)
+  | .deref e => .deref (rewriteAppName oldName newName e)
+  | .assign n rhs => .assign n (rewriteAppName oldName newName rhs)
+  | .forLoop v lo hi body =>
+    .forLoop v (rewriteAppName oldName newName lo)
+      (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
+  | .forLoopRev v lo hi body =>
+    .forLoopRev v (rewriteAppName oldName newName lo)
+      (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
+  | .whileLoop c body =>
+    .whileLoop (rewriteAppName oldName newName c) (rewriteAppName oldName newName body)
+  | .earlyReturn e => .earlyReturn (rewriteAppName oldName newName e)
+  | .questionMark e => .questionMark (rewriteAppName oldName newName e)
   | .forFold v lo hi body =>
     .forFold v (rewriteAppName oldName newName lo)
       (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
-  | .tuple es => .tuple (es.map (rewriteAppName oldName newName))
-  | .proj e i => .proj (rewriteAppName oldName newName e) i
-  | .match_ scrut arms =>
-    .match_ (rewriteAppName oldName newName scrut)
-      (arms.map fun (p, b) => (p, rewriteAppName oldName newName b))
-  | .cfBreak e => .cfBreak (rewriteAppName oldName newName e)
-  | .cfContinue e => .cfContinue (rewriteAppName oldName newName e)
-  | .cfBreakContinue e => .cfBreakContinue (rewriteAppName oldName newName e)
   | .forFoldRev v lo hi body =>
     .forFoldRev v (rewriteAppName oldName newName lo)
       (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
+  | .whileFold c body =>
+    .whileFold (rewriteAppName oldName newName c) (rewriteAppName oldName newName body)
   | .forFoldReturn v lo hi body =>
     .forFoldReturn v (rewriteAppName oldName newName lo)
       (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
@@ -66,6 +84,29 @@ partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
       (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
   | .whileFoldReturn c body =>
     .whileFoldReturn (rewriteAppName oldName newName c) (rewriteAppName oldName newName body)
-  | e => e
+  | .cfBreak e => .cfBreak (rewriteAppName oldName newName e)
+  | .cfContinue e => .cfContinue (rewriteAppName oldName newName e)
+  | .cfBreakContinue e => .cfBreakContinue (rewriteAppName oldName newName e)
+where
+  mapExpr (oldName newName : String) : List ImpExpr → List ImpExpr
+    | [] => []
+    | e :: es => rewriteAppName oldName newName e :: mapExpr oldName newName es
+  mapArms (oldName newName : String) : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
+    | [] => []
+    | (p, e) :: rest => (p, rewriteAppName oldName newName e) :: mapArms oldName newName rest
+
+@[simp] theorem rewriteAppName.mapExpr_eq (oldName newName : String) (es : List ImpExpr) :
+    rewriteAppName.mapExpr oldName newName es = es.map (rewriteAppName oldName newName) := by
+  induction es with
+  | nil => rfl
+  | cons e es ih => simp [rewriteAppName.mapExpr, ih]
+
+@[simp] theorem rewriteAppName.mapArms_eq (oldName newName : String)
+    (arms : List (ImpPat × ImpExpr)) :
+    rewriteAppName.mapArms oldName newName arms =
+      arms.map fun (p, e) => (p, rewriteAppName oldName newName e) := by
+  induction arms with
+  | nil => rfl
+  | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [rewriteAppName.mapArms, ih]
 
 end Hax
