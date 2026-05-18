@@ -87,10 +87,13 @@ partial def collectTFreeVars (bound : List String := []) :
     else []
     collectTFreeVars bound scrut ++ patFreeVars ++
     arms.foldl (fun acc (_, b) => acc ++ collectTFreeVars bound b) []
-  | .mk (.forLoop _ lo hi body) _ | .mk (.forLoopRev _ lo hi body) _
-  | .mk (.forFold _ lo hi body) _ | .mk (.forFoldRev _ lo hi body) _
-  | .mk (.forFoldReturn _ lo hi body) _ | .mk (.forFoldRevReturn _ lo hi body) _ =>
-    collectTFreeVars bound lo ++ collectTFreeVars bound hi ++ collectTFreeVars bound body
+  -- Fold / for-loop constructors bind the loop variable in their body;
+  -- the bound list must include `v` for the body traversal, otherwise the
+  -- loop index leaks as a "free var" and is misclassified as a Deps method.
+  | .mk (.forLoop v lo hi body) _ | .mk (.forLoopRev v lo hi body) _
+  | .mk (.forFold v lo hi body) _ | .mk (.forFoldRev v lo hi body) _
+  | .mk (.forFoldReturn v lo hi body) _ | .mk (.forFoldRevReturn v lo hi body) _ =>
+    collectTFreeVars bound lo ++ collectTFreeVars bound hi ++ collectTFreeVars (v :: bound) body
   | .mk (.whileLoop c body) _
   | .mk (.whileFold c body) _ | .mk (.whileFoldReturn c body) _ =>
     collectTFreeVars bound c ++ collectTFreeVars bound body

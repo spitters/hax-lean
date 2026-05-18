@@ -2212,8 +2212,8 @@ def isAlwaysBuiltin (f : String) : Bool :=
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
   | "panic" | "sha256" | "Some" | "None" | "Ok" | "Err"
   | "shl" | "shr" | "Shl" | "Shr"
-  | "add" | "sub" | "div" | "rem" | "neg"
-  | "Add" | "Sub" | "Div" | "Rem" | "Neg"
+  | "add" | "sub" | "mul" | "div" | "rem" | "neg"
+  | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg"
   | "bitand" | "bitor" | "bitxor" | "bitnot"
   | "BitAnd" | "BitOr" | "BitXor"
   | "eq" | "Eq" | "ne" | "Ne" | "not" | "Not"
@@ -2254,11 +2254,14 @@ partial def collectFreeVars (bound : List String := []) : ImpExpr → List Strin
     else []
     collectFreeVars bound scrut ++ patFreeVars ++
     arms.foldl (fun acc (_, b) => acc ++ collectFreeVars bound b) []
-  | .forFold _ lo hi body | .forFoldRev _ lo hi body =>
-    collectFreeVars bound lo ++ collectFreeVars bound hi ++ collectFreeVars bound body
+  -- Fold constructors bind the loop variable `v` in their body; the bound
+  -- list must include `v` for the body traversal, otherwise the loop index
+  -- leaks as a "free var" and is misclassified as a Deps method.
+  | .forFold v lo hi body | .forFoldRev v lo hi body =>
+    collectFreeVars bound lo ++ collectFreeVars bound hi ++ collectFreeVars (v :: bound) body
   | .whileFold c body => collectFreeVars bound c ++ collectFreeVars bound body
-  | .forFoldReturn _ lo hi body | .forFoldRevReturn _ lo hi body =>
-    collectFreeVars bound lo ++ collectFreeVars bound hi ++ collectFreeVars bound body
+  | .forFoldReturn v lo hi body | .forFoldRevReturn v lo hi body =>
+    collectFreeVars bound lo ++ collectFreeVars bound hi ++ collectFreeVars (v :: bound) body
   | .whileFoldReturn c body => collectFreeVars bound c ++ collectFreeVars bound body
   | .cfBreak e | .cfContinue e | .cfBreakContinue e => collectFreeVars bound e
   | _ => []
