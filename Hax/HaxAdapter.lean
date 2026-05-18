@@ -3124,6 +3124,65 @@ def parseStructDefsFromJson (j : Json) : List StructInfo :=
   raw.foldl (fun acc si =>
     if acc.any (·.name == si.name) then acc else acc ++ [si]) []
 
+/-- A Rust enum definition: name + variant names.
+    Currently captures the unit-variant case (`enum Pattern { IK, XK, NK }`).
+    Variants with payload fields are emitted as no-payload constructors;
+    downstream Lean code can still match on them but won't see the payload. -/
+structure EnumInfo where
+  name : String
+  variants : List String
+  deriving Inhabited
+
+/-- Parse Rust enum definitions from a hax JSON export array.
+    Hax encodes `kind.Enum` as `[[name, name_span], generics, variants_array]`
+    where each variant is `{ident: [variant_name, span], hir_id, def_id, ...}`. -/
+partial def parseEnumDefs (items : List Json) : List EnumInfo :=
+  let parseOneEnum (enumData : Array Json) : Option EnumInfo :=
+    -- enumData = [name_with_span, generics, variants]
+    let name := match enumData.toList with
+      | (Json.arr nameSpan) :: _ => match nameSpan.toList with
+        | (Json.str n) :: _ => n
+        | _ => ""
+      | _ => ""
+    if name.isEmpty then none
+    else
+      let variantsJ := enumData.toList[2]?
+      match variantsJ with
+      | some (Json.arr variantList) =>
+        let variantNames := variantList.toList.filterMap fun vj =>
+          match vj.getObjVal? "ident" with
+          | Except.ok (Json.arr identPair) => match identPair.toList with
+            | (Json.str n) :: _ => some n
+            | _ => none
+          | _ => none
+        some { name := name, variants := variantNames }
+      | _ => none
+  items.foldl (fun acc item =>
+    let kind := (item.getObjVal? "kind").toOption
+    match kind with
+    | some kindJ =>
+      -- Recurse into Mod items: kind.Mod = [name_data, [sub_items]]
+      let modEnums := match kindJ.getObjVal? "Mod" with
+        | Except.ok (Json.arr modData) =>
+          match modData.toList[1]? with
+          | some (Json.arr subItems) => parseEnumDefs subItems.toList
+          | _ => []
+        | _ => []
+      let thisEnum := match kindJ.getObjVal? "Enum" with
+        | Except.ok (Json.arr ed) => parseOneEnum ed
+        | _ => none
+      acc ++ modEnums ++ thisEnum.toList
+    | none => acc) []
+
+/-- Parse enum defs from a top-level hax JSON (array of items). -/
+def parseEnumDefsFromJson (j : Json) : List EnumInfo :=
+  let raw := match j with
+    | .arr items => parseEnumDefs items.toList
+    | _ => []
+  -- Deduplicate by enum name (keep first occurrence)
+  raw.foldl (fun acc ei =>
+    if acc.any (·.name == ei.name) then acc else acc ++ [ei]) []
+
 /-- Parse the inner ImpType from a Tuple-variant struct's field list.
     Hax represents `struct T(Inner)` as `kind: Struct(..., {Tuple: [[field0_data]]})`.
     Returns the inner ImpType of the first positional field, if any. -/
