@@ -156,6 +156,51 @@ where
   | nil => rfl
   | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [tInitMissingFoldAccums.mapArms, ih]
 
+/-- The `letBind`-prepending `foldr` preserves the outer `ty` of its
+    starting expression — each iteration wraps with `expr.ty`, which on
+    the first step is `fold.ty`, and on every subsequent step is the
+    previous wrapper's `ty` (also `fold.ty`). -/
+private theorem foldr_letBindLit_ty (names : List String) (fold : TExpr) :
+    (names.foldr
+        (fun fv expr =>
+          TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty)
+        fold).ty
+      = fold.ty := by
+  induction names with
+  | nil => rfl
+  | cons n ns ih =>
+    show (TExpr.mk (.letBind n _ _) _).ty = fold.ty
+    show _ = fold.ty
+    exact ih
+
+/-- Outer-type preservation for `tInitMissingFoldAccums`. Every node's
+    `ty` annotation is preserved by the phase, including the freshly
+    inserted `letBind`s at fold sites (which carry the fold's outer
+    `ty` per `foldr_letBindLit_ty`). -/
+theorem tInitMissingFoldAccums_ty (bound : List String) (e : TExpr) :
+    (tInitMissingFoldAccums bound e).ty = e.ty := by
+  cases e with
+  | mk kind ty =>
+    cases kind with
+    | forFold _ _ _ _ =>
+      show (List.foldr (fun fv expr =>
+              TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty) _ _).ty = ty
+      exact foldr_letBindLit_ty _ _
+    | forFoldRev _ _ _ _ =>
+      show (List.foldr (fun fv expr =>
+              TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty) _ _).ty = ty
+      exact foldr_letBindLit_ty _ _
+    | forFoldReturn _ _ _ _ =>
+      show (List.foldr (fun fv expr =>
+              TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty) _ _).ty = ty
+      exact foldr_letBindLit_ty _ _
+    | forFoldRevReturn _ _ _ _ =>
+      show (List.foldr (fun fv expr =>
+              TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty) _ _).ty = ty
+      exact foldr_letBindLit_ty _ _
+    | break_ eo => cases eo <;> rfl
+    | _ => rfl
+
 /-- Erasing a `letBind`-prepending `foldr` commutes with applying the
     same `foldr` over erased nodes. -/
 private theorem foldr_letBindLit_erase (names : List String) (fold : TExpr) :
