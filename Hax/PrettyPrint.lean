@@ -4125,6 +4125,23 @@ partial def rewriteStructFromElem (structMeta : StructMeta)
         if (name == "Vec" || name.endsWith "::Vec") &&
            structMeta.any (·.1 == sname) then some sname else none
       | _ => none
+    -- Tuple-element arrays: `Array (T1 × T2 × ...)`. We need an arity, not
+    -- a struct name. Returns `some n` if from_elem's result is an array of
+    -- n-tuples. Triggered by SPDZ's `Array (FieldElement × FieldElement)`.
+    -- Walk through Slice/Ref wrappers since Vec sometimes gets normalized
+    -- to Slice in hax's type system.
+    let tupleElemArity : Option Nat := fnRetTypes.findSome? fun (_, retTy) =>
+      let rec inner : ImpType → Option Nat
+        | .adt name [.tuple elems] =>
+          if (name == "Vec" || name.endsWith "::Vec") && elems.length > 1
+            then some elems.length else none
+        | .array (.tuple elems) _ =>
+          if elems.length > 1 then some elems.length else none
+        | .slice (.tuple elems) =>
+          if elems.length > 1 then some elems.length else none
+        | .ref t _ => inner t
+        | _ => none
+      inner retTy
     -- Also check if arrVar is used with struct projections in body
     let structFromUsage := structMeta.findSome? fun (sname, fields) =>
       let projUsed := fields.any fun (fname, _, _) =>
@@ -4163,8 +4180,15 @@ partial def rewriteStructFromElem (structMeta : StructMeta)
         .letBind arrVar (.app "from_elem" [initVal, sz])
           (rewriteStructFromElem structMeta fnRetTypes allDefs body)
     | none =>
-      .letBind arrVar (.app "from_elem" [initVal, sz])
-        (rewriteStructFromElem structMeta fnRetTypes allDefs body)
+      -- No struct match — check the tuple-element fallback (SPDZ case).
+      match tupleElemArity with
+      | some n =>
+        let tupleInit := ImpExpr.tuple (List.replicate n initVal)
+        .letBind arrVar (.app "from_elem" [tupleInit, sz])
+          (rewriteStructFromElem structMeta fnRetTypes allDefs body)
+      | none =>
+        .letBind arrVar (.app "from_elem" [initVal, sz])
+          (rewriteStructFromElem structMeta fnRetTypes allDefs body)
   | .letBind n v body =>
     .letBind n (rewriteStructFromElem structMeta fnRetTypes allDefs v)
       (rewriteStructFromElem structMeta fnRetTypes allDefs body)

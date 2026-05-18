@@ -786,14 +786,15 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
         | none => (fname, e)
       | _ => (fname, e)
-  -- Pre-process: rewrite `from_elem ZERO n` for struct arrays
-  let defs := if structMeta.isEmpty then defs
+  -- Pre-process: rewrite `from_elem ZERO n` for struct arrays.
+  -- Build per-function retTypes from fnTypes; pass the full list (not just
+  -- the calling function's own retType) so calls to other functions can
+  -- be resolved by the rewriter when an array of structs flows through.
+  let allFnRetTypes : List (String × ImpType) := fnTypes.filterMap fun (n, ti) =>
+    if ti.retType.isUnknown then none else some (n, ti.retType)
+  let defs := if structMeta.isEmpty && allFnRetTypes.isEmpty then defs
     else defs.map fun (n, e) =>
-      let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
-      let fnRetTypes := match fnRetType with
-        | some ty => [(n, ty)]
-        | none => []
-      (n, rewriteStructFromElem structMeta fnRetTypes defs e)
+      (n, rewriteStructFromElem structMeta allFnRetTypes defs e)
   -- Fix projection paths for tuples with arity > 2
   let callRetTypes := fnTypes.filterMap fun (n, ti) =>
     if !ti.retType.isUnknown then some (n, ti.retType) else none
