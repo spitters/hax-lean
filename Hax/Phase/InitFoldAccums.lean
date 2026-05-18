@@ -31,14 +31,14 @@ is a follow-up.
 namespace Hax
 
 /-- Collect all variable names bound by let-bindings at the top level. -/
-private partial def collectBoundNamesT : ImpExpr → List String
+partial def collectBoundNamesT : ImpExpr → List String
   | .letBind n _ body => n :: collectBoundNamesT body
   | .seq a b => collectBoundNamesT a ++ collectBoundNamesT b
   | _ => []
 
 /-- Extract accumulator variable names from a fold body by detecting mutation
     patterns: `let n := <update>; n` where `n` is rebound to its updated value. -/
-private partial def extractAccumNamesFromBody : ImpExpr → List String
+partial def extractAccumNamesFromBody : ImpExpr → List String
   | .seq (.seq a b) c => extractAccumNamesFromBody (.seq a (.seq b c))
   | .seq (.letBind n _ (.var v)) rest =>
     if n == v && !n.startsWith "_assign" then

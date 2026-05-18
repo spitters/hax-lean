@@ -26,4 +26,5 @@ import Hax.TPhase.FunctionalizeLoops
 import Hax.TPhase.CfIntoMonads
 import Hax.TPhase.ExplicitMonadic
 import Hax.TPhase.RewriteAppName
+import Hax.TPhase.InitFoldAccums
 import Hax.TPipeline
