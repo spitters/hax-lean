@@ -918,7 +918,16 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if enumMeta.isEmpty then ""
     else
       let lines := enumMeta.map fun ei =>
-        let variants := ei.variants.map (fun v => s!"  | {v}") |> "\n".intercalate
+        let variants := ei.variants.map (fun v =>
+          if v.payload.isEmpty then s!"  | {v.name}"
+          else
+            -- Render `| Name : T1 → T2 → ... → MyEnum` for payload variants.
+            let payloadStrs := v.payload.map fun ty =>
+              let s := ty.toLeanTypeStrSurface baseStructLookup
+              if (s.splitOn " × ").length > 1 || (s.splitOn " → ").length > 1
+                then s!"({s})" else s
+            let arrowChain := " → ".intercalate (payloadStrs ++ [ei.name])
+            s!"  | {v.name} : {arrowChain}") |> "\n".intercalate
         s!"inductive {ei.name} : Type where\n{variants}\n  deriving Inhabited, BEq"
       "/-- Rust enum definitions extracted from hax JSON. -/\n"
         ++ "\n\n".intercalate lines ++ "\n\n"

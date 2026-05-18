@@ -2199,34 +2199,48 @@ private def isRuntimeName (f : String) : Bool :=
   | "is_empty" | "from" => true
   | _ => false
 
+/-- Names that are ALWAYS builtin runtime operations / collection methods /
+    primitive ops and NEVER cross-crate dependencies. Grouped by category
+    for clarity; the union is consulted by `isAlwaysBuiltin`.
+
+    Adding a new builtin: append its bare hax name to the appropriate
+    list. Width-annotated forms (`name#32`) are recognized by the `#`
+    sigil and don't need explicit listing.
+
+    Mirrors upstream cryspen/hax's `operators` table in
+    `engine/backends/lean/lean_refines/lean_refines_backend.ml`. -/
+def builtinTable : List (String × List String) :=
+  [ ("array",            ["index", "array_update", "repeat", "array_lit", "push", "len",
+                          "from_elem", "index_mut", "is_empty", "to_vec"])
+  , ("collection",       ["copy_from_slice", "extend_from_slice", "truncate",
+                          "with_capacity", "into_vec", "into_iter", "iter", "map",
+                          "collect", "flat_map", "zip", "next", "new", "enumerate"])
+  , ("range",            ["RangeTo", "RangeFrom", "Range"])
+  , ("misc-runtime",     ["count_ones", "assert_failed", "assert_failed'",
+                          "from", "into", "literal", "deref", "clone",
+                          "cast", "castVal", "castVal_w", "from_val",
+                          "panic", "sha256", "rotate_right", "rotate_left"])
+  , ("option-result",    ["Some", "None", "Ok", "Err"])
+  , ("arith-bare",       ["add", "sub", "mul", "div", "rem", "neg",
+                          "wrapping_add", "wrapping_sub", "wrapping_mul"])
+  , ("arith-capital",    ["Add", "Sub", "Mul", "Div", "Rem", "Neg"])
+  , ("arith-width",      ["wrapping_add_w", "wrapping_sub_w", "wrapping_mul_w"])
+  , ("bitops-bare",      ["bitand", "bitor", "bitxor", "bitnot",
+                          "bitxor_w", "bitand_w", "bitor_w", "shl_w", "shr_w"])
+  , ("bitops-capital",   ["BitAnd", "BitOr", "BitXor"])
+  , ("shift",            ["shl", "shr", "Shl", "Shr"])
+  , ("compare",          ["eq", "Eq", "ne", "Ne", "lt", "le", "gt", "ge",
+                          "Lt", "Le", "Gt", "Ge"])
+  , ("logic",            ["not", "Not", "and", "And", "or", "Or", "&&", "||"])
+  , ("ord",              ["min", "max"])
+  ]
+
 /-- Check if a name is ALWAYS a builtin runtime op and NEVER a cross-crate dep.
-    This is the exclusion list from `generatePreamble`, factored out for reuse.
-    Names like `mul` are NOT here because they can be cross-crate deps. -/
+    Implemented as a lookup over `builtinTable` plus a `#` suffix check
+    for width-annotated forms (`wrapping_add#32`, `rotate_right#32`, ...). -/
 def isAlwaysBuiltin (f : String) : Bool :=
-  match f with
-  | "index" | "array_update" | "repeat" | "array_lit" | "push" | "len"
-  | "copy_from_slice" | "extend_from_slice" | "truncate"
-  | "with_capacity" | "into_vec" | "into_iter" | "iter" | "map" | "collect" | "flat_map" | "zip" | "next" | "new"
-  | "from_elem" | "RangeTo" | "RangeFrom" | "Range"
-  | "count_ones" | "assert_failed" | "index_mut" | "enumerate" | "is_empty"
-  | "from" | "into" | "literal" | "deref" | "clone" | "to_vec" | "cast" | "castVal"
-  | "castVal_w" | "bitxor_w" | "bitand_w" | "bitor_w" | "shr_w" | "shl_w"
-  | "wrapping_add_w" | "wrapping_sub_w" | "wrapping_mul_w" | "from_val"
-  | "assert_failed'"
-  | "rotate_right" | "rotate_left"
-  | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
-  | "panic" | "sha256" | "Some" | "None" | "Ok" | "Err"
-  | "shl" | "shr" | "Shl" | "Shr"
-  | "add" | "sub" | "mul" | "div" | "rem" | "neg"
-  | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg"
-  | "bitand" | "bitor" | "bitxor" | "bitnot"
-  | "BitAnd" | "BitOr" | "BitXor"
-  | "eq" | "Eq" | "ne" | "Ne" | "not" | "Not"
-  | "and" | "And" | "or" | "Or" | "&&" | "||"
-  | "lt" | "le" | "gt" | "ge" | "Lt" | "Le" | "Gt" | "Ge"
-  | "min" | "max" => true
-  -- Width-annotated ops (wrapping_add#32, rotate_right#32, etc.)
-  | f => f.any (· == '#')
+  builtinTable.any (fun (_, names) => names.contains f)
+    || f.any (· == '#')
 
 /-- Check if a name looks like a struct field projection (starts with "." or is "Struct.field"). -/
 def isFieldProjection (f : String) : Bool :=

@@ -3124,18 +3124,63 @@ def parseStructDefsFromJson (j : Json) : List StructInfo :=
   raw.foldl (fun acc si =>
     if acc.any (·.name == si.name) then acc else acc ++ [si]) []
 
-/-- A Rust enum definition: name + variant names.
-    Currently captures the unit-variant case (`enum Pattern { IK, XK, NK }`).
-    Variants with payload fields are emitted as no-payload constructors;
-    downstream Lean code can still match on them but won't see the payload. -/
+/-- One variant of a Rust enum. `payload` is the list of positional
+    field types; `[]` means a unit variant. Tuple variants
+    (`Foo(A, B)`) and struct variants (`Foo { x: A, y: B }`) are
+    flattened to their positional shape; field names are dropped
+    (downstream we always pattern-match positionally). -/
+structure EnumVariantInfo where
+  name : String
+  payload : List ImpType := []
+  deriving Inhabited
+
+/-- A Rust enum definition: name + variants. -/
 structure EnumInfo where
   name : String
-  variants : List String
+  variants : List EnumVariantInfo
   deriving Inhabited
+
+/-- Parse the positional payload types of one enum variant from its
+    hax JSON. Returns `[]` for unit variants. Handles two shapes:
+
+      `data: {"Tuple": [[field, ...], ...]}`    — tuple variant
+      `data: {"Struct": {"fields": [...]}}`     — struct variant
+
+    For both, we extract each field's `ty` via `parseHaxType`. The
+    field name is dropped — we emit a positional constructor.
+    Unit variants have no `data` field (or `data` absent / null). -/
+private def parseEnumVariantPayload (variantJ : Json) : List ImpType :=
+  let dataJ := match variantJ.getObjVal? "data" with
+    | .ok v => v
+    | _ => Json.null
+  -- Tuple variant
+  let fromTuple : List ImpType :=
+    match dataJ.getObjVal? "Tuple" with
+    | .ok (Json.arr tupArr) =>
+      match tupArr.toList with
+      | (Json.arr fields) :: _ =>
+        fields.toList.filterMap fun fj =>
+          match fj.getObjVal? "ty" with
+          | .ok tyJ => some (parseHaxType tyJ)
+          | _ => none
+      | _ => []
+    | _ => []
+  if !fromTuple.isEmpty then fromTuple else
+  -- Struct variant
+  match dataJ.getObjVal? "Struct" with
+  | .ok structJ =>
+    match structJ.getObjValAs? (Array Json) "fields" with
+    | .ok fields =>
+      fields.toList.filterMap fun fj =>
+        match fj.getObjVal? "ty" with
+        | .ok tyJ => some (parseHaxType tyJ)
+        | _ => none
+    | _ => []
+  | _ => []
 
 /-- Parse Rust enum definitions from a hax JSON export array.
     Hax encodes `kind.Enum` as `[[name, name_span], generics, variants_array]`
-    where each variant is `{ident: [variant_name, span], hir_id, def_id, ...}`. -/
+    where each variant is `{ident: [variant_name, span], data: ..., ...}`. -/
 partial def parseEnumDefs (items : List Json) : List EnumInfo :=
   let parseOneEnum (enumData : Array Json) : Option EnumInfo :=
     -- enumData = [name_with_span, generics, variants]
@@ -3149,13 +3194,14 @@ partial def parseEnumDefs (items : List Json) : List EnumInfo :=
       let variantsJ := enumData.toList[2]?
       match variantsJ with
       | some (Json.arr variantList) =>
-        let variantNames := variantList.toList.filterMap fun vj =>
+        let variants := variantList.toList.filterMap fun vj =>
           match vj.getObjVal? "ident" with
           | Except.ok (Json.arr identPair) => match identPair.toList with
-            | (Json.str n) :: _ => some n
+            | (Json.str n) :: _ =>
+              some ({ name := n, payload := parseEnumVariantPayload vj } : EnumVariantInfo)
             | _ => none
           | _ => none
-        some { name := name, variants := variantNames }
+        some { name := name, variants := variants }
       | _ => none
   items.foldl (fun acc item =>
     let kind := (item.getObjVal? "kind").toOption
