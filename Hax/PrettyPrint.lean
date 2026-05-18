@@ -8,6 +8,8 @@ import Hax.ImpType
 import Hax.HaxAdapter
 import Hax.ImpType
 import Hax.Canonicalize
+import Hax.Phase.RewriteAppName
+import Hax.Phase.InitFoldAccums
 
 /-!
 # Lean 4 Pretty-Printer for ImpExpr (DEPRECATED — untyped path)
@@ -3942,42 +3944,8 @@ partial def qualifyProjections (structMeta : StructMeta)
   | .cfBreakContinue e => .cfBreakContinue (qualifyProjections structMeta ambiguous ctx e)
   | e => e
 
-/-- Rewrite all occurrences of `.app oldName args` to `.app newName args` in an ImpExpr. -/
-partial def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
-  | .app f args =>
-    let f' := if f == oldName then newName else f
-    .app f' (args.map (rewriteAppName oldName newName))
-  | .letBind n v body =>
-    .letBind n (rewriteAppName oldName newName v) (rewriteAppName oldName newName body)
-  | .seq a b => .seq (rewriteAppName oldName newName a) (rewriteAppName oldName newName b)
-  | .ifThenElse c t e =>
-    .ifThenElse (rewriteAppName oldName newName c)
-      (rewriteAppName oldName newName t) (rewriteAppName oldName newName e)
-  | .whileFold c body =>
-    .whileFold (rewriteAppName oldName newName c) (rewriteAppName oldName newName body)
-  | .forFold v lo hi body =>
-    .forFold v (rewriteAppName oldName newName lo)
-      (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
-  | .tuple es => .tuple (es.map (rewriteAppName oldName newName))
-  | .proj e i => .proj (rewriteAppName oldName newName e) i
-  | .match_ scrut arms =>
-    .match_ (rewriteAppName oldName newName scrut)
-      (arms.map fun (p, b) => (p, rewriteAppName oldName newName b))
-  | .cfBreak e => .cfBreak (rewriteAppName oldName newName e)
-  | .cfContinue e => .cfContinue (rewriteAppName oldName newName e)
-  | .cfBreakContinue e => .cfBreakContinue (rewriteAppName oldName newName e)
-  | .forFoldRev v lo hi body =>
-    .forFoldRev v (rewriteAppName oldName newName lo)
-      (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
-  | .forFoldReturn v lo hi body =>
-    .forFoldReturn v (rewriteAppName oldName newName lo)
-      (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
-  | .forFoldRevReturn v lo hi body =>
-    .forFoldRevReturn v (rewriteAppName oldName newName lo)
-      (rewriteAppName oldName newName hi) (rewriteAppName oldName newName body)
-  | .whileFoldReturn c body =>
-    .whileFoldReturn (rewriteAppName oldName newName c) (rewriteAppName oldName newName body)
-  | e => e
+-- `rewriteAppName` moved to `Hax/Phase/RewriteAppName.lean`.
+-- Imported above; re-exposed in the `Hax` namespace.
 
 /-- Rewrite `.app "new" args` to `.app structName args` when `args.length` matches
     a struct's field count. This handles Rust patterns like `AuthShare::new(value, mac)`
@@ -4415,109 +4383,9 @@ private def detectStructDeps (structMeta : StructMeta)
       | _ => acc
     | none => acc) []
 
-/-! ### Pass T-A: Initialize missing fold accumulators
-
-When a fold accumulator tuple `(a, b)` references a variable `b` not bound in
-the enclosing scope, inserts `let b := (0 : Int)` before the fold.
-Merged from PrettyPrintT.lean. -/
-
-/-- Collect all variable names bound by let-bindings at the top level. -/
-private partial def collectBoundNamesT : ImpExpr → List String
-  | .letBind n _ body => n :: collectBoundNamesT body
-  | .seq a b => collectBoundNamesT a ++ collectBoundNamesT b
-  | _ => []
-
-/-- Extract accumulator variable names from a fold body by detecting mutation patterns. -/
-private partial def extractAccumNamesFromBody : ImpExpr → List String
-  | .seq (.seq a b) c => extractAccumNamesFromBody (.seq a (.seq b c))
-  | .seq (.letBind n _ (.var v)) rest =>
-    if n == v && !n.startsWith "_assign" then
-      let restAccs := extractAccumNamesFromBody rest
-      if restAccs.contains n then restAccs else n :: restAccs
-    else extractAccumNamesFromBody rest
-  | .seq (.ifThenElse _ thn _) rest =>
-    let thnAccs := extractCondMutsT thn |>.filter (!·.startsWith "_assign")
-    let restAccs := extractAccumNamesFromBody rest
-    (thnAccs ++ restAccs).eraseDups
-  | .seq _ rest => extractAccumNamesFromBody rest
-  | .letBind n _ (.var v) =>
-    if n == v && !n.startsWith "_assign" then [n] else []
-  | .letBind _ _ body => extractAccumNamesFromBody body
-  | .ifThenElse _ thn _ =>
-    (extractCondMutsT thn).filter (!·.startsWith "_assign") |>.eraseDups
-  | _ => []
-where
-  extractCondMutsT : ImpExpr → List String
-    | .seq (.seq a b) c => extractCondMutsT (.seq a (.seq b c))
-    | .seq (.letBind n _ (.var v)) rest =>
-      if n == v then n :: extractCondMutsT rest else extractCondMutsT rest
-    | .seq .unitVal rest => extractCondMutsT rest
-    | .seq _ rest => extractCondMutsT rest
-    | .letBind n _ (.var v) => if n == v then [n] else []
-    | .letBind _ _ body => extractCondMutsT body
-    | .unitVal => []
-    | _ => []
-
-/-- Walk an ImpExpr and insert `let v := (0 : Int)` before any fold whose
-    accumulator references a variable not bound in the enclosing scope. -/
-partial def initMissingFoldAccums (bound : List String := []) : ImpExpr → ImpExpr
-  | .letBind n v body =>
-    let v' := initMissingFoldAccums bound v
-    let body' := initMissingFoldAccums (n :: bound) body
-    .letBind n v' body'
-  | .seq a b =>
-    let a' := initMissingFoldAccums bound a
-    let boundsFromA := collectBoundNamesT a
-    .seq a' (initMissingFoldAccums (bound ++ boundsFromA) b)
-  | .forFold v lo hi body =>
-    let lo' := initMissingFoldAccums bound lo
-    let hi' := initMissingFoldAccums bound hi
-    let body' := initMissingFoldAccums (v :: bound) body
-    let fold := ImpExpr.forFold v lo' hi' body'
-    let accumNames := extractAccumNamesFromBody body'
-    let freeAccums := accumNames.filter fun n => !bound.contains n
-    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
-  | .forFoldRev v lo hi body =>
-    let lo' := initMissingFoldAccums bound lo
-    let hi' := initMissingFoldAccums bound hi
-    let body' := initMissingFoldAccums (v :: bound) body
-    let fold := ImpExpr.forFoldRev v lo' hi' body'
-    let accumNames := extractAccumNamesFromBody body'
-    let freeAccums := accumNames.filter fun n => !bound.contains n
-    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
-  | .forFoldReturn v lo hi body =>
-    let lo' := initMissingFoldAccums bound lo
-    let hi' := initMissingFoldAccums bound hi
-    let body' := initMissingFoldAccums (v :: bound) body
-    let fold := ImpExpr.forFoldReturn v lo' hi' body'
-    let accumNames := extractAccumNamesFromBody body'
-    let freeAccums := accumNames.filter fun n => !bound.contains n
-    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
-  | .forFoldRevReturn v lo hi body =>
-    let lo' := initMissingFoldAccums bound lo
-    let hi' := initMissingFoldAccums bound hi
-    let body' := initMissingFoldAccums (v :: bound) body
-    let fold := ImpExpr.forFoldRevReturn v lo' hi' body'
-    let accumNames := extractAccumNamesFromBody body'
-    let freeAccums := accumNames.filter fun n => !bound.contains n
-    freeAccums.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold
-  | .ifThenElse c t e =>
-    .ifThenElse (initMissingFoldAccums bound c)
-      (initMissingFoldAccums bound t) (initMissingFoldAccums bound e)
-  | .match_ scrut arms =>
-    .match_ (initMissingFoldAccums bound scrut)
-      (arms.map fun (p, b) => (p, initMissingFoldAccums bound b))
-  | .whileFold c body =>
-    .whileFold (initMissingFoldAccums bound c) (initMissingFoldAccums bound body)
-  | .whileFoldReturn c body =>
-    .whileFoldReturn (initMissingFoldAccums bound c) (initMissingFoldAccums bound body)
-  | .tuple es => .tuple (es.map (initMissingFoldAccums bound))
-  | .proj e i => .proj (initMissingFoldAccums bound e) i
-  | .app f args => .app f (args.map (initMissingFoldAccums bound))
-  | .cfBreak e => .cfBreak (initMissingFoldAccums bound e)
-  | .cfContinue e => .cfContinue (initMissingFoldAccums bound e)
-  | .cfBreakContinue e => .cfBreakContinue (initMissingFoldAccums bound e)
-  | e => e
+-- `initMissingFoldAccums` (plus its helpers `collectBoundNamesT` and
+-- `extractAccumNamesFromBody`) moved to `Hax/Phase/InitFoldAccums.lean`.
+-- Imported below.
 
 /-! ### Pass T-B: Reconcile function types with call-site types -/
 

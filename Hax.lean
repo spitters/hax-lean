@@ -8,6 +8,8 @@ import Hax.Phase.LocalMutation
 import Hax.Phase.FunctionalizeLoops
 import Hax.Phase.CfIntoMonads
 import Hax.Phase.ExplicitMonadic
+import Hax.Phase.RewriteAppName
+import Hax.Phase.InitFoldAccums
 import Hax.ToRawCode
 import Hax.Pipeline
 import Hax.PipelineCF
