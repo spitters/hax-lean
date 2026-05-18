@@ -15,7 +15,7 @@ Typed analog of `Hax.initMissingFoldAccums`. Walks a `TExpr` and inserts
 
 ## Verification
 
-The main theorem `tInitMissingFoldAccums_erase` states:
+The main theorem `tInitMissingFoldAccums_erase` (proved below) states:
 
 ```
 (tInitMissingFoldAccums bound e).erase = initMissingFoldAccums bound e.erase
@@ -27,6 +27,12 @@ these are pure ImpExpr predicates that don't observe types, so we
 can reuse them directly. The structural recursion preserves outer
 types at every node; the inserted `letBind`s use `ImpType.int` to
 match the untyped `.lit (.int 0)` value's type.
+
+Both passes recurse defensively into pre-pipeline constructors
+(`.borrow`, `.deref`, `.assign`, loop variants, `.earlyReturn`,
+`.questionMark`) so the erase commutation goes through structurally
+even though those constructors are eliminated by earlier phases in
+practice.
 -/
 
 namespace Hax
@@ -149,5 +155,97 @@ where
   induction arms with
   | nil => rfl
   | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [tInitMissingFoldAccums.mapArms, ih]
+
+/-- Erasing a `letBind`-prepending `foldr` commutes with applying the
+    same `foldr` over erased nodes. -/
+private theorem foldr_letBindLit_erase (names : List String) (fold : TExpr) :
+    (names.foldr
+        (fun fv expr =>
+          TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty)
+        fold).erase
+      = names.foldr (fun fv expr => .letBind fv (.lit (.int 0)) expr) fold.erase := by
+  induction names with
+  | nil => rfl
+  | cons n ns ih => simp [List.foldr, TExpr.erase, ih]
+
+/-- Erase commutation for `tInitMissingFoldAccums`. The typed pass operates
+    on `TExpr` (with type annotations on every `.letBind` insertion); the
+    untyped pass operates on `ImpExpr` directly. After erasure they produce
+    identical ImpExpr trees because both compute `accumNames` from the same
+    erased body and prepend the same `letBind v (.lit (.int 0))` chain. -/
+theorem tInitMissingFoldAccums_erase (bound : List String) (e : TExpr) :
+    (tInitMissingFoldAccums bound e).erase
+      = initMissingFoldAccums bound e.erase := by
+  induction e using TExpr.ind generalizing bound with
+  | lit | var | unitVal | continue_ | break_none =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums]
+  | letBind _ _ _ _ ih1 ih2 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2]
+  | app _ _ args ih =>
+    simp only [tInitMissingFoldAccums, tInitMissingFoldAccums.mapExpr_eq,
+      TExpr.erase, TExpr.eraseList_eq, initMissingFoldAccums,
+      initMissingFoldAccums.mapExpr_eq, List.map_map, Function.comp_def]
+    congr 1; exact List.map_congr_left (fun a ha => ih a ha bound)
+  | tuple _ elems ih =>
+    simp only [tInitMissingFoldAccums, tInitMissingFoldAccums.mapExpr_eq,
+      TExpr.erase, TExpr.eraseList_eq, initMissingFoldAccums,
+      initMissingFoldAccums.mapExpr_eq, List.map_map, Function.comp_def]
+    congr 1; exact List.map_congr_left (fun a ha => ih a ha bound)
+  | proj _ _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | ifThenElse _ _ _ _ ih1 ih2 ih3 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2, ih3]
+  | match_ _ _ arms ih1 ih2 =>
+    simp only [tInitMissingFoldAccums, tInitMissingFoldAccums.mapArms_eq,
+      TExpr.erase, TExpr.eraseArms_eq, initMissingFoldAccums,
+      initMissingFoldAccums.mapArms_eq, ih1, List.map_map, Function.comp_def]
+    congr 1; exact List.map_congr_left (fun ⟨p, e⟩ hpa => by
+      simp only [ih2 (p, e) hpa])
+  | seq _ a b iha ihb =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, iha, ihb]
+  | borrow _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | deref _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | assign _ _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2, ih3]
+  | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2, ih3]
+  | whileLoop _ _ _ ih1 ih2 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2]
+  | break_some _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | earlyReturn _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | questionMark _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | forFold _ _ _ _ _ ihlo ihhi ihbody =>
+    simp only [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums,
+      foldr_letBindLit_erase, ihbody, ihlo, ihhi]
+  | forFoldRev _ _ _ _ _ ihlo ihhi ihbody =>
+    simp only [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums,
+      foldr_letBindLit_erase, ihbody, ihlo, ihhi]
+  | whileFold _ _ _ ih1 ih2 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2]
+  | forFoldReturn _ _ _ _ _ ihlo ihhi ihbody =>
+    simp only [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums,
+      foldr_letBindLit_erase, ihbody, ihlo, ihhi]
+  | forFoldRevReturn _ _ _ _ _ ihlo ihhi ihbody =>
+    simp only [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums,
+      foldr_letBindLit_erase, ihbody, ihlo, ihhi]
+  | whileFoldReturn _ _ _ ih1 ih2 =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2]
+  | cfBreak _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | cfContinue _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | cfBreakContinue _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | ann _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
+  | namedProj _ _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
 
 end Hax
