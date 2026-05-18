@@ -1079,7 +1079,12 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- { Some(p) => p, None => return None }` after the explicit-match
   -- desugar wraps the Some arm in `cfContinue p`.
   | .letBind n (.cfContinue v) body =>
-    if n.startsWith "_" then atLine body lvl
+    -- Drop the binding only when the body genuinely doesn't reference `n`
+    -- (e.g. `_iter_unused`). For `_tup` produced by tuple-destructure
+    -- lowering of `let pat = match { Some v => v | None => return None }`,
+    -- the body uses `_tup.0`, `_tup.1`, ... so we must emit the binding
+    -- with `v` as its value.
+    if n.startsWith "_" && !exprContainsVar n body then atLine body lvl
     else
       let ind := indent lvl
       s!"{ind}let {sanitizeName n} := {toLean v 0}\n{atLine body lvl}"

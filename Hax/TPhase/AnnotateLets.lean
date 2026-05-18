@@ -48,6 +48,15 @@ private def isTrivialAnnotType (ty : ImpType) : Bool :=
   | .fn _ _ => true
   -- Type variables collapse to `Int` in the surface stringifier.
   | .typeVar _ => true
+  -- Tuples skip annotation: Lean infers the tuple type from the destructure
+  -- pattern + the function's return type. Annotating risks emitting an
+  -- arity-wrong type when the JSON's call-site `ty` differs from the
+  -- function's declared return type (observed on AEGIS / AESGCMSIV /
+  -- OPAQUE / SPDZ where the JSON encodes the call result as a 2-tuple
+  -- but the function returns a 3-tuple). Skipping the annotation is
+  -- always safe; the destructure pattern fully determines the binding's
+  -- shape downstream.
+  | .tuple _ => true
   | _ => false
 
 /-- Should this let-binding's RHS receive a `.ann` wrapper?

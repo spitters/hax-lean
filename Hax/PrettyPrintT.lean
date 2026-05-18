@@ -329,7 +329,12 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
       mergeType acc retTy) freeVarTy
     (d, maxArity, bestArgs, bestRet)
 
-  let depsStr := if depInfo.isEmpty then ""
+  let depsStr := if depInfo.isEmpty then
+      -- Emit an empty deps class anyway so that downstream SurfaceDeps
+      -- files referencing `<X>Deps` continue to compile (they may carry
+      -- structure beyond the instance — opaque types, theorems, ...).
+      let depsClassName := s!"{moduleName}Deps"
+      s!"/-- External dependencies for {moduleName} extraction (auto-generated). -/\nclass {depsClassName} where\n"
     else
       let depsClassName := s!"{moduleName}Deps"
       let letters := #["a", "b", "c", "d", "e", "f", "g", "h"]
