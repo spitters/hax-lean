@@ -181,6 +181,46 @@ where
   | nil => rfl
   | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [tFixProjectionPaths.mapArms, ih]
 
+/-- `buildNestedProj` always wraps the outermost result in the supplied
+    `outTy`. (Intermediate `.proj _ 1` nodes also use `outTy` for the
+    same reason.) -/
+theorem TFixProjectionPaths.buildNestedProj_ty
+    (outTy : ImpType) (e : TExpr) (idx arity : Nat) :
+    (TFixProjectionPaths.buildNestedProj outTy e idx arity).ty = outTy := by
+  induction arity using Nat.strongRecOn generalizing e idx with
+  | ind arity ih =>
+    unfold TFixProjectionPaths.buildNestedProj
+    split
+    · rfl
+    · rename_i hsplit
+      have harity : arity > 2 := by omega
+      exact ih (arity - 1) (by omega) _ _
+
+/-- Outer-type annotation preservation. The rewriter expands a single
+    `.proj e i` with `i > 1` into a chain of `.proj _ 0/1` nodes,
+    but the outermost node's `ty` (the element type at position `i`)
+    is preserved verbatim. -/
+theorem tFixProjectionPaths_ty (e : TExpr) :
+    (tFixProjectionPaths e).ty = e.ty := by
+  cases e with
+  | mk kind ty =>
+    cases kind with
+    | proj e' i =>
+      show (tFixProjectionPaths (.mk (.proj e' i) ty)).ty = ty
+      unfold tFixProjectionPaths
+      generalize tFixProjectionPaths e' = e''
+      cases e'' with
+      | mk kind'' ty'' =>
+        cases kind'' with
+        | var _ => rfl
+        | _ =>
+          simp only
+          split
+          · exact TFixProjectionPaths.buildNestedProj_ty _ _ _ _
+          · rfl
+    | break_ eo => cases eo <;> rfl
+    | _ => rfl
+
 -- NOTE: `tFixProjectionPaths_erase` is intentionally not stated here.
 -- The typed rewriter reads `e.ty` (a structural tuple arity); the
 -- untyped rewriter consults `arityMap : List (String × Nat)` populated

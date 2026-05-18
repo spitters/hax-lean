@@ -209,6 +209,17 @@ where
   | nil => rfl
   | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [tQualifyProjections.mapArms, ih]
 
+/-- The typed phase preserves the outer type annotation at every node:
+    no node is rewritten to a different type. This is the invariant that
+    makes the typed phases safe to chain in arbitrary order — the
+    succeeding phase still sees the same `ty` annotations. -/
+theorem tQualifyProjections_ty
+    (structMeta : StructMetaT) (ambiguous : List String) (ctx e : TExpr) :
+    (tQualifyProjections structMeta ambiguous ctx e).ty = e.ty := by
+  cases e with
+  | mk kind ty =>
+    cases kind <;> first | rfl | (rename_i e; cases e <;> rfl)
+
 -- NOTE: `tQualifyProjections_erase` is intentionally not stated here.
 -- The typed rewriter reads `arg.ty`, the untyped rewriter heuristically
 -- infers a struct from `inferExprStructType` over the erased context.

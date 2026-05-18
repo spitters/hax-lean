@@ -194,6 +194,15 @@ where
   | nil => rfl
   | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [tRewriteNewToStructCtor.mapArms, ih]
 
+/-- Outer-type annotation preservation: every node's `ty` is unchanged
+    by the rewriter. -/
+theorem tRewriteNewToStructCtor_ty
+    (structMeta : StructMetaT) (e : TExpr) :
+    (tRewriteNewToStructCtor structMeta e).ty = e.ty := by
+  cases e with
+  | mk kind ty =>
+    cases kind <;> first | rfl | (rename_i e; cases e <;> rfl)
+
 -- NOTE: `tRewriteNewToStructCtor_erase` is intentionally not stated here.
 -- The typed rewriter reads the outer `ty`, the untyped rewriter applies
 -- arity- and arg-name-heuristic disambiguation over `structMeta` against

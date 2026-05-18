@@ -255,6 +255,52 @@ where
   | cons pa arms ih => obtain ⟨p, e⟩ := pa
                        simp [tRewriteStructFromElem.mapArms, ih]
 
+/-- Outer-type annotation preservation: every node's `ty` is unchanged
+    by the rewriter. The only structural change is replacing the
+    `initVal` argument of a `from_elem` call with an `n`-tuple of
+    copies — both forms carry the same outer type annotation. -/
+theorem tRewriteStructFromElem_ty
+    (structMeta : StructMetaT) (fnRetTypes : List (String × ImpType))
+    (allDefs : List (String × TExpr)) (e : TExpr) :
+    (tRewriteStructFromElem structMeta fnRetTypes allDefs e).ty = e.ty := by
+  cases e with
+  | mk kind ty =>
+    cases kind with
+    | letBind n val body =>
+      -- Both branches of the inner `match val'` produce
+      -- `.mk (.letBind n _ _) ty`, so the outer `.ty` is `ty`.
+      show (tRewriteStructFromElem structMeta fnRetTypes allDefs
+              (.mk (.letBind n val body) ty)).ty = ty
+      have key : ∀ (n : String) (v body' : TExpr) (ty : ImpType),
+          ((match v with
+            | .mk (.app "from_elem" [initVal, sz]) callTy =>
+              .mk (.letBind n
+                    (TRewriteStructFromElem.expandFromElem structMeta initVal sz callTy)
+                    body') ty
+            | _ => .mk (.letBind n v body') ty) : TExpr).ty = ty := by
+        intro n v body' ty
+        cases v with
+        | mk kind' ty' =>
+          cases kind' <;> first
+            | rfl
+            | (rename_i eo; cases eo <;> rfl)
+            | (rename_i f args; cases args with
+               | nil => simp; rfl
+               | cons a rest =>
+                 cases rest with
+                 | nil => simp; rfl
+                 | cons b rest2 =>
+                   cases rest2 with
+                   | nil =>
+                     by_cases hf : f = "from_elem"
+                     · subst hf; rfl
+                     · simp [hf]; rfl
+                   | cons c rest3 => simp; rfl)
+      unfold tRewriteStructFromElem
+      exact key _ _ _ _
+    | break_ eo => cases eo <;> rfl
+    | _ => rfl
+
 -- NOTE: `tRewriteStructFromElem_erase` is intentionally not stated here.
 -- The typed rewriter reads `callTy` on the `from_elem` call; the
 -- untyped rewriter runs five body-walking heuristics over the erased
