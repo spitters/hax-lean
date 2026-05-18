@@ -50,6 +50,14 @@ def unwrapRefs : ImpType → ImpType
   | .ref inner _ => unwrapRefs inner
   | t => t
 
+/-- Strip leading `.ann` type-ascription wrappers. The hax JSON adapter
+    wraps macro expansions (e.g. `vec![...]`) in `.ann` carrying the
+    container type — the inner expression is the actual call, the
+    outer `.ann` carries the type. -/
+def unwrapAnn : TExpr → TExpr
+  | .mk (.ann e) _ => unwrapAnn e
+  | t => t
+
 /-- Look up a struct by name and return its field count when known. -/
 def structFieldCount (structMeta : StructMetaT) (sname : String) : Option Nat :=
   (structMeta.find? (·.1 == sname)).map (·.2.length)
@@ -100,11 +108,6 @@ def expandFromElem (structMeta : StructMetaT)
     (initVal sz : TExpr) (callTy : ImpType) : TExpr :=
   match desiredArity structMeta callTy with
   | some n =>
-    -- Replace `initVal` with a tuple of `n` copies. Each copy keeps
-    -- `initVal`'s type. The outer tuple's type is the tuple of these
-    -- copies' types (so the new `from_elem` call still has type
-    -- `callTy`, modulo the element-type swap that downstream phases
-    -- perform when emitting struct constructors).
     let copies := List.replicate n initVal
     let tupleTy : ImpType := .tuple (copies.map TExpr.ty)
     let tupleInit : TExpr := .mk (.tuple copies) tupleTy
@@ -133,9 +136,16 @@ def tRewriteStructFromElem
   | .mk (.letBind n val body) ty =>
     let val' := tRewriteStructFromElem structMeta _fnRetTypes _allDefs val
     let body' := tRewriteStructFromElem structMeta _fnRetTypes _allDefs body
-    -- Specialised pattern: `let arr := from_elem initVal sz`.
-    match val' with
-    | .mk (.app "from_elem" [initVal, sz]) callTy =>
+    -- Specialised pattern: `let arr := from_elem initVal sz`. Peeks
+    -- through `.ann` type-ascription wrappers — the hax JSON adapter
+    -- wraps macro expansions like `vec![T::ZERO; n]` in a `.ann` node
+    -- carrying the container type, and we want to expand on the inner
+    -- `from_elem` call. Recovering `callTy` from the `.ann`'s outer ty
+    -- (rather than the inner call's) keeps the container type
+    -- information that drives `desiredArity`.
+    match unwrapAnn val' with
+    | .mk (.app "from_elem" [initVal, sz]) _ =>
+      let callTy := val'.ty
       let val'' := expandFromElem structMeta initVal sz callTy
       .mk (.letBind n val'' body') ty
     | _ => .mk (.letBind n val' body') ty
@@ -267,19 +277,20 @@ theorem tRewriteStructFromElem_ty
   | mk kind ty =>
     cases kind with
     | letBind n val body =>
-      -- Both branches of the inner `match val'` produce
-      -- `.mk (.letBind n _ _) ty`, so the outer `.ty` is `ty`.
+      -- Both branches of the inner `match unwrapAnn val' with ...`
+      -- produce `.mk (.letBind n _ _) ty`, so the outer `.ty` is `ty`.
       show (tRewriteStructFromElem structMeta fnRetTypes allDefs
               (.mk (.letBind n val body) ty)).ty = ty
       have key : ∀ (n : String) (v body' : TExpr) (ty : ImpType),
-          ((match v with
-            | .mk (.app "from_elem" [initVal, sz]) callTy =>
+          ((match TRewriteStructFromElem.unwrapAnn v with
+            | .mk (.app "from_elem" [initVal, sz]) _ =>
               .mk (.letBind n
-                    (TRewriteStructFromElem.expandFromElem structMeta initVal sz callTy)
+                    (TRewriteStructFromElem.expandFromElem structMeta initVal sz v.ty)
                     body') ty
             | _ => .mk (.letBind n v body') ty) : TExpr).ty = ty := by
         intro n v body' ty
-        cases v with
+        generalize TRewriteStructFromElem.unwrapAnn v = vu
+        cases vu with
         | mk kind' ty' =>
           cases kind' <;> first
             | rfl

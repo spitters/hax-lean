@@ -804,34 +804,24 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
   let structLookup := mkStructLookup structMeta structIsPassthrough
-  -- ====================================================================
-  -- QUARANTINED post-erase fallback (effective 2026-05-18).
+  -- The four type-dependent post-erase rewriters
+  -- (`qualifyProjections`, `rewriteNewToStructCtor`,
+  -- `rewriteStructFromElem`, `fixProjectionPaths`) were removed here on
+  -- 2026-05-18 after the typed pipeline gained full coverage. The typed
+  -- analogs run on TExpr before erase using direct `arg.ty` annotations
+  -- (see `Hax.TPhase.{QualifyProjections,RewriteNewToStructCtor,
+  -- RewriteStructFromElem,FixProjectionPaths}`).
   --
-  -- These four type-dependent rewriters duplicate the work of the typed
-  -- phases (tQualifyProjections, tRewriteNewToStructCtor,
-  -- tRewriteStructFromElem, tFixProjectionPaths) which ran on the TExpr
-  -- layer before erase. They were kept here as a fallback because:
+  -- The fix that unblocked deletion: `tRewriteStructFromElem` now
+  -- unwraps `.ann` type-ascription wrappers around `from_elem` calls,
+  -- which the hax JSON adapter inserts for macro expansions like
+  -- `vec![T::ZERO; n]`. Without the unwrap, the typed phase silently
+  -- missed those calls and we depended on the untyped fallback (SPDZ).
   --
-  --   * The typed phases rely on accurate `arg.ty` annotations from the
-  --     hax JSON adapter; when those are `.unknown` or missing, the
-  --     typed phase silently no-ops while the untyped post-erase pass
-  --     (which uses body-walk heuristics) still fires.
-  --   * Removing them outright regressed SPDZ's `init_authentic_share`
-  --     (typed phase missed `vec![AuthShare::ZERO; n]` → `from_elem
-  --     (ZERO, ZERO) n` expansion).
-  --
-  -- To DELETE rather than QUARANTINE, the typed phases need either:
-  --   (a) full coverage equivalent to the untyped heuristics, or
-  --   (b) a JSON-adapter fix ensuring every relevant call carries
-  --       its container type.
-  --
-  -- When that holds, drop everything between the QUARANTINED markers.
-  -- ====================================================================
-  let ambiguousFields := findAmbiguousFields structMeta
-  let defs := if ambiguousFields.isEmpty then defs
-    else defs.map fun (n, e) => (n, qualifyProjections structMeta ambiguousFields e e)
-  let defs := if structMeta.isEmpty then defs
-    else defs.map fun (n, e) => (n, rewriteNewToStructCtor structMeta e)
+  -- The zero-arg `new()` rewriter (`rewriteNewFromStructMap`) is kept —
+  -- it consumes per-function struct mapping from `rawTdefs` that the
+  -- typed phase doesn't reconstruct (the typed `tRewriteNewToStructCtor`
+  -- skips empty-args calls).
   let defs := if newStructMap.isEmpty then defs
     else defs.map fun (fname, e) =>
       match newStructMap.find? (·.1 == fname) with
@@ -840,33 +830,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
         | none => (fname, e)
       | _ => (fname, e)
-  let defs := if structMeta.isEmpty then defs
-    else defs.map fun (n, e) =>
-      let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
-      let fnRetTypes := match fnRetType with
-        | some ty => if ty.isUnknown then [] else [(n, ty)]
-        | none => []
-      (n, rewriteStructFromElem structMeta fnRetTypes defs e)
-  let callRetTypes := fnTypes.filterMap fun (n, ti) =>
-    if !ti.retType.isUnknown then some (n, ti.retType) else none
-  let structArities := structMeta.map fun (sname, fields) => (sname, fields.length)
-  let depRetArities := callRetTypes.filterMap fun (dname, retTy) =>
-    match retTy with
-    | .tuple elems => if elems.length > 2 then some (dname, elems.length) else none
-    | _ => none
-  let allExprs := defs.map (·.2)
-  let usageArities := defs.foldl (fun acc (_, e) =>
-    let calls := collectAppCalls e
-    let callNames := calls.map (·.1) |>.eraseDups
-    acc ++ callNames.filterMap fun fname =>
-      let arity := allExprs.foldl (fun a expr => max a (detectReturnArity fname expr)) 0
-      if arity > 2 then some (fname, arity) else none) ([] : List (String × Nat))
-  let arityMap := (structArities ++ depRetArities ++ usageArities).eraseDups
-  let defs := if arityMap.isEmpty then defs
-    else defs.map fun (n, e) => (n, fixProjectionPaths arityMap e)
-  -- ====================================================================
-  -- END QUARANTINED post-erase fallback.
-  -- ====================================================================
   -- `initMissingFoldAccums` kept as an idempotent backup; the typed
   -- `tInitMissingFoldAccums` already ran on the TExpr layer before erase
   -- (and `tInitMissingFoldAccums_erase` proves the erased result matches).
