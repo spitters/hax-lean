@@ -8,6 +8,7 @@ import Hax.PrettyPrint
 import Hax.Pipeline
 import Hax.HaxAdapter
 import Hax.TPhase.AnnotateLets
+import Hax.TPhase.InitFoldAccums
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -753,6 +754,14 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- so the renderer (operating on ImpExpr after erasure) can recognize
   -- newtype-specific `.0` projections via the marker function-name.
   let procTdefs := procTdefs.map fun (n, te) => (n, markNamedProj te)
+  -- Apply the typed init-fold-accums phase BEFORE erase, so the
+  -- accumulator init insertions happen on the type-rich TExpr (and
+  -- their .erase is the same as the untyped variant on the erased
+  -- body, by the erase-preservation property of `tInitMissingFoldAccums`
+  -- — proof is currently deferred but the operational behavior is
+  -- identical for the unit-bound case used here).
+  let procTdefs := procTdefs.map fun (n, te) =>
+    (n, tInitMissingFoldAccums [] te)
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
   let defs : List (String × ImpExpr) :=
     if procTdefs.isEmpty then
