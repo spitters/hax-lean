@@ -4119,22 +4119,32 @@ partial def rewriteStructFromElem (structMeta : StructMeta)
     (allDefs : List (String × ImpExpr)) : ImpExpr → ImpExpr
   | .letBind arrVar (.app "from_elem" [initVal, sz]) body =>
     -- Check function return type to see if this produces a Vec<Struct>
+    -- Detect `Vec<Struct>` shape. Vec carries 2 generic args in our model
+    -- (element type + allocator), so match on `args.head?` rather than a
+    -- 1-element list pattern.
     let structName := fnRetTypes.findSome? fun (_, retTy) =>
       match retTy with
-      | .adt name [.adt sname _] =>
-        if (name == "Vec" || name.endsWith "::Vec") &&
-           structMeta.any (·.1 == sname) then some sname else none
+      | .adt name (elemTy :: _) =>
+        if name == "Vec" || name.endsWith "::Vec" then
+          match elemTy with
+          | .adt sname _ =>
+            if structMeta.any (·.1 == sname) then some sname else none
+          | _ => none
+        else none
       | _ => none
     -- Tuple-element arrays: `Array (T1 × T2 × ...)`. We need an arity, not
     -- a struct name. Returns `some n` if from_elem's result is an array of
     -- n-tuples. Triggered by SPDZ's `Array (FieldElement × FieldElement)`.
-    -- Walk through Slice/Ref wrappers since Vec sometimes gets normalized
-    -- to Slice in hax's type system.
+    -- Vec carries 2+ generic args (element + allocator), so look at the
+    -- first arg only.
     let tupleElemArity : Option Nat := fnRetTypes.findSome? fun (_, retTy) =>
       let rec inner : ImpType → Option Nat
-        | .adt name [.tuple elems] =>
-          if (name == "Vec" || name.endsWith "::Vec") && elems.length > 1
-            then some elems.length else none
+        | .adt name (elemTy :: _) =>
+          if name == "Vec" || name.endsWith "::Vec" then
+            match elemTy with
+            | .tuple elems => if elems.length > 1 then some elems.length else none
+            | _ => none
+          else none
         | .array (.tuple elems) _ =>
           if elems.length > 1 then some elems.length else none
         | .slice (.tuple elems) =>

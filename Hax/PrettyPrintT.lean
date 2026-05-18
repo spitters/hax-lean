@@ -790,11 +790,17 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Build per-function retTypes from fnTypes; pass the full list (not just
   -- the calling function's own retType) so calls to other functions can
   -- be resolved by the rewriter when an array of structs flows through.
-  let allFnRetTypes : List (String × ImpType) := fnTypes.filterMap fun (n, ti) =>
-    if ti.retType.isUnknown then none else some (n, ti.retType)
-  let defs := if structMeta.isEmpty && allFnRetTypes.isEmpty then defs
+  -- Pass only the CALLING function's retType so the rewriter only applies
+  -- struct-from-elem expansion when the from_elem result feeds back to the
+  -- enclosing function's own return type. Using a global list incorrectly
+  -- matched other functions' struct-array signatures (SPDZ bug).
+  let defs := if structMeta.isEmpty then defs
     else defs.map fun (n, e) =>
-      (n, rewriteStructFromElem structMeta allFnRetTypes defs e)
+      let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
+      let fnRetTypes := match fnRetType with
+        | some ty => if ty.isUnknown then [] else [(n, ty)]
+        | none => []
+      (n, rewriteStructFromElem structMeta fnRetTypes defs e)
   -- Fix projection paths for tuples with arity > 2
   let callRetTypes := fnTypes.filterMap fun (n, ti) =>
     if !ti.retType.isUnknown then some (n, ti.retType) else none
