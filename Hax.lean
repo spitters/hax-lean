@@ -27,4 +27,8 @@ import Hax.TPhase.CfIntoMonads
 import Hax.TPhase.ExplicitMonadic
 import Hax.TPhase.RewriteAppName
 import Hax.TPhase.InitFoldAccums
+import Hax.TPhase.QualifyProjections
+import Hax.TPhase.RewriteNewToStructCtor
+import Hax.TPhase.RewriteStructFromElem
+import Hax.TPhase.FixProjectionPaths
 import Hax.TPipeline

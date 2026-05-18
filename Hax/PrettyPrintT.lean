@@ -9,6 +9,10 @@ import Hax.Pipeline
 import Hax.HaxAdapter
 import Hax.TPhase.AnnotateLets
 import Hax.TPhase.InitFoldAccums
+import Hax.TPhase.QualifyProjections
+import Hax.TPhase.RewriteNewToStructCtor
+import Hax.TPhase.RewriteStructFromElem
+import Hax.TPhase.FixProjectionPaths
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -762,6 +766,28 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- identical for the unit-bound case used here).
   let procTdefs := procTdefs.map fun (n, te) =>
     (n, tInitMissingFoldAccums [] te)
+  -- Typed phases (run BEFORE erase so type-dependent rewrites use direct
+  -- `TExpr.ty` annotations instead of post-erase heuristics). The
+  -- equivalent untyped passes downstream become idempotent no-ops because
+  -- the patterns they detect (`.app ".field"`, `.app "new" args`,
+  -- `.app "from_elem" ..`, `.app ".N" ..` for N>1) have already been
+  -- rewritten at the TExpr level. Each typed phase has a documented
+  -- erase-preservation property (theorem deferred pending a `WellTyped`
+  -- predicate).
+  let ambiguousFields := findAmbiguousFields structMeta
+  let procTdefs := if ambiguousFields.isEmpty then procTdefs
+    else procTdefs.map fun (n, te) =>
+      (n, tQualifyProjections structMeta ambiguousFields te te)
+  let procTdefs := if structMeta.isEmpty then procTdefs
+    else procTdefs.map fun (n, te) => (n, tRewriteNewToStructCtor structMeta te)
+  let procTdefs := if structMeta.isEmpty then procTdefs
+    else procTdefs.map fun (n, te) =>
+      let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
+      let fnRetTypes := match fnRetType with
+        | some ty => if ty.isUnknown then [] else [(n, ty)]
+        | none => []
+      (n, tRewriteStructFromElem structMeta fnRetTypes procTdefs te)
+  let procTdefs := procTdefs.map fun (n, te) => (n, tFixProjectionPaths te)
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
   let defs : List (String × ImpExpr) :=
     if procTdefs.isEmpty then
