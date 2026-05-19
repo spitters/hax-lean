@@ -100,11 +100,17 @@ inductive ImpExpr where
   -- Nested break encoding: break inside loop with earlyReturn
   -- Produces val(CF true (CF false v)) directly, avoiding cfBreak/cfContinue composition
   | cfBreakContinue (e : ImpExpr)
-  -- First-class type ascription: `(e : ty)`. Replaces the legacy
-  -- `::annot::<TyStr>`-string-prefix `.app` marker. Constructed by the
-  -- typed pipeline at injection time so the type information is
-  -- carried structurally rather than through a parsed function-name string.
-  | typeAscription (e : ImpExpr) (ty : ImpType)
+  -- First-class type ascription: `(e : tyStr)`. Replaces the legacy
+  -- `::annot::<TyStr>`-string-prefix `.app` marker. The ascription's
+  -- type is carried as a pre-rendered surface string — produced by
+  -- `ImpType.toLeanTypeStrSurface sl` at construction time, where
+  -- `sl` is the struct-lookup table that maps struct names to their
+  -- `_T` aliases or tuple representations. Storing the string here
+  -- avoids threading `sl` through every recursive `toLean` call.
+  -- Construction sites still take `ImpType` (via the injector in
+  -- `PrettyPrintT.injectLetTypeAnnotations`) so type-safety is
+  -- preserved at the construction boundary.
+  | typeAscription (e : ImpExpr) (tyStr : String)
   deriving Inhabited
 
 /-- Custom induction principle for `ImpExpr` that handles nested lists.
@@ -150,7 +156,7 @@ def ImpExpr.ind {motive : ImpExpr → Prop}
     (cfBreak : ∀ e, motive e → motive (.cfBreak e))
     (cfContinue : ∀ e, motive e → motive (.cfContinue e))
     (cfBreakContinue : ∀ e, motive e → motive (.cfBreakContinue e))
-    (typeAscription : ∀ e ty, motive e → motive (.typeAscription e ty))
+    (typeAscription : ∀ e tyStr, motive e → motive (.typeAscription e tyStr))
     (e : ImpExpr) : motive e :=
   go e
 where
@@ -185,7 +191,7 @@ where
     | .cfBreak e => cfBreak e (go e)
     | .cfContinue e => cfContinue e (go e)
     | .cfBreakContinue e => cfBreakContinue e (go e)
-    | .typeAscription e ty => typeAscription e ty (go e)
+    | .typeAscription e tyStr => typeAscription e tyStr (go e)
   goList : (es : List ImpExpr) → ∀ a, a ∈ es → motive a
     | _ :: _, _, .head _ => go _
     | _ :: es, a, .tail _ h => goList es a h
@@ -238,7 +244,7 @@ def ImpExpr.beq : ImpExpr → ImpExpr → Bool
   | .cfBreak e₁, .cfBreak e₂ => e₁.beq e₂
   | .cfContinue e₁, .cfContinue e₂ => e₁.beq e₂
   | .cfBreakContinue e₁, .cfBreakContinue e₂ => e₁.beq e₂
-  | .typeAscription e₁ t₁, .typeAscription e₂ t₂ => e₁.beq e₂ && t₁ == t₂
+  | .typeAscription e₁ s₁, .typeAscription e₂ s₂ => e₁.beq e₂ && s₁ == s₂
   | _, _ => false
 where
   beqList : List ImpExpr → List ImpExpr → Bool

@@ -417,21 +417,17 @@ This module's job is purely to RENDER the marker: walk the post-pipeline
 `TExpr` to find `.ann` nodes on let-RHSs and produce a name→type-string
 map for the ImpExpr injection. -/
 
-/-- Walk a post-pipeline `TExpr` and collect `(letBindingName, ty)`
+/-- Walk a post-pipeline `TExpr` and collect `(letBindingName, tyStr)`
     pairs for every let-binding whose RHS is wrapped in `.ann`.
 
     Decisions of WHICH bindings to wrap come from the verified pass
     `tAnnotateLetBindings`; this function only translates those
-    decisions into the rendering layer's representation.
-
-    Returns the structured `ImpType` directly (P1, 2026-05-19) rather
-    than the pre-rendered string the legacy implementation produced.
-    The `Int` collapse-filter still applies — converts to surface
-    string with the default `sl = none` for the comparison, which is
-    safe because the `Int` type collapses regardless of struct
-    aliasing. -/
+    decisions into the rendering layer's representation. The
+    ascription type is pre-rendered via `sl` (struct-lookup) here so
+    that downstream `injectLetTypeAnnotations` emits ready-to-render
+    strings inside `ImpExpr.typeAscription` nodes. -/
 partial def collectLetBindingTypes (sl : String → Option String) :
-    TExpr → List (String × ImpType)
+    TExpr → List (String × String)
   | .mk (.letBind n (.mk (.ann inner) annTy) body) _ =>
     -- This let-RHS was marked for annotation by the verified pass.
     -- The pass is conservative — it marks any non-trivial ImpType.
@@ -440,7 +436,7 @@ partial def collectLetBindingTypes (sl : String → Option String) :
     -- `core::macros::AssertKind` → `Int`), since an `: Int`
     -- ascription would be useless or harmful.
     let tyStr := annTy.toLeanTypeStrSurface sl
-    let here := if tyStr == "Int" then [] else [(n, annTy)]
+    let here := if tyStr == "Int" then [] else [(n, tyStr)]
     here ++ collectLetBindingTypes sl inner ++ collectLetBindingTypes sl body
   | .mk (.letBind _ val body) _ =>
     collectLetBindingTypes sl val ++ collectLetBindingTypes sl body
@@ -465,20 +461,20 @@ partial def collectLetBindingTypes (sl : String → Option String) :
   | _ => []
 
 /-- Inject `ImpExpr.typeAscription` wrappers into letBind RHSs in an
-    ImpExpr body, using the given name→ImpType map. The renderer
+    ImpExpr body, using the given name→tyStr map. The renderer
     (`Hax.PrettyPrint.toLean`) consumes the wrapper as `(val : T)`.
 
     Replaces the legacy `::annot::<TyStr>` string-prefix `.app` marker
-    (P1, 2026-05-19); the construction site passes an `ImpType` rather
-    than a free-form string, so wrong-type annotations become a Lean
-    type error in haxpipeT itself instead of a silent miscompile. -/
-partial def injectLetTypeAnnotations (typeMap : List (String × ImpType)) :
+    (P1, 2026-05-19); the marker is now a first-class AST node that
+    can't be confused with a function call whose name happens to
+    start with `::`. -/
+partial def injectLetTypeAnnotations (typeMap : List (String × String)) :
     ImpExpr → ImpExpr
   | .letBind n val body =>
     let val' := injectLetTypeAnnotations typeMap val
     let body' := injectLetTypeAnnotations typeMap body
     match typeMap.find? (·.1 == n) with
-    | some (_, ty) => .letBind n (.typeAscription val' ty) body'
+    | some (_, tyStr) => .letBind n (.typeAscription val' tyStr) body'
     | none => .letBind n val' body'
   | .app f args => .app f (args.map (injectLetTypeAnnotations typeMap))
   | .seq a b => .seq (injectLetTypeAnnotations typeMap a) (injectLetTypeAnnotations typeMap b)

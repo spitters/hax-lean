@@ -1047,14 +1047,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- The marker is an `.app` whose function name starts with `::annot::`;
   -- render as a Lean type ascription `(val : T)`.
   let annot : Option String := match e with
-    | .typeAscription inner ty =>
+    | .typeAscription inner tyStr =>
       -- First-class type ascription (P1, 2026-05-19). Replaces the legacy
-      -- `::annot::<TyStr>` string-prefix `.app` marker. The renderer calls
-      -- `toLeanTypeStrSurface` with the default `sl = none`, so structs
-      -- render without the `_T` clash-resolution alias — passes through
-      -- as the bare struct name. If a protocol needs the aliased form,
-      -- the construction site should resolve the type before emitting.
-      some s!"({toLean inner 0 boolNames} : {ty.toLeanTypeStrSurface})"
+      -- `::annot::<TyStr>` string-prefix `.app` marker. The construction
+      -- site (`PrettyPrintT.collectLetBindingTypes`) pre-renders the
+      -- ascription type using `sl` (the struct-lookup), so we just
+      -- splice the string in.
+      some s!"({toLean inner 0 boolNames} : {tyStr})"
     | .app f [inner] =>
       if f.startsWith "::namedProj::" then
         -- Newtype `.0` projection marker, injected by PrettyPrintT from
@@ -1431,7 +1430,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- Unreachable: `.typeAscription` is intercepted at the top of `toLean`
   -- (the `annot` Option match). The fallthrough is required only so
   -- Lean's exhaustiveness checker is happy.
-  | .typeAscription e ty => s!"({toLean e 0 boolNames} : {ty.toLeanTypeStrSurface})"
+  | .typeAscription e tyStr => s!"({toLean e 0 boolNames} : {tyStr})"
 where
   /-- Render at line start: adds indent prefix for leaf expressions that don't
       add their own `{indent lvl}` prefix (var, app, lit, tuple, cfBreak, etc.). -/
@@ -2172,13 +2171,8 @@ partial def toLeanImpExpr (e : ImpExpr) : String :=
   | .cfBreak e => s!"(.cfBreak {toLeanImpExpr e})"
   | .cfContinue e => s!"(.cfContinue {toLeanImpExpr e})"
   | .cfBreakContinue e => s!"(.cfBreakContinue {toLeanImpExpr e})"
-  | .typeAscription e ty =>
-    -- We don't currently emit type ascriptions in the surface ImpExpr
-    -- constructor form (this codepath produces a Lean AST term for
-    -- agreement proofs). Stringify the inner expression with the
-    -- surface stringifier; the ImpType is dropped because there's no
-    -- compact reconstruction syntax for `ImpType` here.
-    s!"(.typeAscription {toLeanImpExpr e} (ImpType.unknown))"
+  | .typeAscription e tyStr =>
+    s!"(.typeAscription {toLeanImpExpr e} \"{tyStr}\")"
   -- Pre-pipeline constructors (should not appear after pipeline)
   | .borrow e => s!"(.borrow {toLeanImpExpr e})"
   | .deref e => s!"(.deref {toLeanImpExpr e})"

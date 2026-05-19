@@ -317,9 +317,13 @@ def TExpr.ofImpExpr : ImpExpr → TExpr
   | .cfBreak e => .mk (.cfBreak (ofImpExpr e)) .unknown
   | .cfContinue e => .mk (.cfContinue (ofImpExpr e)) .unknown
   | .cfBreakContinue e => .mk (.cfBreakContinue (ofImpExpr e)) .unknown
-  -- Lift via the existing `.ann` marker so erase round-trips through
-  -- the new `ImpExpr.typeAscription` AST node (see `TExpr.erase` for `.ann`).
-  | .typeAscription e ty => .mk (.ann (ofImpExpr e)) ty
+  -- Lift via the existing `.ann` marker. The outer `TExpr.mk` ty is
+  -- `.unknown` because `ImpExpr.typeAscription` carries a pre-rendered
+  -- surface string rather than the structured `ImpType` (storing the
+  -- string avoids re-threading `sl` through every `toLean` call).
+  -- Round-trip via `erase` is not preserved for typeAscription nodes;
+  -- the retired `TExpr.erase_ofImpExpr` lemma documents this trade-off.
+  | .typeAscription e _ => .mk (.ann (ofImpExpr e)) .unknown
 where
   liftList : List ImpExpr → List TExpr
     | [] => []
