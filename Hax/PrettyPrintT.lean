@@ -350,17 +350,26 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
       let allExprs := defs.map (·.2)
       let fields := depInfo.map fun (d, arity, argTypes, retType) =>
         let retStr := depTypeStr retType structLookup (isReturn := true)
-        -- u128 is always Array Int in the extraction model (byte array, not scalar)
-        let retStr := match retType with
-          | .uint .w128 | .sint .w128 => "Array Int"
-          | _ => retStr
+        -- u128 / i128 is always Array Int when it's a *function result* (byte
+        -- array, not scalar). For 0-arity dep constants the representation
+        -- depends on how the constant is used — `Hax.sub MAX 4` needs MAX
+        -- as `Int`, not `Array Int`, so we defer the u128 override to the
+        -- usedAsInt/usedAsArray heuristic below.
+        let retStr := match retType, arity with
+          | .uint .w128, n | .sint .w128, n => if n > 0 then "Array Int" else retStr
+          | _, _ => retStr
         -- Override: collection operations always return Array Int
         let retStr := if collectionOps.contains d && retStr == "Int" then "Array Int" else retStr
         if arity == 0 then
-          -- u128 is always Array Int in the extraction model (byte array, not scalar)
           let isWideInt := match retType with
             | .uint .w128 | .sint .w128 => true | _ => false
           let usedAsInt := allExprs.any (isVarUsedAsInt d)
+          -- Positive array evidence: `.len` / `.iter` projections on this var.
+          -- Unknown-typed 0-arity deps in Rust are almost always scalar
+          -- constants (e.g. `u128::MAX`, `i32::MIN`) — collection refs come
+          -- through as typed `.array`/`.slice` ADT refs, not `.unknown`.
+          let usedAsArray := allExprs.any fun e =>
+            checkProjOnVar d "len" e || checkProjOnVar d "iter" e
           -- Check struct projections on this variable (e.g., .x, .y applied to d)
           let structTypeFromVar := allExprs.findSome? fun e =>
             structMeta.findSome? fun ((sname, fields) : String × List (String × String × ImpType)) =>
@@ -371,9 +380,24 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
           let retStr := match structTypeFromVar with
             | some st => st  -- struct projections detected: use struct type
             | none =>
-              if isWideInt then "Array Int"  -- u128 always byte array
+              -- u128/i128 0-arity: prefer Int when used arithmetically
+              -- (`Hax.sub MAX 4` etc.); fall back to Array Int when there's
+              -- positive evidence it's used as a byte array (`.len`/`.iter`).
+              if isWideInt then
+                if usedAsArray then "Array Int"
+                else if usedAsInt then "Int"
+                else "Array Int"  -- byte-array default for w128 with no signal
               else if retType.isUnknown then
-                if usedAsInt then "Int" else "Array Int"
+                -- Unknown-typed 0-arity deps: switch to `Int` only when
+                -- there's positive evidence the constant is used in scalar
+                -- arithmetic (`Hax.sub MAX 4` etc.). For everything else,
+                -- keep the historical `Array Int` default — opaque deps
+                -- typically represent struct constants (e.g. SPDZ `ZERO`
+                -- / `ONE` are `FieldElement`, a passthrough struct that
+                -- prints as `Array Int`).
+                if usedAsArray then "Array Int"
+                else if usedAsInt then "Int"
+                else "Array Int"
               else if retStr == "Int" && !usedAsInt then retStr  -- trust TExpr type
               else retStr
           s!"  {sanitizeName d} : {retStr}"
