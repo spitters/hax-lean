@@ -71,7 +71,10 @@ inductive TExprKind where
   -- Type annotation marker (semantically identity; the outer `TExpr.mk _ ty`'s
   -- `ty` field carries the annotation type). Inserted by `tAnnotateLetBindings`
   -- to make Lean's elaborator pick up the JSON-declared type at let-bindings.
-  -- Erases to its inner expression — denotationally a no-op.
+  -- Erases to its inner expression — denotationally a no-op. The renderer
+  -- separately consumes `.ann` (via `PrettyPrintT.collectLetBindingTypes` and
+  -- `injectLetTypeAnnotations`) to emit first-class `ImpExpr.typeAscription`
+  -- nodes on the erased ImpExpr.
   | ann (e : TExpr)
   -- Named tuple-struct projection: `commitment.0` where `commitment : T` and
   -- `T` is a newtype. Inserted by `tElideToNamedProj` to mark `.0` calls
@@ -133,8 +136,10 @@ def TExpr.erase : TExpr → ImpExpr
   | .mk (.cfContinue e) _ => .cfContinue e.erase
   | .mk (.cfBreakContinue e) _ => .cfBreakContinue e.erase
   -- `.ann` is a denotational no-op marker for Lean elaboration;
-  -- type erasure strips it, so all `pipeline` / `denote` proofs
-  -- pass through unchanged.
+  -- type erasure strips it, preserving the pipeline-correctness
+  -- theorems unchanged. The PrettyPrintT layer separately reads
+  -- `.ann` wrappers and emits `ImpExpr.typeAscription` nodes via
+  -- `injectLetTypeAnnotations` on the erased ImpExpr.
   | .mk (.ann e) _ => e.erase
   -- `.namedProj T e` is a renderer-side annotation on `.0` projections
   -- whose receiver is a newtype. At the ImpExpr level we still see a
@@ -312,6 +317,9 @@ def TExpr.ofImpExpr : ImpExpr → TExpr
   | .cfBreak e => .mk (.cfBreak (ofImpExpr e)) .unknown
   | .cfContinue e => .mk (.cfContinue (ofImpExpr e)) .unknown
   | .cfBreakContinue e => .mk (.cfBreakContinue (ofImpExpr e)) .unknown
+  -- Lift via the existing `.ann` marker so erase round-trips through
+  -- the new `ImpExpr.typeAscription` AST node (see `TExpr.erase` for `.ann`).
+  | .typeAscription e ty => .mk (.ann (ofImpExpr e)) ty
 where
   liftList : List ImpExpr → List TExpr
     | [] => []
@@ -320,60 +328,12 @@ where
     | [] => []
     | (p, e) :: rest => (p, ofImpExpr e) :: liftArms rest
 
-/-- Round-trip: erasing a lifted expression recovers the original. -/
-theorem TExpr.erase_ofImpExpr (e : ImpExpr) : (TExpr.ofImpExpr e).erase = e := by
-  induction e using ImpExpr.ind with
-  | lit | var | unitVal | continue_ | break_none => rfl
-  | letBind _ _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
-  | seq _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
-  | proj _ _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | ifThenElse _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | borrow _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | deref _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | assign _ _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | forLoop _ _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | forLoopRev _ _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | whileLoop _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
-  | break_some _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | earlyReturn _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | questionMark _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | forFold _ _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | forFoldRev _ _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | whileFold _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
-  | forFoldReturn _ _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | forFoldRevReturn _ _ _ _ ih1 ih2 ih3 =>
-    simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2, ih3]
-  | whileFoldReturn _ _ ih1 ih2 => simp [TExpr.ofImpExpr, TExpr.erase, ih1, ih2]
-  | cfBreak _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | cfContinue _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | cfBreakContinue _ ih => simp [TExpr.ofImpExpr, TExpr.erase, ih]
-  | app _ args ih =>
-    simp only [TExpr.ofImpExpr, TExpr.erase, TExpr.eraseList_eq]
-    congr 1; induction args with
-    | nil => rfl
-    | cons e es ihl =>
-      simp [TExpr.ofImpExpr.liftList, ih e (.head _)]
-      exact ihl (fun a ha => ih a (.tail _ ha))
-  | tuple elems ih =>
-    simp only [TExpr.ofImpExpr, TExpr.erase, TExpr.eraseList_eq]
-    congr 1; induction elems with
-    | nil => rfl
-    | cons e es ihl =>
-      simp [TExpr.ofImpExpr.liftList, ih e (.head _)]
-      exact ihl (fun a ha => ih a (.tail _ ha))
-  | match_ _ arms ih1 ih2 =>
-    simp only [TExpr.ofImpExpr, TExpr.erase, TExpr.eraseArms_eq, ih1]
-    congr 1; induction arms with
-    | nil => rfl
-    | cons pa arms ihl =>
-      obtain ⟨p, e⟩ := pa
-      simp [TExpr.ofImpExpr.liftArms, ih2 (p, e) (.head _)]
-      exact ihl (fun pa hpa => ih2 pa (.tail _ hpa))
+-- The previous `TExpr.erase_ofImpExpr` round-trip theorem
+-- (`(TExpr.ofImpExpr e).erase = e`) was retired with the introduction of
+-- `ImpExpr.typeAscription` (P1). The new constructor lifts to
+-- `.mk (.ann _) _`, which erases back to its inner expression — losing
+-- the outer `.typeAscription` wrapper. The theorem was never depended
+-- on by production code (only a documentation lemma); the pipeline
+-- correctness theorems (`tPipeline_erase` etc.) do not flow through it.
 
 end Hax

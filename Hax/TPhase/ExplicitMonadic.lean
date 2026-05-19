@@ -208,7 +208,7 @@ theorem tExplicitMonadic_erase (e : TExpr) :
   | cfBreak _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | cfContinue _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | cfBreakContinue _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
-  | ann _ _ ih => simp [tExplicitMonadic, TExpr.erase, ih]
+  | ann _ _ ih => simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | namedProj _ _ _ ih =>
     simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | app _ _ args ih =>

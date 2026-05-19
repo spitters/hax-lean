@@ -195,6 +195,7 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
   | .cfBreak _ => pure (.err "cfBreak in pre-pipeline expression")
   | .cfContinue _ => pure (.err "cfContinue in pre-pipeline expression")
   | .cfBreakContinue _ => pure (.err "cfBreakContinue in pre-pipeline expression")
+  | .typeAscription e _ => denote bi fuel e
   termination_by e => (fuel, sizeOf e)
   decreasing_by
     all_goals simp_wf

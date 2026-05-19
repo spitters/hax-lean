@@ -74,6 +74,7 @@ def cfIntoMonads : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (cfIntoMonads e)
   | .cfContinue e => .cfContinue (cfIntoMonads e)
   | .cfBreakContinue e => .cfBreakContinue (cfIntoMonads e)
+  | .typeAscription e ty => .typeAscription (cfIntoMonads e) ty
 where
   mapExpr : List ImpExpr → List ImpExpr
     | [] => []
@@ -145,6 +146,7 @@ theorem cfIntoMonads_noEarlyExit (e : ImpExpr) :
   | cfBreak _ ih => exact .cfBreak ih
   | cfContinue _ ih => exact .cfContinue ih
   | cfBreakContinue _ ih => exact .cfBreakContinue ih
+  | typeAscription _ _ ih => exact .typeAscription ih
 
 /-- When an expression has no early exit nodes, `cfIntoMonads` is the identity. -/
 theorem cfIntoMonads_identity (e : ImpExpr) (h : NoEarlyExit e) :
@@ -215,6 +217,7 @@ theorem cfIntoMonads_identity (e : ImpExpr) (h : NoEarlyExit e) :
   | cfBreak _ ih => cases h with | cfBreak he => simp only [cfIntoMonads, ih he]
   | cfContinue _ ih => cases h with | cfContinue he => simp only [cfIntoMonads, ih he]
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => simp only [cfIntoMonads, ih he]
+  | typeAscription _ _ ih => cases h with | typeAscription he => simp only [cfIntoMonads, ih he]
 
 /-- `cfIntoMonads` preserves `NoReferences`. -/
 theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
@@ -281,6 +284,7 @@ theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- `cfIntoMonads` preserves `NoMutation`. -/
 theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
@@ -347,6 +351,7 @@ theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- `cfIntoMonads` preserves `NoLoops`. -/
 theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
@@ -411,6 +416,7 @@ theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- On early-exit-free inputs, `cfIntoMonads` is the identity.
 
@@ -501,6 +507,9 @@ theorem cfIntoMonads_correct (e : ImpExpr) (h : NoEarlyExit e) :
     simp only [cfIntoMonads, ih he]
   | cfBreakContinue e ih =>
     cases h with | cfBreakContinue he =>
+    simp only [cfIntoMonads, ih he]
+  | typeAscription e _ ih =>
+    cases h with | typeAscription he =>
     simp only [cfIntoMonads, ih he]
 
 end Hax

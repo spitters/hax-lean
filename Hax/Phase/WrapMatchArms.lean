@@ -45,6 +45,9 @@ def endsInCF : ImpExpr → Bool
   | .letBind _ _ body => endsInCF body
   | .seq _ e2 => endsInCF e2
   | .ifThenElse _ t e => endsInCF t && endsInCF e
+  -- typeAscription is a transparent wrapper around a value/return —
+  -- look through it. Mirrors `TExpr.endsInCF`'s `.ann` case.
+  | .typeAscription e _ => endsInCF e
   | _ => false
 
 /-- Wrap `e` with `cfContinue` unless it already ends in a CF
@@ -103,6 +106,7 @@ def wrapMatchArmsCF : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (wrapMatchArmsCF e)
   | .cfContinue e => .cfContinue (wrapMatchArmsCF e)
   | .cfBreakContinue e => .cfBreakContinue (wrapMatchArmsCF e)
+  | .typeAscription e ty => .typeAscription (wrapMatchArmsCF e) ty
 where
   mapExpr : List ImpExpr → List ImpExpr
     | [] => []
@@ -268,5 +272,8 @@ theorem wrapMatchArmsCF_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
   | cfBreakContinue _ ih =>
     cases h with | cfBreakContinue he =>
     simp only [wrapMatchArmsCF]; exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih =>
+    cases h with | typeAscription he =>
+    simp only [wrapMatchArmsCF]; exact .typeAscription (ih he)
 
 end Hax

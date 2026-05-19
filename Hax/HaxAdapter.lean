@@ -1576,6 +1576,7 @@ partial def reconstructForLoops : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (reconstructForLoops e)
   | .cfContinue e => .cfContinue (reconstructForLoops e)
   | .cfBreakContinue e => .cfBreakContinue (reconstructForLoops e)
+  | .typeAscription e ty => .typeAscription (reconstructForLoops e) ty
 
 /-! ## Compound Assignment Normalization
 
@@ -1670,6 +1671,7 @@ partial def normalizeAssignOps : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (normalizeAssignOps e)
   | .cfContinue e => .cfContinue (normalizeAssignOps e)
   | .cfBreakContinue e => .cfBreakContinue (normalizeAssignOps e)
+  | .typeAscription e ty => .typeAscription (normalizeAssignOps e) ty
 
 /-! ## Full hax export file parsing
 

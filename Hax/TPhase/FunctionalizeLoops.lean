@@ -204,7 +204,7 @@ theorem tFunctionalizeLoopsAux_erase (nested : Bool) (e : TExpr) :
   | cfBreakContinue _ _ ih =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
   | ann _ _ ih =>
-    simp [tFunctionalizeLoopsAux, TExpr.erase, ih]
+    simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
   | namedProj _ _ _ ih =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
   | app _ _ args ih =>

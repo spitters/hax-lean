@@ -68,6 +68,7 @@ inductive NoReferences : ImpExpr → Prop where
   | cfBreak {e} : NoReferences e → NoReferences (.cfBreak e)
   | cfContinue {e} : NoReferences e → NoReferences (.cfContinue e)
   | cfBreakContinue {e} : NoReferences e → NoReferences (.cfBreakContinue e)
+  | typeAscription {e ty} : NoReferences e → NoReferences (.typeAscription e ty)
 
 theorem NoReferences.not_borrow {e : ImpExpr} : ¬NoReferences (.borrow e) := by
   intro h; cases h
@@ -125,6 +126,7 @@ inductive NoMutation : ImpExpr → Prop where
   | cfBreak {e} : NoMutation e → NoMutation (.cfBreak e)
   | cfContinue {e} : NoMutation e → NoMutation (.cfContinue e)
   | cfBreakContinue {e} : NoMutation e → NoMutation (.cfBreakContinue e)
+  | typeAscription {e ty} : NoMutation e → NoMutation (.typeAscription e ty)
 
 theorem NoMutation.not_assign {n : String} {rhs : ImpExpr} :
     ¬NoMutation (.assign n rhs) := by intro h; cases h
@@ -170,6 +172,7 @@ inductive NoLoops : ImpExpr → Prop where
   | cfBreak {e} : NoLoops e → NoLoops (.cfBreak e)
   | cfContinue {e} : NoLoops e → NoLoops (.cfContinue e)
   | cfBreakContinue {e} : NoLoops e → NoLoops (.cfBreakContinue e)
+  | typeAscription {e ty} : NoLoops e → NoLoops (.typeAscription e ty)
 
 theorem NoLoops.not_forLoop {v : String} {lo hi body : ImpExpr} :
     ¬NoLoops (.forLoop v lo hi body) := by intro h; cases h
@@ -230,6 +233,7 @@ inductive NoEarlyExit : ImpExpr → Prop where
   | cfBreak {e} : NoEarlyExit e → NoEarlyExit (.cfBreak e)
   | cfContinue {e} : NoEarlyExit e → NoEarlyExit (.cfContinue e)
   | cfBreakContinue {e} : NoEarlyExit e → NoEarlyExit (.cfBreakContinue e)
+  | typeAscription {e ty} : NoEarlyExit e → NoEarlyExit (.typeAscription e ty)
 
 theorem NoEarlyExit.not_earlyReturn {e : ImpExpr} :
     ¬NoEarlyExit (.earlyReturn e) := by intro h; cases h
@@ -272,6 +276,7 @@ def checkNoReferences : ImpExpr → Bool
   | .cfBreak e => checkNoReferences e
   | .cfContinue e => checkNoReferences e
   | .cfBreakContinue e => checkNoReferences e
+  | .typeAscription e _ => checkNoReferences e
 where
   checkNoReferencesList : List ImpExpr → Bool
     | [] => true
@@ -315,6 +320,7 @@ def checkNoMutation : ImpExpr → Bool
   | .cfBreak e => checkNoMutation e
   | .cfContinue e => checkNoMutation e
   | .cfBreakContinue e => checkNoMutation e
+  | .typeAscription e _ => checkNoMutation e
 where
   checkNoMutationList : List ImpExpr → Bool
     | [] => true
@@ -352,6 +358,7 @@ def checkNoLoops : ImpExpr → Bool
   | .cfBreak e => checkNoLoops e
   | .cfContinue e => checkNoLoops e
   | .cfBreakContinue e => checkNoLoops e
+  | .typeAscription e _ => checkNoLoops e
 where
   checkNoLoopsList : List ImpExpr → Bool
     | [] => true
@@ -394,6 +401,7 @@ def checkNoEarlyExit : ImpExpr → Bool
   | .cfBreak e => checkNoEarlyExit e
   | .cfContinue e => checkNoEarlyExit e
   | .cfBreakContinue e => checkNoEarlyExit e
+  | .typeAscription e _ => checkNoEarlyExit e
 where
   checkNoEarlyExitList : List ImpExpr → Bool
     | [] => true
@@ -484,6 +492,8 @@ theorem checkNoEarlyExit_sound :
     intro h; simp [checkNoEarlyExit] at h; exact .cfContinue (ih h)
   | cfBreakContinue _ ih =>
     intro h; simp [checkNoEarlyExit] at h; exact .cfBreakContinue (ih h)
+  | typeAscription _ _ ih =>
+    intro h; simp [checkNoEarlyExit] at h; exact .typeAscription (ih h)
 where
   checkNoEarlyExit_sound_list : ∀ (es : List ImpExpr),
       checkNoEarlyExit.checkNoEarlyExitList es = true →

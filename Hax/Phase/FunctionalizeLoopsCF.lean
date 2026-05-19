@@ -101,6 +101,7 @@ inductive NoCFConstructors : ImpExpr → Prop where
   | continue_ : NoCFConstructors .continue_
   | earlyReturn {e} : NoCFConstructors e → NoCFConstructors (.earlyReturn e)
   | questionMark {e} : NoCFConstructors e → NoCFConstructors (.questionMark e)
+  | typeAscription {e ty} : NoCFConstructors e → NoCFConstructors (.typeAscription e ty)
 
 theorem NoCFConstructors.not_forFold {v : String} {lo hi body : ImpExpr} :
     ¬NoCFConstructors (.forFold v lo hi body) := by intro h; cases h
@@ -2170,6 +2171,11 @@ private theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlo
   | cfBreak => exact absurd hncf NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd hncf NoCFConstructors.not_cfContinue
   | cfBreakContinue => exact absurd hncf NoCFConstructors.not_cfBreakContinue
+  | typeAscription _ _ ih =>
+    cases hncf with | typeAscription hi =>
+    intro fuel env henv
+    simp only [functionalizeLoopsAux]; unfold denote denote'
+    exact ih hi nested fuel env henv
 
 /-- Phase 3 simulation: `functionalizeLoops` preserves semantics up to
     `Outcome.encodeCF3` on the result, with identical env.

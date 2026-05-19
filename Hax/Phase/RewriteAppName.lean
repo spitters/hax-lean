@@ -87,6 +87,7 @@ def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (rewriteAppName oldName newName e)
   | .cfContinue e => .cfContinue (rewriteAppName oldName newName e)
   | .cfBreakContinue e => .cfBreakContinue (rewriteAppName oldName newName e)
+  | .typeAscription e ty => .typeAscription (rewriteAppName oldName newName e) ty
 where
   mapExpr (oldName newName : String) : List ImpExpr → List ImpExpr
     | [] => []

@@ -57,6 +57,7 @@ where
     | .cfBreak e, acc => go e acc
     | .cfContinue e, acc => go e acc
     | .cfBreakContinue e, acc => go e acc
+    | .typeAscription e _, acc => go e acc
   goList : List ImpExpr → List String → List String
     | [], acc => acc
     | e :: es, acc => go e (goList es acc)
@@ -96,6 +97,7 @@ where
     | .cfBreak e, acc => go e acc
     | .cfContinue e, acc => go e acc
     | .cfBreakContinue e, acc => go e acc
+    | .typeAscription e _, acc => go e acc
   goList : List ImpExpr → List String → List String
     | [], acc => acc
     | e :: es, acc => go e (goList es acc)

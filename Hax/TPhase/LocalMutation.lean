@@ -132,7 +132,7 @@ theorem tLocalMutation_erase (mvars : List String) (e : TExpr) :
   | cfBreak _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | cfContinue _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | cfBreakContinue _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
-  | ann _ _ ih => simp [tLocalMutation, TExpr.erase, ih]
+  | ann _ _ ih => simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | namedProj _ _ _ ih =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | app _ _ args ih =>

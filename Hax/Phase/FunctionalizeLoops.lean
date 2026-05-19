@@ -121,6 +121,7 @@ def functionalizeLoopsAux (nested : Bool) : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (functionalizeLoopsAux nested e)
   | .cfContinue e => .cfContinue (functionalizeLoopsAux nested e)
   | .cfBreakContinue e => .cfBreakContinue (functionalizeLoopsAux nested e)
+  | .typeAscription e ty => .typeAscription (functionalizeLoopsAux nested e) ty
 where
   mapExpr (nested : Bool) : List ImpExpr → List ImpExpr
     | [] => []
@@ -222,6 +223,7 @@ theorem functionalizeLoopsAux_noLoops (nested : Bool) (e : ImpExpr) :
   | cfBreak _ ih => exact .cfBreak (ih _)
   | cfContinue _ ih => exact .cfContinue (ih _)
   | cfBreakContinue _ ih => exact .cfBreakContinue (ih _)
+  | typeAscription _ _ ih => exact .typeAscription (ih _)
 
 /-- `functionalizeLoops` produces an expression with no loop nodes. -/
 theorem functionalizeLoops_noLoops (e : ImpExpr) :
@@ -305,6 +307,7 @@ theorem functionalizeLoopsAux_preserves_noRefs (nested : Bool) (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih _ he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih _ he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih _ he)
 
 /-- `functionalizeLoops` preserves `NoReferences`. -/
 theorem functionalizeLoops_preserves_noRefs (e : ImpExpr)
@@ -388,6 +391,7 @@ theorem functionalizeLoopsAux_preserves_noMut (nested : Bool) (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih _ he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih _ he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih _ he)
 
 /-- `functionalizeLoops` preserves `NoMutation`. -/
 theorem functionalizeLoops_preserves_noMut (e : ImpExpr)
@@ -471,6 +475,7 @@ theorem functionalizeLoopsAux_preserves_noEarlyExit (nested : Bool) (e : ImpExpr
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih _ he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih _ he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih _ he)
 
 /-- On loop-free inputs, `functionalizeLoops` is the identity. -/
 theorem functionalizeLoopsAux_correct (nested : Bool) (e : ImpExpr) (h : NoLoops e) :
@@ -555,6 +560,9 @@ theorem functionalizeLoopsAux_correct (nested : Bool) (e : ImpExpr) (h : NoLoops
     simp only [functionalizeLoopsAux, ih _ he]
   | cfBreakContinue _ ih =>
     cases h with | cfBreakContinue he =>
+    simp only [functionalizeLoopsAux, ih _ he]
+  | typeAscription _ _ ih =>
+    cases h with | typeAscription he =>
     simp only [functionalizeLoopsAux, ih _ he]
 
 /-- On loop-free inputs, `functionalizeLoops` is the identity. -/

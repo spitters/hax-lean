@@ -121,7 +121,7 @@ theorem tDropReferences_erase (e : TExpr) :
   | cfBreak _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | cfContinue _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | cfBreakContinue _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
-  | ann _ _ ih => simp [tDropReferences, TExpr.erase, ih]
+  | ann _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | namedProj _ _ _ ih =>
     simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | app _ _ args ih =>

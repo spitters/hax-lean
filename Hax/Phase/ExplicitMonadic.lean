@@ -43,6 +43,9 @@ def wrapReturns : ImpExpr → ImpExpr
   | .ifThenElse c t e => .ifThenElse c (wrapReturns t) (wrapReturns e)
   | .seq e1 e2 => .seq e1 (wrapReturns e2)
   | .match_ scrut arms => .match_ scrut (wrapReturnsArms arms)
+  -- Type ascriptions are transparent: descend into the inner expression.
+  -- Mirrors `tWrapReturns` for `.ann` so erase-preservation holds.
+  | .typeAscription e ty => .typeAscription (wrapReturns e) ty
   -- Leaf return position: wrap in cfContinue
   | e => .cfContinue e
 where
@@ -111,6 +114,7 @@ def explicitMonadic : ImpExpr → ImpExpr
   | .continue_ => .continue_
   | .earlyReturn e => .earlyReturn (explicitMonadic e)
   | .questionMark e => .questionMark (explicitMonadic e)
+  | .typeAscription e ty => .typeAscription (explicitMonadic e) ty
 where
   mapExpr : List ImpExpr → List ImpExpr
     | [] => []
@@ -151,11 +155,17 @@ private theorem wrapReturns_preserves (e : ImpExpr)
     (mkSeq : ∀ e1 e2, P e1 → P e2 → P (.seq e1 e2))
     (mkMatch : ∀ scrut arms, P scrut →
         (∀ pa, pa ∈ arms → P pa.2) → P (.match_ scrut arms))
+    -- P decomposes / rebuilds through typeAscription (transparent wrapper)
+    (hAsc : ∀ e ty, P (.typeAscription e ty) → P e)
+    (mkAsc : ∀ e ty, P e → P (.typeAscription e ty))
     : P (wrapReturns e) := by
   induction e using ImpExpr.ind with
   | cfBreak _ _ => exact h
   | cfContinue _ _ => exact h
   | cfBreakContinue _ _ => exact h
+  | typeAscription _ _ ih =>
+    rename_i e' ty
+    exact mkAsc _ _ (ih (hAsc e' ty h))
   | letBind n val body _ ih_body =>
     have ⟨hval, hbody⟩ := hLetBind n val body h
     exact mkLetBind n val _ hval (ih_body hbody)
@@ -182,6 +192,8 @@ theorem wrapReturns_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
     (fun _ _ h => by cases h with | match_ hs ha => exact ⟨hs, ha⟩)
     (fun _ _ _ => .letBind) (fun _ _ _ => .ifThenElse)
     (fun _ _ => .seq) (fun _ _ => .match_)
+    (fun _ _ h => by cases h with | typeAscription he => exact he)
+    (fun _ _ => .typeAscription)
 
 theorem wrapReturns_preserves_noMut (e : ImpExpr) (h : NoMutation e) :
     NoMutation (wrapReturns e) :=
@@ -192,6 +204,8 @@ theorem wrapReturns_preserves_noMut (e : ImpExpr) (h : NoMutation e) :
     (fun _ _ h => by cases h with | match_ hs ha => exact ⟨hs, ha⟩)
     (fun _ _ _ => .letBind) (fun _ _ _ => .ifThenElse)
     (fun _ _ => .seq) (fun _ _ => .match_)
+    (fun _ _ h => by cases h with | typeAscription he => exact he)
+    (fun _ _ => .typeAscription)
 
 theorem wrapReturns_preserves_noLoops (e : ImpExpr) (h : NoLoops e) :
     NoLoops (wrapReturns e) :=
@@ -202,6 +216,8 @@ theorem wrapReturns_preserves_noLoops (e : ImpExpr) (h : NoLoops e) :
     (fun _ _ h => by cases h with | match_ hs ha => exact ⟨hs, ha⟩)
     (fun _ _ _ => .letBind) (fun _ _ _ => .ifThenElse)
     (fun _ _ => .seq) (fun _ _ => .match_)
+    (fun _ _ h => by cases h with | typeAscription he => exact he)
+    (fun _ _ => .typeAscription)
 
 theorem wrapReturns_preserves_noEarlyExit (e : ImpExpr) (h : NoEarlyExit e) :
     NoEarlyExit (wrapReturns e) :=
@@ -212,6 +228,8 @@ theorem wrapReturns_preserves_noEarlyExit (e : ImpExpr) (h : NoEarlyExit e) :
     (fun _ _ h => by cases h with | match_ hs ha => exact ⟨hs, ha⟩)
     (fun _ _ _ => .letBind) (fun _ _ _ => .ifThenElse)
     (fun _ _ => .seq) (fun _ _ => .match_)
+    (fun _ _ h => by cases h with | typeAscription he => exact he)
+    (fun _ _ => .typeAscription)
 
 /-! ## Feature Preservation: explicitMonadic -/
 
@@ -282,6 +300,7 @@ theorem explicitMonadic_preserves_noRefs (e : ImpExpr)
   | continue_ => exact .continue_
   | earlyReturn _ ih => cases h with | earlyReturn he => exact .earlyReturn (ih he)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- `explicitMonadic` preserves `NoMutation`. -/
 theorem explicitMonadic_preserves_noMut (e : ImpExpr)
@@ -350,6 +369,7 @@ theorem explicitMonadic_preserves_noMut (e : ImpExpr)
   | continue_ => exact .continue_
   | earlyReturn _ ih => cases h with | earlyReturn he => exact .earlyReturn (ih he)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- `explicitMonadic` preserves `NoLoops`. -/
 theorem explicitMonadic_preserves_noLoops (e : ImpExpr)
@@ -415,6 +435,7 @@ theorem explicitMonadic_preserves_noLoops (e : ImpExpr)
   | continue_ => exact absurd h NoLoops.not_continue
   | earlyReturn _ ih => cases h with | earlyReturn he => exact .earlyReturn (ih he)
   | questionMark _ ih => cases h with | questionMark he => exact .questionMark (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- `explicitMonadic` preserves `NoEarlyExit`. -/
 theorem explicitMonadic_preserves_noEarlyExit (e : ImpExpr)
@@ -483,5 +504,6 @@ theorem explicitMonadic_preserves_noEarlyExit (e : ImpExpr)
   | continue_ => exact .continue_
   | earlyReturn => exact absurd h NoEarlyExit.not_earlyReturn
   | questionMark => exact absurd h NoEarlyExit.not_questionMark
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 end Hax

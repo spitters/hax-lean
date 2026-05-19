@@ -168,6 +168,7 @@ def initMissingFoldAccums (bound : List String := []) : ImpExpr → ImpExpr
   | .break_ (some e) => .break_ (some (initMissingFoldAccums bound e))
   | .earlyReturn e => .earlyReturn (initMissingFoldAccums bound e)
   | .questionMark e => .questionMark (initMissingFoldAccums bound e)
+  | .typeAscription e ty => .typeAscription (initMissingFoldAccums bound e) ty
   -- True base cases: leaves with no subexpressions.
   | .lit v => .lit v
   | .var n => .var n

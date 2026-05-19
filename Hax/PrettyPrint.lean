@@ -286,6 +286,9 @@ private partial def exprContainsVar (name : String) : ImpExpr → Bool
   | .proj e _ => exprContainsVar name e
   | .match_ scrut arms =>
     exprContainsVar name scrut || arms.any fun (_, b) => exprContainsVar name b
+  -- Look through typeAscription wrappers — the type doesn't introduce
+  -- variable references and the inner expression must be scanned.
+  | .typeAscription e _ => exprContainsVar name e
   | _ => false
 
 /-- Detect tuple destructuring pattern in letBind body.
@@ -990,6 +993,9 @@ def hasGuardRecursion (fname : String) (e : ImpExpr) : Bool :=
 private def isAtom : ImpExpr → Bool
   | .lit _ | .var _ | .unitVal => true
   | .tuple _ => true  -- tuples have their own parens
+  -- Type ascription renders as `(e : T)` which already wraps itself
+  -- in parentheses; no need to double-wrap.
+  | .typeAscription _ _ => true
   | _ => false
 
 /-- Wrap in parentheses if needed. -/
@@ -1016,6 +1022,10 @@ private def isLeafExpr : ImpExpr → Bool
   | .var _ | .lit _ | .unitVal | .app _ _ | .tuple _ => true
   | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
   | .proj _ _ => true
+  -- Type ascription is a transparent wrapper around any expression
+  -- (rendered as `(e : T)`); it's a leaf for layout purposes so that
+  -- annotated let-RHSs render inline like the legacy `::annot::` form.
+  | .typeAscription _ _ => true
   | _ => false
 
 /-- Pretty-print an ImpExpr as Lean 4 source code.
@@ -1037,10 +1047,16 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- The marker is an `.app` whose function name starts with `::annot::`;
   -- render as a Lean type ascription `(val : T)`.
   let annot : Option String := match e with
+    | .typeAscription inner ty =>
+      -- First-class type ascription (P1, 2026-05-19). Replaces the legacy
+      -- `::annot::<TyStr>` string-prefix `.app` marker. The renderer calls
+      -- `toLeanTypeStrSurface` with the default `sl = none`, so structs
+      -- render without the `_T` clash-resolution alias — passes through
+      -- as the bare struct name. If a protocol needs the aliased form,
+      -- the construction site should resolve the type before emitting.
+      some s!"({toLean inner 0 boolNames} : {ty.toLeanTypeStrSurface})"
     | .app f [inner] =>
-      if f.startsWith "::annot::" then
-        some s!"({toLean inner 0 boolNames} : {f.drop "::annot::".length})"
-      else if f.startsWith "::namedProj::" then
+      if f.startsWith "::namedProj::" then
         -- Newtype `.0` projection marker, injected by PrettyPrintT from
         -- a `.namedProj T x` node. Render as the type-specific unwrap
         -- `«T.0» x` (a definitional identity emitted in the preamble).
@@ -1113,13 +1129,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     -- Match-with-cfBreak pattern: let x := (match s with | p1 => v1 | p2 => cfBreak v2); body
     -- → if-else chain (for Option/Result patterns in untyped mode) or inlined match
     -- Inlines the continuation into non-cfBreak arms to avoid type mismatch.
-    -- Peek through `::annot::<T>` markers — when the typed pipeline
-    -- decides to annotate a let-binding's RHS, the marker hides the
+    -- Peek through `.typeAscription` markers — when the typed pipeline
+    -- decides to annotate a let-binding's RHS, the wrapper hides the
     -- underlying match from this pattern check; peel it so the
     -- inline-into-arms transform can still fire.
     let unwrappedVal : ImpExpr :=
       match val with
-      | .app f [inner] => if f.startsWith "::annot::" then inner else val
+      | .typeAscription inner _ => inner
       | _ => val
     let matchCfBreak := match unwrappedVal with
       | .match_ scrut arms =>
@@ -1412,6 +1428,10 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   | .continue_ => "continue"
   | .earlyReturn e => s!"return {toLean e 0}"
   | .questionMark e => s!"{parensIf (toLean e 0) (!isAtom e)}?"
+  -- Unreachable: `.typeAscription` is intercepted at the top of `toLean`
+  -- (the `annot` Option match). The fallthrough is required only so
+  -- Lean's exhaustiveness checker is happy.
+  | .typeAscription e ty => s!"({toLean e 0 boolNames} : {ty.toLeanTypeStrSurface})"
 where
   /-- Render at line start: adds indent prefix for leaf expressions that don't
       add their own `{indent lvl}` prefix (var, app, lit, tuple, cfBreak, etc.). -/
@@ -2152,6 +2172,13 @@ partial def toLeanImpExpr (e : ImpExpr) : String :=
   | .cfBreak e => s!"(.cfBreak {toLeanImpExpr e})"
   | .cfContinue e => s!"(.cfContinue {toLeanImpExpr e})"
   | .cfBreakContinue e => s!"(.cfBreakContinue {toLeanImpExpr e})"
+  | .typeAscription e ty =>
+    -- We don't currently emit type ascriptions in the surface ImpExpr
+    -- constructor form (this codepath produces a Lean AST term for
+    -- agreement proofs). Stringify the inner expression with the
+    -- surface stringifier; the ImpType is dropped because there's no
+    -- compact reconstruction syntax for `ImpType` here.
+    s!"(.typeAscription {toLeanImpExpr e} (ImpType.unknown))"
   -- Pre-pipeline constructors (should not appear after pipeline)
   | .borrow e => s!"(.borrow {toLeanImpExpr e})"
   | .deref e => s!"(.deref {toLeanImpExpr e})"

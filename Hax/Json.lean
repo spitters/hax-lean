@@ -245,6 +245,8 @@ private partial def impExprToJson : ImpExpr → Json
   | .cfBreak e => Json.mkObj [("cfBreak", impExprToJson e)]
   | .cfContinue e => Json.mkObj [("cfContinue", impExprToJson e)]
   | .cfBreakContinue e => Json.mkObj [("cfBreakContinue", impExprToJson e)]
+  | .typeAscription e ty =>
+    Json.mkObj [("typeAscription", Json.mkObj [("e", impExprToJson e), ("ty", toJson ty)])]
 
 private partial def impExprFromJson (j : Json) : Except String ImpExpr := do
   match j with
@@ -354,6 +356,10 @@ private partial def impExprFromJson (j : Json) : Except String ImpExpr := do
       return .cfContinue (← impExprFromJson sub)
     else if let .ok sub := j.getObjVal? "cfBreakContinue" then
       return .cfBreakContinue (← impExprFromJson sub)
+    else if let .ok sub := j.getObjVal? "typeAscription" then
+      let e ← impExprFromJson (← sub.getObjVal? "e")
+      let ty ← (sub.getObjVal? "ty").bind fromJson?
+      return .typeAscription e ty
     else throw s!"expected ImpExpr, got {j}"
 
 instance : ToJson ImpExpr where toJson := impExprToJson

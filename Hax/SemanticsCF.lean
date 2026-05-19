@@ -405,6 +405,7 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
     | .val v => pure (.val (.controlFlow true (.controlFlow false v)))
     | other => pure other
+  | .typeAscription e _ => denote' bi fuel e
   termination_by e => (fuel, sizeOf e)
   decreasing_by
     all_goals simp_wf

@@ -135,7 +135,9 @@ theorem TExpr.endsInCF_erase (e : TExpr) :
   | ifThenElse _ _ _ _ _ ih2 ih3 =>
     simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF, ih2, ih3]
   | ann _ _ ih =>
-    simp [TExpr.endsInCF, TExpr.erase, ih]
+    -- `.ann` erases to `.typeAscription`, which `Hax.endsInCF`
+    -- looks through (mirror of `TExpr.endsInCF`'s `.ann` case).
+    simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF, ih]
   | namedProj _ _ _ _ =>
     -- `.namedProj T e` erases to `.app ".0" [e.erase]` (an `.app` node),
     -- which `Hax.endsInCF` answers `false` for. `TExpr.endsInCF` on a

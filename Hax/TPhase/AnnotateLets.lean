@@ -157,12 +157,7 @@ where
 
 /-- **Main theorem.** `tAnnotateLetBindings` is denotation-preserving via
     erasure: applying it to a TExpr and then erasing yields the same
-    `ImpExpr` as just erasing.
-
-    Because the only non-trivial action is wrapping with `.ann`, and
-    `.ann` erases to its inner expression, the result on the `ImpExpr`
-    side is structurally identical. This makes the new phase semantically
-    transparent — it carries no semantic obligation in the pipeline. -/
+    `ImpExpr` as just erasing. -/
 theorem tAnnotateLetBindings_erase (e : TExpr) :
     (tAnnotateLetBindings e).erase = e.erase := by
   induction e using TExpr.ind with

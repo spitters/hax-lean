@@ -63,6 +63,7 @@ def dropReferences : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (dropReferences e)
   | .cfContinue e => .cfContinue (dropReferences e)
   | .cfBreakContinue e => .cfBreakContinue (dropReferences e)
+  | .typeAscription e ty => .typeAscription (dropReferences e) ty
 where
   mapExpr : List ImpExpr → List ImpExpr
     | [] => []
@@ -128,6 +129,7 @@ theorem dropReferences_noRefs (e : ImpExpr) : NoReferences (dropReferences e) :=
   | cfBreak _ ih => exact .cfBreak ih
   | cfContinue _ ih => exact .cfContinue ih
   | cfBreakContinue _ ih => exact .cfBreakContinue ih
+  | typeAscription _ _ ih => exact .typeAscription ih
 
 /-- Semantics preservation: `denote` commutes with `dropReferences`.
 
@@ -245,5 +247,10 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
   | cfBreak _ ih => intro fuel; simp [dropReferences, denote]
   | cfContinue _ ih => intro fuel; simp [dropReferences, denote]
   | cfBreakContinue _ ih => intro fuel; simp [dropReferences, denote]
+  | typeAscription _ _ ih =>
+    intro fuel
+    simp only [dropReferences]
+    unfold denote
+    exact ih fuel
 
 end Hax

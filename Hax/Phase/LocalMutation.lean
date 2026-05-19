@@ -91,6 +91,7 @@ def localMutation (mvars : List String) : ImpExpr → ImpExpr
   | .cfBreak e => .cfBreak (localMutation mvars e)
   | .cfContinue e => .cfContinue (localMutation mvars e)
   | .cfBreakContinue e => .cfBreakContinue (localMutation mvars e)
+  | .typeAscription e ty => .typeAscription (localMutation mvars e) ty
 where
   mapExpr (mvars : List String) : List ImpExpr → List ImpExpr
     | [] => []
@@ -157,6 +158,7 @@ theorem localMutation_noMut (mvars : List String) (e : ImpExpr) :
   | cfBreak _ ih => exact .cfBreak ih
   | cfContinue _ ih => exact .cfContinue ih
   | cfBreakContinue _ ih => exact .cfBreakContinue ih
+  | typeAscription _ _ ih => exact .typeAscription ih
 
 /-- `localMutation` preserves `NoReferences`. -/
 theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
@@ -219,6 +221,7 @@ theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-- The `assign n rhs` ↦ `seq (letBind n rhs (var n)) unitVal` transformation
     preserves denotational semantics. -/
@@ -356,5 +359,7 @@ theorem localMutation_correct (bi : Builtins) (fuel : Nat)
   | cfBreak _ ih => intro fuel; simp [localMutation, denote]
   | cfContinue _ ih => intro fuel; simp [localMutation, denote]
   | cfBreakContinue _ ih => intro fuel; simp [localMutation, denote]
+  | typeAscription _ _ ih =>
+    intro fuel; simp only [localMutation]; unfold denote; exact ih fuel
 
 end Hax

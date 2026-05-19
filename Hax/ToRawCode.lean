@@ -90,6 +90,7 @@ noncomputable def toRawCode : ImpExpr → RawCode Value
   | .cfBreak e => toRawCode e
   | .cfContinue e => toRawCode e
   | .cfBreakContinue e => toRawCode e
+  | .typeAscription e _ => toRawCode e
 where
   /-- Translate a list of expressions, collecting into a list of values. -/
   toRawCodeList : List ImpExpr → (List Value → RawCode Value) → RawCode Value

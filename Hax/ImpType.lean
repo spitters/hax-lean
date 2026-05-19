@@ -75,6 +75,39 @@ inductive ImpType where
 
 namespace ImpType
 
+/-- Structural equality for `ImpType`. Manual because nested `List ImpType`
+    prevents `deriving BEq`. -/
+def beq : ImpType → ImpType → Bool
+  | .bool, .bool => true
+  | .int, .int => true
+  | .uint w₁, .uint w₂ => w₁ == w₂
+  | .sint w₁, .sint w₂ => w₁ == w₂
+  | .unit, .unit => true
+  | .str, .str => true
+  | .tuple e₁, .tuple e₂ => beqList e₁ e₂
+  | .option a, .option b => beq a b
+  | .result a₁ b₁, .result a₂ b₂ => beq a₁ a₂ && beq b₁ b₂
+  | .controlFlow a₁ b₁, .controlFlow a₂ b₂ => beq a₁ a₂ && beq b₁ b₂
+  | .adt n₁ a₁, .adt n₂ a₂ => n₁ == n₂ && beqList a₁ a₂
+  | .fn p₁ r₁, .fn p₂ r₂ => beqList p₁ p₂ && beq r₁ r₂
+  | .ref a₁ b₁, .ref a₂ b₂ => beq a₁ a₂ && b₁ == b₂
+  | .slice a, .slice b => beq a b
+  | .array a₁ n₁, .array a₂ n₂ => beq a₁ a₂ && n₁ == n₂
+  | .typeVar n₁, .typeVar n₂ => n₁ == n₂
+  | .unknown, .unknown => true
+  | _, _ => false
+where
+  beqList : List ImpType → List ImpType → Bool
+    | [], [] => true
+    | a :: r₁, b :: r₂ => beq a b && beqList r₁ r₂
+    | _, _ => false
+
+instance : BEq ImpType := ⟨beq⟩
+
+end ImpType
+
+namespace ImpType
+
 /-- Extract the integer width if this is a fixed-width integer type. -/
 def intWidth? : ImpType → Option IntWidth
   | .uint w => some w
