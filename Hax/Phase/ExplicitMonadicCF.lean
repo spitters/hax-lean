@@ -241,6 +241,16 @@ theorem wrapReturns_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
       | controlFlow => rfl
       | _ => exact denoteMatchArms'_wrapReturns_wrapContinue bi fuel _ arms ih_arms _
     | err => rfl | earlyRet => rfl | broke => rfl | continued => rfl
+  | typeAscription _ _ ih =>
+    intro env
+    simp only [wrapReturns]
+    -- `wrapReturns` recurses into the inner of `.typeAscription`, mirroring
+    -- the way `.ann` is treated in `tWrapReturns`. The denotation of
+    -- `.typeAscription e _` is the denotation of `e` (see `denote'`'s
+    -- typeAscription case in `SemanticsCF`), so both sides reduce to the
+    -- inner expression's behaviour.
+    unfold denote'
+    exact ih env
 
 /-! ## Fold neutrality lemmas
 
@@ -1287,6 +1297,14 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
   | continue_ => exact absurd hnl NoLoops.not_continue
   | earlyReturn => exact absurd hne NoEarlyExit.not_earlyReturn
   | questionMark => exact absurd hne NoEarlyExit.not_questionMark
+  | typeAscription _ _ ih =>
+    cases hnr with | typeAscription hr =>
+    cases hnm with | typeAscription hm =>
+    cases hnl with | typeAscription hl =>
+    cases hne with | typeAscription he =>
+    intro fuel env
+    simp only [explicitMonadic]; unfold denote'
+    exact ih hr hm hl he fuel env
 
 /-! ## Pipeline connection -/
 

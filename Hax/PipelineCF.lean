@@ -95,6 +95,7 @@ private theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
   | cfBreak => exact absurd h NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd h NoCFConstructors.not_cfContinue
   | cfBreakContinue => exact absurd h NoCFConstructors.not_cfBreakContinue
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 private theorem localMutation_preserves_noCFConstructors (vars : List String) (e : ImpExpr)
     (h : NoCFConstructors e) : NoCFConstructors (localMutation vars e) := by
@@ -150,6 +151,7 @@ private theorem localMutation_preserves_noCFConstructors (vars : List String) (e
   | cfBreak => exact absurd h NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd h NoCFConstructors.not_cfContinue
   | cfBreakContinue => exact absurd h NoCFConstructors.not_cfBreakContinue
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 /-! ### Phases 1-3 preserve NoQuestionMark -/
 
@@ -212,6 +214,7 @@ private theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 private theorem localMutation_preserves_noQuestionMark (vars : List String) (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (localMutation vars e) := by
@@ -273,6 +276,7 @@ private theorem localMutation_preserves_noQuestionMark (vars : List String) (e :
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
 private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (functionalizeLoopsAux nested e) := by
@@ -350,6 +354,7 @@ private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (
   | cfBreak _ ih => cases h with | cfBreak he => exact .cfBreak (ih _ he)
   | cfContinue _ ih => cases h with | cfContinue he => exact .cfContinue (ih _ he)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih _ he)
+  | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih _ he)
 
 private theorem functionalizeLoops_preserves_noQuestionMark (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (functionalizeLoops e) :=
@@ -449,6 +454,9 @@ private theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpEx
   | cfBreak => exact absurd h NoCFConstructors.not_cfBreak
   | cfContinue => exact absurd h NoCFConstructors.not_cfContinue
   | cfBreakContinue => exact absurd h NoCFConstructors.not_cfBreakContinue
+  | typeAscription _ _ ih =>
+    cases h with | typeAscription he =>
+    simp only [functionalizeLoopsAux]; exact .typeAscription (ih nested he)
 
 private theorem functionalizeLoops_wellFormedFolds (e : ImpExpr)
     (h : NoCFConstructors e) : WellFormedFolds (functionalizeLoops e) :=

@@ -83,6 +83,7 @@ inductive NoQuestionMark : ImpExpr → Prop where
   | cfBreak {e} : NoQuestionMark e → NoQuestionMark (.cfBreak e)
   | cfContinue {e} : NoQuestionMark e → NoQuestionMark (.cfContinue e)
   | cfBreakContinue {e} : NoQuestionMark e → NoQuestionMark (.cfBreakContinue e)
+  | typeAscription {e tyStr} : NoQuestionMark e → NoQuestionMark (.typeAscription e tyStr)
 
 theorem NoQuestionMark.not_questionMark {e : ImpExpr} :
     ¬NoQuestionMark (.questionMark e) := by intro h; cases h
@@ -141,6 +142,7 @@ inductive WellFormedFolds : ImpExpr → Prop where
   | cfBreak {e} : WellFormedFolds e → WellFormedFolds (.cfBreak e)
   | cfContinue {e} : WellFormedFolds e → WellFormedFolds (.cfContinue e)
   | cfBreakContinue {e} : WellFormedFolds e → WellFormedFolds (.cfBreakContinue e)
+  | typeAscription {e tyStr} : WellFormedFolds e → WellFormedFolds (.typeAscription e tyStr)
 
 /-! ### Helper: denoteArgs' commutes with cfIntoMonads -/
 
@@ -1289,6 +1291,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
     | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
     | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
     | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+  | typeAscription _ _ ih =>
+    intro fuel env w; unfold denote'; exact ih fuel env w
 
 /-! ### Helper: denoteForLoop' never produces earlyRet -/
 
@@ -2245,5 +2249,12 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     | err => rfl
     | broke => rfl
     | continued => rfl
+  | typeAscription _ _ ih =>
+    cases hnl with | typeAscription he =>
+    cases hnq with | typeAscription hqe =>
+    cases hwf with | typeAscription hwe =>
+    intro fuel env
+    simp only [cfIntoMonads]; unfold denote'
+    exact ih he hqe hwe fuel env
 
 end Hax

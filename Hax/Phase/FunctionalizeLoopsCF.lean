@@ -220,6 +220,10 @@ private def matchPat_preserves_ncf_impl :
           exact ih payload env env' henv (by simp [Value.deepNoControlFlow] at hv; exact hv) hm
         | true => simp [matchPat] at hm
       | _ => simp [matchPat] at hm)
+    -- ctorPat: `matchPat` falls through to the catch-all and returns `none`,
+    -- so the `= some env'` hypothesis is unreachable.
+    (fun _name _args _ih_args _v _env _env' _henv _hv hm => by
+      simp [matchPat] at hm)
     (fun vs env env' henv hvs hm => by
       cases vs with
       | nil => simp [matchPat.matchPatList] at hm; subst hm; exact henv
