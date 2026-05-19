@@ -868,6 +868,21 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
       | _ => "unknown_var"
     return .var name
   | .error _ =>
+  -- UpvarRef: a closure-captured variable. Structure:
+  -- `{"UpvarRef": {"var_hir_id": {"name": "x", "id": ...}}}`.
+  -- The OCaml `cargo hax into lean` backend treats this identically
+  -- to `VarRef` — the captured variable is lexically in scope at the
+  -- closure body's emission point, so a plain `.var name` reference
+  -- resolves correctly (see Libcrux_specs_hax aes128_gcm_encrypt:
+  -- `(fun block => Libcrux_specs_hax.Aes.aes128_encrypt k block)`
+  -- where `k` is the captured `let k := *key`).
+  match h_UpvarRef : j.getObjVal? "UpvarRef" with
+  | .ok data =>
+    let name := match data.getObjVal? "var_hir_id" with
+      | .ok h => extractLocalIdentName h
+      | _ => "unknown_upvar"
+    return .var name
+  | .error _ =>
   match h_GlobalName : j.getObjVal? "GlobalName" with
   | .ok data =>
     let name := match data.getObjVal? "item" with
@@ -2190,6 +2205,14 @@ where
       let name := match data.getObjVal? "id" with
         | .ok id => extractLocalIdentName id
         | _ => "unknown_var"
+      return .var name
+
+    -- UpvarRef: closure-captured variable. See the matching case in
+    -- `parseExprKind` (around line 879) for why this is just a `.var name`.
+    else if let .ok data := j.getObjVal? "UpvarRef" then
+      let name := match data.getObjVal? "var_hir_id" with
+        | .ok h => extractLocalIdentName h
+        | _ => "unknown_upvar"
       return .var name
 
     else if let .ok data := j.getObjVal? "GlobalName" then
