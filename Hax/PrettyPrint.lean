@@ -697,6 +697,16 @@ private def accInitOverrides (accs : List String) (body : ImpExpr) :
       else some (acc, initExpr)
     | none => none
 
+/-- Pull variable names out of a `cfContinue` / `cfBreak` argument that
+    threads accumulator state back to the loop. Recognises `.var "n"`
+    (single accumulator) and `.tuple [.var "n1", ..]` (multiple). -/
+private def cfArgAccNames : ImpExpr → List String
+  | .var n => [n]
+  | .tuple elems => elems.filterMap fun
+    | .var n => some n
+    | _ => none
+  | _ => []
+
 /-- Extract accumulators from a whileFold body.
     The body may be wrapped in an `ifThenElse` (from `while true { if cond ... else break }`),
     so we look inside the `thn` branch for mutation patterns.
@@ -707,6 +717,13 @@ private partial def extractWhileAccumulators : ImpExpr → List String
       -- Mutation pattern at top level
       [n]
     else []
+  -- `cfContinue (h, offset)` / `cfBreak (h, offset)` at the tail of the
+  -- while body — the args are the accumulators threaded between iterations.
+  -- Without this, a body that mutates locals via `let h := ...; let offset := ...;
+  -- cfContinue (h, offset)` looks accumulator-free to the old recursion
+  -- (which only matched `.letBind n _ (.var n)` shapes).
+  | .cfContinue arg => cfArgAccNames arg
+  | .cfBreak arg => cfArgAccNames arg
   | .letBind _ _ body => extractWhileAccumulators body
   | .seq (.seq a b) c => extractWhileAccumulators (.seq a (.seq b c))
   | e => extractAccumulators e
@@ -912,6 +929,13 @@ private partial def extractCfBreak : ImpExpr → Option ImpExpr
   -- recurse into the tail to find cfBreak at the end of a mutation chain
   | .seq (.letBind _ _ (.var _)) rest => extractCfBreak rest
   | .seq (.seq _ _) rest => extractCfBreak rest
+  -- if-then-else where both branches are cfBreak-extractable: lift the
+  -- if into the value position. Handles nested early-return patterns
+  -- like `if c1 { if c2 { return X } else { return Y } }`.
+  | .ifThenElse c thn els =>
+    match extractCfBreak thn, extractCfBreak els with
+    | some vT, some vE => some (.ifThenElse c vT vE)
+    | _, _ => none
   | _ => none
 
 /-- Strip cfBreak from the tail of an expression, replacing it with the break value.
@@ -924,6 +948,54 @@ private partial def stripCfBreak : ImpExpr → ImpExpr
   | .seq .unitVal rest => stripCfBreak rest
   | .letBind n v body => .letBind n v (stripCfBreak body)
   | .seq e1 e2 => .seq e1 (stripCfBreak e2)
+  | e => e
+
+/-- Check whether `e` is a "control-flow guard tail" — its leaves are
+    `cfBreak` (early return), `cfContinue` (fall through), or `.unitVal`
+    (which acts as implicit fall-through when paired with a sibling
+    `cfBreak`). -/
+private partial def isCfGuardTail : ImpExpr → Bool
+  | .cfBreak _ => true
+  | .cfContinue _ => true
+  | .unitVal => true  -- implicit fall-through
+  | .seq (.cfBreak _) _ | .seq (.cfContinue _) _ => true
+  | .ifThenElse _ thn els => isCfGuardTail thn && isCfGuardTail els
+  | .letBind _ _ body => isCfGuardTail body
+  | .seq _ rest => isCfGuardTail rest
+  | _ => false
+
+/-- Check whether `e` contains a `cfBreak` somewhere in its tail positions.
+    Used together with `isCfGuardTail` to ensure we don't fire the
+    CF-guard fusion on plain `if cond then () else ()` patterns that
+    aren't actually doing early returns. -/
+private partial def tailHasCfBreak : ImpExpr → Bool
+  | .cfBreak _ => true
+  | .seq (.cfBreak _) _ => true
+  | .ifThenElse _ thn els => tailHasCfBreak thn || tailHasCfBreak els
+  | .letBind _ _ body => tailHasCfBreak body
+  | .seq _ rest => tailHasCfBreak rest
+  | _ => false
+
+/-- An if-then-else is a CF guard exactly when both branches are
+    CF-guard tails and at least one branch contains a `cfBreak`. -/
+private def isCfGuardIf (thn els : ImpExpr) : Bool :=
+  isCfGuardTail thn && isCfGuardTail els && (tailHasCfBreak thn || tailHasCfBreak els)
+
+/-- Rewrite a CF-guard `e` so that every `cfContinue`/`unitVal` leaf is
+    replaced by `rest` and every `cfBreak val` leaf becomes the bare
+    `val`. Used to fuse `seq <if-with-cf-markers> rest` into a single
+    expression where each branch decides between an early return and
+    continuing with `rest` inlined. -/
+private partial def inlineRestIntoCfGuard (rest : ImpExpr) : ImpExpr → ImpExpr
+  | .cfBreak val => val
+  | .cfContinue _ => rest
+  | .unitVal => rest
+  | .seq (.cfBreak val) _ => val
+  | .seq (.cfContinue _) _ => rest
+  | .ifThenElse c thn els =>
+    .ifThenElse c (inlineRestIntoCfGuard rest thn) (inlineRestIntoCfGuard rest els)
+  | .letBind n v body => .letBind n v (inlineRestIntoCfGuard rest body)
+  | .seq e1 e2 => .seq e1 (inlineRestIntoCfGuard rest e2)
   | e => e
 
 /-- Check if an expression references a name as a function call (.app fname ...). -/
@@ -1260,6 +1332,12 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       s!"Hax.slice_from {parensIf (toLean arr 0) (!isAtom arr)} {parensIf (toLean n 0) (!isAtom n)}"
     | "index_mut", [arr, .app "Range" [lo, hi]] =>
       s!"Hax.slice_range {parensIf (toLean arr 0) (!isAtom arr)} {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)}"
+    -- `index arr RangeFull` is the whole-array slice — identity on `Array α`.
+    -- Matches what the OCaml `cargo hax into lean` backend emits (a no-op
+    -- coercion). `RangeFull` carries no bounds, so we drop it.
+    | "index", [arr, .var "RangeFull"] | "index", [arr, .app "RangeFull" []]
+    | "index_mut", [arr, .var "RangeFull"] | "index_mut", [arr, .app "RangeFull" []] =>
+      parensIf (toLean arr 0) (!isAtom arr)
     -- Special-case: collect(Range(lo, hi)) → Hax.range lo hi
     | "collect", [.app "Range" [lo, hi]] =>
       s!"Hax.range {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)}"
@@ -1535,6 +1613,16 @@ where
     | .ifThenElse cond thn els, _ =>
       -- Skip assert blocks (assert_eq!/assert! wrapped in if-true-then)
       if isAssertBlock e1 then atLine e2 lvl
+      -- CF-guard pattern: at least one branch tails into `cfBreak val`
+      -- (early return) and the other tails into `cfContinue ()` / `()`
+      -- (fall through). Inline `e2` into the fall-through positions and
+      -- unwrap cfBreaks, so the resulting if-expression directly returns
+      -- the function's value. Closes the "let ... statement after if-with-
+      -- cfBreak in else=()" pattern that the legacy renderer emitted as
+      -- invalid Lean (statement following a non-unit if-expression).
+      else if isCfGuardIf thn els then
+        let fused := inlineRestIntoCfGuard e2 (.ifThenElse cond thn els)
+        atLine fused lvl
       -- Early-return guard pattern:
       --   seq (ifThenElse cond <cfBreak val> <cfContinue/unitVal>) rest
       --   → if cond then val else rest
