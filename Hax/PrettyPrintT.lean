@@ -473,9 +473,18 @@ partial def injectLetTypeAnnotations (typeMap : List (String × String)) :
   | .letBind n val body =>
     let val' := injectLetTypeAnnotations typeMap val
     let body' := injectLetTypeAnnotations typeMap body
-    match typeMap.find? (·.1 == n) with
-    | some (_, tyStr) => .letBind n (.typeAscription val' tyStr) body'
-    | none => .letBind n val' body'
+    -- Skip annotation for param-shadow patterns (`let n := var n`).
+    -- The typeMap is keyed by name; when the same name is bound twice
+    -- (e.g. `let p1 := p1; let p1 := g1_decompress p1`), the param-shadow
+    -- and the real reassignment share the entry. The param-shadow's RHS
+    -- has the parameter's actual type — annotating it with the later
+    -- shadowing's type is a type error (regression seen on EUDIW BLS
+    -- `pairing_check`, where `let p1 := p1` got ascribed to the decompress
+    -- result type `Array Int × Array Int × Bool`).
+    let isParamShadow := match val' with | .var v => v == n | _ => false
+    match typeMap.find? (·.1 == n), isParamShadow with
+    | some (_, tyStr), false => .letBind n (.typeAscription val' tyStr) body'
+    | _, _ => .letBind n val' body'
   | .app f args => .app f (args.map (injectLetTypeAnnotations typeMap))
   | .seq a b => .seq (injectLetTypeAnnotations typeMap a) (injectLetTypeAnnotations typeMap b)
   | .ifThenElse c t e =>
