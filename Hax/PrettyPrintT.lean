@@ -759,11 +759,9 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- newtype-specific `.0` projections via the marker function-name.
   let procTdefs := procTdefs.map fun (n, te) => (n, markNamedProj te)
   -- Apply the typed init-fold-accums phase BEFORE erase, so the
-  -- accumulator init insertions happen on the type-rich TExpr (and
-  -- their .erase is the same as the untyped variant on the erased
-  -- body, by the erase-preservation property of `tInitMissingFoldAccums`
-  -- — proof is currently deferred but the operational behavior is
-  -- identical for the unit-bound case used here).
+  -- accumulator init insertions happen on the type-rich TExpr.
+  -- Erase-preservation: `Hax.TPhase.tInitMissingFoldAccums_erase`
+  -- proves `(tInitMissingFoldAccums bound e).erase = initMissingFoldAccums bound e.erase`.
   let procTdefs := procTdefs.map fun (n, te) =>
     (n, tInitMissingFoldAccums [] te)
   -- Typed phases (run BEFORE erase so type-dependent rewrites use direct
@@ -830,10 +828,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
         | none => (fname, e)
       | _ => (fname, e)
-  -- `initMissingFoldAccums` kept as an idempotent backup; the typed
-  -- `tInitMissingFoldAccums` already ran on the TExpr layer before erase
-  -- (and `tInitMissingFoldAccums_erase` proves the erased result matches).
-  let defs := defs.map fun (n, e) => (n, initMissingFoldAccums [] e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
   let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs)
