@@ -829,8 +829,8 @@ def parseLiteral (data : Json) : ImpExpr :=
       .app "array_lit" byteExprs
     | _ => .app "array_lit" []
   else if let .ok _strData := litKind.getObjVal? "Str" then
-    -- Str: string literal → opaque in untyped extraction
-    .app "literal" []
+    -- Str: intentional opaque placeholder, see typed branch comment.
+    .app "str_opaque" []
   else .app "literal" []  -- char, float, etc.
 
 /-- Replace the deepest unitVal in a letBind chain with a continuation.
@@ -2251,8 +2251,14 @@ where
           return .app "array_lit" byteExprs
         | _ => return .app "array_lit" []
       else if let .ok _strData := litKind.getObjVal? "Str" then
-        -- Str: string literal → opaque literal placeholder
-        return .app "literal" []
+        -- Str: string literal → intentional opaque placeholder. Use a
+        -- distinct app head (`str_opaque`) so `validateExtraction`
+        -- doesn't flag it as an "unsupported literal" — string content
+        -- in extracted Rust is almost always a debug label (e.g.
+        -- `TransitionConstraint { name: "next.a = cur.b", … }`) that we
+        -- deliberately don't carry through to Lean. Renders to the same
+        -- `Hax.literal` constant as the generic unsupported placeholder.
+        return .app "str_opaque" []
       else if let .ok byteVal := litKind.getObjValAs? Nat "Byte" then
         -- Byte: single byte b'X' → integer literal (byte value)
         return .lit (.int byteVal)

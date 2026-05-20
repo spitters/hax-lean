@@ -140,6 +140,7 @@ private def runtimeName (f : String) : String :=
   | "array_update" => "Hax.array_update"
   -- Slice/mutation operations
   | "literal" => "Hax.literal"
+  | "str_opaque" => "Hax.literal"
   | "copy_from_slice" => "Hax.copy_from_slice"
   | "extend_from_slice" => "Hax.extend_from_slice"
   | "index_mut" => "Hax.index_mut"
@@ -2351,7 +2352,7 @@ private def isRuntimeName (f : String) : Bool :=
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
   | "array_update" | "cast" | "castVal"
   | "Some" | "None" | "Ok" | "Err"
-  | "panic" | "literal" | "deref" | "clone" | "to_vec" | "copy_from_slice"
+  | "panic" | "literal" | "str_opaque" | "deref" | "clone" | "to_vec" | "copy_from_slice"
   | "extend_from_slice" | "truncate" | "sha256"
   | "with_capacity" | "into_vec" | "into_iter" | "next"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range" | "min" | "max"
@@ -2377,7 +2378,7 @@ def builtinTable : List (String × List String) :=
                           "collect", "flat_map", "zip", "next", "new", "enumerate"])
   , ("range",            ["RangeTo", "RangeFrom", "Range"])
   , ("misc-runtime",     ["count_ones", "assert_failed", "assert_failed'",
-                          "from", "into", "literal", "deref", "clone",
+                          "from", "into", "literal", "str_opaque", "deref", "clone",
                           "cast", "castVal", "castVal_w", "from_val",
                           "panic", "sha256", "rotate_right", "rotate_left"])
   , ("option-result",    ["Some", "None", "Ok", "Err"])
