@@ -1885,23 +1885,41 @@ where
           s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
       -- Render the tail expression to detect its type for annotations
       let tailStr := (atLine tail (lvl + 1)).trimRight
-      -- Detect nested cfBreak in body's tail positions (function-level
-      -- early-return inside a fold body); used by both accs-empty and
-      -- accs-non-empty branches to decide whether the outer destructure
-      -- needs `.Break (.Break _v)` (two unwraps).
-      let rec hasNestedCfBreak : ImpExpr → Bool
-        | .cfBreak (.cfBreak _) => true
-        | .ifThenElse _ t e => hasNestedCfBreak t || hasNestedCfBreak e
-        | .letBind _ _ b => hasNestedCfBreak b
-        | .seq _ b => hasNestedCfBreak b
-        | .match_ _ arms => arms.any (fun (_, b) => hasNestedCfBreak b)
+      -- Decide whether THIS fold's `.Break _v` arm needs to re-wrap `_v`.
+      -- The `forFoldReturn` result type is `ControlFlow β (ControlFlow γ α)`,
+      -- so `.Break _v` already yields `_v : β` (the function-return value).
+      -- The decision is purely about the OUTER context:
+      --   * At function-tail: leave `_v` bare — it IS the return value.
+      --   * Inside an enclosing `forFoldReturn` body: the body must
+      --     produce `ControlFlow (ControlFlow β' γ') α'`. To propagate
+      --     the function-return up, wrap as `Hax.cfBreak (Hax.cfBreak _v)`
+      --     so the outer fold sees `.Break (.Break _v)` = function return.
+      -- The signal is the `tail`: if it tails into CF (`cfBreak` /
+      -- `cfContinue` / `cfBreakContinue`), we're inside an enclosing fold.
+      let rec tailIsCf : ImpExpr → Bool
+        | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
+        | .letBind _ _ b => tailIsCf b
+        | .seq _ b => tailIsCf b
+        | .ifThenElse _ t e => tailIsCf t && tailIsCf e
+        | .match_ _ arms => arms.all (fun (_, b) => tailIsCf b)
         | _ => false
-      let nestedCfBreakInBody := hasNestedCfBreak body
+      let enclosedInFold := tailIsCf tail
       if accs.isEmpty then
-        if nestedCfBreakInBody then
-          s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow (ControlFlow _ _) (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break (.Break _v) => _v\n{ind}| .Break (.Continue _) =>\n{atLine tail (lvl + 1)}\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
-        else
-          s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow _ (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break _v => _v\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
+        -- `_fr : ControlFlow β (ControlFlow γ α)` (forFoldReturn result).
+        -- `.Break _v` gives `_v : β` = function-return value.
+        -- At function-tail leave it bare; inside an enclosing fold,
+        -- re-wrap via `Hax.cfBreak (Hax.cfBreak _v)` so the outer
+        -- fold's body type `ControlFlow (ControlFlow β' γ') α'` is
+        -- preserved and the function-return propagates.
+        let breakArm :=
+          if enclosedInFold then "Hax.cfBreak (Hax.cfBreak _v)" else "_v"
+        -- A `show` annotation pins the inner Continue type so pattern
+        -- elaboration doesn't fail with unresolved metavariables when
+        -- the body doesn't use `cfBreakContinue` (which would force γ).
+        -- α (the third slot) is left unresolved (`_`) — Lean infers it
+        -- from the body's `cfContinue v` value type, which may be Unit
+        -- (top-level fold) or `ControlFlow Unit Unit` (nested fold body).
+        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow _ (ControlFlow Unit _) from _fr) with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
       else
         let accStr := ", ".intercalate (accs.map sanitizeName)
         let destr := if accs.length == 1 then sanitizeName accs.head! else s!"({accStr})"
@@ -1915,26 +1933,14 @@ where
         -- normalises the AST so the trivial render produces well-typed
         -- Lean.
         let tailRendered := atLine tail (lvl + 1)
-        -- Detect a nested-loop body that uses `cfBreak (cfBreak _)` to
-        -- propagate an early-return up two levels. The inner match's
-        -- `.Break _v` arm must then re-wrap `_v` as a cfBreak so the
-        -- outer loop body's expected `ControlFlow B C` type is
-        -- preserved.
-        let hasNestedCfBreak : Bool :=
-          let rec scan : ImpExpr → Bool
-            | .cfBreak (.cfBreak _) => true
-            | .cfBreak v => scan v
-            | .letBind _ v b => scan v || scan b
-            | .seq a b => scan a || scan b
-            | .ifThenElse _ t e => scan t || scan e
-            | .match_ _ arms => arms.any (fun (_, b) => scan b)
-            | .whileFold _ b | .whileFoldReturn _ b => scan b
-            | .forFold _ _ _ b | .forFoldRev _ _ _ b
-            | .forFoldReturn _ _ _ b | .forFoldRevReturn _ _ _ b => scan b
-            | _ => false
-          scan body || scan tail
+        -- Same `enclosedInFold` decision as above. The single-wrap
+        -- form (`Hax.cfBreak _v`) is used here because the existing
+        -- accs-non-empty pathway targets folds whose enclosing context
+        -- is a regular `forFold` (one ControlFlow level). For
+        -- enclosure inside a `forFoldReturn` body (two levels), the
+        -- accs-empty path above is the typical match.
         let breakArm :=
-          if hasNestedCfBreak then "Hax.cfBreak _v" else "_v"
+          if enclosedInFold then "Hax.cfBreak _v" else "_v"
         s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
@@ -2400,6 +2406,15 @@ def isAlwaysBuiltin (f : String) : Bool :=
 def isFieldProjection (f : String) : Bool :=
   f.startsWith "." || f.contains '.'
 
+/-- Collect names bound by an `ImpPat`. Used to extend the `bound`
+    list when traversing match-arm bodies in `collectFreeVars`. -/
+partial def patBindersImp : ImpPat → List String
+  | .varPat n => [n]
+  | .tuplePat pats => pats.foldl (fun acc p => acc ++ patBindersImp p) []
+  | .somePat p | .okPat p | .errPat p => patBindersImp p
+  | .ctorPat _ args => args.foldl (fun acc p => acc ++ patBindersImp p) []
+  | .wildcard | .litPat _ | .nonePat => []
+
 /-- Collect free variables: `.var` names not bound by enclosing `letBind`.
     Returns (name, 0) pairs so they can be merged with `collectAppCalls` results. -/
 partial def collectFreeVars (bound : List String := []) : ImpExpr → List String
@@ -2417,8 +2432,14 @@ partial def collectFreeVars (bound : List String := []) : ImpExpr → List Strin
   | .tuple es => es.foldl (fun acc e => acc ++ collectFreeVars bound e) []
   | .proj e _ => collectFreeVars bound e
   | .match_ scrut arms =>
-    -- When all arms use .varPat (enum variant match), collect pattern names as free vars
-    -- since the surface code converts these to `if Hax.beq scrut VARIANT then ...`
+    -- Enum-variant heuristic (only fires when ALL arms are bare
+    -- `varPat _`): scrape the bare names as free vars because the
+    -- renderer rewrites them to `if Hax.beq scrut TAG then …`. For
+    -- arms with structured patterns (`tuplePat`, `somePat`, `ctorPat`,
+    -- …) the pattern variables are local destructure binders — extend
+    -- `bound` with them when traversing the body so they don't leak
+    -- as free vars (which would route a `match Some(p) => f p` arm's
+    -- `p` into the Deps class).
     let allVarPats := arms.all fun (p, _) => match p with
       | .varPat _ => true | .wildcard => true | _ => false
     let patFreeVars := if allVarPats then
@@ -2426,7 +2447,8 @@ partial def collectFreeVars (bound : List String := []) : ImpExpr → List Strin
         | .varPat n => if bound.contains n then none else some n | _ => none
     else []
     collectFreeVars bound scrut ++ patFreeVars ++
-    arms.foldl (fun acc (_, b) => acc ++ collectFreeVars bound b) []
+    arms.foldl (fun acc (p, b) =>
+      acc ++ collectFreeVars (bound ++ patBindersImp p) b) []
   -- Fold constructors bind the loop variable `v` in their body; the bound
   -- list must include `v` for the body traversal, otherwise the loop index
   -- leaks as a "free var" and is misclassified as a Deps method.

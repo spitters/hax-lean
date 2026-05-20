@@ -68,6 +68,15 @@ private partial def collectTAppCalls : TExpr → List (String × Nat × List Imp
   | .mk (.break_ (some e)) _ => collectTAppCalls e
   | _ => []
 
+/-- Collect names bound by an `ImpPat`. These are introduced as locals
+    in the arm body and must extend `bound` for free-var collection. -/
+partial def patBinders : ImpPat → List String
+  | .varPat n => [n]
+  | .tuplePat pats => pats.foldl (fun acc p => acc ++ patBinders p) []
+  | .somePat p | .okPat p | .errPat p => patBinders p
+  | .ctorPat _ args => args.foldl (fun acc p => acc ++ patBinders p) []
+  | .wildcard | .litPat _ | .nonePat => []
+
 /-- Collect free variable references in a TExpr with their types. -/
 partial def collectTFreeVars (bound : List String := []) :
     TExpr → List (String × ImpType)
@@ -84,6 +93,12 @@ partial def collectTFreeVars (bound : List String := []) :
   | .mk (.tuple es) _ => es.foldl (fun acc e => acc ++ collectTFreeVars bound e) []
   | .mk (.proj e _) _ => collectTFreeVars bound e
   | .mk (.match_ scrut arms) _ =>
+    -- Enum-variant heuristic: when all arms are bare `varPat _` (no
+    -- structure), the names are likely enum tag references that the
+    -- renderer rewrites to `if Hax.beq scrut TAG then …`. Those tags
+    -- need to surface as Deps. Pattern-bound vars inside any other
+    -- pattern shape (tuplePat, somePat, ctorPat, …) are local
+    -- destructure binders and must NOT leak as free vars.
     let allVarPats := arms.all fun (p, _) => match p with
       | .varPat _ => true | .wildcard => true | _ => false
     let patFreeVars := if allVarPats then
@@ -91,7 +106,8 @@ partial def collectTFreeVars (bound : List String := []) :
         | .varPat n => if bound.contains n then none else some (n, ImpType.unknown) | _ => none
     else []
     collectTFreeVars bound scrut ++ patFreeVars ++
-    arms.foldl (fun acc (_, b) => acc ++ collectTFreeVars bound b) []
+    arms.foldl (fun acc (p, b) =>
+      acc ++ collectTFreeVars (bound ++ patBinders p) b) []
   -- Fold / for-loop constructors bind the loop variable in their body;
   -- the bound list must include `v` for the body traversal, otherwise the
   -- loop index leaks as a "free var" and is misclassified as a Deps method.

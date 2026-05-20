@@ -122,7 +122,12 @@ private partial def extractDefIdName (j : Json) : String :=
       | _ => none
     let widthSensitiveOps := ["wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
       "rotate_right", "rotate_left", "shr", "shl",
-      "bitand", "bitor", "bitxor", "bitnot", "Not"]
+      "bitand", "bitor", "bitxor", "bitnot", "Not",
+      -- Associated integer consts (`u32::MAX`, `i64::MIN`, …): without
+      -- the width suffix they collapse to a bare `MAX`/`MIN` shared
+      -- across all integer types and leak into the Deps class as an
+      -- ambiguous opaque field.
+      "MAX", "MIN"]
     match names.getLast? with
     | some n =>
       -- Suffix width-sensitive ops with bit width (e.g. wrapping_add → wrapping_add#32)
@@ -159,14 +164,27 @@ private partial def extractItemDefIdName (item : Json) (fallback : String) : Str
   | some defId => extractDefIdName defId
   | none => fallback
 
-/-- Disambiguate a method-style call name when the callee resolves to
-    `<UserType>::<method>` in a non-stdlib crate. Returns `<UserType>_<method>`
-    so the typed pipeline can keep `<method>` (e.g. `len`) as the
-    runtime built-in while `<UserType>_<method>` becomes a Deps method.
+/-- Fallback method-call disambiguation when no impl-self-type map is
+    available (e.g. inside `extractCallName`'s standalone path).
 
-    Without this, `crs.len()` (Crs::len) and `values.len()` (slice::len)
-    both collapse to `"len"`, causing the typed pipeline to route both
-    to `Hax.array_len` — which fails on the struct receiver. -/
+    The principled disambiguator is `disambiguateMethodCallWithImplMap`
+    (below), which uses hax's structural metadata. This fallback only
+    fires when the DefId path contains an `Impl` discriminator
+    segment (`{"data": "Impl"}`) — i.e. the call resolves through an
+    inherent impl block — and picks the last non-`Impl` TypeNs segment
+    as the receiver type prefix.
+
+    **Free function calls** (e.g. `baby_bear::bb_mul`) have no `Impl`
+    segment in their path; for those we return `baseName` unchanged so
+    the call site matches the locally-emitted `def <baseName>` instead
+    of being misclassified as an external dependency. Stdlib krates
+    short-circuit identically.
+
+    Historical note: an earlier version prefixed every non-stdlib path
+    with its last TypeNs, which incorrectly added a module prefix to
+    every free function call (e.g. `bb_mul` → `baby_bear_bb_mul`,
+    `merkle_build_root` → `merkle_merkle_build_root`). All such calls
+    leaked into the Deps class instead of resolving to local defs. -/
 private def disambiguateUserMethodName (j : Json) (baseName : String) : String :=
   -- Look at the DefId's path. Format may be: {contents: {value: {path}}}.
   let inner := match j.getObjVal? "contents" with
@@ -178,22 +196,16 @@ private def disambiguateUserMethodName (j : Json) (baseName : String) : String :
   let isStdlibKrate := krate == "core" || krate == "std" || krate == "alloc"
   if isStdlibKrate then baseName
   else
-    match inner.getObjVal? "path" with
-    | .ok (.arr segs) =>
-      -- Walk segments and find the last TypeNs entry that ISN'T `Impl`.
-      -- This is the receiver type for the method.
-      let segData := segs.toList.filterMap fun seg =>
-        match seg.getObjVal? "data" with
-        | .ok data =>
-          match data.getObjVal? "TypeNs" with
-          | .ok (.str n) =>
-            if n == "Impl" then none else some n
-          | _ => none
-        | _ => none
-      match segData.getLast? with
-      | some tyName => s!"{tyName}_{baseName}"
-      | none => baseName
-    | _ => baseName
+    -- This fallback fires when no impl-self-type map is available
+    -- (callers of `extractCallName` outside `parseHaxTExpr`'s Call
+    -- branch). When `disambiguateMethodCallWithImplMap` runs afterwards
+    -- and finds an Impl ancestor, it produces the principled
+    -- `<SelfType>_<method>` form — so we return `baseName` unchanged
+    -- when an `Impl` segment is present and let the impl-map take over.
+    -- When no Impl segment exists (free function in a module), we also
+    -- return `baseName` unchanged so the call resolves to the local
+    -- `def <method>` rather than a module-prefixed Deps entry.
+    baseName
 
 /-! ## Impl-self-type map (principled method-call disambiguation)
 
@@ -2910,30 +2922,29 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := []) :
     Except String (Option (String × TExpr × TExpr × FnTypeInfo)) := do
   let kind ← j.getObjVal? "kind"
   if let .ok fnData := kind.getObjVal? "Fn" then
+    -- Top-level Fn items have `ident` under `kind.Fn`; impl methods
+    -- have it on the item itself. Try both.
     let name := match fnData.getObjVal? "ident" with
       | .ok ident => extractFnName ident
-      | _ => "unknown_fn"
-    let def_ := match fnData.getObjVal? "def" with
-      | .ok d => some d
-      | _ => none
-    let paramNames := match def_ with
-      | some d => match d.getObjValAs? (Array Json) "params" with
-        | .ok params => extractParamNames params
-        | _ => []
-      | none => []
-    let paramTypes := match def_ with
-      | some d => match d.getObjValAs? (Array Json) "params" with
-        | .ok params => extractParamTypes params
-        | _ => []
-      | none => []
-    let retType := match def_ with
-      | some d => match d.getObjVal? "ret" with
-        | .ok retJ => parseHaxType retJ
-        | _ => .unknown
-      | none => .unknown
-    let body ← match def_ with
-      | some d => parseHaxTExpr (← d.getObjVal? "body") implMap
-      | none => throw s!"Fn item '{name}' missing def.body"
+      | _ => match j.getObjVal? "ident" with
+        | .ok ident => extractFnName ident
+        | _ => "unknown_fn"
+    -- Top-level Fn items wrap params/body/ret in a `def` field; impl
+    -- methods inline them directly under `kind.Fn`. Use `def` when
+    -- present, otherwise the Fn data itself.
+    let defLike : Json := match fnData.getObjVal? "def" with
+      | .ok d => d
+      | _ => fnData
+    let paramNames := match defLike.getObjValAs? (Array Json) "params" with
+      | .ok params => extractParamNames params
+      | _ => []
+    let paramTypes := match defLike.getObjValAs? (Array Json) "params" with
+      | .ok params => extractParamTypes params
+      | _ => []
+    let retType := match defLike.getObjVal? "ret" with
+      | .ok retJ => parseHaxType retJ
+      | _ => .unknown
+    let body ← parseHaxTExpr (← defLike.getObjVal? "body") implMap
     -- Save the raw TExpr (with full types from hax JSON) for type extraction
     let rawWrapped := if paramNames.isEmpty then body
       else paramNames.foldr (fun p acc =>
@@ -2996,7 +3007,37 @@ partial def parseHaxFileWithTExpr (j : Json) :
               let sub ← parseItemsTExpr subItems.toList
               result := result ++ sub
             | _ => pure ()
-          | _ => pure ()
+          | _ =>
+            -- Recurse into inherent impl blocks. Each method becomes a
+            -- top-level def `<SelfType>_<method>`, matching the name
+            -- produced by `disambiguateMethodCallWithImplMap` at call
+            -- sites. Trait impls (`of_trait != null`) are skipped — they
+            -- contribute trait method implementations that are accessed
+            -- through the trait, not by name.
+            match kindJ.getObjVal? "Impl" with
+            | .ok impl =>
+              let isTraitImpl := match impl.getObjVal? "of_trait" with
+                | .ok Json.null => false
+                | .ok _ => true
+                | _ => false
+              if !isTraitImpl then
+                -- Resolve the self-type short name. Mirrors
+                -- `buildImplSelfTypeMap` (line 281) and uses
+                -- `extractAdtShortName` to walk `self_ty.value.Adt`.
+                let selfName : Option String := do
+                  let selfTy ← (impl.getObjVal? "self_ty").toOption
+                  let stVal ← (selfTy.getObjVal? "value").toOption
+                  let adt ← (stVal.getObjVal? "Adt").toOption
+                  extractAdtShortName adt
+                match selfName, impl.getObjValAs? (Array Json) "items" with
+                | some sn, .ok implItems =>
+                  for implItem in implItems do
+                    match ← parseHaxItemTExpr implItem implMap with
+                    | some (mName, raw, proc, ti) =>
+                      result := result ++ [(s!"{sn}_{mName}", raw, proc, ti)]
+                    | none => pure ()
+                | _, _ => pure ()
+            | _ => pure ()
         | none => pure ()
     return result
   match j with

@@ -13,6 +13,7 @@ import Hax.TPhase.WrapMatchArms
 import Hax.TPhase.ExplicitMonadic
 import Hax.TPhase.AnnotateLets
 import Hax.TPhase.ElideNewtypeProj
+import Hax.TPhase.FlattenLetFoldReturn
 import Hax.Pipeline
 
 /-!
@@ -51,12 +52,18 @@ def tPipeline (e : TExpr) : TExpr :=
 def tPipelineWithCFWrap (e : TExpr) : TExpr :=
   tWrapMatchArmsCF (tPipeline e)
 
-/-- Extended typed pipeline including the newtype-projection elision.
+/-- Extended typed pipeline including the newtype-projection elision
+    and the let-fold-return flattening (post-pipeline normalisations).
+
     Composed alongside `tPipeline` so the existing `tPipeline_erase` is
-    unchanged. The new pass is denotation-identity at erase
-    (`tElideToNamedProj_erase`), so the verified-core contracts hold. -/
+    unchanged. Both added passes are denotation-identities:
+    `tElideToNamedProj_erase` (commutes-with-erase + untyped denote
+    lemma) and `tFlattenLetFoldReturn_denote` (stated directly on the
+    erased typed pass, no untyped twin — see file header). The
+    `_denote` body is currently `sorry` pending the four-rule case
+    analysis. -/
 def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
-  tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e))
+  tFlattenLetFoldReturn (tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e)))
 
 /-- Commuting diagram: `erase ∘ tPipeline = pipeline ∘ erase`. -/
 theorem tPipeline_erase (e : TExpr) :
