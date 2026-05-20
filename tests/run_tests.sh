@@ -88,6 +88,45 @@ else
   skip "--emit-json on lizard fixture" "no verified-dalek checkout found"
 fi
 
+# Test 5: typed path on the plonky3-hax fixture (if available).
+# Set PLONKY3_HAX_DIR to override the default search paths. The fixture
+# lives at the crate root, not in a `crates/<name>/` sub-directory.
+PLONKY3_FIXTURE=""
+PLONKY3_PATHS="\
+    ${PLONKY3_HAX_DIR:+${PLONKY3_HAX_DIR}/hax_frontend_export.json} \
+    ../SSProve-lean/plonky3-hax/hax_frontend_export.json \
+    ../../SSProve-lean/plonky3-hax/hax_frontend_export.json \
+    ../plonky3-hax/hax_frontend_export.json"
+for candidate in $PLONKY3_PATHS; do
+  if [ -f "$candidate" ]; then
+    PLONKY3_FIXTURE="$candidate"
+    break
+  fi
+done
+
+if [ -n "$PLONKY3_FIXTURE" ]; then
+  if "$HAXPIPE" --hax "$PLONKY3_FIXTURE" --emit-certified --name TestPlonky3 \
+       > /tmp/haxpipeT_plonky3.lean 2> /tmp/haxpipeT_plonky3.err
+  then
+    if grep -q "namespace TestPlonky3" /tmp/haxpipeT_plonky3.lean; then
+      # Check no `Total warnings:` line was emitted on stderr (the
+      # extraction should be clean of "unsupported literal" warnings).
+      if grep -q "Total warnings:" /tmp/haxpipeT_plonky3.err; then
+        warning_count=$(grep -oE "Total warnings: [0-9]+" /tmp/haxpipeT_plonky3.err | grep -oE "[0-9]+")
+        fail "typed path on plonky3 fixture" "$warning_count extraction warnings (see /tmp/haxpipeT_plonky3.err)"
+      else
+        pass "typed path on plonky3 fixture (0 warnings)"
+      fi
+    else
+      fail "typed path on plonky3 fixture" "namespace missing in output"
+    fi
+  else
+    fail "typed path on plonky3 fixture" "haxpipeT nonzero exit (see /tmp/haxpipeT_plonky3.err)"
+  fi
+else
+  skip "typed path on plonky3 fixture" "no plonky3-hax checkout found (set PLONKY3_HAX_DIR or symlink ../SSProve-lean)"
+fi
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed, $SKIP skipped ==="
 [ "$FAIL" -eq 0 ]
