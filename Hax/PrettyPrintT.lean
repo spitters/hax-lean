@@ -608,6 +608,7 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
         else if tyStr != "Unit" && tyStr.length > 0 && tyStr.front.isUpper then
           s!"({sn} : {tyStr})"
         else sn)
+  let body := Hax.stripFunctionTailCfBreak body
   let bodyStr := toLean body 1 boolNames
   s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
 

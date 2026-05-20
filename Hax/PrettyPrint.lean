@@ -950,6 +950,25 @@ private partial def stripCfBreak : ImpExpr → ImpExpr
   | .seq e1 e2 => .seq e1 (stripCfBreak e2)
   | e => e
 
+/-- Strip function-tail `cfBreak` markers. When the Rust source uses
+    `return X` at function level (not inside a fold), `cfIntoMonads`
+    turns it into `.cfBreak X`. At the function body's tail position
+    the cfBreak wrapper is meaningless — the early-return value X is
+    just the function's return value. Without this strip, a pattern
+    like `match Y with | Some p => p | None => return None` renders
+    as `| none => Hax.cfBreak (none)` whose type doesn't unify with
+    the function's return type. Called by both `toLeanDef` (untyped
+    generator) and `toLeanDefTyped` (typed generator). -/
+partial def stripFunctionTailCfBreak : ImpExpr → ImpExpr
+  | .cfBreak v => v
+  | .ifThenElse c t e =>
+    .ifThenElse c (stripFunctionTailCfBreak t) (stripFunctionTailCfBreak e)
+  | .match_ scrut arms =>
+    .match_ scrut (arms.map fun (p, b) => (p, stripFunctionTailCfBreak b))
+  | .letBind n v body => .letBind n v (stripFunctionTailCfBreak body)
+  | .seq a b => .seq a (stripFunctionTailCfBreak b)
+  | e => e
+
 /-- Check whether `e` is a "control-flow guard tail" — its leaves are
     `cfBreak` (early return), `cfContinue` (fall through), or `.unitVal`
     (which acts as implicit fall-through when paired with a sibling
@@ -1221,20 +1240,30 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       --   - at function tail: unwrap to the raw early-return value (the
       --     function returns `Option T`, not `ControlFlow`).
       -- Heuristic: if the surrounding `body` (the rest of the block
-      -- after this letBind) eventually emits a `cfContinue` — i.e.
-      -- it's already wrapping its tail in ControlFlow constructors
-      -- because it's inside a loop body — keep the cfBreak. Otherwise
-      -- we're at a function tail and the cfBreak's wrapper would
-      -- type-mismatch the function's `Option`-typed return.
+      -- after this letBind) emits a `cfContinue` / `cfBreak` at its
+      -- TAIL position — i.e. the block as a whole produces a
+      -- `ControlFlow` value because it's the body of an enclosing
+      -- fold — keep the cfBreak in the arm. Otherwise we're at a
+      -- function-tail position and the cfBreak's wrapper would
+      -- type-mismatch the function's return type.
+      --
+      -- Earlier heuristic was `hasCfContinue body` (scanned anywhere
+      -- in the rest of the function), which produced false positives
+      -- on functions that contain unrelated downstream folds with
+      -- cfContinue tails (plonky3_prove had ~6 such folds after the
+      -- match-on-outer FRI proof, all of them irrelevant to whether
+      -- the present match is inside a loop body).
       let surroundingIsLoop : Bool :=
-        let rec hasCfContinue : ImpExpr → Bool
+        let rec tailIsCf : ImpExpr → Bool
           | .cfContinue _ => true
-          | .letBind _ v b => hasCfContinue v || hasCfContinue b
-          | .seq a b => hasCfContinue a || hasCfContinue b
-          | .ifThenElse _ t e => hasCfContinue t || hasCfContinue e
-          | .match_ _ arms => arms.any (fun (_, b) => hasCfContinue b)
+          | .cfBreak _ => true
+          | .cfBreakContinue _ => true
+          | .letBind _ _ b => tailIsCf b
+          | .seq _ b => tailIsCf b
+          | .ifThenElse _ t e => tailIsCf t && tailIsCf e
+          | .match_ _ arms => arms.all (fun (_, b) => tailIsCf b)
           | _ => false
-        hasCfContinue body
+        tailIsCf body
       let armLvl := max lvl 1
         let armInd := indent armLvl
         let armStrs := arms.map fun (p, armBody) =>
@@ -1856,10 +1885,23 @@ where
           s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
       -- Render the tail expression to detect its type for annotations
       let tailStr := (atLine tail (lvl + 1)).trimRight
+      -- Detect nested cfBreak in body's tail positions (function-level
+      -- early-return inside a fold body); used by both accs-empty and
+      -- accs-non-empty branches to decide whether the outer destructure
+      -- needs `.Break (.Break _v)` (two unwraps).
+      let rec hasNestedCfBreak : ImpExpr → Bool
+        | .cfBreak (.cfBreak _) => true
+        | .ifThenElse _ t e => hasNestedCfBreak t || hasNestedCfBreak e
+        | .letBind _ _ b => hasNestedCfBreak b
+        | .seq _ b => hasNestedCfBreak b
+        | .match_ _ arms => arms.any (fun (_, b) => hasNestedCfBreak b)
+        | _ => false
+      let nestedCfBreakInBody := hasNestedCfBreak body
       if accs.isEmpty then
-        -- forFoldReturn returns ControlFlow β (ControlFlow γ Unit)
-        -- We need to annotate to fix unresolvable γ
-        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow _ (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break _v => _v\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
+        if nestedCfBreakInBody then
+          s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow (ControlFlow _ _) (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break (.Break _v) => _v\n{ind}| .Break (.Continue _) =>\n{atLine tail (lvl + 1)}\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
+        else
+          s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match (show ControlFlow _ (ControlFlow Unit Unit) from _fr) with\n{ind}| .Break _v => _v\n{ind}| .Continue _ =>\n{atLine tail (lvl + 1)}"
       else
         let accStr := ", ".intercalate (accs.map sanitizeName)
         let destr := if accs.length == 1 then sanitizeName accs.head! else s!"({accStr})"
@@ -2123,6 +2165,7 @@ def toLeanDef (name : String) (e : ImpExpr) (annotateTypes : Bool := false)
   -- when not all params are annotated. The param annotations for nested
   -- arrays are sufficient; Lean infers return types from the body.
   let retAnnotation := ""
+  let body := stripFunctionTailCfBreak body
   let bodyStr := toLean body 1
   s!"def {sanitizeName name}{paramStr}{retAnnotation} :=\n{bodyStr}\n"
 
