@@ -2270,6 +2270,25 @@ where
     else if let .ok data := j.getObjVal? "Call" then
       let funJ ← data.getObjVal? "fun"
       let funName := extractCallName funJ
+      -- Strip panicking calls. `assert!`, `assert_eq!`, `panic!`,
+      -- `unreachable!` etc. expand through hax into calls to
+      -- `core::panicking::*` helpers (`assert_failed`, `panic`,
+      -- `panic_fmt`, `unreachable_display`, …). These are runtime
+      -- crash points with no verification value — extracting them
+      -- faithfully would force the verifier to model panicking
+      -- semantics. Replace with `.unitVal` so the surrounding
+      -- `let _ := <assert>; rest` reduces (via rule A of
+      -- `tFlattenLetFoldReturn`) to just `rest`. The `AssertKind::Eq`
+      -- variant tag that precedes `assert_failed` also resolves to a
+      -- bare last-segment name (e.g. `Eq` → conflicts with binary
+      -- ops); replacing the call discards the whole `let kind := …; …`
+      -- shape before it can be rendered.
+      let panickingFns := ["assert_failed", "panic", "panic_fmt",
+        "begin_panic", "panic_explicit", "panic_display",
+        "unreachable_display", "panic_nounwind", "panic_nounwind_fmt",
+        "panic_str", "panic_bounds_check"]
+      if panickingFns.contains funName then
+        return .unitVal
       let argsJ ← data.getObjValAs? (Array Json) "args"
       let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a implMap)
       -- Principled method-call disambiguation via the impl-self-type map.
@@ -2310,6 +2329,35 @@ where
         return .letBind "_let" rhs (TExpr.mk .unitVal .unit)
 
     else if let .ok data := j.getObjVal? "Block" then
+      -- Strip assertion-shape Blocks. `assert!`/`assert_eq!` expands
+      -- into a Block whose `expr` is a `Call` to `assert_failed` (with
+      -- the AssertKind tag bound in preceding `Let` stmts). After the
+      -- panicking-call strip in the Call branch the assert_failed
+      -- becomes `.unitVal`, but the surrounding `let kind := …` and
+      -- argument-construction stmts remain as dead bindings whose
+      -- renderer output collides with the surrounding context. Collapse
+      -- the entire Block to `.unitVal` when its `expr` resolves to a
+      -- known panicking function — the stmts only existed to compute
+      -- panic arguments and have no observable effect once the call
+      -- itself is gone.
+      let panickingFns := ["assert_failed", "panic", "panic_fmt",
+        "begin_panic", "panic_explicit", "panic_display",
+        "unreachable_display", "panic_nounwind", "panic_nounwind_fmt",
+        "panic_str", "panic_bounds_check"]
+      let exprIsPanic := match data.getObjVal? "expr" with
+        | .ok exprJ =>
+          match exprJ.getObjVal? "contents" with
+          | .ok contents =>
+            match contents.getObjVal? "Call" with
+            | .ok callData =>
+              match callData.getObjVal? "fun" with
+              | .ok funJ => panickingFns.contains (extractCallName funJ)
+              | _ => false
+            | _ => false
+          | _ => false
+        | _ => false
+      if exprIsPanic then
+        return .unitVal
       let stmts ← match data.getObjValAs? (Array Json) "stmts" with
         | .ok ss => ss.toList.attach.mapM (fun ⟨s, _h⟩ => parseTStmt s)
         | _ => pure []
@@ -2466,7 +2514,36 @@ where
       return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
 
     else if let .ok data := j.getObjVal? "NeverToAny" then
-      return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
+      -- `NeverToAny` is the `!` → any-type coercion. Two distinct uses:
+      --
+      --   * **Panicking** (`assert!`, `panic!`, `unreachable!`): the
+      --     wrapped source has no observable value. Strip the whole
+      --     subtree to `.unitVal` so the renderer doesn't try to emit
+      --     `AssertKind` tags or `panic_fmt` marshalling code.
+      --
+      --   * **Early return** (`return None;` inside `if`): the wrapped
+      --     source is a `Return` whose payload IS observable as a
+      --     function-tail value. Must recurse normally so the
+      --     `cfBreak` propagates through `tWrapMatchArmsCF`.
+      --
+      -- Discriminator: scan the source's JSON for a panicking-call
+      -- function name. If found, strip. Otherwise recurse.
+      let srcJ ← data.getObjVal? "source"
+      let panickingFns := ["assert_failed", "panic", "panic_fmt",
+        "begin_panic", "panic_explicit", "panic_display",
+        "unreachable_display", "panic_nounwind", "panic_nounwind_fmt",
+        "panic_str", "panic_bounds_check"]
+      let rec containsPanic : Json → Bool
+        | .obj kvs => kvs.toList.any fun (_, v) =>
+          match v with
+          | .str s => panickingFns.contains s
+          | _ => containsPanic v
+        | .arr items => items.toList.any containsPanic
+        | _ => false
+      if containsPanic srcJ then
+        return .unitVal
+      else
+        return (← parseHaxTExpr srcJ implMap).kind
 
     else if let .ok data := j.getObjVal? "Box" then
       return (← parseHaxTExpr (← data.getObjVal? "value") implMap).kind
