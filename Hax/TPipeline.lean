@@ -56,12 +56,15 @@ def tPipelineWithCFWrap (e : TExpr) : TExpr :=
     and the let-fold-return flattening (post-pipeline normalisations).
 
     Composed alongside `tPipeline` so the existing `tPipeline_erase` is
-    unchanged. Both added passes are denotation-identities:
-    `tElideToNamedProj_erase` (commutes-with-erase + untyped denote
-    lemma) and `tFlattenLetFoldReturn_denote` (stated directly on the
-    erased typed pass, no untyped twin — see file header). The
-    `_denote` body is currently `sorry` pending the four-rule case
-    analysis. -/
+    unchanged. `tElideToNamedProj` is a denotation-identity via the
+    standard erase-then-untyped-denote route. `tFlattenLetFoldReturn`
+    is a **render-time** normalisation whose four rewrites are
+    well-known algebraic identities under the universal `"_"` discard
+    convention; formal denotation preservation is discussed (but not
+    mechanised) in `Hax/TPhase/FlattenLetFoldReturn.lean` — it depends
+    on a `"_"` not-free-in invariant that isn't carried by the typed
+    AST. The pass is outside the verified-core diagram for this
+    reason. -/
 def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
   tFlattenLetFoldReturn (tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e)))
 

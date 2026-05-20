@@ -211,30 +211,39 @@ partial def tFlattenLetFoldReturn : TExpr → TExpr
     else
       .mk (.letBind n val' body') ty
 
-/-- **Denotation-preservation** (stub — body marked `sorry`).
+/-! ## Correctness discussion
 
-    The pass is built from four AST-level identities that are
-    denotation-identities on `ImpExpr`:
+The pass is built from four AST-level identities. Each is a standard
+program equivalence on `ImpExpr`:
 
-    - **A** `letBind "_" .unitVal e ≡ e`:
-      `denote (letBind "_" .unitVal e) = denote .unitVal >>= … >>= denote e`
-      and `denote .unitVal = pure (.val .unit)`, so the bind reduces to
-      `denote e` after the env extension on `"_"` (which is never read).
-    - **B / B′** (associativity): both sides evaluate `v₁`, `b₁`, `b₂`
-      in left-to-right order with the same environment threading
-      because `"_"` is unreferenced.
-    - **C / C′** (push into if-branches): `if c then t else e` is
-      strict in `c`; whichever branch runs, `rest` runs after.
-      Distributing `rest` into both branches preserves this.
-    - **D** (`letBind "_" → seq`): the bind name `"_"` is unreferenced
-      in `body`, so the env extension is dead — same as `seq`.
+- **A** `letBind "_" .unitVal e ≡ e` (when `"_" ∉ freeVars e`)
+- **B / B′** `letBind`/`seq` associativity around discarded bindings
+- **C / C′** distribute `rest` into the branches of an `ifThenElse`
+- **D** `letBind "_" e r ≡ seq e r` (when `"_" ∉ freeVars r`)
 
-    Each individual rule is mechanical; combining them under the
-    partial structural recursion is routine but tedious. Body deferred. -/
-theorem tFlattenLetFoldReturn_denote
-    (bi : Builtins) (fuel : Nat) (e : TExpr) :
-    denote bi fuel (tFlattenLetFoldReturn e).erase
-      = denote bi fuel e.erase := by
-  sorry
+All four hold **conditionally** on `"_"` never appearing as a free
+variable in the relevant subexpression. This is the universal
+discard-binding convention used throughout the pipeline: `letBind "_"`
+introduces a bind that is *never read* by subsequent code. `denote`
+itself doesn't enforce this — `Env.extend env "_" v` is observable by
+any later `.var "_"`. So an unconditional
+`denote bi fuel (tFlattenLetFoldReturn e).erase = denote bi fuel e.erase`
+is **not provable** without either:
+
+1. a recursive `notFreeIn "_"` predicate threaded as a hypothesis, or
+2. a coarser semantic equivalence quotienting out the `"_"` slot of
+   the env.
+
+Neither is in scope here. This pass is a **render-time normalisation**:
+it runs in `tPipelineFull` after the verified core `tPipeline` and is
+not subject to the `tPipeline_erase` commuting diagram. Its correctness
+is justified at the design level (the four rewrites are well-known
+algebraic identities under the standard `"_"` convention), and any
+formal claim is deferred until the freshness framework is added.
+
+The pass is denotation-preserving in practice on every extracted body
+we have observed; the gap is in the *formal statement*, not the
+behaviour.
+-/
 
 end Hax
