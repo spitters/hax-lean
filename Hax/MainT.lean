@@ -90,6 +90,7 @@ def main (args : List String) : IO UInt32 := do
     let inputJson ← IO.ofExcept (Json.parseVerified input)
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
+    let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
     let postPipelineTdefs := procTdefs.map fun (n, te) => (n, tPipelineFull newtypes te)
 
     -- Validate via erasure
@@ -104,7 +105,7 @@ def main (args : List String) : IO UInt32 := do
     -- Generate typed certified output (rawTdefs for param annotations, postPipelineTdefs for bodies)
     -- rawTdefs has hax types preserved (for deps class + param annotations)
     -- postPipelineTdefs has pipeline-transformed bodies (for rendering)
-    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs newtypes enumMeta)
+    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs newtypes enumMeta aliasMeta)
     return 0
 
   -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===

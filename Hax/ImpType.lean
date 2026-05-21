@@ -280,7 +280,7 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
   | .fn _ _ => "Int"  -- function types collapse to Int in untyped mode
   | .ref inner _ => inner.toLeanTypeStr structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStr structLookup})"
-  | .array inner _len => s!"Array ({inner.toLeanTypeStr structLookup})"
+  | .array inner len => s!"Vector {inner.toLeanTypeStr structLookup} {len}"
   | .typeVar _ => "Int"
   | .unknown => "Int"
 
@@ -353,6 +353,20 @@ partial def toLeanTypeStrSurface (ty : ImpType)
   | .ref inner _ => inner.toLeanTypeStrSurface structLookup
   | .slice inner => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
   | .array inner _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
+
+/-- Precise type rendering that preserves fixed-size byte arrays as
+    `Vector UInt8 N`.  Used by item-level emitters that want type-rich
+    output (e.g. `pub type` alias bodies, typed deps class signatures).
+    Other primitive types still collapse to `Int` for compatibility
+    with the untyped Runtime. -/
+partial def toLeanTypeStrPrecise (ty : ImpType)
+    (structLookup : String → Option String := fun _ => none) : String :=
+  match ty with
+  | .array inner len =>
+    match inner with
+    | .uint .w8 => s!"Vector UInt8 {len}"
+    | _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
+  | _ => ty.toLeanTypeStrSurface structLookup
 
 end ImpType
 

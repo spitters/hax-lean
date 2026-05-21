@@ -1796,8 +1796,12 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
     -- can detect them and emit proper function signatures.
     let wrapped := if paramNames.isEmpty then processed else wrapParams paramNames processed
     return some (name, wrapped)
-  -- Const: [ident_pair, generics, ty, body]
+  -- Const: top-level `pub const` has 4 elements [ident, generics, ty, body];
+  -- impl-item associated consts have 2 elements [ty, value-info] — skip those
+  -- (they're picked up at the Deps-typeclass bridge layer, not the surface).
   else if let .ok (.arr constData) := kind.getObjVal? "Const" then
+    if constData.toList.length < 4 then
+      return none
     let name := match constData.toList with
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
@@ -1842,6 +1846,8 @@ partial def parseHaxItemWithTypes (j : Json) :
     let wrapped := if paramNames.isEmpty then processed else wrapParams paramNames processed
     return some (name, wrapped, ⟨paramTypes, retType⟩)
   else if let .ok (.arr constData) := kind.getObjVal? "Const" then
+    if constData.toList.length < 4 then
+      return none
     let name := match constData.toList with
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
@@ -3044,6 +3050,16 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := []) :
         TExpr.mk (.letBind p (TExpr.mk (.var p) paramTy) acc) processed.ty) processed
     return some (name, rawWrapped, procWrapped, ⟨paramTypes, retType⟩)
   else if let .ok (.arr constData) := kind.getObjVal? "Const" then
+    -- Top-level `pub const X: T = body` has 4 elements:
+    --   [ident, generics, ty, body]
+    -- Impl-item associated consts (Rust `const X: T = body` inside an
+    -- `impl` block) have a different 2-element shape:
+    --   [ty, value-info]
+    -- We only handle the top-level form here; impl-item Consts are
+    -- skipped (the protocol-side `Deps` typeclass picks them up at
+    -- the bridge layer instead).
+    if constData.toList.length < 4 then
+      return none
     let name := match constData.toList with
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
@@ -3272,6 +3288,53 @@ def parseStructDefsFromJson (j : Json) : List StructInfo :=
   -- Deduplicate by struct name (keep first occurrence)
   raw.foldl (fun acc si =>
     if acc.any (·.name == si.name) then acc else acc ++ [si]) []
+
+/-- A Rust `pub type X = T` alias.  `name` is the alias name; `body` is the
+    underlying `ImpType` (e.g. `Vector UInt8 32` for `pub type Scalar = [u8; 32]`).
+    Generics are not yet supported (most crypto-protocol aliases are monomorphic). -/
+structure TypeAliasInfo where
+  name : String
+  body : ImpType
+  deriving Inhabited
+
+/-- Parse `TyAlias` items from a hax JSON export array. -/
+partial def parseTypeAliasDefs (items : List Json) : List TypeAliasInfo :=
+  let parseOneAlias (aliasData : Array Json) : Option TypeAliasInfo :=
+    let name := match aliasData.toList with
+      | (Json.arr nameSpan) :: _ => match nameSpan.toList with
+        | (Json.str n) :: _ => n
+        | _ => ""
+      | _ => ""
+    if name.isEmpty then none
+    else
+      let body := match aliasData.toList[2]? with
+        | some bodyJ => parseHaxType bodyJ
+        | none => ImpType.unknown
+      some { name := name, body := body : TypeAliasInfo }
+  items.foldl (fun acc item =>
+    let kind := (item.getObjVal? "kind").toOption
+    match kind with
+    | some kindJ =>
+      let modAliases := match kindJ.getObjVal? "Mod" with
+        | Except.ok (Json.arr modData) =>
+          match modData.toList[1]? with
+          | some (Json.arr subItems) => parseTypeAliasDefs subItems.toList
+          | _ => []
+        | _ => []
+      let thisAlias := match kindJ.getObjVal? "TyAlias" with
+        | Except.ok (Json.arr ad) => parseOneAlias ad
+        | _ => none
+      acc ++ modAliases ++ thisAlias.toList
+    | none => acc) []
+
+/-- Parse `TyAlias` defs from a top-level hax JSON (array of items),
+    deduplicating by alias name. -/
+def parseTypeAliasDefsFromJson (j : Json) : List TypeAliasInfo :=
+  let raw := match j with
+    | .arr items => parseTypeAliasDefs items.toList
+    | _ => []
+  raw.foldl (fun acc a =>
+    if acc.any (·.name == a.name) then acc else acc ++ [a]) []
 
 /-- One variant of a Rust enum. `payload` is the list of positional
     field types; `[]` means a unit variant. Tuple variants
