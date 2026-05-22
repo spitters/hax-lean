@@ -3320,10 +3320,17 @@ abbrev StructMeta := StructMeta'
     Handles nested structs: if struct A has a field of type struct B,
     resolves B's tuple type first. Requires acyclic struct definitions. -/
 private partial def resolveStructType (structMeta : StructMeta) (name : String)
-    : Option String :=
+    (clashSet : List String := []) : Option String :=
   match structMeta.find? (·.1 == name) with
   | some (_, fields) =>
-    let lookup := resolveStructType structMeta
+    -- The recursive field-type lookup must respect the clash routing:
+    -- when an inlined field references a clashing newtype/struct, we
+    -- emit `<name>_T` instead of recursing (which would inline the
+    -- newtype's body, defeating the rename done at the abbrev level).
+    let lookup : String → Option String := fun n =>
+      let short := ImpType.sanitizeAdtShortName n
+      if clashSet.contains short then some s!"{short}_T"
+      else resolveStructType structMeta n clashSet
     let resolveField := fun (_fname : String) (tag : String) (impTy : ImpType) =>
       match impTy with
       | .unknown => if tag == "int" then "Int" else "Array Int"
@@ -3489,12 +3496,18 @@ def computeStructPassthrough (structMeta : StructMeta)
   propagate initial structMeta.length
 
 /-- Build a struct lookup that maps pass-through structs to "Array Int"
-    and resolves other structs to their tuple types. -/
+    and resolves other structs to their tuple types.  `clashSet` (if
+    provided) lists names whose abbrev is renamed to `<name>_T` (because
+    they collide with a Deps method); the struct-resolution recursion
+    emits `<name>_T` for those instead of inlining the body. -/
 def mkStructLookup (structMeta : StructMeta)
-    (passthrough : List (String × Bool)) : String → Option String :=
+    (passthrough : List (String × Bool))
+    (clashSet : List String := []) : String → Option String :=
   fun name =>
-    if passthrough.any fun (n, pt) => n == name && pt then some "Array Int"
-    else resolveStructType structMeta name
+    let short := ImpType.sanitizeAdtShortName name
+    if clashSet.contains short then some s!"{short}_T"
+    else if passthrough.any fun (n, pt) => n == name && pt then some "Array Int"
+    else resolveStructType structMeta name clashSet
 
 /-- Generate auto-preamble: struct definitions, projections, and dependency class.
     `structMeta`: struct definitions from hax JSON (name → [(field_name, type_tag)])

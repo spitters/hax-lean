@@ -253,12 +253,19 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   let clashDepsNames := allTCallsForClash.map (·.1) |>.eraseDups |>.map sanitizeName
   let clashSet : List String := allOpaqueForClash.filter (clashDepsNames.contains)
   -- Augmented lookup: clash names resolve to their `_T` alias (a fresh
-  -- axiom emitted at the top of the file). Non-clash struct lookups go
-  -- through the base lookup unchanged.
+  -- axiom or abbrev emitted at the top of the file). For non-clash names,
+  -- delegate to a clash-aware version of mkStructLookup so that struct
+  -- bodies INLINED via resolveStructType also route clashing field-types
+  -- to `<name>_T` instead of expanding them (which would re-introduce the
+  -- raw `FieldElement` reference that collides with the Deps method).
+  let clashedBaseLookup := mkStructLookup structMeta structIsPassthrough clashSet
   let structLookup : String → Option String := fun name =>
     let short := ImpType.sanitizeAdtShortName name
     if clashSet.contains short then some s!"{short}_T"
-    else baseStructLookup name
+    else clashedBaseLookup name
+  -- (Use `structLookup` below; `clashedBaseLookup` is exposed so callers
+  -- that consult `baseStructLookup` for clash-naïve collection still get
+  -- the clash-unaware version.)
 
   -- App names from processed defs (has qualified projections)
   let allCalls := defs.foldl (fun acc (_, e) => acc ++ collectAppCalls e) []
@@ -968,6 +975,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- clashing names as known structs and skip them, leaving `Commitment_T`
   -- referenced but unaxiomed.
   let baseStructLookup := structLookup
+  -- Clash-aware base lookup: `mkStructLookup` threads clashSet into
+  -- `resolveStructType`, so inlined struct bodies route clashing field
+  -- types to `<name>_T` instead of expanding them.
+  let clashedBaseLookup := mkStructLookup structMeta structIsPassthrough axiomClashSet
   -- Augmented structLookup: clash names route to their `_T` alias.
   -- Used for body emission (toLeanDefTyped) so let-binding type
   -- ascriptions render as `(val : Commitment_T)` instead of
@@ -975,7 +986,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let structLookup : String → Option String := fun name =>
     let short := ImpType.sanitizeAdtShortName name
     if axiomClashSet.contains short then some s!"{short}_T"
-    else baseStructLookup name
+    else clashedBaseLookup name
   -- Rewrite function body projection references for conflicts
   let defs := if projConflicts.isEmpty then defs
     else defs.map fun (n, e) =>

@@ -158,7 +158,7 @@ def main (args : List String) : IO UInt32 := do
       IO.eprintln s!"DEBUG: defs count = {defs.length}"
       let sl : String → Option String := fun n =>
         let passthrough := computeStructPassthrough structMeta defs
-        mkStructLookup structMeta passthrough n
+        mkStructLookup structMeta passthrough (clashSet := []) n
       IO.eprintln s!"=== STRUCT META ({structMeta.length} structs) ==="
       for (sname, fields) in structMeta do
         IO.eprintln s!"  struct {sname} -> {sl sname |>.getD "none"}:"
