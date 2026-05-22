@@ -66,6 +66,9 @@ private partial def collectTAppCalls : TExpr → List (String × Nat × List Imp
   | .mk (.cfBreak e) _ | .mk (.cfContinue e) _ | .mk (.cfBreakContinue e) _ =>
     collectTAppCalls e
   | .mk (.break_ (some e)) _ => collectTAppCalls e
+  -- `.ann e ty` is a type-ascription wrapper; recurse into the payload
+  -- so calls beneath the ascription are still discovered.
+  | .mk (.ann e) _ => collectTAppCalls e
   | _ => []
 
 /-- Collect names bound by an `ImpPat`. These are introduced as locals
@@ -77,10 +80,27 @@ partial def patBinders : ImpPat → List String
   | .ctorPat _ args => args.foldl (fun acc p => acc ++ patBinders p) []
   | .wildcard | .litPat _ | .nonePat => []
 
-/-- Collect free variable references in a TExpr with their types. -/
+/-- Collect free variable references in a TExpr with their types.
+
+    `.ann e ty` wrappers (inserted by `tAnnotateLetBindings`) carry a
+    type ascription on `e`. When `e` is a free var (e.g.
+    `(ZERO : FieldElement)`), the `.ann`'s outer type is the var's
+    effective type — better than the var's intrinsic `.ty` (which is
+    often `.unknown` for opaque 0-arity deps). We special-case that
+    here so the deps-class renderer can infer `ZERO : FieldElement`
+    instead of falling back to `Array Int`.
+
+    For non-var `.ann e` payloads, just recurse into `e` (the outer
+    annotation type doesn't directly apply to deeper vars). -/
 partial def collectTFreeVars (bound : List String := []) :
     TExpr → List (String × ImpType)
   | .mk (.var n) ty => if bound.contains n then [] else [(n, ty)]
+  | .mk (.ann (.mk (.var n) varTy)) annTy =>
+    -- Prefer the .ann's outer type when the var's own ty is unknown
+    -- (typical for opaque-dep refs whose import-time type is lost).
+    let ty := if varTy.isUnknown then annTy else varTy
+    if bound.contains n then [] else [(n, ty)]
+  | .mk (.ann e) _ => collectTFreeVars bound e
   | .mk (.app _ args) _ => args.foldl (fun acc a => acc ++ collectTFreeVars bound a) []
   | .mk (.letBind n (.mk (.var v) _) body) _ =>
     if n == v then collectTFreeVars (n :: bound) body
@@ -160,6 +180,37 @@ private def depTypeStr (ty : ImpType) (sl : String → Option String)
   | _ => ty.toLeanTypeStrSurface sl
 
 set_option linter.unusedVariables false in
+/-- Walk a (post-pipeline) `TExpr` and collect `(varName, annType)` pairs
+    from every `.ann (.var v) ty` pattern. These are the type ascriptions
+    inserted by `tAnnotateLetBindings` on let-binding RHSs; pulling them
+    here lets the deps-class renderer recover types for 0-arity opaque
+    consts (e.g. `Self::ONE`) whose `.var`-level type info was lost
+    during the hax import / pipeline roundtrip. -/
+partial def collectAnnVarTypes : TExpr → List (String × ImpType)
+  | .mk (.ann (.mk (.var n) _)) annTy => [(n, annTy)]
+  | .mk (.ann e) _ => collectAnnVarTypes e
+  | .mk (.app _ args) _ => args.foldl (fun acc a => acc ++ collectAnnVarTypes a) []
+  | .mk (.letBind _ v body) _ => collectAnnVarTypes v ++ collectAnnVarTypes body
+  | .mk (.seq a b) _ => collectAnnVarTypes a ++ collectAnnVarTypes b
+  | .mk (.ifThenElse c t e) _ =>
+    collectAnnVarTypes c ++ collectAnnVarTypes t ++ collectAnnVarTypes e
+  | .mk (.tuple es) _ => es.foldl (fun acc e => acc ++ collectAnnVarTypes e) []
+  | .mk (.proj e _) _ => collectAnnVarTypes e
+  | .mk (.match_ scrut arms) _ =>
+    collectAnnVarTypes scrut ++ arms.foldl (fun acc (_, b) => acc ++ collectAnnVarTypes b) []
+  | .mk (.forLoop _ lo hi body) _ | .mk (.forLoopRev _ lo hi body) _
+  | .mk (.forFold _ lo hi body) _ | .mk (.forFoldRev _ lo hi body) _
+  | .mk (.forFoldReturn _ lo hi body) _ | .mk (.forFoldRevReturn _ lo hi body) _ =>
+    collectAnnVarTypes lo ++ collectAnnVarTypes hi ++ collectAnnVarTypes body
+  | .mk (.whileLoop c body) _ | .mk (.whileFold c body) _ | .mk (.whileFoldReturn c body) _ =>
+    collectAnnVarTypes c ++ collectAnnVarTypes body
+  | .mk (.borrow e) _ | .mk (.deref e) _ | .mk (.assign _ e) _
+  | .mk (.earlyReturn e) _ | .mk (.questionMark e) _
+  | .mk (.cfBreak e) _ | .mk (.cfContinue e) _ | .mk (.cfBreakContinue e) _ =>
+    collectAnnVarTypes e
+  | .mk (.break_ (some e)) _ => collectAnnVarTypes e
+  | _ => []
+
 /-- Generate the deps class and struct definitions using typed information from TExprs.
     This replaces `generatePreamble` by using types directly from the TExpr tree
     instead of ~300 lines of heuristic detection.
@@ -176,6 +227,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     (moduleName : String) (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (processedDefs : List (String × ImpExpr) := [])
+    (procTdefs : List (String × TExpr) := [])
     : String × List (String × String) × List String :=
   -- Use processed defs for structural analysis (qualified projections etc.)
   let defs := if processedDefs.isEmpty then tdefs.map fun (n, te) => (n, te.erase) else processedDefs
@@ -223,11 +275,30 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     !structNames.contains v && !isFieldProjection v &&
     !allAppNames.contains v
 
-  -- Typed free var info from TExprs (for type annotations in deps class)
+  -- Typed free var info from TExprs (for type annotations in deps class).
+  -- We pull from two sources:
+  --   1. `tdefs` (rawTdefs from hax JSON) — `.var n ty` annotations preserved
+  --      from the import. Some 0-arity opaque consts (e.g. `Self::ONE` whose
+  --      body is a complex const expression) end up with `ty = .unknown`
+  --      here.
+  --   2. `procTdefs` (post-pipeline TExprs with `.ann` wrappers from
+  --      `tAnnotateLetBindings`) — the `.ann` wrapper carries the let-binding
+  --      RHS type, which is the var's effective type at that call site.
+  -- We combine both and prefer non-unknown types during dedup.
   let allTFreeVars := tdefs.foldl (fun acc (fname, te) =>
     acc ++ collectTFreeVars [fname] te) ([] : List (String × ImpType))
-  let allTFreeVarsDedup := allTFreeVars.foldl (fun (acc : List (String × ImpType)) (n, ty) =>
-    if acc.any (·.1 == n) then acc else acc ++ [(n, ty)]) []
+  let annVarTypes := procTdefs.foldl (fun acc (_, te) =>
+    acc ++ collectAnnVarTypes te) ([] : List (String × ImpType))
+  let allTFreeVarsCombined := allTFreeVars ++ annVarTypes
+  -- Dedup with type preference: when the same var appears multiple times with
+  -- different types, prefer a non-unknown type over `.unknown`.
+  let allTFreeVarsDedup := allTFreeVarsCombined.foldl (fun (acc : List (String × ImpType)) (n, ty) =>
+    match acc.find? (·.1 == n) with
+    | none => acc ++ [(n, ty)]
+    | some (_, existingTy) =>
+      if existingTy.isUnknown && !ty.isUnknown then
+        acc.map (fun (n', t') => if n' == n then (n', ty) else (n', t'))
+      else acc) []
 
   -- All dependency names (function calls + free variables)
   let allNamesWithVars := (allAppNames ++ freeVarDeps).eraseDups
@@ -891,7 +962,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       | _ => (fname, e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
-  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs)
+  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs)
   -- Keep the BASE structLookup (no clash augment) for opaque-ADT
   -- collection — augmenting it would make collectOpaqueAdtNames treat
   -- clashing names as known structs and skip them, leaving `Commitment_T`
