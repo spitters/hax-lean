@@ -1,166 +1,169 @@
-# Verified Hax Compiler Phases in Lean 4
+# Verified Hax Pipeline in Lean 4
 
 Formal verification of the [hax](https://github.com/hacspec/hax) compiler
-phases that lower a Rust subset into a purely functional form. Each phase is
-implemented as a syntax-directed transformation on an imperative expression
-AST (`ImpExpr`) and equipped with:
+phases that lower a Rust subset into a purely functional form, together
+with the `haxpipeT` CLI that drives the pipeline on hax JSON dumps.
 
-1. **Feature elimination** -- the phase removes certain AST constructors
-2. **Preservation** -- the phase does not re-introduce constructors removed by earlier phases
-3. **Semantics preservation** -- the phase preserves a fuel-bounded big-step denotation
+The pipeline is a typed, syntax-directed AST-to-AST transformation
+(`TExpr → TExpr`) with three layered guarantees per phase:
 
-The project also includes a **typed pipeline** (`TExpr`) with commuting
-diagrams between the untyped and typed phases, a **width-aware runtime**
-for integer/bitwise/array operations, and a **CLI tool** (`haxpipeT`) for
-extracting Rust functions from hax JSON into Lean.
+1. **Feature elimination** — the phase removes certain AST constructors
+2. **Preservation** — the phase does not re-introduce constructors removed earlier
+3. **Semantics preservation** — the untyped erase commutes with the phase,
+   so big-step denotation is preserved (via the proved untyped layer)
 
 ## Pipeline
 
 ```
-ImpExpr
-  ──[dropReferences]──────→  ImpExpr  (NoReferences)
-  ──[localMutation]───────→  ImpExpr  (NoMutation)
-  ──[functionalizeLoops]──→  ImpExpr  (NoLoops)
-  ──[cfIntoMonads]────────→  ImpExpr  (NoEarlyExit)
-  ──[explicitMonadic]─────→  ImpExpr  (ExplicitMonadic)
-  ──[toRawCode]───────────→  RawCode   (free monad)
+TExpr
+  ──[tDropReferences]──────→  TExpr  (no borrows / derefs)
+  ──[tLocalMutation]───────→  TExpr  (no mutable assigns)
+  ──[tFunctionalizeLoops]──→  TExpr  (no for / while / break / continue)
+  ──[tCfIntoMonads]────────→  TExpr  (no early return / ?)
+  ──[tWrapMatchArms]───────→  TExpr  (Rust fall-through-as-continue)
+  ──[tExplicitMonadic]─────→  TExpr  (explicit monadic lowering)
+  ──[tAnnotateLetBindings]─→  TExpr  (let-RHS type markers)
+  ──[tElideToNamedProj]────→  TExpr  (newtype projection elision)
+  ──[tFlattenLetFoldReturn]→  TExpr  (post-pipeline render normalisation)
 ```
 
-After all five phases the output satisfies `FullyFunctional` (conjunction of
-all feature predicates) and can be translated to a free-monad deep
-embedding (`RawCode`).
+The core four phases (`tDropReferences` … `tCfIntoMonads`) carry
+machine-checked `_erase` and `_ty` preservation theorems. The
+post-pipeline rewrites (`tWrapMatchArmsCF`, `tElideToNamedProj`,
+`tFlattenLetFoldReturn`) are denotation-identity at the AST level; one
+(`tFlattenLetFoldReturn`) is a render-time normalisation whose
+correctness rests on a `"_"` not-free-in invariant discussed in the
+phase file.
 
 ## Verified properties
 
-| Theorem | Statement |
-|---------|-----------|
-| `pipeline_fullyFunctional` | Output has no references, mutation, loops, or early exits |
-| `pipeline_correct` | Pipeline preserves big-step semantics |
-| `pipelineToRawCode_noOracleCall` | Translated code contains no oracle calls |
+The typed layer has two kinds of per-phase theorems: `_erase` (commutes
+with `TExpr.erase`) and `_ty` (preserves the type projection). Semantic
+preservation is inherited from the untyped layer through the `_erase`
+equations — there is no independent typed denotation `TExpr → Value`.
+This keeps the typed layer slim at the cost of having the untyped
+`denote` in the TCB chain for any typed semantic claim.
 
-Each individual phase also has its own correctness theorem:
-`dropReferences_correct`, `localMutation_correct`,
-`functionalizeLoops_correct`, `cfIntoMonads_correct`,
-`explicitMonadic_correct`.
+| Theorem                          | Statement                                          |
+|----------------------------------|----------------------------------------------------|
+| `tPipeline_erase`                | `(tPipeline e).erase = pipeline e.erase`           |
+| `tPipelineExt_erase`             | `(tPipelineExt e).erase = pipelineExt e.erase`     |
+| `tPipeline_fullyFunctional`      | `TFullyFunctional (tPipeline e)`                   |
+| `tPipelineExt_fullyFunctional`   | `TFullyFunctional (tPipelineExt e)`                |
 
-## Statistics
+Untyped-layer correctness (the foundation the typed `_erase` equations
+reduce to):
 
-- **38 files**, ~22 800 lines of Lean 4
-- **0 sorries, 0 axioms** — everything is proved
-- **0 Mathlib dependency** — the project is self-contained
+| Theorem                       | Statement                                                       |
+|-------------------------------|-----------------------------------------------------------------|
+| `pipeline_correct`            | `denote (pipeline e) = denote e` (fuel-bounded, well-scoped)    |
+| `pipeline_full_correct`       | untyped pipeline preserves `denote'` (ControlFlow-aware)        |
+| `pipelineExt_full_correct`    | end-to-end over all 5 phases including `explicitMonadic`        |
+| `pipelineToRawCode_noOracleCall` | translated free-monad output contains no oracle calls        |
 
-## File structure
+## File layout
 
 ```
-Hax.lean                             # Root import
+Hax.lean                             # root import (typed + untyped)
 Hax/
-├── AST.lean                         # ImpExpr: imperative expression AST
-├── Value.lean                       # Runtime values
-├── ImpType.lean                     # Type language for typed AST
-├── Features.lean                    # Feature predicates (NoReferences, etc.)
-├── TFeatures.lean                   # Typed feature predicates
-├── FreeVars.lean                    # Free variable analysis
-├── Semantics.lean                   # Fuel-bounded big-step semantics
-├── SemanticsCF.lean                 # Semantics with control flow
-├── Runtime.lean                     # Runtime builtins (width-aware ops)
-├── RuntimeCorrectness.lean          # Runtime correctness proofs
-├── TExpr.lean                       # Typed expression AST
-├── Json.lean                        # JSON parsing for hax IR
-├── HaxAdapter.lean                  # Adapter from hax JSON to ImpExpr
-├── PrettyPrint.lean                 # Pretty-printer for ImpExpr
-├── PrettyPrintT.lean                # Pretty-printer for TExpr
-├── CLI.lean                         # Command-line interface (haxpipe)
-├── MainT.lean                       # Main entry point for typed pipeline
-├── Phase/
-│   ├── DropReferences.lean          # Phase 1: erase borrow/deref
-│   ├── LocalMutation.lean           # Phase 2: mutable vars → state passing
-│   ├── FunctionalizeLoops.lean      # Phase 3: loops → fold patterns
-│   ├── FunctionalizeLoopsCF.lean    # Phase 3 with control flow
-│   ├── CfIntoMonads.lean            # Phase 4: early return/? → monadic ops
-│   ├── CfIntoMonadsCF.lean          # Phase 4 with control flow
-│   ├── ExplicitMonadic.lean         # Phase 5: explicit monadic lowering
-│   └── ExplicitMonadicCF.lean       # Phase 5 with control flow
-├── TPhase/
-│   ├── DropReferences.lean          # Typed phase 1
-│   ├── LocalMutation.lean           # Typed phase 2
-│   ├── FunctionalizeLoops.lean      # Typed phase 3
-│   ├── CfIntoMonads.lean            # Typed phase 4
-│   └── ExplicitMonadic.lean         # Typed phase 5
-├── Pipeline.lean                    # End-to-end composition + correctness
-├── PipelineCF.lean                  # Pipeline with control flow
-├── TPipeline.lean                   # Typed pipeline (commuting diagrams)
-├── ToRawCode.lean                   # Translation to RawCode free monad
-├── TestCompile.lean                 # Compilation tests
-├── TestNested.lean                  # Nested expression tests
-├── Tests.lean                       # Test suite
-└── Deep/
-    └── RawCode.lean                 # Minimal RawCode stub (ret/bind/fail)
+├── AST.lean                         # ImpExpr: untyped imperative AST
+├── TExpr.lean                       # typed expression AST
+├── ImpType.lean                     # type language for typed AST
+├── Value.lean                       # runtime values
+├── Features.lean / TFeatures.lean   # feature predicates (untyped / typed)
+├── FreeVars.lean                    # free-variable analysis
+├── Semantics.lean / SemanticsCF.lean# fuel-bounded big-step (with / without CF)
+├── Runtime.lean / RuntimeCorrectness.lean  # width-aware builtins + proofs
+├── Json/                            # verified RFC 8259 JSON parser
+│   ├── Lexer.lean
+│   ├── Parser.lean
+│   └── Adapter.lean
+├── HaxAdapter.lean                  # hax-JSON → AST
+├── AdapterRefinement.lean           # per-constructor refinement proofs (~7800 LOC)
+├── Canonicalize.lean                # AST canonicalisation
+├── Phase/                           # untyped verified phases
+│   ├── DropReferences / LocalMutation / FunctionalizeLoops(CF)
+│   ├── CfIntoMonads(CF) / ExplicitMonadic(CF)
+│   └── RewriteAppName / InitFoldAccums / WrapMatchArms
+├── TPhase/                          # typed verified phases (16 files)
+│   ├── DropReferences / LocalMutation / FunctionalizeLoops / CfIntoMonads
+│   ├── WrapMatchArms / ExplicitMonadic / AnnotateLets
+│   ├── ElideNewtypeProj / FlattenLetFoldReturn
+│   ├── RewriteAppName / RewriteNewToStructCtor / RewriteStructFromElem
+│   ├── FixProjectionPaths / QualifyProjections
+│   ├── InitFoldAccums / StructMetaT
+├── Pipeline.lean / PipelineCF.lean  # untyped pipeline + correctness
+├── TPipeline.lean                   # typed pipeline + commuting diagrams
+├── ToRawCode.lean                   # translation to free-monad RawCode
+├── PrettyPrint.lean / PrettyPrintT.lean  # AST → Lean source (trusted)
+├── CLI.lean / MainT.lean            # haxpipeT entry point
+└── Deep/RawCode.lean                # minimal RawCode stub (ret/bind/fail)
 ```
 
 ## Building
 
 ```bash
-lake build              # verify the proofs (0 sorry, 0 axiom)
+lake build              # verify the proofs
 lake build haxpipeT     # build the CLI: .lake/build/bin/haxpipeT
+bash tests/run_tests.sh # integration tests (skipped if no hax JSON fixture)
 ```
 
 ## Running the CLI
 
-`haxpipeT` reads a hax JSON dump and emits one of five output formats,
-selected by flag:
+`haxpipeT` reads a hax JSON dump (produced by `cargo hax json` from the
+[hax](https://github.com/hacspec/hax) toolchain) and emits Lean 4
+source via the typed pipeline.
 
-| Flag | Output | Status |
-|------|--------|--------|
-| `--emit-certified --hax` | Surface code **plus** post-pipeline `ImpExpr` literals, with hax-JSON types preserved end-to-end | **Recommended.** Used by all 100+ production extractions in `SSProve-lean/CatCrypt/.../*_haxpipe.lean`. |
-| `--emit-certified` (no `--hax`) | Same shape, untyped pipeline | **Deprecated (2026-05-14).** Legacy expression-parser path. Emits a runtime warning on stderr. |
-| `--emit-lean` (default) | Lean 4 surface code, no ImpExpr literals | **Deprecated (2026-05-14).** Untyped pipeline; no production consumer. Use `--emit-certified --hax` instead. |
-| `--emit-json` | The transformed `ImpExpr` AST serialized as JSON | Debug/inspection. |
-| `--emit-bridge` | A CatCrypt `HaxBridge.lean` template wiring extraction into a protocol | **Deprecated.** `HaxBridge.lean` is the legacy pattern; new bridges should be `SurfaceDeps.lean`. |
-| `--emit-debug-meta` | Debug metadata about hax types and struct layouts | Debug/inspection. |
+| Flag | Output |
+|------|--------|
+| `--emit-certified --hax` | Typed extraction: surface code plus post-pipeline `ImpExpr` literals, with hax JSON types preserved end-to-end. **The production path.** |
+| `--emit-json`            | Transformed `ImpExpr` AST as JSON (debug / inspection). |
+| `--emit-debug-meta`      | Debug metadata about hax types and struct layouts. |
 
 ```bash
-# Recommended: typed certified output (used by every production extraction)
 haxpipeT --hax INPUT.json --emit-certified --name MyModule -o out.lean
-
-# Transformed AST as JSON
-haxpipeT --hax INPUT.json --emit-json --name MyModule -o out.json
 ```
 
-### Deprecation note
+Generated Lean files compile standalone against this repo's `Hax.*`
+modules.
 
-The *untyped* pipeline (`Hax/PrettyPrint.lean` → `toLeanCertifiedFile`)
-is deprecated. Every consumer in `SSProve-lean` uses the typed path
-(`--emit-certified --hax`, `Hax/PrettyPrintT.lean` →
-`toLeanCertifiedFileTyped`), which preserves hax JSON types through to
-the emitted Lean. The untyped path is retained only for the legacy
-expression-parser entry point and tests, and is slated for removal once
-those are migrated. See `Hax/PrettyPrint.lean`'s module docstring.
+The untyped emit paths (`--emit-lean`, `--emit-certified` without
+`--hax`, `--emit-bridge`) are deprecated and emit a runtime warning;
+they remain only to support legacy tests and the dropped `HaxBridge.lean`
+template. See `Hax/PrettyPrint.lean`'s module docstring for the removal
+plan.
 
-To produce the JSON input from a Rust crate, run `cargo hax json` from the
-[hax](https://github.com/hacspec/hax) toolchain. Generated Lean files
-compile standalone against this repo's `Hax.*` modules — no Mathlib, no
-other deps.
+## Trusted vs. verified
 
-## Relationship to hax
+The pipeline follows CompCert-style TCB minimisation: the AST-to-AST
+transformations are proved; the I/O ring around them is trusted.
 
-The AST constructors in `ImpExpr` mirror the hax intermediate representation
-after macro expansion. The five phases correspond to hax's Rust-to-functional
-lowering pipeline:
+| Component             | Status                                          |
+|-----------------------|-------------------------------------------------|
+| `TPhase/*`, `Phase/*` | **Verified.** `_erase` / `_ty` / `*_correct`.   |
+| `TPipeline`, `Pipeline` | **Verified.** Composition + correctness.      |
+| `Json/Parser.lean`    | **Verified.** RFC 8259 conformance.             |
+| `HaxAdapter.lean`     | Trusted *at the top level*. Companion `AdapterRefinement.lean` proves per-constructor JSON-to-AST refinement (`JsonRefinesExpr`, ~30 theorems including the `reconstructForLoops` preservation cases); the end-to-end `parseHaxExpr_refines` is documented TODO, blocked on `partial def` equational lemmas and a JSON-size termination measure. |
+| `PrettyPrint{T}.lean` | Trusted. AST → Lean source. No preservation proof. |
+| `Runtime.lean`        | Trusted. Width-aware builtins; declares two intentional interface axioms (`bridgeCast`, `sha256`) that the CatCrypt-side bridge instantiates. |
+| Lean 4 compiler       | Assumed correct.                                |
 
-| Phase | hax phase | Consumed constructors |
-|-------|-----------|----------------------|
-| 1. `dropReferences` | Drop references | `borrow`, `deref` |
-| 2. `localMutation` | Local mutation | `assign` |
-| 3. `functionalizeLoops` | Functionalize loops | `forLoop`, `whileLoop`, `break_`, `continue_` |
-| 4. `cfIntoMonads` | CF into monads | `earlyReturn`, `questionMark` |
-| 5. `explicitMonadic` | Explicit monadic | Implicit control flow |
+## Known limitations
+
+- **Expression-level only** — no recursive functions, modules, or item-level structure
+- **Fuel-bounded semantics** — non-termination is not modeled
+- **Closures approximated** — bodies mapped to `app "__closure"`
+- **Generics** — complex types fall back to `.unknown`
+- **Traits** — no dispatch; trait methods are unresolved function names
+- **Runtime folds are `partial`** — `Hax.forFold` / `Hax.whileFold` use `partial def`
 
 ## Relationship to CatCrypt
 
-The `RawCode` stub in `Hax/Deep/RawCode.lean` is a minimal extract of
-CatCrypt's free-monad deep embedding (ret/bind/fail only). In the full
-CatCrypt project the output of `toRawCode` connects to game-based
-cryptographic proofs via the deep embedding.
+`Hax/Deep/RawCode.lean` is a minimal extract of CatCrypt's free-monad deep
+embedding (ret / bind / fail). In CatCrypt, `toRawCode` connects to
+game-based cryptographic proofs via that deep embedding, and the
+typed-pipeline output drops directly into the `SurfaceDeps.lean` extraction
+bridge.
 
 ## License
 
