@@ -1,8 +1,13 @@
 # Verification Status
 
-All 5 phases of the hax core lowering pipeline are formalized in Lean 4,
-with machine-checked correctness proofs. The project builds with `0 sorry`
-and `0 axiom`, no Mathlib dependency.
+The hax core lowering pipeline is formalized in Lean 4 as a typed,
+syntax-directed AST-to-AST transformation (`TExpr → TExpr`). Each phase
+carries machine-checked `_erase` (commutes with `TExpr.erase`) and `_ty`
+(preserves the type projection) theorems. Semantic preservation is
+inherited from the untyped layer through the `_erase` equations — there
+is no independent typed denotation `TExpr → Value`, which keeps the
+typed layer slim at the cost of having the untyped `denote` in the TCB
+chain for any typed semantic claim.
 
 ## Typed pipeline (primary interface)
 
@@ -23,9 +28,6 @@ and its properties:
 | `tPipeline_fullyFunctional`      | `TFullyFunctional (tPipeline e)`                   |
 | `tPipelineExt_fullyFunctional`   | `TFullyFunctional (tPipelineExt e)`                |
 
-Semantic correctness is inherited from the untyped pipeline via the
-`erase` equations.
-
 ## Untyped pipeline (semantic foundation)
 
 [`Hax/Pipeline.lean`](../Hax/Pipeline.lean) and
@@ -44,6 +46,8 @@ The `CF` variants handle Rust's `core::ops::ControlFlow` encoding
 
 ## Phase files
 
+The core lowering chain (per-phase, untyped and typed variants):
+
 | Phase | Untyped                                 | CF variant                               | Typed                                  |
 |-------|-----------------------------------------|------------------------------------------|----------------------------------------|
 | 1     | `Phase/DropReferences.lean`             | —                                        | `TPhase/DropReferences.lean`           |
@@ -53,6 +57,24 @@ The `CF` variants handle Rust's `core::ops::ControlFlow` encoding
 | 5     | `Phase/ExplicitMonadic.lean`            | `Phase/ExplicitMonadicCF.lean`           | `TPhase/ExplicitMonadic.lean`          |
 
 Phases 1–2 do not need a CF variant.
+
+Additional verified phases (typed layer, post-pipeline normalisations
+and render-shaping rewrites):
+
+`TPhase/WrapMatchArms`, `TPhase/AnnotateLets`, `TPhase/ElideNewtypeProj`,
+`TPhase/FlattenLetFoldReturn`, `TPhase/RewriteAppName`,
+`TPhase/RewriteNewToStructCtor`, `TPhase/RewriteStructFromElem`,
+`TPhase/FixProjectionPaths`, `TPhase/QualifyProjections`,
+`TPhase/InitFoldAccums`, `TPhase/StructMetaT`.
+
+The corresponding untyped versions (`Phase/RewriteAppName`,
+`Phase/InitFoldAccums`, `Phase/WrapMatchArms`) carry the matching
+correctness theorems the typed `_erase` proofs reduce to.
+
+`tFlattenLetFoldReturn` is a render-time normalisation; its correctness
+relies on a `"_"` not-free-in invariant discussed in
+`Hax/TPhase/FlattenLetFoldReturn.lean` and is outside the verified-core
+diagram for that reason.
 
 ## Preconditions
 
@@ -69,12 +91,12 @@ These hold for all well-formed hax output.
 ## Trusted components
 
 | Component             | Role                                          |
-|----------------------|-----------------------------------------------|
-| `HaxAdapter.lean`    | Parses hax JSON → AST (~650 LOC, no proof)    |
-| `Json.lean`          | JSON round-trip not formally proved           |
-| `PrettyPrint{T}.lean`| AST → Lean 4 source; no preservation proof    |
-| `Runtime.lean`       | Implements `denote'`; no linking proof        |
-| Lean 4 compiler      | Assumed correct                               |
+|-----------------------|-----------------------------------------------|
+| `Json/Parser.lean`    | **Verified.** RFC 8259-conformant JSON parser, replaces `Lean.Json.parse` via `Json.parseVerified`. |
+| `HaxAdapter.lean`     | Parses hax JSON → AST (~650 LOC). Trusted at the top level. Companion `AdapterRefinement.lean` (~7800 LOC) proves per-constructor refinement (`JsonRefinesExpr`, ~30 theorems including the `reconstructForLoops` preservation cases); the end-to-end `parseHaxExpr_refines` is documented TODO, blocked on `partial def` equational lemmas and a JSON-size termination measure. |
+| `PrettyPrint{T}.lean` | AST → Lean 4 source; no preservation proof. |
+| `Runtime.lean`        | Implements `denote'`; declares two intentional interface axioms (`bridgeCast`, `sha256`) that the CatCrypt-side bridge instantiates. No linking proof. |
+| Lean 4 compiler       | Assumed correct.                              |
 
 This matches CompCert's structure: the AST-to-AST transformation is proved;
 the parser/printer/runtime form the TCB.
@@ -90,12 +112,6 @@ the parser/printer/runtime form the TCB.
 - **Traits** — no dispatch; trait methods are unresolved function names.
 - **Runtime folds are `partial`** — `Hax.forFold` / `Hax.whileFold` use
   `partial def` (standard for general recursion).
-
-## Statistics
-
-- **38 files** under `Hax/`, ~22 975 lines of Lean 4
-- **0 sorries, 0 axioms**
-- **0 Mathlib dependency**
 
 ## Build
 
