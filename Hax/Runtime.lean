@@ -662,6 +662,11 @@ the `UInt{w}` level can call the named variants directly. -/
 /-- Width-tagged bitwise or on `Int`. -/
 @[inline] def bitor_w (_w : Nat) (a b : Int) : Int := bitor a b
 
+/-- Width-tagged bitwise not on `Int`. Unary, mirroring the binary
+    `bitxor_w`/`bitand_w`/`bitor_w` shims: the width argument is
+    informational only (see file docstring above). -/
+@[inline] def bitnot_w (_w : Nat) (a : Int) : Int := bitnot a
+
 /-- Width-tagged right shift on `Int`. -/
 @[inline] def shr_w (_w : Nat) (a b : Int) : Int := shr a b
 

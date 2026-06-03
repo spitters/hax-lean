@@ -163,6 +163,7 @@ private def runtimeName (f : String) : String :=
   | "truncate" => "Hax.truncate"
   | "is_empty" => "Hax.is_empty"
   | "deref" => "Hax.deref"
+  | "deref_mut" => "Hax.deref"
   | "clone" => "Hax.clone"
   | "to_vec" => "Hax.to_vec"
   | "_assign" => "Hax.assign"
@@ -1368,6 +1369,15 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     | "index", [arr, .var "RangeFull"] | "index", [arr, .app "RangeFull" []]
     | "index_mut", [arr, .var "RangeFull"] | "index_mut", [arr, .app "RangeFull" []] =>
       parensIf (toLean arr 0) (!isAtom arr)
+    -- `index_mut arr i` with a *scalar* index is element access (Rust `arr[i]`
+    -- on a `&mut` target). The Range cases above already cover slice access;
+    -- everything else is a single-element read, so render as `Hax.index`
+    -- (returns the element type) rather than the slice-identity `index_mut`
+    -- (which would force the element type to equal the array type). Indexed
+    -- compound-assigns (`arr[i] op= v`) are normalised to `array_update` in
+    -- `HaxAdapter`; any residual scalar `index_mut` here is a pure read.
+    | "index_mut", [arr, idx] =>
+      s!"Hax.index {parensIf (toLean arr 0) (!isAtom arr)} {parensIf (toLean idx 0) (!isAtom idx)}"
     -- Special-case: collect(Range(lo, hi)) → Hax.range lo hi
     | "collect", [.app "Range" [lo, hi]] =>
       s!"Hax.range {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)}"
@@ -2352,7 +2362,7 @@ private def isRuntimeName (f : String) : Bool :=
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
   | "array_update" | "cast" | "castVal"
   | "Some" | "None" | "Ok" | "Err"
-  | "panic" | "literal" | "str_opaque" | "deref" | "clone" | "to_vec" | "copy_from_slice"
+  | "panic" | "literal" | "str_opaque" | "deref" | "deref_mut" | "clone" | "to_vec" | "copy_from_slice"
   | "extend_from_slice" | "truncate" | "sha256"
   | "with_capacity" | "into_vec" | "into_iter" | "next"
   | "from_elem" | "RangeTo" | "RangeFrom" | "Range" | "min" | "max"
@@ -2378,7 +2388,7 @@ def builtinTable : List (String × List String) :=
                           "collect", "flat_map", "zip", "next", "new", "enumerate"])
   , ("range",            ["RangeTo", "RangeFrom", "Range"])
   , ("misc-runtime",     ["count_ones", "assert_failed", "assert_failed'",
-                          "from", "into", "literal", "str_opaque", "deref", "clone",
+                          "from", "into", "literal", "str_opaque", "deref", "deref_mut", "clone",
                           "cast", "castVal", "castVal_w", "from_val",
                           "panic", "sha256", "rotate_right", "rotate_left"])
   , ("option-result",    ["Some", "None", "Ok", "Err"])

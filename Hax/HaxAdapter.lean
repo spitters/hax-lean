@@ -1016,19 +1016,27 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
           | .var n => n
           | .deref (.var n) => n
           | _ => "_assign"
+        -- `index` and `index_mut` are both element-access on the LHS of an
+        -- assignment (the latter from a `&mut`-indexed target, e.g. `arr[i] = v`
+        -- where `arr` is `&mut`). Normalise both to the same writeback form.
+        let isIndex (f : String) : Bool := f == "index" || f == "index_mut"
         match lhs' with
         | .var n => return .assign n rhs
         -- Nested array element assignment: arr[i][j] = v
         -- → assign arr (array_update arr i (array_update (index arr i) j v))
-        | .app "index" [.app "index" [outerArr, outerIdx], innerIdx] =>
-          let outerName := getVarName (stripD outerArr)
-          let innerUpdate := ImpExpr.app "array_update"
-            [.app "index" [outerArr, outerIdx], innerIdx, rhs]
-          return .assign outerName (.app "array_update" [outerArr, outerIdx, innerUpdate])
+        | .app outer [.app inner [outerArr, outerIdx], innerIdx] =>
+          if isIndex outer && isIndex inner then
+            let outerName := getVarName (stripD outerArr)
+            let innerUpdate := ImpExpr.app "array_update"
+              [.app "index" [outerArr, outerIdx], innerIdx, rhs]
+            return .assign outerName (.app "array_update" [outerArr, outerIdx, innerUpdate])
+          else return .assign "_assign" rhs
         -- Array element assignment: arr[i] = v → assign arr (array_update arr i v)
-        | .app "index" [arr, idx] =>
-          let arrName := getVarName (stripD arr)
-          return .assign arrName (.app "array_update" [arr, idx, rhs])
+        | .app f [arr, idx] =>
+          if isIndex f then
+            let arrName := getVarName (stripD arr)
+            return .assign arrName (.app "array_update" [arr, idx, rhs])
+          else return .assign "_assign" rhs
         | _ => return .assign "_assign" rhs
       | .error e => throw e
     | .error e => throw e
@@ -1051,13 +1059,21 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
           | .deref e => stripD2 e
           | e => e
         let lhs' : ImpExpr := stripD2 lhs
+        -- `index` / `index_mut` both denote element access; a `&mut`-indexed
+        -- compound-assign target (`arr[i] op= v`) arrives as `index_mut`.
+        let isIndexOp (f : String) : Bool := f == "index" || f == "index_mut"
         match lhs' with
         | .var n => return .assign n (.app op [lhs, rhs])
-        | .app "index" [arr, idx] =>
-          -- arr[i] op= v → assign arr (array_update arr idx (op(arr[i], v)))
-          let arrName := match stripD2 arr with
-            | .var n => n | .deref (.var n) => n | _ => "_assign"
-          return .assign arrName (.app "array_update" [arr, idx, .app op [lhs, rhs]])
+        | .app f [arr, idx] =>
+          if isIndexOp f then
+            -- arr[i] op= v → assign arr (array_update arr idx (op(arr[i], v)))
+            -- The element-read inside `op` uses plain `index` (the rendered
+            -- `index_mut` would otherwise force a monomorphic element type).
+            let arrName := match stripD2 arr with
+              | .var n => n | .deref (.var n) => n | _ => "_assign"
+            let elemRead := ImpExpr.app "index" [arr, idx]
+            return .assign arrName (.app "array_update" [arr, idx, .app op [elemRead, rhs]])
+          else return .assign "_assign" (.app op [lhs, rhs])
         | _ => return .assign "_assign" (.app op [lhs, rhs])
       | .error e => throw e
     | .error e => throw e

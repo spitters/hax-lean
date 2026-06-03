@@ -109,6 +109,13 @@ INPUT:
   JSON-encoded ImpExpr (default) or hax Decorated<ExprKind> (with --hax).
   Reads from stdin if no file specified (or \"-\").
 
+NOTE (large inputs):
+  The typed phases use native (unbounded) recursion over the AST, so
+  whole-crate exports (100 MB+ hax_frontend_export.json) can overflow the
+  default 8 MB thread stack. Run under `ulimit -s unlimited` (or a large
+  explicit `ulimit -s`) for such inputs. Bounding the recursion is a
+  separate robustness item.
+
 EXAMPLES:
   echo '{\"var\": \"x\"}' | haxpipe
   haxpipe --emit-json input.json
