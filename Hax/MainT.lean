@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 import Hax.CLI
 import Hax.PrettyPrintT
 import Hax.TPipeline
+import Hax.InlineClosures
 
 /-!
 # haxpipeT CLI — Typed Extraction Pipeline
@@ -91,7 +92,10 @@ def main (args : List String) : IO UInt32 := do
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
     let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
-    let postPipelineTdefs := procTdefs.map fun (n, te) => (n, tPipelineFull newtypes te)
+    -- Bug-1: inline let-bound local closures (sentinels emitted by the adapter)
+    -- before the typed pipeline, so the IR never carries a closure-as-value.
+    let postPipelineTdefs := procTdefs.map fun (n, te) =>
+      (n, tPipelineFull newtypes (tInlineClosures te))
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)

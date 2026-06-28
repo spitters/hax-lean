@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 import Hax.AST
 import Hax.ImpType
 import Hax.TExpr
+import Hax.InlineClosures
 import Hax.JsonSize
 import Lean.Data.Json
 
@@ -2211,6 +2212,30 @@ private def extractNodeType (j : Json) : ImpType :=
   | .ok tyJ => parseHaxType tyJ
   | _ => .unknown
 
+/-- Bug-1 (let-bound local closures): if `exprJ` is a `Closure` with an inline
+    `body` and ≥1 cleanly-named param, return its ordered param names and the body
+    JSON, for sentinel marking. The IR has no lambda, so a let-bound closure is
+    marked `letBind f (app "__clo__:p…" [body]) …` and inlined at its `Fn::call`
+    sites by `tInlineClosures` (pre-pipeline). The first hax closure param is the
+    implicit environment slot (null pat) and is dropped by `parseHaxPat`. Returns
+    `none` for closures passed directly to a HOF/loop (no inline `body`, or no
+    named params) — those keep the existing param-dropping behavior. -/
+private def closureSentinelArg? (exprJ : Json) : Option (List String × Json) :=
+  let kind := match exprJ.getObjVal? "contents" with | .ok c => c | _ => exprJ
+  match kind.getObjVal? "Closure" with
+  | .ok cdata =>
+    match cdata.getObjVal? "body", cdata.getObjValAs? (Array Json) "params" with
+    | .ok bodyJ, .ok paramsArr =>
+      let names := paramsArr.toList.filterMap (fun p =>
+        match p.getObjVal? "pat" with
+        | .ok patJ => match parseHaxPat patJ with
+          | .varPat nm => if nm.startsWith "_" then none else some nm
+          | _ => none
+        | _ => none)
+      if names.isEmpty then none else some (names, bodyJ)
+    | _, _ => none
+  | _ => none
+
 /-- Parse a hax `Decorated<ExprKind>` JSON directly into a `TExpr`,
     preserving the type annotation from every JSON node's `ty` field.
     This is the principled typed extraction: every subexpression carries
@@ -2336,10 +2361,18 @@ where
       return .app funName' args
 
     else if let .ok data := j.getObjVal? "Let" then
-      let rhs ← parseHaxTExpr (← data.getObjVal? "expr") implMap
+      let exprJ ← data.getObjVal? "expr"
       let pat := match data.getObjVal? "pat" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
+      -- Bug-1: a `let`-bound local closure → sentinel for `tInlineClosures`.
+      if let .varPat n := pat then
+        if let some (names, bodyJ) := closureSentinelArg? exprJ then
+          let body ← parseHaxTExpr bodyJ implMap
+          let sentinel := TExpr.mk
+            (.app (closureSentinelPrefix ++ String.intercalate "," names) [body]) body.ty
+          return .letBind n sentinel (TExpr.mk .unitVal .unit)
+      let rhs ← parseHaxTExpr exprJ implMap
       match pat with
       | .tuplePat pats =>
         let tmpName := "_tup"
@@ -2682,6 +2715,15 @@ where
       let pat := match data.getObjVal? "pattern" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
+      -- Bug-1: a `let`-bound local closure is marked with a sentinel so the
+      -- pre-pipeline `tInlineClosures` pass can inline it at its `Fn::call` sites.
+      if let .varPat n := pat then
+        if let .ok initJ := data.getObjVal? "initializer" then
+          if let some (names, bodyJ) := closureSentinelArg? initJ then
+            let body ← parseHaxTExpr bodyJ implMap
+            let sentinel := TExpr.mk
+              (.app (closureSentinelPrefix ++ String.intercalate "," names) [body]) body.ty
+            return TExpr.mk (.letBind n sentinel (TExpr.mk .unitVal .unit)) .unknown
       let init ← match data.getObjVal? "initializer" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
         | .ok e => parseHaxTExpr e implMap
