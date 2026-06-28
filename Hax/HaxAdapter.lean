@@ -77,7 +77,7 @@ private def firstObjKey (j : Json) : Option String :=
 
 /-- Extract the last meaningful name from a hax `DefId` path.
     DefId JSON: `{"krate": "...", "path": [{"data": {"TypeNs": "..."}, "disambiguator": 0}, ...]}` -/
-private partial def extractDefIdName (j : Json) : String :=
+private partial def extractDefIdName (j : Json) (collisions : List String := []) : String :=
   -- hax DefId may be: {path: [...]} or {contents: {value: {path: [...]}}}
   -- Unwrap to find the object containing "path"
   let inner := match j.getObjVal? "contents" with
@@ -132,11 +132,22 @@ private partial def extractDefIdName (j : Json) : String :=
     match names.getLast? with
     | some n =>
       -- Suffix width-sensitive ops with bit width (e.g. wrapping_add → wrapping_add#32)
-      if widthSensitiveOps.contains n then
-        match implWidth with
-        | some w => s!"{n}#{w}"
-        | none => n
-      else n
+      let base :=
+        if widthSensitiveOps.contains n then
+          match implWidth with
+          | some w => s!"{n}#{w}"
+          | none => n
+        else n
+      -- Bug-2: when a short name collides across parent modules (e.g. edwards25519
+      -- vs p256 `scalar_mult`), qualify it with the parent module segment so the
+      -- two functions stay distinct. Otherwise one body wins and the other's call
+      -- sites mis-type (3-tuple vs 4-tuple point). Applied identically at def and
+      -- call sites (both route through here), keeping them consistent.
+      if collisions.contains n then
+        match names.reverse with
+        | _ :: parent :: _ => s!"{parent}_{base}"
+        | _ => base
+      else base
     | none =>
       match inner.getObjValAs? String "krate" with
       | .ok k => k
@@ -155,14 +166,15 @@ private def extractLocalIdentName (j : Json) : String :=
 
 /-- Extract the DefId name from an `item` JSON object.
     hax items have structure: `{id, value: {def_id: ...}}` or `{def_id: ...}`. -/
-private partial def extractItemDefIdName (item : Json) (fallback : String) : String :=
+private partial def extractItemDefIdName (item : Json) (fallback : String)
+    (collisions : List String := []) : String :=
   let defIdJ := match item.getObjVal? "value" with
     | .ok v => match v.getObjVal? "def_id" with
       | .ok d => some d
       | _ => item.getObjVal? "def_id" |>.toOption
     | _ => item.getObjVal? "def_id" |>.toOption
   match defIdJ with
-  | some defId => extractDefIdName defId
+  | some defId => extractDefIdName defId collisions
   | none => fallback
 
 /-- Fallback method-call disambiguation when no impl-self-type map is
@@ -228,9 +240,17 @@ This is the principled version of the earlier name-allowlist heuristic
 than guessing from method names.
 -/
 
-/-- Map from Impl-block DefId-interning-id to the short name of the
-    self-type that the impl is for. -/
-abbrev ImplSelfTypeMap := List (Nat × String)
+/-- Parse-time context threaded through the typed parse. `impls` maps an
+    Impl-block DefId-interning-id to the short name of the self-type the impl is
+    for (method-call disambiguation). `collisions` is the set of function short
+    names that collide across ≥2 parent modules (e.g. `scalar_mult` under both
+    `edwards25519` and `p256`); such names are qualified with their parent module
+    at both def and call sites (Bug-2). The name `ImplSelfTypeMap` is retained for
+    minimal churn. -/
+structure ImplSelfTypeMap where
+  impls : List (Nat × String) := []
+  collisions : List String := []
+  deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
     inner field type. Built once from the top-level JSON's Struct
@@ -267,7 +287,7 @@ private partial def extractAdtShortName (adtJ : Json) : Option String := do
     `owner_id.contents.id`) → self-type short name. Inherent impls are
     the ones whose methods can be called as `<receiver>.<method>()`
     and need disambiguation from stdlib methods of the same name. -/
-partial def buildImplSelfTypeMap (j : Json) : ImplSelfTypeMap :=
+partial def buildImplSelfTypeMap (j : Json) : List (Nat × String) :=
   match j with
   | .arr items =>
     items.toList.filterMap fun it =>
@@ -346,7 +366,7 @@ private partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Opti
 
 /-- Look up an Impl-DefId-id in the map. -/
 private def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String :=
-  m.find? (·.1 == id) |>.map (·.2)
+  m.impls.find? (·.1 == id) |>.map (·.2)
 
 /-- Disambiguate a method-call name using the impl map. Given the
     Call's `fun` JSON (a GlobalName) and the base method name, walk
@@ -354,7 +374,7 @@ private def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String 
     that Impl's self-type is in the map, return `<TypeName>_<base>`. -/
 private def disambiguateMethodCallWithImplMap
     (funJ : Json) (baseName : String) (implMap : ImplSelfTypeMap) : String :=
-  if implMap.isEmpty then baseName
+  if implMap.impls.isEmpty then baseName
   else
     match funJ.getObjVal? "contents" with
     | .ok contents =>
@@ -395,7 +415,7 @@ private def disambiguateMethodCallWithImplMap
 /-- Extract a function name from a hax expression (for Call).
     If the callee is a GlobalName, extract its item's DefId name and
     disambiguate user methods.  Otherwise use a placeholder. -/
-private partial def extractCallName (j : Json) : String :=
+private partial def extractCallName (j : Json) (collisions : List String := []) : String :=
   -- j is the `fun` expression (a Decorated<ExprKind>)
   match j.getObjVal? "contents" with
   | .ok contents =>
@@ -403,7 +423,7 @@ private partial def extractCallName (j : Json) : String :=
     | .ok gn =>
       match gn.getObjVal? "item" with
       | .ok item =>
-        let baseName := extractItemDefIdName item "unknown_fn"
+        let baseName := extractItemDefIdName item "unknown_fn" collisions
         -- Locate the DefId for disambiguation (same lookup pattern as
         -- extractItemDefIdName).
         let defIdJ := match item.getObjVal? "value" with
@@ -2245,7 +2265,7 @@ private def closureSentinelArg? (exprJ : Json) : Option (List String × Json) :=
     `buildImplSelfTypeMap`. Used to disambiguate method calls into
     `<TypeName>_<method>` based on the resolved DefId's Impl ancestor's
     self-type. Defaults to `[]` (no disambiguation). -/
-partial def parseHaxTExpr (j : Json) (implMap : ImplSelfTypeMap := []) : Except String TExpr := do
+partial def parseHaxTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) : Except String TExpr := do
   let ty := extractNodeType j
   let contents ← j.getObjVal? "contents"
   let kind ← parseTExprKind contents j
@@ -2322,7 +2342,7 @@ where
 
     else if let .ok data := j.getObjVal? "Call" then
       let funJ ← data.getObjVal? "fun"
-      let funName := extractCallName funJ
+      let funName := extractCallName funJ implMap.collisions
       -- Strip panicking calls. `assert!`, `assert_eq!`, `panic!`,
       -- `unreachable!` etc. expand through hax into calls to
       -- `core::panicking::*` helpers (`assert_failed`, `panic`,
@@ -3065,17 +3085,25 @@ partial def normalizeAssignOpsTExpr : TExpr → TExpr
     `rawTExpr` preserves types from hax JSON (for type extraction).
     `processedTExpr` has for-loop reconstruction and assign normalization applied
     (types may be lost due to ImpExpr roundtrip, used for pipeline/rendering). -/
-partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := []) :
+partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     Except String (Option (String × TExpr × TExpr × FnTypeInfo)) := do
   let kind ← j.getObjVal? "kind"
   if let .ok fnData := kind.getObjVal? "Fn" then
     -- Top-level Fn items have `ident` under `kind.Fn`; impl methods
     -- have it on the item itself. Try both.
-    let name := match fnData.getObjVal? "ident" with
+    let baseName := match fnData.getObjVal? "ident" with
       | .ok ident => extractFnName ident
       | _ => match j.getObjVal? "ident" with
         | .ok ident => extractFnName ident
         | _ => "unknown_fn"
+    -- Bug-2: if this function's short name collides across modules, qualify the
+    -- DEF name from the item's def_id path (same rule as call sites). Non-colliding
+    -- names keep the bare `extractFnName` form (zero churn for them).
+    let name := if implMap.collisions.contains baseName then
+        match j.getObjVal? "def_id" with
+        | .ok defId => extractDefIdName defId implMap.collisions
+        | _ => baseName
+      else baseName
     -- Top-level Fn items wrap params/body/ret in a `def` field; impl
     -- methods inline them directly under `kind.Fn`. Use `def` when
     -- present, otherwise the Fn data itself.
@@ -3128,6 +3156,55 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := []) :
     return some (name, body, processed, ⟨[], .unknown⟩)
   else return none
 
+/-- The ordered segment names of a hax DefId path (mirrors `extractDefIdName`'s
+    `names`). The last is the item name; the second-to-last is its parent module. -/
+private partial def defIdPathNames (defId : Json) : List String :=
+  let inner := match defId.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
+    | _ => defId
+  match inner.getObjVal? "path" with
+  | .ok (.arr segments) => segments.toList.filterMap fun seg =>
+      match seg.getObjVal? "data" with
+      | .ok (.str s) => some s
+      | .ok data =>
+        match data.getObjVal? "TypeNs", data.getObjVal? "ValueNs" with
+        | .ok (.str n), _ => some n
+        | _, .ok (.str n) => some n
+        | _, _ => none
+      | _ => none
+  | _ => []
+
+/-- Collect `(fnShortName, parentModule)` for every `Fn` item, recursing into
+    `Mod` sub-items, for Bug-2 collision detection. -/
+private partial def collectFnNameParents (items : List Json) : List (String × String) :=
+  items.foldl (init := []) fun acc item =>
+    match item.getObjVal? "kind" with
+    | .ok kind =>
+      if (kind.getObjVal? "Fn").toOption.isSome then
+        match item.getObjVal? "def_id" with
+        | .ok defId =>
+          match (defIdPathNames defId).reverse with
+          | name :: parent :: _ => (name, parent) :: acc
+          | _ => acc
+        | _ => acc
+      else
+        match kind.getObjVal? "Mod" with
+        | .ok (Json.arr modData) =>
+          match modData.toList[1]? with
+          | some (Json.arr subItems) => collectFnNameParents subItems.toList ++ acc
+          | _ => acc
+        | _ => acc
+    | _ => acc
+
+/-- Function short names that collide across ≥2 distinct parent modules. Such
+    names are module-qualified at both def and call sites (Bug-2). -/
+private partial def fnNameCollisions (root : Json) : List String :=
+  let items := match root with | .arr xs => xs.toList | _ => []
+  let pairs := collectFnNameParents items
+  let names := (pairs.map (·.1)).eraseDups
+  names.filter fun nm =>
+    ((pairs.filter (·.1 == nm)).map (·.2)).eraseDups.length > 1
+
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
     processed typed defs (for pipeline/rendering)). -/
@@ -3137,7 +3214,8 @@ partial def parseHaxFileWithTExpr (j : Json) :
   -- Build the impl-self-type map once from the full JSON. This lets the
   -- recursive parse disambiguate user-defined methods (e.g. `Crs::len`)
   -- from stdlib ones (`slice::len`) at every Call node.
-  let implMap := buildImplSelfTypeMap j
+  let implMap : ImplSelfTypeMap :=
+    { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
