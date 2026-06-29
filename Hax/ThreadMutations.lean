@@ -64,6 +64,18 @@ partial def tVarRefs : TExpr → List String
   | .mk (.var n) _ => [n]
   | e => (tChildrenM e).foldl (fun acc c => acc ++ tVarRefs c) []
 
+/-- Whether `e` contains a loop / fold construct. Used to decide whether to thread
+    mutations through an `if` that sits *inside* a fold body: when the continuation
+    feeds a subsequent loop (so the loop needs the merged post-`if` state) the
+    threading is required and safe, whereas an `if` whose mutated variables merely
+    become the enclosing fold's accumulator return must be left to the accumulator
+    mechanism. -/
+partial def tContainsLoop : TExpr → Bool
+  | .mk (.forLoop ..) _ | .mk (.forLoopRev ..) _ | .mk (.whileLoop ..) _
+  | .mk (.forFold ..) _ | .mk (.forFoldRev ..) _ | .mk (.whileFold ..) _
+  | .mk (.forFoldReturn ..) _ | .mk (.forFoldRevReturn ..) _ | .mk (.whileFoldReturn ..) _ => true
+  | e => (tChildrenM e).any tContainsLoop
+
 /-- Build `(v₁, …, vₙ)` (or just `vᵢ` when singleton) from variable names. -/
 def tVarTuple : List String → TExpr
   | [v] => .mk (.var v) .unknown
@@ -109,7 +121,9 @@ partial def tThreadMut (active : Bool) (e : TExpr) : TExpr :=
     let rest := tThreadMut active rest
     let used := tVarRefs rest
     let m := (tAssignedVars t ++ tAssignedVars f).eraseDups.filter used.contains
-    if !active || m.isEmpty then
+    -- Fire at straight-line/top-level position (`active`), or — even inside a fold
+    -- body — when the continuation contains a loop that consumes the merged state.
+    if (!active && !tContainsLoop rest) || m.isEmpty then
       .mk (.seq (.mk (.ifThenElse c t f) ifTy) rest) e.ty
     else
       let tup := tVarTuple m
