@@ -7,6 +7,7 @@ import Hax.CLI
 import Hax.PrettyPrintT
 import Hax.TPipeline
 import Hax.InlineClosures
+import Hax.ThreadMutations
 
 /-!
 # haxpipeT CLI — Typed Extraction Pipeline
@@ -92,10 +93,10 @@ def main (args : List String) : IO UInt32 := do
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
     let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
-    -- Lower `Fn::call` of let-bound `.lam` closures to direct applications
-    -- before the typed pipeline (so `f x y` instead of `call f (x,y)`).
+    -- Pre-pipeline normalizations: lower `Fn::call` of let-bound `.lam` closures
+    -- to direct applications, and thread mutations across `if`-statement joins.
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      (n, tPipelineFull newtypes (tLowerClosureCalls [] te))
+      (n, tPipelineFull newtypes (tThreadMut (tLowerClosureCalls [] te)))
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
