@@ -5,6 +5,7 @@ Authors: CatCrypt Contributors
 -/
 import Hax.TExpr
 import Hax.Semantics
+import Hax.Phase.FlattenLetFoldReturn
 
 /-!
 # Typed phase: `tFlattenLetFoldReturn`
@@ -17,9 +18,11 @@ function-tail.
 
 This is a render-time pass: it runs in `tPipelineFull` *after* the
 verified core `tPipeline` and is not subject to the `tPipeline_erase`
-commuting diagram. Unlike the core typed passes, it has no parallel
-untyped twin in `Hax/Phase/`; denotation preservation is stated
-directly on the erased output (see `tFlattenLetFoldReturn_denote`).
+commuting diagram. Its four rewrites are mechanised as
+denotation-preserving identities on the untyped semantics in
+`Hax/Phase/FlattenLetFoldReturn.lean` (B/C unconditional; A/D under the
+`noVarRef "_"` freshness side-condition). See the `## Correctness`
+section below.
 
 ## Motivation
 
@@ -212,39 +215,41 @@ partial def tFlattenLetFoldReturn : TExpr → TExpr
     else
       .mk (.letBind n val' body') ty
 
-/-! ## Correctness discussion
+/-! ## Correctness
 
-The pass is built from four AST-level identities. Each is a standard
-program equivalence on `ImpExpr`:
+The pass is built from four AST-level identities, each a program
+equivalence on `ImpExpr`. All four are now **mechanised** on the untyped
+`denote` semantics in `Hax/Phase/FlattenLetFoldReturn.lean`:
 
-- **A** `letBind "_" .unitVal e ≡ e` (when `"_" ∉ freeVars e`)
-- **B / B′** `letBind`/`seq` associativity around discarded bindings
-- **C / C′** distribute `rest` into the branches of an `ifThenElse`
-- **D** `letBind "_" e r ≡ seq e r` (when `"_" ∉ freeVars r`)
+- **A** `letBind "_" .unitVal e ≡ e` — `flattenA_denote`
+- **B / B′** discarded-bind associativity — `flattenB_denote`
+- **C / C′** distribute the tail into both `ifThenElse` branches —
+  `flattenC_denote`
+- **D** `letBind "_" e r ≡ seq e r` — `flattenD_denote`
 
-All four hold **conditionally** on `"_"` never appearing as a free
-variable in the relevant subexpression. This is the universal
-discard-binding convention used throughout the pipeline: `letBind "_"`
-introduces a bind that is *never read* by subsequent code. `denote`
-itself doesn't enforce this — `Env.extend env "_" v` is observable by
-any later `.var "_"`. So an unconditional
-`denote bi fuel (tFlattenLetFoldReturn e).erase = denote bi fuel e.erase`
-is **not provable** without either:
+**B and C are unconditional** clean `denote = denote` equalities (both
+sides bind `"_"` to the same value before running the tail, so the two
+`StateM Env Outcome` functions coincide).
 
-1. a recursive `notFreeIn "_"` predicate threaded as a hypothesis, or
-2. a coarser semantic equivalence quotienting out the `"_"` slot of
-   the env.
+**A and D depend on the freshness side-condition** `noVarRef "_" r`: they
+change the `"_"` slot of the environment (A drops a `()` binding; D
+replaces `letBind "_"` by `seq`, which does not bind `"_"`). This is the
+universal discard-binding convention: `letBind "_"` introduces a bind
+that is never read. Both are proved via the env-insensitivity congruence
+`denote_agreeExcept`: under `noVarRef "_" r`, `denote` maps
+`Env.AgreeExcept "_"`-related states to equal outcomes and
+`AgreeExcept "_"`-related output states. A and D therefore preserve the
+outcome and leave the output environments agreeing except at the unread
+`"_"` slot.
 
-Neither is in scope here. This pass is a **render-time normalisation**:
-it runs in `tPipelineFull` after the verified core `tPipeline` and is
-not subject to the `tPipeline_erase` commuting diagram. Its correctness
-is justified at the design level (the four rewrites are well-known
-algebraic identities under the standard `"_"` convention), and any
-formal claim is deferred until the freshness framework is added.
-
-The pass is denotation-preserving in practice on every extracted body
-we have observed; the gap is in the *formal statement*, not the
-behaviour.
+**Scope of the whole-pass claim.** `tFlattenLetFoldReturn` itself is a
+`partial def` — its B/C recursions cross the structural boundary, so
+Lean exposes no equational lemmas for it. Consequently neither its
+erase-commutation nor an end-to-end `denote ∘ erase` preservation can be
+discharged from the four identities above until the pass is reformulated
+as a total (fuel-bounded) function. The pass remains a **render-time**
+normalisation outside the `tPipeline_erase` diagram; what is now
+mechanised is the denotation-preservation of each of its four rewrites.
 -/
 
 end Hax

@@ -123,6 +123,7 @@ theorem wrapReturns_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
   | app f args _ => exact cfContinue_denote'_wrapContinue bi fuel (.app f args)
   | tuple elems _ => exact cfContinue_denote'_wrapContinue bi fuel (.tuple elems)
   | proj e i _ => exact cfContinue_denote'_wrapContinue bi fuel (.proj e i)
+  | lam ps body _ => exact cfContinue_denote'_wrapContinue bi fuel (.lam ps body)
   | borrow e _ => exact cfContinue_denote'_wrapContinue bi fuel (.borrow e)
   | deref e _ => exact cfContinue_denote'_wrapContinue bi fuel (.deref e)
   | assign n rhs _ => exact cfContinue_denote'_wrapContinue bi fuel (.assign n rhs)
@@ -947,6 +948,10 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     simp only [explicitMonadic]; unfold denote'
     simp only [bind, StateT.bind]
     rw [ih he hme hle hee fuel env]
+  -- First-class closure: both sides denote to the same `.err` (unmodeled).
+  | lam ps body _ =>
+    intro fuel env
+    simp only [explicitMonadic, denote']
   -- Structural: ifThenElse
   | ifThenElse c t el ih_c ih_t ih_e =>
     cases hnr with | ifThenElse hrc hrt hre =>

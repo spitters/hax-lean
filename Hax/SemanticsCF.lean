@@ -258,6 +258,11 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.controlFlow isBreak v) => pure (.val (.controlFlow isBreak v))
     | .val v => do modify (Env.extend · name v); denote' bi fuel body
     | other => pure other
+  | .lam _ _ =>
+    -- The reference semantics is first-order; a closure value is not modeled
+    -- (mirrors `denote`'s `.lam` case). `.lam` is a syntactic carrier for
+    -- extraction; the verified guarantee is type erasure, not this denotation.
+    pure (.err "closures are not evaluated by the reference semantics")
   | .app f args => denoteApp' bi fuel f args
   | .tuple elems => do
     let mvals ← denoteArgs' bi fuel elems

@@ -47,6 +47,7 @@ private theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
   induction e using ImpExpr.ind with
   | lit => exact .lit
   | var => exact .var
+  | lam _ _ ih => cases h with | lam hb => exact .lam (ih hb)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
   | app _ args ih =>
@@ -102,6 +103,7 @@ private theorem localMutation_preserves_noCFConstructors (vars : List String) (e
   induction e using ImpExpr.ind with
   | lit => exact .lit
   | var => exact .var
+  | lam _ _ ih => cases h with | lam hb => exact .lam (ih hb)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
   | app _ args ih =>
@@ -160,6 +162,7 @@ private theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
   induction e using ImpExpr.ind with
   | lit => exact .lit
   | var => exact .var
+  | lam _ _ ih => cases h with | lam hb => exact .lam (ih hb)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
   | app _ args ih =>
@@ -221,6 +224,7 @@ private theorem localMutation_preserves_noQuestionMark (vars : List String) (e :
   induction e using ImpExpr.ind with
   | lit => exact .lit
   | var => exact .var
+  | lam _ _ ih => cases h with | lam hb => exact .lam (ih hb)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
   | app _ args ih =>
@@ -283,6 +287,7 @@ private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (
   induction e using ImpExpr.ind generalizing nested with
   | lit => exact .lit
   | var => exact .var
+  | lam _ _ ih => cases h with | lam hb => exact .lam (ih _ hb)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 _ h1) (ih2 _ h2)
   | app _ args ih =>
@@ -367,6 +372,7 @@ private theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpEx
   induction e using ImpExpr.ind generalizing nested with
   | lit => exact .lit
   | var => exact .var
+  | lam _ _ ih => cases h with | lam hb => exact .lam (ih _ hb)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 _ h1) (ih2 _ h2)
   | app _ args ih =>
@@ -496,6 +502,38 @@ theorem pipeline_cf_val (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (denote' bi fuel (pipeline e) env).1 = .val v := by
   rw [pipeline_cf bi hbi e hncf hnee fuel env henv, hval]
   rfl
+
+/-- Strengthened `pipeline_correct`, dropping the `hNoLoops` hypothesis.
+
+    `pipeline_correct` (in `Pipeline.lean`) requires the post-phase-1-2 program
+    to be loop-free (`hNoLoops`) so that both sides can be compared under the
+    same reference evaluator `denote`. That comparison cannot hold once loops
+    are present: `functionalizeLoops` rewrites `forLoop`/`whileLoop`/`break_`/
+    `continue_` into the fold constructors (`forFold`, `whileFold`, `cfBreak`,
+    `cfContinue`), for which `denote` returns an error. The pipeline output must
+    instead be read by the ControlFlow-aware evaluator `denote'`, and the two
+    evaluators agree up to the `Outcome.encodeCF3` encoding (`broke`/`continued`
+    become `controlFlow` values).
+
+    Remaining hypotheses, all minimal:
+    * `Builtins.DeepNoControlFlow bi` — the explicit builtin-table contract that
+      replaces `hNoLoops`: builtins never fabricate `controlFlow` values.
+    * `NoCFConstructors e` — the source uses no fold/CF constructors (true of
+      every pre-pipeline extraction; `denote` errors on them).
+    * `hNoEE` — kept exactly as in `pipeline_correct`.
+    * `Env.NoControlFlow env` — the starting environment has no `controlFlow`
+      values (e.g. `Env.empty`).
+
+    The loop-case fold-denotation coincidence is discharged by `FL_combined`
+    (via `denoteForLoop_combined`/`denoteWhile_combined`). For programs that
+    also contain early exits, see `pipeline_full_correct`. -/
+theorem pipeline_correct' (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+    (e : ImpExpr) (hncf : NoCFConstructors e)
+    (hNoEE : NoEarlyExit (localMutation (mutatedVars e) (dropReferences e)))
+    (fuel : Nat) (env : Env) (henv : Env.NoControlFlow env) :
+    denote' bi fuel (pipeline e) env =
+      (Outcome.encodeCF3 (denote bi fuel e env).1, (denote bi fuel e env).2) :=
+  pipeline_cf bi hbi e hncf hNoEE fuel env henv
 
 /-! ### Full pipeline theorem (all well-scoped programs) -/
 

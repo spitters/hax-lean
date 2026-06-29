@@ -34,35 +34,86 @@ Run BEFORE the typed pipeline (parse-time normalization, not a verified phase).
 
 namespace Hax
 
-/-- Immediate `TExpr` children. -/
-private def tChildrenM : TExpr → List TExpr
-  | .mk (.letBind _ v b) _ => [v, b]
-  | .mk (.lam _ b) _ => [b]
-  | .mk (.app _ args) _ => args
-  | .mk (.tuple es) _ => es
-  | .mk (.proj e _) _ => [e]
-  | .mk (.ifThenElse c t e) _ => [c, t, e]
-  | .mk (.match_ s arms) _ => s :: arms.map (·.2)
-  | .mk (.seq a b) _ => [a, b]
-  | .mk (.borrow e) _ | .mk (.deref e) _ | .mk (.ann e) _
-  | .mk (.namedProj _ e) _ | .mk (.earlyReturn e) _ | .mk (.questionMark e) _
-  | .mk (.cfBreak e) _ | .mk (.cfContinue e) _ | .mk (.cfBreakContinue e) _
-  | .mk (.break_ (some e)) _ | .mk (.assign _ e) _ => [e]
-  | .mk (.forLoop _ lo hi b) _ | .mk (.forLoopRev _ lo hi b) _
-  | .mk (.forFold _ lo hi b) _ | .mk (.forFoldRev _ lo hi b) _
-  | .mk (.forFoldReturn _ lo hi b) _ | .mk (.forFoldRevReturn _ lo hi b) _ => [lo, hi, b]
-  | .mk (.whileLoop c b) _ | .mk (.whileFold c b) _ | .mk (.whileFoldReturn c b) _ => [c, b]
-  | _ => []
-
-/-- Names assigned (`.assign`) anywhere in `e`. -/
-partial def tAssignedVars : TExpr → List String
+/-- Names assigned (`.assign`) anywhere in `e`. Structural recursion (one
+    `match` arm per constructor) so the function is non-`partial` and admits the
+    `tAssignedVars_erase` commutation lemma in `ThreadMutationsErase`. -/
+def tAssignedVars : TExpr → List String
   | .mk (.assign n rhs) _ => n :: tAssignedVars rhs
-  | e => (tChildrenM e).foldl (fun acc c => acc ++ tAssignedVars c) []
+  | .mk (.letBind _ v b) _ => tAssignedVars v ++ tAssignedVars b
+  | .mk (.lam _ b) _ => tAssignedVars b
+  | .mk (.app _ args) _ => goE args
+  | .mk (.tuple es) _ => goE es
+  | .mk (.proj e _) _ => tAssignedVars e
+  | .mk (.ifThenElse c t e) _ => tAssignedVars c ++ tAssignedVars t ++ tAssignedVars e
+  | .mk (.match_ s arms) _ => tAssignedVars s ++ goA arms
+  | .mk (.seq a b) _ => tAssignedVars a ++ tAssignedVars b
+  | .mk (.borrow e) _ => tAssignedVars e
+  | .mk (.deref e) _ => tAssignedVars e
+  | .mk (.forLoop _ lo hi b) _ => tAssignedVars lo ++ tAssignedVars hi ++ tAssignedVars b
+  | .mk (.forLoopRev _ lo hi b) _ => tAssignedVars lo ++ tAssignedVars hi ++ tAssignedVars b
+  | .mk (.whileLoop c b) _ => tAssignedVars c ++ tAssignedVars b
+  | .mk (.earlyReturn e) _ => tAssignedVars e
+  | .mk (.questionMark e) _ => tAssignedVars e
+  | .mk (.forFold _ lo hi b) _ => tAssignedVars lo ++ tAssignedVars hi ++ tAssignedVars b
+  | .mk (.forFoldRev _ lo hi b) _ => tAssignedVars lo ++ tAssignedVars hi ++ tAssignedVars b
+  | .mk (.whileFold c b) _ => tAssignedVars c ++ tAssignedVars b
+  | .mk (.forFoldReturn _ lo hi b) _ => tAssignedVars lo ++ tAssignedVars hi ++ tAssignedVars b
+  | .mk (.forFoldRevReturn _ lo hi b) _ => tAssignedVars lo ++ tAssignedVars hi ++ tAssignedVars b
+  | .mk (.whileFoldReturn c b) _ => tAssignedVars c ++ tAssignedVars b
+  | .mk (.cfBreak e) _ => tAssignedVars e
+  | .mk (.cfContinue e) _ => tAssignedVars e
+  | .mk (.cfBreakContinue e) _ => tAssignedVars e
+  | .mk (.ann e) _ => tAssignedVars e
+  | .mk (.namedProj _ e) _ => tAssignedVars e
+  | .mk (.break_ (some e)) _ => tAssignedVars e
+  | _ => []
+where
+  goE : List TExpr → List String
+    | [] => []
+    | e :: es => tAssignedVars e ++ goE es
+  goA : List (ImpPat × TExpr) → List String
+    | [] => []
+    | (_, e) :: rest => tAssignedVars e ++ goA rest
 
 /-- Names referenced (`.var`) anywhere in `e` (over-approximate: ignores binders). -/
-partial def tVarRefs : TExpr → List String
+def tVarRefs : TExpr → List String
   | .mk (.var n) _ => [n]
-  | e => (tChildrenM e).foldl (fun acc c => acc ++ tVarRefs c) []
+  | .mk (.letBind _ v b) _ => tVarRefs v ++ tVarRefs b
+  | .mk (.lam _ b) _ => tVarRefs b
+  | .mk (.app _ args) _ => goE args
+  | .mk (.tuple es) _ => goE es
+  | .mk (.proj e _) _ => tVarRefs e
+  | .mk (.ifThenElse c t e) _ => tVarRefs c ++ tVarRefs t ++ tVarRefs e
+  | .mk (.match_ s arms) _ => tVarRefs s ++ goA arms
+  | .mk (.seq a b) _ => tVarRefs a ++ tVarRefs b
+  | .mk (.borrow e) _ => tVarRefs e
+  | .mk (.deref e) _ => tVarRefs e
+  | .mk (.assign _ rhs) _ => tVarRefs rhs
+  | .mk (.forLoop _ lo hi b) _ => tVarRefs lo ++ tVarRefs hi ++ tVarRefs b
+  | .mk (.forLoopRev _ lo hi b) _ => tVarRefs lo ++ tVarRefs hi ++ tVarRefs b
+  | .mk (.whileLoop c b) _ => tVarRefs c ++ tVarRefs b
+  | .mk (.earlyReturn e) _ => tVarRefs e
+  | .mk (.questionMark e) _ => tVarRefs e
+  | .mk (.forFold _ lo hi b) _ => tVarRefs lo ++ tVarRefs hi ++ tVarRefs b
+  | .mk (.forFoldRev _ lo hi b) _ => tVarRefs lo ++ tVarRefs hi ++ tVarRefs b
+  | .mk (.whileFold c b) _ => tVarRefs c ++ tVarRefs b
+  | .mk (.forFoldReturn _ lo hi b) _ => tVarRefs lo ++ tVarRefs hi ++ tVarRefs b
+  | .mk (.forFoldRevReturn _ lo hi b) _ => tVarRefs lo ++ tVarRefs hi ++ tVarRefs b
+  | .mk (.whileFoldReturn c b) _ => tVarRefs c ++ tVarRefs b
+  | .mk (.cfBreak e) _ => tVarRefs e
+  | .mk (.cfContinue e) _ => tVarRefs e
+  | .mk (.cfBreakContinue e) _ => tVarRefs e
+  | .mk (.ann e) _ => tVarRefs e
+  | .mk (.namedProj _ e) _ => tVarRefs e
+  | .mk (.break_ (some e)) _ => tVarRefs e
+  | _ => []
+where
+  goE : List TExpr → List String
+    | [] => []
+    | e :: es => tVarRefs e ++ goE es
+  goA : List (ImpPat × TExpr) → List String
+    | [] => []
+    | (_, e) :: rest => tVarRefs e ++ goA rest
 
 /-- Whether `e` contains a loop / fold construct. Used to decide whether to thread
     mutations through an `if` that sits *inside* a fold body: when the continuation
@@ -70,11 +121,43 @@ partial def tVarRefs : TExpr → List String
     threading is required and safe, whereas an `if` whose mutated variables merely
     become the enclosing fold's accumulator return must be left to the accumulator
     mechanism. -/
-partial def tContainsLoop : TExpr → Bool
-  | .mk (.forLoop ..) _ | .mk (.forLoopRev ..) _ | .mk (.whileLoop ..) _
-  | .mk (.forFold ..) _ | .mk (.forFoldRev ..) _ | .mk (.whileFold ..) _
-  | .mk (.forFoldReturn ..) _ | .mk (.forFoldRevReturn ..) _ | .mk (.whileFoldReturn ..) _ => true
-  | e => (tChildrenM e).any tContainsLoop
+def tContainsLoop : TExpr → Bool
+  | .mk (.forLoop ..) _ => true
+  | .mk (.forLoopRev ..) _ => true
+  | .mk (.whileLoop ..) _ => true
+  | .mk (.forFold ..) _ => true
+  | .mk (.forFoldRev ..) _ => true
+  | .mk (.whileFold ..) _ => true
+  | .mk (.forFoldReturn ..) _ => true
+  | .mk (.forFoldRevReturn ..) _ => true
+  | .mk (.whileFoldReturn ..) _ => true
+  | .mk (.letBind _ v b) _ => tContainsLoop v || tContainsLoop b
+  | .mk (.lam _ b) _ => tContainsLoop b
+  | .mk (.app _ args) _ => goE args
+  | .mk (.tuple es) _ => goE es
+  | .mk (.proj e _) _ => tContainsLoop e
+  | .mk (.ifThenElse c t e) _ => tContainsLoop c || tContainsLoop t || tContainsLoop e
+  | .mk (.match_ s arms) _ => tContainsLoop s || goA arms
+  | .mk (.seq a b) _ => tContainsLoop a || tContainsLoop b
+  | .mk (.borrow e) _ => tContainsLoop e
+  | .mk (.deref e) _ => tContainsLoop e
+  | .mk (.assign _ rhs) _ => tContainsLoop rhs
+  | .mk (.earlyReturn e) _ => tContainsLoop e
+  | .mk (.questionMark e) _ => tContainsLoop e
+  | .mk (.cfBreak e) _ => tContainsLoop e
+  | .mk (.cfContinue e) _ => tContainsLoop e
+  | .mk (.cfBreakContinue e) _ => tContainsLoop e
+  | .mk (.ann e) _ => tContainsLoop e
+  | .mk (.namedProj _ e) _ => tContainsLoop e
+  | .mk (.break_ (some e)) _ => tContainsLoop e
+  | _ => false
+where
+  goE : List TExpr → Bool
+    | [] => false
+    | e :: es => tContainsLoop e || goE es
+  goA : List (ImpPat × TExpr) → Bool
+    | [] => false
+    | (_, e) :: rest => tContainsLoop e || goA rest
 
 /-- Build `(v₁, …, vₙ)` (or just `vᵢ` when singleton) from variable names. -/
 def tVarTuple : List String → TExpr
@@ -95,12 +178,19 @@ def tDestructure : List String → TExpr → TExpr → TExpr
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
     bindings (and keeping a trailing `assign` as a statement before `newTail`). -/
-partial def tReplaceTail (e newTail : TExpr) : TExpr :=
-  match e.kind with
-  | .letBind n v body => .mk (.letBind n v (tReplaceTail body newTail)) e.ty
-  | .seq a b => .mk (.seq a (tReplaceTail b newTail)) e.ty
-  | .assign _ _ => .mk (.seq e newTail) e.ty
-  | _ => newTail
+def tReplaceTail : TExpr → TExpr → TExpr
+  | .mk (.letBind n v body) ty, newTail => .mk (.letBind n v (tReplaceTail body newTail)) ty
+  | .mk (.seq a b) ty, newTail => .mk (.seq a (tReplaceTail b newTail)) ty
+  | .mk (.assign n r) ty, newTail => .mk (.seq (.mk (.assign n r) ty) newTail) ty
+  | _, newTail => newTail
+
+/-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
+    `if`-statement detection in `tThreadMut` looks through `.ann` and thus
+    commutes with type erasure. No `.ann` nodes exist at this pre-pipeline
+    stage, so this is the identity on real inputs. -/
+def tStripAnn : TExpr → TExpr
+  | .mk (.ann e) _ => tStripAnn e
+  | e => e
 
 /-- Thread mutations across `if`-statement joins (see module docstring).
 

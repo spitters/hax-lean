@@ -74,6 +74,7 @@ inductive NoCFConstructors : ImpExpr → Prop where
   | var {n} : NoCFConstructors (.var n)
   | letBind {n val body} : NoCFConstructors val → NoCFConstructors body →
       NoCFConstructors (.letBind n val body)
+  | lam {ps body} : NoCFConstructors body → NoCFConstructors (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → NoCFConstructors a) →
       NoCFConstructors (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → NoCFConstructors a) →
@@ -1167,6 +1168,13 @@ private theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlo
     · simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at hw; subst hw; rfl
     · simp [pure, Pure.pure, StateT.pure] at hw
     · simp [pure, Pure.pure, StateT.pure, Outcome.encodeCF3gen_val]
+  | lam ps body _ih =>
+    intro fuel env henv
+    simp only [functionalizeLoopsAux]; unfold denote denote'
+    refine ⟨henv, fun w hw => ?_, fun w hw => ?_, ?_⟩
+    · simp [pure, Pure.pure, StateT.pure] at hw
+    · simp [pure, Pure.pure, StateT.pure] at hw
+    · simp [pure, Pure.pure, StateT.pure, Outcome.encodeCF3gen_err]
   | borrow e ih =>
     intro fuel env henv
     simp only [functionalizeLoopsAux]; unfold denote denote'

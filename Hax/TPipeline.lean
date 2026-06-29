@@ -58,13 +58,16 @@ def tPipelineWithCFWrap (e : TExpr) : TExpr :=
     Composed alongside `tPipeline` so the existing `tPipeline_erase` is
     unchanged. `tElideToNamedProj` is a denotation-identity via the
     standard erase-then-untyped-denote route. `tFlattenLetFoldReturn`
-    is a **render-time** normalisation whose four rewrites are
-    well-known algebraic identities under the universal `"_"` discard
-    convention; formal denotation preservation is discussed (but not
-    mechanised) in `Hax/TPhase/FlattenLetFoldReturn.lean` — it depends
-    on a `"_"` not-free-in invariant that isn't carried by the typed
-    AST. The pass is outside the verified-core diagram for this
-    reason. -/
+    is a **render-time** normalisation whose four rewrites are now
+    mechanised as denotation-preserving identities on the untyped
+    semantics in `Hax/Phase/FlattenLetFoldReturn.lean`
+    (`flattenA_denote`..`flattenD_denote`): B and C are unconditional
+    `denote = denote` equalities; A and D hold under the `noVarRef "_"`
+    freshness side-condition (the universal discard convention), via the
+    env-insensitivity congruence `denote_agreeExcept`. The whole pass is
+    a `partial def`, so its erase-commutation is not reducible to these
+    identities yet (it would need a total fuel-bounded reformulation);
+    the pass therefore stays outside the verified-core diagram. -/
 def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
   tFlattenLetFoldReturn (tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e)))
 

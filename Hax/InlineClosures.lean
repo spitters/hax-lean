@@ -60,10 +60,16 @@ def tMapChildren (f : TExpr → TExpr) : TExpr → TExpr
   | .mk (.ann e) ty => .mk (.ann (f e)) ty
   | .mk (.namedProj n e) ty => .mk (.namedProj n (f e)) ty
 
-/-- Strip outer `&`/`*` wrappers to reach the underlying value. -/
+/-- Strip outer denotational no-op wrappers (`&`, `*`, and the `.ann`
+    type-ascription marker) to reach the underlying value. `.ann` is included
+    so that a name lookup made on the typed side commutes with type erasure
+    (`TExpr.erase` deletes `.ann`); see `tVarName?_erase` in
+    `InlineClosuresErase`. At this pre-pipeline stage no `.ann` nodes exist yet,
+    so the extra case never fires on real inputs. -/
 def tStripRefs : TExpr → TExpr
   | .mk (.borrow e) _ => tStripRefs e
   | .mk (.deref e) _ => tStripRefs e
+  | .mk (.ann e) _ => tStripRefs e
   | e => e
 
 /-- The variable name `e` refers to, after stripping `&`/`*` wrappers. -/
@@ -78,26 +84,109 @@ def tUnbundleArgs : TExpr → List TExpr
   | .mk (.tuple elems) _ => elems
   | e => [e]
 
+/-- Is `e` a first-class local closure (`.lam`), looking through the
+    erase-deleted `.ann` type-ascription marker? Used to decide whether a
+    `let`-binding introduces a let-bound lambda name; threading the decision
+    through `.ann` keeps it in agreement with type erasure (see
+    `tIsClosureBinding_erase`). No `.ann` nodes exist at this pre-pipeline
+    stage, so the `.ann` case never fires on real inputs. -/
+def tIsClosureBinding : TExpr → Bool
+  | .mk (.lam ..) _ => true
+  | .mk (.ann e) _ => tIsClosureBinding e
+  | _ => false
+
 /-- Lower `Fn::call` invocations of a let-bound `.lam` to direct applications.
     `lamNames` is the set of in-scope let-bound lambda names. A call
     `app "call" [recv, argsTup]` whose `recv` is one of them becomes
     `app <name> <unbundled args>`; all other nodes (including `Fn::call` of a
-    higher-order *parameter*) are traversed structurally and left in place. -/
-partial def tLowerClosureCalls (lamNames : List String) (e : TExpr) : TExpr :=
-  match e.kind with
-  | .letBind name (.mk (.lam ps lbody) lty) cont =>
-    let lbody' := tLowerClosureCalls lamNames lbody
-    let cont' := tLowerClosureCalls (name :: lamNames) cont
-    .mk (.letBind name (.mk (.lam ps lbody') lty) cont') e.ty
-  | .app "call" (recv :: argsTup :: rest) =>
-    match tVarName? recv with
-    | some name =>
-      if rest.isEmpty && lamNames.contains name then
-        let args := (tUnbundleArgs argsTup).map (tLowerClosureCalls lamNames)
-        .mk (.app name args) e.ty
-      else tMapChildren (tLowerClosureCalls lamNames) e
-    | none => tMapChildren (tLowerClosureCalls lamNames) e
-  | _ => tMapChildren (tLowerClosureCalls lamNames) e
+    higher-order *parameter*) are traversed structurally and left in place.
+
+    Defined by structural recursion (one `match` per constructor). A `let`
+    whose bound value is a closure (`tIsClosureBinding`) registers its name in
+    `lamNames` for the continuation, and a `Fn::call` whose receiver resolves to
+    one of those names is rewritten to a direct application (its argument tuple
+    unbundled by `lowerCallArgs`); every other node is traversed structurally,
+    exactly as `tMapChildren` would. The explicit traversal (rather than
+    `tMapChildren`/`tUnbundleArgs` in recursive position) lets Lean see the
+    recursion is well-founded, so the function is non-`partial` and admits the
+    `tLowerClosureCalls_erase` commutation theorem in `InlineClosuresErase`. -/
+def tLowerClosureCalls (lamNames : List String) : TExpr → TExpr
+  | .mk (.app "call" (recv :: argsTup :: rest)) ty =>
+      match tVarName? recv with
+      | some name =>
+        if rest.isEmpty && lamNames.contains name then
+          .mk (.app name (lowerCallArgs lamNames argsTup)) ty
+        else .mk (.app "call" (mapE lamNames (recv :: argsTup :: rest))) ty
+      | none => .mk (.app "call" (mapE lamNames (recv :: argsTup :: rest))) ty
+  | .mk (.lit v) ty => .mk (.lit v) ty
+  | .mk (.var n) ty => .mk (.var n) ty
+  | .mk (.letBind n val body) ty =>
+      .mk (.letBind n (tLowerClosureCalls lamNames val)
+            (tLowerClosureCalls (if tIsClosureBinding val then n :: lamNames else lamNames) body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tLowerClosureCalls lamNames body)) ty
+  | .mk (.app g args) ty => .mk (.app g (mapE lamNames args)) ty
+  | .mk (.tuple elems) ty => .mk (.tuple (mapE lamNames elems)) ty
+  | .mk (.proj e i) ty => .mk (.proj (tLowerClosureCalls lamNames e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+      .mk (.ifThenElse (tLowerClosureCalls lamNames c) (tLowerClosureCalls lamNames t)
+        (tLowerClosureCalls lamNames e)) ty
+  | .mk (.match_ scrut arms) ty =>
+      .mk (.match_ (tLowerClosureCalls lamNames scrut) (mapA lamNames arms)) ty
+  | .mk .unitVal ty => .mk .unitVal ty
+  | .mk (.seq e1 e2) ty =>
+      .mk (.seq (tLowerClosureCalls lamNames e1) (tLowerClosureCalls lamNames e2)) ty
+  | .mk (.borrow e) ty => .mk (.borrow (tLowerClosureCalls lamNames e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tLowerClosureCalls lamNames e)) ty
+  | .mk (.assign n rhs) ty => .mk (.assign n (tLowerClosureCalls lamNames rhs)) ty
+  | .mk (.forLoop v lo hi body) ty =>
+      .mk (.forLoop v (tLowerClosureCalls lamNames lo) (tLowerClosureCalls lamNames hi)
+        (tLowerClosureCalls lamNames body)) ty
+  | .mk (.forLoopRev v lo hi body) ty =>
+      .mk (.forLoopRev v (tLowerClosureCalls lamNames lo) (tLowerClosureCalls lamNames hi)
+        (tLowerClosureCalls lamNames body)) ty
+  | .mk (.whileLoop c body) ty =>
+      .mk (.whileLoop (tLowerClosureCalls lamNames c) (tLowerClosureCalls lamNames body)) ty
+  | .mk (.break_ none) ty => .mk (.break_ none) ty
+  | .mk (.break_ (some e)) ty => .mk (.break_ (some (tLowerClosureCalls lamNames e))) ty
+  | .mk .continue_ ty => .mk .continue_ ty
+  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tLowerClosureCalls lamNames e)) ty
+  | .mk (.questionMark e) ty => .mk (.questionMark (tLowerClosureCalls lamNames e)) ty
+  | .mk (.forFold v lo hi body) ty =>
+      .mk (.forFold v (tLowerClosureCalls lamNames lo) (tLowerClosureCalls lamNames hi)
+        (tLowerClosureCalls lamNames body)) ty
+  | .mk (.forFoldRev v lo hi body) ty =>
+      .mk (.forFoldRev v (tLowerClosureCalls lamNames lo) (tLowerClosureCalls lamNames hi)
+        (tLowerClosureCalls lamNames body)) ty
+  | .mk (.whileFold c body) ty =>
+      .mk (.whileFold (tLowerClosureCalls lamNames c) (tLowerClosureCalls lamNames body)) ty
+  | .mk (.forFoldReturn v lo hi body) ty =>
+      .mk (.forFoldReturn v (tLowerClosureCalls lamNames lo) (tLowerClosureCalls lamNames hi)
+        (tLowerClosureCalls lamNames body)) ty
+  | .mk (.forFoldRevReturn v lo hi body) ty =>
+      .mk (.forFoldRevReturn v (tLowerClosureCalls lamNames lo) (tLowerClosureCalls lamNames hi)
+        (tLowerClosureCalls lamNames body)) ty
+  | .mk (.whileFoldReturn c body) ty =>
+      .mk (.whileFoldReturn (tLowerClosureCalls lamNames c) (tLowerClosureCalls lamNames body)) ty
+  | .mk (.cfBreak e) ty => .mk (.cfBreak (tLowerClosureCalls lamNames e)) ty
+  | .mk (.cfContinue e) ty => .mk (.cfContinue (tLowerClosureCalls lamNames e)) ty
+  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tLowerClosureCalls lamNames e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tLowerClosureCalls lamNames e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tLowerClosureCalls lamNames e)) ty
+where
+  /-- Unbundle (and lower) a `Fn::call` argument tuple into a positional argument
+      list. A `.tuple` is spread into its (lowered) elements; the erase-deleted
+      `.ann` marker is peeled (so the decision commutes with erasure); anything
+      else is a single lowered argument. -/
+  lowerCallArgs (lamNames : List String) : TExpr → List TExpr
+    | .mk (.tuple elems) _ => mapE lamNames elems
+    | .mk (.ann e) _ => lowerCallArgs lamNames e
+    | other => [tLowerClosureCalls lamNames other]
+  mapE (lamNames : List String) : List TExpr → List TExpr
+    | [] => []
+    | e :: es => tLowerClosureCalls lamNames e :: mapE lamNames es
+  mapA (lamNames : List String) : List (ImpPat × TExpr) → List (ImpPat × TExpr)
+    | [] => []
+    | (p, e) :: rest => (p, tLowerClosureCalls lamNames e) :: mapA lamNames rest
 
 /-- Collect the names of every `let`-bound `.lam` (for excluding them from the
     `<X>Deps` class — they are local functions, not opaque dependencies). -/

@@ -84,9 +84,12 @@ theorem pipeline_fullyFunctional (e : ImpExpr) : FullyFunctional (pipeline e) :=
     whose loop-free and early-exit-free structure is preserved through
     phases 1–2.
 
-    For inputs with loops or early exits, phases 3–4 rewrite them into
-    builtin `app` calls, so correctness additionally requires that the
-    builtins implement `for_fold`, `while_fold`, `ControlFlow.Break`, etc. -/
+    For inputs with loops or early exits, phases 3–4 rewrite them into the
+    fold constructors (`forFold`, `whileFold`, `cfBreak`, `cfContinue`), which
+    `denote` errors on. Those cases are discharged in `PipelineCF`: the output
+    is read by the ControlFlow-aware evaluator `denote'` and agrees with `denote`
+    up to `Outcome.encodeCF` (see `pipeline_correct'`, which drops `hNoLoops`,
+    and `pipeline_full_correct`, which also drops `hNoEE`). -/
 theorem pipeline_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr)
     (hNoLoops : NoLoops (localMutation (mutatedVars e) (dropReferences e)))
     (hNoEE : NoEarlyExit (localMutation (mutatedVars e) (dropReferences e))) :

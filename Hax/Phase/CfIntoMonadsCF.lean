@@ -42,6 +42,7 @@ inductive NoQuestionMark : ImpExpr → Prop where
   | var {n} : NoQuestionMark (.var n)
   | letBind {n val body} : NoQuestionMark val → NoQuestionMark body →
       NoQuestionMark (.letBind n val body)
+  | lam {ps body} : NoQuestionMark body → NoQuestionMark (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → NoQuestionMark a) →
       NoQuestionMark (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → NoQuestionMark a) →
@@ -98,6 +99,7 @@ inductive WellFormedFolds : ImpExpr → Prop where
   | var {n} : WellFormedFolds (.var n)
   | letBind {n val body} : WellFormedFolds val → WellFormedFolds body →
       WellFormedFolds (.letBind n val body)
+  | lam {ps body} : WellFormedFolds body → WellFormedFolds (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → WellFormedFolds a) →
       WellFormedFolds (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → WellFormedFolds a) →
@@ -650,6 +652,9 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
     simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
     cases env n <;> (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
   | unitVal =>
+    intro fuel env w; unfold denote'
+    simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+  | lam ps body _ih =>
     intro fuel env w; unfold denote'
     simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
   | letBind n val body ih_val ih_body =>
@@ -1631,6 +1636,8 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
     cases env n <;> rfl
   | unitVal =>
+    intro fuel env; simp only [cfIntoMonads]; unfold denote'; rfl
+  | lam ps body _ih =>
     intro fuel env; simp only [cfIntoMonads]; unfold denote'; rfl
   -- Structural: letBind
   | letBind n val body ih_val ih_body =>
