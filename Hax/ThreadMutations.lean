@@ -90,21 +90,41 @@ partial def tReplaceTail (e newTail : TExpr) : TExpr :=
   | .assign _ _ => .mk (.seq e newTail) e.ty
   | _ => newTail
 
-/-- Thread mutations across `if`-statement joins (see module docstring). -/
-partial def tThreadMut (e : TExpr) : TExpr :=
+/-- Thread mutations across `if`-statement joins (see module docstring).
+
+    `active` gates the join-threading transformation. It is `true` in
+    straight-line / function-tail position and `false` inside a loop or fold
+    body — there the loop accumulator mechanism (in the renderer's
+    `extractAccumulators` / fold-body transforms) already threads mutated
+    variables, and a competing `_mtup` rebind here would mis-detect the
+    accumulator (e.g. collapse it to `()`) and emit inconsistent branch types.
+    We still recurse into loop bodies (to reach nested straight-line `if`s) but
+    with `active := false`. -/
+partial def tThreadMut (active : Bool) (e : TExpr) : TExpr :=
   match e.kind with
   | .seq (.mk (.ifThenElse c t f) ifTy) rest =>
-    let t := tThreadMut t
-    let f := tThreadMut f
-    let rest := tThreadMut rest
+    let c := tThreadMut active c
+    let t := tThreadMut active t
+    let f := tThreadMut active f
+    let rest := tThreadMut active rest
     let used := tVarRefs rest
     let m := (tAssignedVars t ++ tAssignedVars f).eraseDups.filter used.contains
-    if m.isEmpty then
-      .mk (.seq (.mk (.ifThenElse (tThreadMut c) t f) ifTy) rest) e.ty
+    if !active || m.isEmpty then
+      .mk (.seq (.mk (.ifThenElse c t f) ifTy) rest) e.ty
     else
       let tup := tVarTuple m
-      let ifE := .mk (.ifThenElse (tThreadMut c) (tReplaceTail t tup) (tReplaceTail f tup)) .unknown
+      let ifE := .mk (.ifThenElse c (tReplaceTail t tup) (tReplaceTail f tup)) .unknown
       .mk (.letBind "_mtup" ifE (tDestructure m (.mk (.var "_mtup") .unknown) rest)) e.ty
-  | _ => tMapChildren tThreadMut e
+  -- Loop / fold bodies: descend with the transformation disabled.
+  | .forLoop v lo hi b => .mk (.forLoop v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
+  | .forLoopRev v lo hi b => .mk (.forLoopRev v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
+  | .forFold v lo hi b => .mk (.forFold v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
+  | .forFoldRev v lo hi b => .mk (.forFoldRev v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
+  | .forFoldReturn v lo hi b => .mk (.forFoldReturn v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
+  | .forFoldRevReturn v lo hi b => .mk (.forFoldRevReturn v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
+  | .whileLoop c b => .mk (.whileLoop (tThreadMut active c) (tThreadMut false b)) e.ty
+  | .whileFold c b => .mk (.whileFold (tThreadMut active c) (tThreadMut false b)) e.ty
+  | .whileFoldReturn c b => .mk (.whileFoldReturn (tThreadMut active c) (tThreadMut false b)) e.ty
+  | _ => tMapChildren (tThreadMut active) e
 
 end Hax

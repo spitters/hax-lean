@@ -815,24 +815,34 @@ private partial def transformWhileFoldBody (accs : List String) : ImpExpr → Im
 /-- Patch cfBreak unitVal → cfBreak (accTuple accs) in an expression.
     Used when the body already has CF nodes but the break value is ()
     instead of the accumulator tuple. -/
-private partial def patchCfBreakUnit (accs : List String) : ImpExpr → ImpExpr
-  | .cfBreak .unitVal => .cfBreakContinue (accTuple accs)
-  | .seq (.cfBreak .unitVal) rest => .seq (.cfBreakContinue (accTuple accs)) rest
-  | .letBind n v body => .letBind n v (patchCfBreakUnit accs body)
-  | .seq e1 e2 => .seq (patchCfBreakUnit accs e1) (patchCfBreakUnit accs e2)
-  | .ifThenElse c t e => .ifThenElse c (patchCfBreakUnit accs t) (patchCfBreakUnit accs e)
+-- `isReturn`: in a forFoldRETURN/whileFoldReturn body the loop break must be
+-- `cfBreakContinue (accs)` (= `Break (Continue accs)`), so `nestCfBreakForReturn`
+-- leaves it intact instead of double-wrapping. In a PLAIN forFold/whileFold body
+-- (consumed via `.merge`, single-level `ControlFlow β α`) it must stay
+-- `cfBreak (accs)`, or `.merge` sees a doubly-nested `ControlFlow` and fails.
+private partial def patchCfBreakUnit (isReturn : Bool) (accs : List String) : ImpExpr → ImpExpr
+  | .cfBreak .unitVal =>
+    if isReturn then .cfBreakContinue (accTuple accs) else .cfBreak (accTuple accs)
+  | .seq (.cfBreak .unitVal) rest =>
+    .seq (if isReturn then .cfBreakContinue (accTuple accs) else .cfBreak (accTuple accs)) rest
+  | .letBind n v body => .letBind n v (patchCfBreakUnit isReturn accs body)
+  | .seq e1 e2 => .seq (patchCfBreakUnit isReturn accs e1) (patchCfBreakUnit isReturn accs e2)
+  | .ifThenElse c t e => .ifThenElse c (patchCfBreakUnit isReturn accs t) (patchCfBreakUnit isReturn accs e)
   | e => e
 
 /-- Transform a forFold body for ControlFlow rendering.
     Wraps bare `unitVal` / accumulator returns in `cfContinue (accs)` so
     the body has type `ControlFlow β α` as expected by `Hax.forFold`.
     Preserves existing cfBreak/cfContinue nodes. -/
-private partial def transformForFoldCfBody (accs : List String) : ImpExpr → ImpExpr
-  | .seq (.seq a b) c => transformForFoldCfBody accs (.seq a (.seq b c))
+-- `isReturn` selects the loop-break encoding: `cfBreakContinue (accs)` for
+-- forFoldRETURN bodies (left intact by `nestCfBreakForReturn`), single-level
+-- `cfBreak (accs)` for plain forFold/whileFold bodies (consumed via `.merge`).
+private partial def transformForFoldCfBody (isReturn : Bool) (accs : List String) : ImpExpr → ImpExpr
+  | .seq (.seq a b) c => transformForFoldCfBody isReturn accs (.seq a (.seq b c))
   | .seq (.letBind n val (.var v)) rest =>
-    if n == v then .letBind n val (transformForFoldCfBody accs rest)
-    else .seq (.letBind n val (.var v)) (transformForFoldCfBody accs rest)
-  | .seq .unitVal rest => transformForFoldCfBody accs rest
+    if n == v then .letBind n val (transformForFoldCfBody isReturn accs rest)
+    else .seq (.letBind n val (.var v)) (transformForFoldCfBody isReturn accs rest)
+  | .seq .unitVal rest => transformForFoldCfBody isReturn accs rest
   -- Guard pattern in seq: seq (ifThenElse cond unitVal work) rest
   -- The unitVal branch means "skip" (cfContinue), the work branch does mutations,
   -- and rest continues the fold body. Transform: make the unitVal a cfContinue.
@@ -843,44 +853,43 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
     -- Combine els+rest as the continue path, patch thn's cfBreak unitVal → cfBreak (accs).
     if thnHasCF && !elsHasCF then
       let combined := if rest == .unitVal then els else .seq els rest
-      .ifThenElse c (patchCfBreakUnit accs thn) (transformForFoldCfBody accs combined)
+      .ifThenElse c (patchCfBreakUnit isReturn accs thn) (transformForFoldCfBody isReturn accs combined)
     -- Case 2: els already has surface cfBreak, thn is fall-through
     else if !thnHasCF && elsHasCF then
       let combined := if rest == .unitVal then thn else .seq thn rest
-      .ifThenElse c (transformForFoldCfBody accs combined) (patchCfBreakUnit accs els)
+      .ifThenElse c (transformForFoldCfBody isReturn accs combined) (patchCfBreakUnit isReturn accs els)
     -- Case 3: neither has surface CF, thn is unitVal (guard: if cond then done else work)
     else if !thnHasCF && thn == .unitVal then
-      -- In ControlFlow fold: done = cfBreak (exit loop), work continues
+      -- In ControlFlow fold: done = loop break (exit loop), work continues
       let combined := if rest == .unitVal then els else .seq els rest
-      let result := ImpExpr.ifThenElse c (.cfBreakContinue (accTuple accs)) (transformForFoldCfBody accs combined)
-      result
+      let brk : ImpExpr := if isReturn then .cfBreakContinue (accTuple accs) else .cfBreak (accTuple accs)
+      ImpExpr.ifThenElse c brk (transformForFoldCfBody isReturn accs combined)
     -- Case 4: neither has CF, els is unitVal (inverted guard)
     else if !elsHasCF && els == .unitVal then
       let combined := if rest == .unitVal then thn else .seq thn rest
-      .ifThenElse c (transformForFoldCfBody accs combined) (.cfBreakContinue (accTuple accs))
+      let brk : ImpExpr := if isReturn then .cfBreakContinue (accTuple accs) else .cfBreak (accTuple accs)
+      .ifThenElse c (transformForFoldCfBody isReturn accs combined) brk
     else
-      .seq (.ifThenElse c thn els) (transformForFoldCfBody accs rest)
+      .seq (.ifThenElse c thn els) (transformForFoldCfBody isReturn accs rest)
   | .seq e1 rest =>
     -- Dead code elimination: if e1 already returns ControlFlow, rest is unreachable
     if hasSurfaceControlFlow e1 then
-      transformForFoldCfBody accs e1
+      transformForFoldCfBody isReturn accs e1
     else
-      .seq e1 (transformForFoldCfBody accs rest)
-  | .letBind n val body => .letBind n val (transformForFoldCfBody accs body)
+      .seq e1 (transformForFoldCfBody isReturn accs rest)
+  | .letBind n val body => .letBind n val (transformForFoldCfBody isReturn accs body)
   | .ifThenElse c thn els =>
-    let thnHasCF := hasSurfaceControlFlow thn
-    let elsHasCF := hasSurfaceControlFlow els
+    let _ := hasSurfaceControlFlow thn
+    let _ := hasSurfaceControlFlow els
     -- Always use full transform on both branches to handle nested if-else
     -- where sub-branches may have bare values needing cfContinue wrapping.
-    -- transformForFoldCfBody preserves existing cfBreak/cfContinue nodes and
-    -- patches cfBreak unitVal → cfBreak (accs) while wrapping bare terminals.
-    .ifThenElse c (transformForFoldCfBody accs thn) (transformForFoldCfBody accs els)
-  -- Patch cfBreak unitVal → carry accumulator through a loop break. In a
-  -- forFoldRETURN this must be `cfBreakContinue` (= Break (Continue accs)), NOT
-  -- `cfBreak` — else `nestCfBreakForReturn` double-wraps it into Break (Break accs)
-  -- (a function early-return of the Int accumulator), clashing type-wise with the
-  -- genuine early returns. `cfBreakContinue` is left untouched by the nester.
-  | .cfBreak .unitVal => .cfBreakContinue (accTuple accs)
+    .ifThenElse c (transformForFoldCfBody isReturn accs thn) (transformForFoldCfBody isReturn accs els)
+  -- Patch cfBreak unitVal → carry the accumulator through a loop break. In a
+  -- forFoldRETURN this is `cfBreakContinue` (= Break (Continue accs)), so
+  -- `nestCfBreakForReturn` leaves it intact; in a plain fold it stays single-level
+  -- `cfBreak (accs)` for `.merge`.
+  | .cfBreak .unitVal =>
+    if isReturn then .cfBreakContinue (accTuple accs) else .cfBreak (accTuple accs)
   -- Existing cfBreak/cfContinue with non-unit values: preserve as-is
   | .cfBreak v => .cfBreak v
   | .cfContinue v => .cfContinue v
@@ -1516,14 +1525,14 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
     -- First wrap bare values/accumulators in cfContinue (forFoldReturn body must return ControlFlow)
-    let body' := transformForFoldCfBody accs body
+    let body' := transformForFoldCfBody true accs body
     -- Then nest cfBreak for early function returns
     let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.forFoldReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .forFoldRevReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
-    let body' := transformForFoldCfBody accs body
+    let body' := transformForFoldCfBody true accs body
     let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.forFoldRevReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .whileFoldReturn c body =>
@@ -1537,7 +1546,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     -- into `cfBreak (cfBreak accs)` — a function early-return of the accumulator,
     -- type-clashing with genuine early returns. transformForFoldCfBody emits
     -- `cfBreakContinue`/`cfContinue`, which the nester leaves intact.
-    let body' := transformForFoldCfBody accs body
+    let body' := transformForFoldCfBody true accs body
     -- Nest cfBreak for early returns (same as forFoldReturn)
     let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.whileFoldReturn {initStr} (fun {paramStr} => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
@@ -1615,9 +1624,9 @@ where
                      else s!"\n{toLean body (lvl + 2)}"
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
     else
-      -- ControlFlow fold (has break/continue)
-      -- Transform body: wrap bare () and accumulator returns in cfContinue
-      let body' := transformForFoldCfBody accs body
+      -- ControlFlow fold (has break/continue), consumed via `.merge`: single-level
+      -- `ControlFlow β α`, so loop breaks stay `cfBreak (accs)` (isReturn = false).
+      let body' := transformForFoldCfBody false accs body
       s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   /-- Flatten seq chains into proper let-bindings. -/
   seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=

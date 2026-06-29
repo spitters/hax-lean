@@ -96,7 +96,7 @@ def main (args : List String) : IO UInt32 := do
     -- Pre-pipeline normalizations: lower `Fn::call` of let-bound `.lam` closures
     -- to direct applications, and thread mutations across `if`-statement joins.
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      (n, tPipelineFull newtypes (tThreadMut (tLowerClosureCalls [] te)))
+      (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
