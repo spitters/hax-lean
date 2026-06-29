@@ -2591,10 +2591,18 @@ where
 
     else if let .ok data := j.getObjVal? "Cast" then
       let source ← parseHaxTExpr (← data.getObjVal? "source") implMap
-      let targetWidth := extractExprWidth _parentJ  -- outer decorated node has target ty
-      match targetWidth with
-      | some w => return .app s!"cast#{w}" [source]
-      | none => return .app "cast" [source]
+      -- A `bool as uN` cast (e.g. `carry as u8` from `overflowing_add`) is a
+      -- value injection `if b then 1 else 0`, NOT a width truncation. The
+      -- source's `ty` is `.bool` here (hax types the destructured carry var
+      -- directly), so `cast#w`/`castVal_w` would be ill-typed. Emit
+      -- `Hax.boolToInt` instead.
+      match source.ty with
+      | .bool => return .app "boolToInt" [source]
+      | _ =>
+        let targetWidth := extractExprWidth _parentJ  -- outer decorated node has target ty
+        match targetWidth with
+        | some w => return .app s!"cast#{w}" [source]
+        | none => return .app "cast" [source]
 
     else if let .ok data := j.getObjVal? "Use" then
       return (← parseHaxTExpr (← data.getObjVal? "source") implMap).kind
