@@ -784,17 +784,19 @@ private partial def transformWhileContinue (accs : List String) : ImpExpr → Im
     let thnHasCF := hasControlFlowNodes thn
     let elsHasCF := hasControlFlowNodes els
     if thnHasCF && !elsHasCF then
-      -- then has cfContinue, else is a break path
-      .ifThenElse c thn (transformWhileBreak accs els)
+      -- then continues; else is a break path. Run BOTH through transformWhileBreak
+      -- so the break arm's `cfBreak ()` is patched to carry the accumulator
+      -- (`cfBreak (accs)`) instead of being emitted as a bare `cfBreak ()`.
+      .ifThenElse c (transformWhileBreak accs thn) (transformWhileBreak accs els)
     else if !thnHasCF && elsHasCF then
-      -- else has cfContinue, then is a break path
-      .ifThenElse c (transformWhileBreak accs thn) els
+      -- else continues; then is a break path — same patch on both arms.
+      .ifThenElse c (transformWhileBreak accs thn) (transformWhileBreak accs els)
     else if !thnHasCF && !elsHasCF then
       -- Neither has CF: both should continue
       .ifThenElse c (transformWhileContinue accs thn) (transformWhileContinue accs els)
     else
-      -- Both have CF: leave as-is
-      .ifThenElse c thn els
+      -- Both have CF: patch each so any `cfBreak ()` carries the accumulator.
+      .ifThenElse c (transformWhileBreak accs thn) (transformWhileBreak accs els)
   | .unitVal => .cfContinue (accTuple accs)
   -- Non-CF terminal expression: wrap in cfContinue so whileFold body has correct type
   | e =>
@@ -814,8 +816,8 @@ private partial def transformWhileFoldBody (accs : List String) : ImpExpr → Im
     Used when the body already has CF nodes but the break value is ()
     instead of the accumulator tuple. -/
 private partial def patchCfBreakUnit (accs : List String) : ImpExpr → ImpExpr
-  | .cfBreak .unitVal => .cfBreak (accTuple accs)
-  | .seq (.cfBreak .unitVal) rest => .seq (.cfBreak (accTuple accs)) rest
+  | .cfBreak .unitVal => .cfBreakContinue (accTuple accs)
+  | .seq (.cfBreak .unitVal) rest => .seq (.cfBreakContinue (accTuple accs)) rest
   | .letBind n v body => .letBind n v (patchCfBreakUnit accs body)
   | .seq e1 e2 => .seq (patchCfBreakUnit accs e1) (patchCfBreakUnit accs e2)
   | .ifThenElse c t e => .ifThenElse c (patchCfBreakUnit accs t) (patchCfBreakUnit accs e)
@@ -850,12 +852,12 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
     else if !thnHasCF && thn == .unitVal then
       -- In ControlFlow fold: done = cfBreak (exit loop), work continues
       let combined := if rest == .unitVal then els else .seq els rest
-      let result := ImpExpr.ifThenElse c (.cfBreak (accTuple accs)) (transformForFoldCfBody accs combined)
+      let result := ImpExpr.ifThenElse c (.cfBreakContinue (accTuple accs)) (transformForFoldCfBody accs combined)
       result
     -- Case 4: neither has CF, els is unitVal (inverted guard)
     else if !elsHasCF && els == .unitVal then
       let combined := if rest == .unitVal then thn else .seq thn rest
-      .ifThenElse c (transformForFoldCfBody accs combined) (.cfBreak (accTuple accs))
+      .ifThenElse c (transformForFoldCfBody accs combined) (.cfBreakContinue (accTuple accs))
     else
       .seq (.ifThenElse c thn els) (transformForFoldCfBody accs rest)
   | .seq e1 rest =>
@@ -873,8 +875,12 @@ private partial def transformForFoldCfBody (accs : List String) : ImpExpr → Im
     -- transformForFoldCfBody preserves existing cfBreak/cfContinue nodes and
     -- patches cfBreak unitVal → cfBreak (accs) while wrapping bare terminals.
     .ifThenElse c (transformForFoldCfBody accs thn) (transformForFoldCfBody accs els)
-  -- Patch cfBreak unitVal → cfBreak (accs) to carry accumulator through break
-  | .cfBreak .unitVal => .cfBreak (accTuple accs)
+  -- Patch cfBreak unitVal → carry accumulator through a loop break. In a
+  -- forFoldRETURN this must be `cfBreakContinue` (= Break (Continue accs)), NOT
+  -- `cfBreak` — else `nestCfBreakForReturn` double-wraps it into Break (Break accs)
+  -- (a function early-return of the Int accumulator), clashing type-wise with the
+  -- genuine early returns. `cfBreakContinue` is left untouched by the nester.
+  | .cfBreak .unitVal => .cfBreakContinue (accTuple accs)
   -- Existing cfBreak/cfContinue with non-unit values: preserve as-is
   | .cfBreak v => .cfBreak v
   | .cfContinue v => .cfContinue v
@@ -1525,8 +1531,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     let localVars := collectLetBindVars body
     let accs := accs.filter fun a => !localVars.contains a
     let (initStr, paramStr) := accStrings accs
-    -- Apply transformWhileFoldBody to ensure trailing bare expressions are wrapped in cfContinue
-    let body' := if !accs.isEmpty then transformWhileFoldBody accs body else body
+    -- Use the RETURN-aware body transform (same as forFoldReturn), NOT
+    -- transformWhileFoldBody: the latter encodes loop exits/continues as
+    -- single-level `cfBreak accs`, which `nestCfBreakForReturn` then double-wraps
+    -- into `cfBreak (cfBreak accs)` — a function early-return of the accumulator,
+    -- type-clashing with genuine early returns. transformForFoldCfBody emits
+    -- `cfBreakContinue`/`cfContinue`, which the nester leaves intact.
+    let body' := transformForFoldCfBody accs body
     -- Nest cfBreak for early returns (same as forFoldReturn)
     let body' := nestCfBreakForReturn body'
     s!"{ind}Hax.whileFoldReturn {initStr} (fun {paramStr} => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
@@ -1944,7 +1955,7 @@ where
         -- adjustment must be performed by a verified TPhase that
         -- normalises the AST so the trivial render produces well-typed
         -- Lean.
-        let tailRendered := atLine tail (lvl + 1)
+        let tailRendered := atLine tail (lvl + 2)
         -- Same `enclosedInFold` decision as above. The single-wrap
         -- form (`Hax.cfBreak _v`) is used here because the existing
         -- accs-non-empty pathway targets folds whose enclosing context
@@ -1953,7 +1964,14 @@ where
         -- accs-empty path above is the typical match.
         let breakArm :=
           if enclosedInFold then "Hax.cfBreak _v" else "_v"
-        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _cf =>\n{ind1}let {destr} := ControlFlow.merge _cf\n{tailRendered}"
+        -- `_fr : ControlFlow β (ControlFlow γ α)` (Return-fold result):
+        --   `.Break _v`               → early function return (`_v : β`)
+        --   `.Continue (.Continue a)` → loop completed normally (`a : α`, accumulator)
+        --   `.Continue (.Break _)`    → loop break (value `: γ`, discarded; γ may ≠ α,
+        --                               so `ControlFlow.merge _cf` would be ill-typed).
+        -- Bind the accumulator only in the normal-completion arm; the loop-break
+        -- arm has no accumulator (it was replaced by the break value).
+        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _cf =>\n{ind1}match _cf with\n{ind1}| .Continue {destr} =>\n{tailRendered}\n{ind1}| .Break _ =>\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
 
