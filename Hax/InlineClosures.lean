@@ -6,28 +6,22 @@ Authors: CatCrypt Contributors
 import Hax.TExpr
 
 /-!
-# Pre-pipeline normalization: inline let-bound local closures
+# Pre-pipeline normalization: lower closure calls to direct applications
 
-The IR (`TExprKind`) has no lambda constructor, so a Rust *let-bound* local
-closure `let f = |a, b| { body }` cannot be represented as a value. The adapter
-marks such a binding with a sentinel `letBind f (app "__clo__:a,b" [body]) cont`
-(only for `let`-bound closures — closures passed directly to a higher-order
-function or loop keep the existing param-dropping behavior, which is correct
-because the HOF/loop binds those params).
+A Rust *let-bound* local closure `let f = |a, b| { body }` is represented as a
+first-class `.lam` value by the adapter: `letBind f (.lam [a,b] body) cont`. Its
+invocations, however, arrive as `Fn::call(f, (x, y))` — i.e. `app "call" [f, (x,y)]`
+with the synthetic `call` head — which would render as `call f (tuple)` (applying
+a non-function) and pollute the `<X>Deps` class with a `call` field.
 
-This pass eliminates the sentinel by *inlining* the closure at its call sites:
-each `app f args` in the continuation becomes `body[a := arg₀, b := arg₁, …]`,
-and the `let` is dropped. Without it, the closure's own params (`a`, `b`) leak
-as free variables and get misclassified as `<X>Deps` typeclass fields, and the
-call sites render as `call f (tuple)` — applying a non-function. Run BEFORE the
-typed pipeline (it is parse-time normalization, not a verified phase).
+This pass lowers every such call **whose receiver is a let-bound `.lam`** to a
+direct application `app f [x, y]` (the args tuple is unbundled), which renders as
+`f x y` against the in-scope `let f := fun a b => body`. Calls of higher-order
+*parameters* (not let-bound lambdas) keep the `Fn::call` form — they are genuine
+opaque dependencies. Run BEFORE the typed pipeline (parse-time normalization).
 -/
 
 namespace Hax
-
-/-- The sentinel head prefix marking a let-bound closure value. The substring
-    after the colon is the comma-separated list of the closure's param names. -/
-def closureSentinelPrefix : String := "__clo__:"
 
 /-- Apply `f` to every immediate `TExpr` child, rebuilding the node with the
     same kind and type. The single generic traversal the helpers below reuse. -/
@@ -66,71 +60,70 @@ def tMapChildren (f : TExpr → TExpr) : TExpr → TExpr
   | .mk (.ann e) ty => .mk (.ann (f e)) ty
   | .mk (.namedProj n e) ty => .mk (.namedProj n (f e)) ty
 
-/-- Substitute free variables per `env` (`name ↦ replacement`). No alpha-capture
-    handling is needed: the closure body's only substituted names are its own
-    params, which are fresh w.r.t. the call-site arguments. -/
-partial def tSubstVars (env : List (String × TExpr)) (e : TExpr) : TExpr :=
-  match e.kind with
-  | .var n => match env.lookup n with
-    | some repl => repl
-    | none => e
-  | _ => tMapChildren (tSubstVars env) e
-
 /-- Strip outer `&`/`*` wrappers to reach the underlying value. -/
 def tStripRefs : TExpr → TExpr
   | .mk (.borrow e) _ => tStripRefs e
   | .mk (.deref e) _ => tStripRefs e
   | e => e
 
-/-- Is `e` (after stripping refs) the variable `name`? -/
-def tIsVarNamed (name : String) (e : TExpr) : Bool :=
+/-- The variable name `e` refers to, after stripping `&`/`*` wrappers. -/
+def tVarName? (e : TExpr) : Option String :=
   match (tStripRefs e).kind with
-  | .var n => n == name
-  | _ => false
+  | .var n => some n
+  | _ => none
 
-/-- Bind `params` to the components of the `Fn::call` argument tuple. A literal
-    tuple of matching arity is destructured directly; otherwise each param maps to
-    a projection (or, for a single param, the whole argument). -/
-def tMkArgEnv (params : List String) (argsTup : TExpr) : List (String × TExpr) :=
-  let byProj := params.zip (List.range params.length)
-    |>.map (fun (p, i) => (p, TExpr.mk (.proj argsTup i) .unknown))
-  match argsTup.kind with
-  | .tuple elems => if elems.length == params.length then params.zip elems else byProj
-  | _ => match params with
-    | [p] => [(p, argsTup)]
-    | _ => byProj
+/-- Unbundle a `Fn::call` argument tuple into the positional argument list (a
+    literal tuple becomes its elements; anything else is a single argument). -/
+def tUnbundleArgs : TExpr → List TExpr
+  | .mk (.tuple elems) _ => elems
+  | e => [e]
 
-/-- Inline the closure `fname` (params `params`, body `cbody`) at its call sites.
-    A Rust closure call `fname(a, b)` is `Fn::call`, i.e. `app "call" [recv, (a,b)]`
-    with `recv` a (possibly borrowed) reference to `fname`; rewrite it to
-    `cbody[params := (a, b)]`. Other applications are left untouched. -/
-partial def tInlineCall (fname : String) (params : List String) (cbody : TExpr)
-    (e : TExpr) : TExpr :=
+/-- Lower `Fn::call` invocations of a let-bound `.lam` to direct applications.
+    `lamNames` is the set of in-scope let-bound lambda names. A call
+    `app "call" [recv, argsTup]` whose `recv` is one of them becomes
+    `app <name> <unbundled args>`; all other nodes (including `Fn::call` of a
+    higher-order *parameter*) are traversed structurally and left in place. -/
+partial def tLowerClosureCalls (lamNames : List String) (e : TExpr) : TExpr :=
   match e.kind with
+  | .letBind name (.mk (.lam ps lbody) lty) cont =>
+    let lbody' := tLowerClosureCalls lamNames lbody
+    let cont' := tLowerClosureCalls (name :: lamNames) cont
+    .mk (.letBind name (.mk (.lam ps lbody') lty) cont') e.ty
   | .app "call" (recv :: argsTup :: rest) =>
-    let recv' := tInlineCall fname params cbody recv
-    let argsTup' := tInlineCall fname params cbody argsTup
-    let rest' := rest.map (tInlineCall fname params cbody)
-    if tIsVarNamed fname recv && rest.isEmpty then
-      tSubstVars (tMkArgEnv params argsTup') cbody
-    else
-      .mk (.app "call" (recv' :: argsTup' :: rest')) e.ty
-  | _ => tMapChildren (tInlineCall fname params cbody) e
+    match tVarName? recv with
+    | some name =>
+      if rest.isEmpty && lamNames.contains name then
+        let args := (tUnbundleArgs argsTup).map (tLowerClosureCalls lamNames)
+        .mk (.app name args) e.ty
+      else tMapChildren (tLowerClosureCalls lamNames) e
+    | none => tMapChildren (tLowerClosureCalls lamNames) e
+  | _ => tMapChildren (tLowerClosureCalls lamNames) e
 
-/-- Eliminate let-bound-closure sentinels by inlining at call sites. -/
-partial def tInlineClosures (e : TExpr) : TExpr :=
-  match e.kind with
-  | .letBind name (.mk (.app head [cbodyRaw]) _) cont =>
-    if head.startsWith closureSentinelPrefix then
-      let suffix : String := (head.toList.drop closureSentinelPrefix.length).asString
-      let params := suffix.splitOn "," |>.filter (· != "")
-      let cbody := tInlineClosures cbodyRaw
-      let cont' := tInlineClosures cont
-      -- Inline at every call site and drop the binding. `params` is non-empty by
-      -- construction (the adapter only emits the sentinel for ≥1 cleanly-named param).
-      tInlineCall name params cbody cont'
-    else
-      tMapChildren tInlineClosures e
-  | _ => tMapChildren tInlineClosures e
+/-- Collect the names of every `let`-bound `.lam` (for excluding them from the
+    `<X>Deps` class — they are local functions, not opaque dependencies). -/
+partial def tLamBoundNames : TExpr → List String
+  | .mk (.letBind name (.mk (.lam _ lbody) _) cont) _ =>
+    name :: tLamBoundNames lbody ++ tLamBoundNames cont
+  | e => (collectChildren e).foldl (fun acc c => acc ++ tLamBoundNames c) []
+where
+  /-- Immediate `TExpr` children (for the generic recursion above). -/
+  collectChildren : TExpr → List TExpr
+    | .mk (.letBind _ v b) _ => [v, b]
+    | .mk (.lam _ b) _ => [b]
+    | .mk (.app _ args) _ => args
+    | .mk (.tuple es) _ => es
+    | .mk (.proj e _) _ => [e]
+    | .mk (.ifThenElse c t e) _ => [c, t, e]
+    | .mk (.match_ s arms) _ => s :: arms.map (·.2)
+    | .mk (.seq a b) _ => [a, b]
+    | .mk (.borrow e) _ | .mk (.deref e) _ | .mk (.ann e) _
+    | .mk (.namedProj _ e) _ | .mk (.earlyReturn e) _ | .mk (.questionMark e) _
+    | .mk (.cfBreak e) _ | .mk (.cfContinue e) _ | .mk (.cfBreakContinue e) _
+    | .mk (.break_ (some e)) _ | .mk (.assign _ e) _ => [e]
+    | .mk (.forLoop _ lo hi b) _ | .mk (.forLoopRev _ lo hi b) _
+    | .mk (.forFold _ lo hi b) _ | .mk (.forFoldRev _ lo hi b) _
+    | .mk (.forFoldReturn _ lo hi b) _ | .mk (.forFoldRevReturn _ lo hi b) _ => [lo, hi, b]
+    | .mk (.whileLoop c b) _ | .mk (.whileFold c b) _ | .mk (.whileFoldReturn c b) _ => [c, b]
+    | _ => []
 
 end Hax

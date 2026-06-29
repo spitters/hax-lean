@@ -2387,13 +2387,16 @@ where
       let pat := match data.getObjVal? "pat" with
         | .ok p => parseHaxPat p
         | _ => .wildcard
-      -- Bug-1: a `let`-bound local closure → sentinel for `tInlineClosures`.
+      -- A `let`-bound local closure becomes a first-class `.lam` value; its
+      -- `Fn::call` sites are lowered to direct applications by `tLowerClosureCalls`.
       if let .varPat n := pat then
         if let some (names, bodyJ) := closureSentinelArg? exprJ then
           let body ← parseHaxTExpr bodyJ implMap
-          let sentinel := TExpr.mk
-            (.app (closureSentinelPrefix ++ String.intercalate "," names) [body]) body.ty
-          return .letBind n sentinel (TExpr.mk .unitVal .unit)
+          -- `.unknown` (not `body.ty`): a closure's type is `params → body.ty`,
+          -- not `body.ty`; leave it for Lean to infer so the let-binding isn't
+          -- mis-ascribed with the return type.
+          let lam := TExpr.mk (.lam names body) .unknown
+          return .letBind n lam (TExpr.mk .unitVal .unit)
       let rhs ← parseHaxTExpr exprJ implMap
       match pat with
       | .tuplePat pats =>
@@ -2743,9 +2746,8 @@ where
         if let .ok initJ := data.getObjVal? "initializer" then
           if let some (names, bodyJ) := closureSentinelArg? initJ then
             let body ← parseHaxTExpr bodyJ implMap
-            let sentinel := TExpr.mk
-              (.app (closureSentinelPrefix ++ String.intercalate "," names) [body]) body.ty
-            return TExpr.mk (.letBind n sentinel (TExpr.mk .unitVal .unit)) .unknown
+            let lam := TExpr.mk (.lam names body) .unknown
+            return TExpr.mk (.letBind n lam (TExpr.mk .unitVal .unit)) .unknown
       let init ← match data.getObjVal? "initializer" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
         | .ok e => parseHaxTExpr e implMap

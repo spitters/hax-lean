@@ -92,10 +92,10 @@ def main (args : List String) : IO UInt32 := do
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
     let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
-    -- Bug-1: inline let-bound local closures (sentinels emitted by the adapter)
-    -- before the typed pipeline, so the IR never carries a closure-as-value.
+    -- Lower `Fn::call` of let-bound `.lam` closures to direct applications
+    -- before the typed pipeline (so `f x y` instead of `call f (x,y)`).
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      (n, tPipelineFull newtypes (tInlineClosures te))
+      (n, tPipelineFull newtypes (tLowerClosureCalls [] te))
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)

@@ -144,6 +144,8 @@ partial def collectTFreeVars (bound : List String := []) :
     collectTFreeVars bound e
   | .mk (.assign _ rhs) _ => collectTFreeVars bound rhs
   | .mk (.break_ (some e)) _ => collectTFreeVars bound e
+  -- A lambda binds its params in its body; collect genuine captures only.
+  | .mk (.lam ps body) _ => collectTFreeVars (ps ++ bound) body
   | _ => []
 
 /-- Extract leading identity let-bindings (let x := x) from a TExpr as parameters
@@ -270,6 +272,10 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   -- App names from processed defs (has qualified projections)
   let allCalls := defs.foldl (fun acc (_, e) => acc ++ collectAppCalls e) []
   let allAppNames := allCalls.map (·.1) |>.eraseDups
+  -- Let-bound `.lam` names are local functions (`let f := fun … => …`), applied
+  -- by name after closure-call lowering — they must NOT surface as Deps methods.
+  let lamNames := procTdefs.foldl (fun acc (_, te) => acc ++ tLamBoundNames te) []
+    |>.eraseDups
 
   -- Typed call info from raw TExprs (for deps class type annotations)
   let allTCalls := tdefs.foldl (fun acc (_, te) => acc ++ collectTAppCalls te) []
@@ -280,7 +286,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   let freeVarDeps := allFreeVars.eraseDups.filter fun v =>
     !definedNames.contains v &&
     !structNames.contains v && !isFieldProjection v &&
-    !allAppNames.contains v
+    !allAppNames.contains v && !lamNames.contains v
 
   -- Typed free var info from TExprs (for type annotations in deps class).
   -- We pull from two sources:
@@ -312,6 +318,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   let deps := allNamesWithVars.filter fun f =>
     !definedNames.contains f &&
     !structNames.contains f && !isFieldProjection f &&
+    !lamNames.contains f &&
     -- Filter out the renderer's marker functions (`::namedProj::T`).
     -- These are TCB-emitted into the post-pipeline ImpExpr to
     -- communicate type info to `toLean`; they are not real Deps
@@ -998,16 +1005,19 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let structNames := structMeta.map (·.1)
   let allCalls := defs.foldl (fun acc (_, e) => acc ++ collectAppCalls e) []
   let allAppNames := allCalls.map (·.1) |>.eraseDups
+  let lamNames := procTdefs.foldl (fun acc (_, te) => acc ++ tLamBoundNames te) []
+    |>.eraseDups
   let allFreeVars := defs.foldl (fun acc (fname, e) =>
     acc ++ collectFreeVars [fname] e) ([] : List String)
   let freeVarDeps := allFreeVars.eraseDups.filter fun v =>
     !definedNames.contains v &&
     !structNames.contains v && !isFieldProjection v &&
-    !allAppNames.contains v
+    !allAppNames.contains v && !lamNames.contains v
   let allNamesWithVars := (allAppNames ++ freeVarDeps).eraseDups
   let depNames := allNamesWithVars.filter fun f =>
     !definedNames.contains f &&
     !structNames.contains f && !isFieldProjection f &&
+    !lamNames.contains f &&
     !f.startsWith "::" &&  -- exclude renderer markers
     !isAlwaysBuiltin f
   -- Detect guard-recursion for `partial`
