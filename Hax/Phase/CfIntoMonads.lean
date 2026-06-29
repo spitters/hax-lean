@@ -30,6 +30,7 @@ def cfIntoMonads : ImpExpr → ImpExpr
   | .var n => .var n
   | .letBind n val body =>
     .letBind n (cfIntoMonads val) (cfIntoMonads body)
+  | .lam ps body => .lam ps (cfIntoMonads body)
   | .app f args => .app f (mapExpr args)
   | .tuple elems => .tuple (mapExpr elems)
   | .proj e i => .proj (cfIntoMonads e) i
@@ -102,6 +103,7 @@ theorem cfIntoMonads_noEarlyExit (e : ImpExpr) :
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => exact .letBind ih1 ih2
+  | lam _ _ ih => exact .lam ih
   | app _ args ih =>
     simp only [cfIntoMonads, cfIntoMonads.mapExpr_eq]
     exact .app (fun a ha => by
@@ -153,6 +155,9 @@ theorem cfIntoMonads_identity (e : ImpExpr) (h : NoEarlyExit e) :
     cfIntoMonads e = e := by
   induction e using ImpExpr.ind with
   | lit | var | unitVal | continue_ => rfl
+  | lam _ _ ih =>
+    cases h with | lam h1 =>
+    simp only [cfIntoMonads, ih h1]
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 =>
     simp only [cfIntoMonads, ih1 h1, ih2 h2]
@@ -226,6 +231,7 @@ theorem cfIntoMonads_preserves_noRefs (e : ImpExpr)
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih => cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [cfIntoMonads, cfIntoMonads.mapExpr_eq]
@@ -293,6 +299,7 @@ theorem cfIntoMonads_preserves_noMut (e : ImpExpr)
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih => cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [cfIntoMonads, cfIntoMonads.mapExpr_eq]
@@ -360,6 +367,7 @@ theorem cfIntoMonads_preserves_noLoops (e : ImpExpr)
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih => cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [cfIntoMonads, cfIntoMonads.mapExpr_eq]
@@ -427,6 +435,9 @@ theorem cfIntoMonads_correct (e : ImpExpr) (h : NoEarlyExit e) :
     cfIntoMonads e = e := by
   induction e using ImpExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ ih =>
+    cases h with | lam h1 =>
+    simp only [cfIntoMonads, ih h1]
   | letBind n val body ih1 ih2 =>
     cases h with | letBind h1 h2 =>
     simp only [cfIntoMonads, ih1 h1, ih2 h2]

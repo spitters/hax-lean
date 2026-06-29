@@ -42,6 +42,7 @@ def rewriteAppName (oldName newName : String) : ImpExpr → ImpExpr
   | .continue_ => .continue_
   | .break_ none => .break_ none
   | .break_ (some e) => .break_ (some (rewriteAppName oldName newName e))
+  | .lam ps body => .lam ps (rewriteAppName oldName newName body)
   | .app f args =>
     let f' := if f == oldName then newName else f
     .app f' (mapExpr oldName newName args)

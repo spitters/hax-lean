@@ -25,6 +25,7 @@ inductive NoReferences : ImpExpr → Prop where
   | var {n} : NoReferences (.var n)
   | letBind {n val body} : NoReferences val → NoReferences body →
       NoReferences (.letBind n val body)
+  | lam {ps body} : NoReferences body → NoReferences (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → NoReferences a) →
       NoReferences (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → NoReferences a) →
@@ -83,6 +84,7 @@ inductive NoMutation : ImpExpr → Prop where
   | var {n} : NoMutation (.var n)
   | letBind {n val body} : NoMutation val → NoMutation body →
       NoMutation (.letBind n val body)
+  | lam {ps body} : NoMutation body → NoMutation (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → NoMutation a) →
       NoMutation (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → NoMutation a) →
@@ -139,6 +141,7 @@ inductive NoLoops : ImpExpr → Prop where
   | var {n} : NoLoops (.var n)
   | letBind {n val body} : NoLoops val → NoLoops body →
       NoLoops (.letBind n val body)
+  | lam {ps body} : NoLoops body → NoLoops (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → NoLoops a) →
       NoLoops (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → NoLoops a) →
@@ -193,6 +196,7 @@ inductive NoEarlyExit : ImpExpr → Prop where
   | var {n} : NoEarlyExit (.var n)
   | letBind {n val body} : NoEarlyExit val → NoEarlyExit body →
       NoEarlyExit (.letBind n val body)
+  | lam {ps body} : NoEarlyExit body → NoEarlyExit (.lam ps body)
   | app {f args} : (∀ a, a ∈ args → NoEarlyExit a) →
       NoEarlyExit (.app f args)
   | tuple {elems} : (∀ a, a ∈ elems → NoEarlyExit a) →
@@ -247,6 +251,7 @@ def checkNoReferences : ImpExpr → Bool
   | .borrow _ | .deref _ => false
   | .lit _ | .var _ | .unitVal | .continue_ => true
   | .letBind _ v b => checkNoReferences v && checkNoReferences b
+  | .lam _ b => checkNoReferences b
   | .app _ args => checkNoReferencesList args
   | .tuple elems => checkNoReferencesList elems
   | .proj e _ => checkNoReferences e
@@ -290,6 +295,7 @@ def checkNoMutation : ImpExpr → Bool
   | .assign _ _ => false
   | .lit _ | .var _ | .unitVal | .continue_ => true
   | .letBind _ v b => checkNoMutation v && checkNoMutation b
+  | .lam _ b => checkNoMutation b
   | .app _ args => checkNoMutationList args
   | .tuple elems => checkNoMutationList elems
   | .proj e _ => checkNoMutation e
@@ -334,6 +340,7 @@ def checkNoLoops : ImpExpr → Bool
   | .forLoop _ _ _ _ | .forLoopRev _ _ _ _ | .whileLoop _ _ | .break_ _ | .continue_ => false
   | .lit _ | .var _ | .unitVal => true
   | .letBind _ v b => checkNoLoops v && checkNoLoops b
+  | .lam _ b => checkNoLoops b
   | .app _ args => checkNoLoopsList args
   | .tuple elems => checkNoLoopsList elems
   | .proj e _ => checkNoLoops e
@@ -372,6 +379,7 @@ def checkNoEarlyExit : ImpExpr → Bool
   | .earlyReturn _ | .questionMark _ => false
   | .lit _ | .var _ | .unitVal | .continue_ => true
   | .letBind _ v b => checkNoEarlyExit v && checkNoEarlyExit b
+  | .lam _ b => checkNoEarlyExit b
   | .app _ args => checkNoEarlyExitList args
   | .tuple elems => checkNoEarlyExitList elems
   | .proj e _ => checkNoEarlyExit e
@@ -427,6 +435,8 @@ theorem checkNoEarlyExit_sound :
   | break_none => intro; exact .break_none
   | break_some _ ih =>
     intro h; simp [checkNoEarlyExit] at h; exact .break_some (ih h)
+  | lam _ _ ih =>
+    intro h; simp [checkNoEarlyExit] at h; exact .lam (ih h)
   | letBind _ _ _ ih1 ih2 =>
     intro h; simp [checkNoEarlyExit] at h
     exact .letBind (ih1 h.1) (ih2 h.2)

@@ -52,6 +52,7 @@ def localMutation (mvars : List String) : ImpExpr → ImpExpr
   | .var n => .var n
   | .letBind n val body =>
     .letBind n (localMutation mvars val) (localMutation mvars body)
+  | .lam ps body => .lam ps (localMutation mvars body)
   | .app f args => .app f (mapExpr mvars args)
   | .tuple elems => .tuple (mapExpr mvars elems)
   | .proj e i => .proj (localMutation mvars e) i
@@ -119,6 +120,7 @@ theorem localMutation_noMut (mvars : List String) (e : ImpExpr) :
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => exact .letBind ih1 ih2
+  | lam _ _ ih => exact .lam ih
   | app _ args ih =>
     simp only [localMutation, localMutation.mapExpr_eq]
     exact .app (fun a ha => by
@@ -167,6 +169,7 @@ theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih => cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [localMutation, localMutation.mapExpr_eq]
@@ -259,6 +262,7 @@ theorem localMutation_correct (bi : Builtins) (fuel : Nat)
     simp only [localMutation]
     unfold denote
     exact ih fuel
+  | lam _ _ _ => intro fuel; simp only [localMutation, denote]
   | letBind n val body ih1 ih2 =>
     intro fuel
     simp only [localMutation]

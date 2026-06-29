@@ -24,6 +24,7 @@ where
     | .lit _, acc => acc
     | .var n, acc => n :: acc
     | .letBind n val body, acc => go val (go body acc |>.filter (· != n))
+    | .lam ps body, acc => (go body acc).filter (fun v => !ps.contains v)
     | .app _ args, acc => goList args acc
     | .tuple elems, acc => goList elems acc
     | .proj e _, acc => go e acc
@@ -72,6 +73,7 @@ where
   go : ImpExpr → List String → List String
     | .lit _, acc | .var _, acc | .unitVal, acc | .continue_, acc => acc
     | .letBind _ val body, acc => go val (go body acc)
+    | .lam _ body, acc => go body acc
     | .app _ args, acc => goList args acc
     | .tuple elems, acc => goList elems acc
     | .proj e _, acc => go e acc

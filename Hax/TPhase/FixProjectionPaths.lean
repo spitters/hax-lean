@@ -92,6 +92,7 @@ def tFixProjectionPaths : TExpr → TExpr
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
     .mk (.letBind n (tFixProjectionPaths val) (tFixProjectionPaths body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tFixProjectionPaths body)) ty
   | .mk (.app f args) ty =>
     .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty =>

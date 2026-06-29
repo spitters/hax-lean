@@ -29,6 +29,7 @@ def dropReferences : ImpExpr → ImpExpr
   | .lit v => .lit v
   | .var n => .var n
   | .letBind n val body => .letBind n (dropReferences val) (dropReferences body)
+  | .lam ps body => .lam ps (dropReferences body)
   | .app f args => .app f (mapExpr args)
   | .tuple elems => .tuple (mapExpr elems)
   | .proj e i => .proj (dropReferences e) i
@@ -90,6 +91,7 @@ theorem dropReferences_noRefs (e : ImpExpr) : NoReferences (dropReferences e) :=
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => exact .letBind ih1 ih2
+  | lam _ _ ih => exact .lam ih
   | app _ args ih =>
     simp only [dropReferences, dropReferences.mapExpr_eq]
     exact .app (fun a ha => by
@@ -140,6 +142,7 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
   revert fuel
   induction e using ImpExpr.ind with
   | lit | var | unitVal | continue_ | break_none => intro fuel; rfl
+  | lam _ _ _ => intro fuel; simp only [dropReferences, denote]
   | borrow e ih =>
     intro fuel
     conv => rhs; unfold denote

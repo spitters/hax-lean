@@ -67,6 +67,10 @@ inductive ImpExpr where
   | lit (v : ImpLit)
   | var (name : String)
   | letBind (name : String) (val body : ImpExpr)
+  -- First-class local function (Rust `let`-bound closure). `params` are the
+  -- bound parameter names; `body` is the closure body. Lets a closure be
+  -- represented as a value instead of being inlined or param-dropped.
+  | lam (params : List String) (body : ImpExpr)
   | app (f : String) (args : List ImpExpr)
   | tuple (elems : List ImpExpr)
   | proj (e : ImpExpr) (i : Nat)
@@ -122,6 +126,7 @@ def ImpExpr.ind {motive : ImpExpr → Prop}
     (lit : ∀ v, motive (.lit v))
     (var : ∀ n, motive (.var n))
     (letBind : ∀ n val body, motive val → motive body → motive (.letBind n val body))
+    (lam : ∀ params body, motive body → motive (.lam params body))
     (app : ∀ f args, (∀ a, a ∈ args → motive a) → motive (.app f args))
     (tuple : ∀ elems, (∀ a, a ∈ elems → motive a) → motive (.tuple elems))
     (proj : ∀ e i, motive e → motive (.proj e i))
@@ -164,6 +169,7 @@ where
     | .lit v => lit v
     | .var n => var n
     | .letBind n v b => letBind n v b (go v) (go b)
+    | .lam ps b => lam ps b (go b)
     | .app f args => app f args (goList args)
     | .tuple elems => tuple elems (goList elems)
     | .proj e i => proj e i (go e)

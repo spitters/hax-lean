@@ -88,6 +88,7 @@ def tAnnotateLetBindings : TExpr → TExpr
       let body' := tAnnotateLetBindings body
       let valAnnotated := maybeAnn (shouldAnnotate n val) val'
       .mk (.letBind n valAnnotated body') ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tAnnotateLetBindings body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tAnnotateLetBindings e) i) ty
@@ -162,6 +163,8 @@ theorem tAnnotateLetBindings_erase (e : TExpr) :
     (tAnnotateLetBindings e).erase = e.erase := by
   induction e using TExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ _ ih =>
+    simp [tAnnotateLetBindings, TExpr.erase, ih, maybeAnn_erase]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tAnnotateLetBindings, TExpr.erase, ih1, ih2, maybeAnn_erase]
   | seq _ _ _ ih1 ih2 =>

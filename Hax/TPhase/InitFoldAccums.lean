@@ -46,6 +46,7 @@ def tInitMissingFoldAccums (bound : List String := []) : TExpr → TExpr
     let val' := tInitMissingFoldAccums bound val
     let body' := tInitMissingFoldAccums (n :: bound) body
     .mk (.letBind n val' body') ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tInitMissingFoldAccums (ps ++ bound) body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr bound args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr bound elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tInitMissingFoldAccums bound e) i) ty
@@ -224,6 +225,8 @@ theorem tInitMissingFoldAccums_erase (bound : List String) (e : TExpr) :
   induction e using TExpr.ind generalizing bound with
   | lit | var | unitVal | continue_ | break_none =>
     simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums]
+  | lam _ _ _ ih =>
+    simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tInitMissingFoldAccums, TExpr.erase, initMissingFoldAccums, ih1, ih2]
   | app _ _ args ih =>

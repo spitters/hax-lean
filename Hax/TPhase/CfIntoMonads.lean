@@ -21,6 +21,7 @@ def tCfIntoMonads : TExpr → TExpr
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tCfIntoMonads val) (tCfIntoMonads body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tCfIntoMonads body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tCfIntoMonads e) i) ty
@@ -96,6 +97,8 @@ theorem tCfIntoMonads_erase (e : TExpr) :
     (tCfIntoMonads e).erase = cfIntoMonads e.erase := by
   induction e using TExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ _ ih =>
+    simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tCfIntoMonads, TExpr.erase, cfIntoMonads, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>

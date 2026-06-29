@@ -65,6 +65,7 @@ def wrapMatchArmsCF : ImpExpr → ImpExpr
   | .lit v => .lit v
   | .var n => .var n
   | .letBind n val body => .letBind n (wrapMatchArmsCF val) (wrapMatchArmsCF body)
+  | .lam ps body => .lam ps (wrapMatchArmsCF body)
   | .app f args => .app f (mapExpr args)
   | .tuple elems => .tuple (mapExpr elems)
   | .proj e i => .proj (wrapMatchArmsCF e) i
@@ -184,6 +185,10 @@ theorem wrapMatchArmsCF_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
   | unitVal => simp only [wrapMatchArmsCF]; exact .unitVal
   | break_none => simp only [wrapMatchArmsCF]; exact .break_none
   | continue_ => simp only [wrapMatchArmsCF]; exact .continue_
+  | lam _ _ ih =>
+    cases h with | lam h1 =>
+    simp only [wrapMatchArmsCF]
+    exact .lam (ih h1)
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 =>
     simp only [wrapMatchArmsCF]

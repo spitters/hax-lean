@@ -54,6 +54,7 @@ def tExplicitMonadic : TExpr → TExpr
   | .mk .unitVal ty => .mk .unitVal ty
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tExplicitMonadic val) (tExplicitMonadic body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tExplicitMonadic body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tExplicitMonadic e) i) ty
@@ -136,6 +137,8 @@ theorem tWrapReturns_erase (e : TExpr) :
   | cfBreak _ _ _ => rfl
   | cfContinue _ _ _ => rfl
   | cfBreakContinue _ _ _ => rfl
+  | lam _ _ _ _ =>
+    simp [tWrapReturns, TExpr.erase, wrapReturns]
   | letBind _ _ _ _ _ ih2 =>
     simp [tWrapReturns, TExpr.erase, wrapReturns, ih2]
   | ifThenElse _ _ _ _ _ ih2 ih3 =>
@@ -168,6 +171,8 @@ theorem tExplicitMonadic_erase (e : TExpr) :
     (tExplicitMonadic e).erase = explicitMonadic e.erase := by
   induction e using TExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ _ ih =>
+    simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tExplicitMonadic, TExpr.erase, explicitMonadic, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>

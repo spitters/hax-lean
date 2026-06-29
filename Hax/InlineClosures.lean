@@ -35,6 +35,7 @@ def tMapChildren (f : TExpr → TExpr) : TExpr → TExpr
   | .mk (.lit v) ty => .mk (.lit v) ty
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty => .mk (.letBind n (f val) (f body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (f body)) ty
   | .mk (.app g args) ty => .mk (.app g (args.map f)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (elems.map f)) ty
   | .mk (.proj e i) ty => .mk (.proj (f e) i) ty

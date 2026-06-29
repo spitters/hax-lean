@@ -1614,6 +1614,7 @@ partial def reconstructForLoops : ImpExpr → ImpExpr
   | .lit v => .lit v
   | .var n => .var n
   | .letBind n v b => .letBind n (reconstructForLoops v) (reconstructForLoops b)
+  | .lam ps b => .lam ps (reconstructForLoops b)
   | .app f args => .app f (args.map reconstructForLoops)
   | .tuple es => .tuple (es.map reconstructForLoops)
   | .proj e i => .proj (reconstructForLoops e) i
@@ -1701,6 +1702,7 @@ partial def normalizeAssignOps : ImpExpr → ImpExpr
   | .var n => .var n
   | .unitVal => .unitVal
   | .letBind n v b => .letBind n (normalizeAssignOps v) (normalizeAssignOps b)
+  | .lam ps b => .lam ps (normalizeAssignOps b)
   | .tuple es => .tuple (es.map normalizeAssignOps)
   | .proj e i => .proj (normalizeAssignOps e) i
   | .ifThenElse c t e =>
@@ -2876,6 +2878,7 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n v b) ty =>
     .mk (.letBind n (reconstructForLoopsTExpr v) (reconstructForLoopsTExpr b)) ty
+  | .mk (.lam ps b) ty => .mk (.lam ps (reconstructForLoopsTExpr b)) ty
   | .mk (.app f args) ty =>
     .mk (.app f (args.map reconstructForLoopsTExpr)) ty
   | .mk (.tuple es) ty =>
@@ -3027,6 +3030,7 @@ partial def normalizeAssignOpsTExpr : TExpr → TExpr
   | .mk .unitVal ty => .mk .unitVal ty
   | .mk (.letBind n v b) ty =>
     .mk (.letBind n (normalizeAssignOpsTExpr v) (normalizeAssignOpsTExpr b)) ty
+  | .mk (.lam ps b) ty => .mk (.lam ps (normalizeAssignOpsTExpr b)) ty
   | .mk (.tuple es) ty =>
     .mk (.tuple (es.map normalizeAssignOpsTExpr)) ty
   | .mk (.proj e i) ty =>

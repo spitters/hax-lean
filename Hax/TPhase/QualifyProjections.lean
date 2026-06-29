@@ -95,6 +95,8 @@ def tQualifyProjections
   | .mk (.letBind n val body) ty =>
     .mk (.letBind n (tQualifyProjections structMeta ambiguous _ctx val)
                     (tQualifyProjections structMeta ambiguous _ctx body)) ty
+  | .mk (.lam ps body) ty =>
+    .mk (.lam ps (tQualifyProjections structMeta ambiguous _ctx body)) ty
   | .mk (.app f args) ty =>
     -- Recurse first so the head-rewrite sees already-rewritten args.
     let args' := mapExpr structMeta ambiguous _ctx args

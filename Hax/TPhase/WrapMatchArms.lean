@@ -34,6 +34,7 @@ def tWrapMatchArmsCF : TExpr → TExpr
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tWrapMatchArmsCF val) (tWrapMatchArmsCF body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tWrapMatchArmsCF body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tWrapMatchArmsCF e) i) ty
@@ -128,6 +129,8 @@ theorem TExpr.endsInCF_erase (e : TExpr) :
     e.endsInCF = Hax.endsInCF e.erase := by
   induction e using TExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ _ _ =>
+    simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF]
   | letBind _ _ _ _ _ ih2 =>
     simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF, ih2]
   | seq _ _ _ _ ih2 =>

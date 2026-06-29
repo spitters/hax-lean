@@ -21,6 +21,7 @@ def tLocalMutation (mvars : List String) : TExpr → TExpr
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tLocalMutation mvars val) (tLocalMutation mvars body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tLocalMutation mvars body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr mvars args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr mvars elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tLocalMutation mvars e) i) ty
@@ -98,6 +99,8 @@ theorem tLocalMutation_erase (mvars : List String) (e : TExpr) :
     (tLocalMutation mvars e).erase = localMutation mvars e.erase := by
   induction e using TExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ _ ih =>
+    simp [tLocalMutation, TExpr.erase, localMutation, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tLocalMutation, TExpr.erase, localMutation, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>

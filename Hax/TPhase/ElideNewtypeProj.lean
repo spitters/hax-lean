@@ -97,6 +97,7 @@ def tElideToNamedProj (newtypes : HaxAdapter.NewtypeMap) : TExpr → TExpr
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tElideToNamedProj newtypes val)
                       (tElideToNamedProj newtypes body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tElideToNamedProj newtypes body)) ty
   | .mk (.app f args) ty =>
       .mk (rewriteAppHead newtypes f (mapExpr newtypes args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr newtypes elems)) ty
@@ -201,6 +202,8 @@ theorem tElideToNamedProj_erase (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) :
   | unitVal => rfl
   | break_none => rfl
   | continue_ => rfl
+  | lam _ _ _ ih =>
+    simp [tElideToNamedProj, TExpr.erase, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tElideToNamedProj, TExpr.erase, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>

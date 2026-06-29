@@ -149,6 +149,8 @@ def tRewriteStructFromElem
       let val'' := expandFromElem structMeta initVal sz callTy
       .mk (.letBind n val'' body') ty
     | _ => .mk (.letBind n val' body') ty
+  | .mk (.lam ps body) ty =>
+    .mk (.lam ps (tRewriteStructFromElem structMeta _fnRetTypes _allDefs body)) ty
   | .mk (.app f args) ty =>
     .mk (.app f (mapExpr structMeta _fnRetTypes _allDefs args)) ty
   | .mk (.tuple elems) ty =>

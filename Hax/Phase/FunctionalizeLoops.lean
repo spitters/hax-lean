@@ -52,6 +52,7 @@ def functionalizeLoopsAux (nested : Bool) : ImpExpr → ImpExpr
   | .var n => .var n
   | .letBind n val body =>
     .letBind n (functionalizeLoopsAux nested val) (functionalizeLoopsAux nested body)
+  | .lam ps body => .lam ps (functionalizeLoopsAux nested body)
   | .app f args => .app f (mapExpr nested args)
   | .tuple elems => .tuple (mapExpr nested elems)
   | .proj e i => .proj (functionalizeLoopsAux nested e) i
@@ -164,6 +165,7 @@ theorem functionalizeLoopsAux_noLoops (nested : Bool) (e : ImpExpr) :
   | lit => exact .lit
   | var => exact .var
   | letBind _ _ _ ih1 ih2 => exact .letBind (ih1 _) (ih2 _)
+  | lam _ _ ih => exact .lam (ih _)
   | app _ args ih =>
     simp only [functionalizeLoopsAux, functionalizeLoopsAux.mapExpr_eq]
     exact .app (fun a ha => by
@@ -238,6 +240,8 @@ theorem functionalizeLoopsAux_preserves_noRefs (nested : Bool) (e : ImpExpr)
   | var => exact .var
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 _ h1) (ih2 _ h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih _ h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [functionalizeLoopsAux, functionalizeLoopsAux.mapExpr_eq]
@@ -322,6 +326,8 @@ theorem functionalizeLoopsAux_preserves_noMut (nested : Bool) (e : ImpExpr)
   | var => exact .var
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 _ h1) (ih2 _ h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih _ h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [functionalizeLoopsAux, functionalizeLoopsAux.mapExpr_eq]
@@ -406,6 +412,8 @@ theorem functionalizeLoopsAux_preserves_noEarlyExit (nested : Bool) (e : ImpExpr
   | var => exact .var
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 _ h1) (ih2 _ h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih _ h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [functionalizeLoopsAux, functionalizeLoopsAux.mapExpr_eq]
@@ -482,6 +490,9 @@ theorem functionalizeLoopsAux_correct (nested : Bool) (e : ImpExpr) (h : NoLoops
     functionalizeLoopsAux nested e = e := by
   induction e using ImpExpr.ind generalizing nested with
   | lit | var | unitVal => rfl
+  | lam _ _ ih =>
+    cases h with | lam h1 =>
+    simp only [functionalizeLoopsAux, ih _ h1]
   | letBind n val body ih1 ih2 =>
     cases h with | letBind h1 h2 =>
     simp only [functionalizeLoopsAux, ih1 _ h1, ih2 _ h2]

@@ -85,6 +85,7 @@ def tRewriteNewToStructCtor (structMeta : StructMetaT) : TExpr → TExpr
   | .mk (.letBind n val body) ty =>
     .mk (.letBind n (tRewriteNewToStructCtor structMeta val)
                     (tRewriteNewToStructCtor structMeta body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tRewriteNewToStructCtor structMeta body)) ty
   | .mk (.app f args) ty =>
     let args' := mapExpr structMeta args
     let f' :=

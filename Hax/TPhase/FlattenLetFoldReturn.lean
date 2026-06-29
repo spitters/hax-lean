@@ -114,6 +114,7 @@ partial def tFlattenLetFoldReturn : TExpr → TExpr
   | .mk .continue_ ty => .mk .continue_ ty
   | .mk (.break_ none) ty => .mk (.break_ none) ty
   | .mk (.break_ (some e)) ty => .mk (.break_ (some (tFlattenLetFoldReturn e))) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tFlattenLetFoldReturn body)) ty
   | .mk (.app f args) ty => .mk (.app f (args.map tFlattenLetFoldReturn)) ty
   | .mk (.tuple es) ty => .mk (.tuple (es.map tFlattenLetFoldReturn)) ty
   | .mk (.proj e i) ty => .mk (.proj (tFlattenLetFoldReturn e) i) ty

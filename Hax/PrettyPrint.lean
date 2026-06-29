@@ -1201,6 +1201,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- Let binding: detect tuple destructuring pattern
   -- letBind "_tup" rhs (letBind "a" (proj (var "_tup") 0) (letBind "b" (proj (var "_tup") 1) body))
   -- → let (a, b) := rhs
+  | .lam ps body => s!"(fun {" ".intercalate ps} => {toLean body 0 boolNames})"
   | .letBind n val body =>
     -- Mutation-discard pattern: let _assign := val; _assign → let _ := val; ()
     -- Prevents non-Unit _assign values from leaking as the block return value.
@@ -2291,6 +2292,8 @@ partial def toLeanImpExpr (e : ImpExpr) : String :=
   | .unitVal => ".unitVal"
   | .letBind n v b =>
     s!"(.letBind \"{n}\" {toLeanImpExpr v} {toLeanImpExpr b})"
+  | .lam ps b =>
+    s!"(.lam [{", ".intercalate (ps.map (fun p => s!"\"{p}\""))}] {toLeanImpExpr b})"
   | .app f args =>
     s!"(.app \"{f}\" [{", ".intercalate (args.map toLeanImpExpr)}])"
   | .tuple elems =>

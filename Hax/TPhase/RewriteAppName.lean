@@ -38,6 +38,7 @@ def tRewriteAppName (oldName newName : String) : TExpr → TExpr
   | .mk (.letBind n val body) ty =>
     .mk (.letBind n (tRewriteAppName oldName newName val)
                     (tRewriteAppName oldName newName body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tRewriteAppName oldName newName body)) ty
   | .mk (.app f args) ty =>
     let f' := if f == oldName then newName else f
     .mk (.app f' (mapExpr oldName newName args)) ty
@@ -145,6 +146,8 @@ theorem tRewriteAppName_erase (oldName newName : String) (h : oldName ≠ ".0")
     (tRewriteAppName oldName newName e).erase = rewriteAppName oldName newName e.erase := by
   induction e using TExpr.ind with
   | lit | var | unitVal | continue_ | break_none => rfl
+  | lam _ _ _ ih =>
+    simp [tRewriteAppName, TExpr.erase, rewriteAppName, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tRewriteAppName, TExpr.erase, rewriteAppName, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>

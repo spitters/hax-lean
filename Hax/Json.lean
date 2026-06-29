@@ -190,6 +190,9 @@ private partial def impExprToJson : ImpExpr → Json
   | .letBind n val body =>
     Json.mkObj [("letBind", Json.mkObj [("name", Json.str n),
       ("val", impExprToJson val), ("body", impExprToJson body)])]
+  | .lam ps body =>
+    Json.mkObj [("lam", Json.mkObj [("params", Json.arr (ps.map Json.str).toArray),
+      ("body", impExprToJson body)])]
   | .app f args =>
     Json.mkObj [("app", Json.mkObj [("f", Json.str f),
       ("args", Json.arr (args.map impExprToJson).toArray)])]
@@ -379,6 +382,9 @@ private partial def texprKindToJson : TExprKind → Json
   | .letBind n val body =>
     Json.mkObj [("letBind", Json.mkObj [("name", Json.str n),
       ("val", texprToJson val), ("body", texprToJson body)])]
+  | .lam ps body =>
+    Json.mkObj [("lam", Json.mkObj [("params", Json.arr (ps.map Json.str).toArray),
+      ("body", texprToJson body)])]
   | .app f args =>
     Json.mkObj [("app", Json.mkObj [("f", Json.str f),
       ("args", Json.arr (args.map texprToJson).toArray)])]

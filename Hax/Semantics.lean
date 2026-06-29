@@ -102,6 +102,11 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     match rv with
     | .val v => do modify (Env.extend · name v); denote bi fuel body
     | other => pure other
+  | .lam _ _ =>
+    -- The reference semantics is first-order; a closure value is not modeled.
+    -- (`.lam` is a syntactic carrier for extraction; the verified guarantee is
+    -- type erasure, not this denotation.)
+    pure (.err "closures are not evaluated by the reference semantics")
   | .app f args => do
     let mvals ← denoteArgs bi fuel args
     match mvals with

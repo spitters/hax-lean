@@ -22,6 +22,7 @@ def tDropReferences : TExpr → TExpr
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tDropReferences val) (tDropReferences body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tDropReferences body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tDropReferences e) i) ty
@@ -89,6 +90,8 @@ theorem tDropReferences_erase (e : TExpr) :
   | lit | var | unitVal | continue_ | break_none => rfl
   | borrow _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | deref _ _ ih => simp [tDropReferences, TExpr.erase, dropReferences, ih]
+  | lam _ _ _ ih =>
+    simp [tDropReferences, TExpr.erase, dropReferences, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tDropReferences, TExpr.erase, dropReferences, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>

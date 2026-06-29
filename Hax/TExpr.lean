@@ -37,6 +37,9 @@ inductive TExprKind where
   | lit (v : ImpLit)
   | var (name : String)
   | letBind (name : String) (val body : TExpr)
+  -- First-class local function (Rust `let`-bound closure). Erases to
+  -- `ImpExpr.lam`, keeping the typed pipeline a refinement of the untyped one.
+  | lam (params : List String) (body : TExpr)
   | app (f : String) (args : List TExpr)
   | tuple (elems : List TExpr)
   | proj (e : TExpr) (i : Nat)
@@ -108,6 +111,7 @@ def TExpr.erase : TExpr → ImpExpr
   | .mk (.lit v) _ => .lit v
   | .mk (.var n) _ => .var n
   | .mk (.letBind n val body) _ => .letBind n val.erase body.erase
+  | .mk (.lam params body) _ => .lam params body.erase
   | .mk (.app f args) _ => .app f (eraseList args)
   | .mk (.tuple elems) _ => .tuple (eraseList elems)
   | .mk (.proj e i) _ => .proj e.erase i
@@ -176,6 +180,7 @@ def TExpr.ind {motive : TExpr → Prop}
     (var : ∀ ty n, motive (.mk (.var n) ty))
     (letBind : ∀ ty n val body, motive val → motive body →
         motive (.mk (.letBind n val body) ty))
+    (lam : ∀ ty params body, motive body → motive (.mk (.lam params body) ty))
     (app : ∀ ty f args, (∀ a, a ∈ args → motive a) →
         motive (.mk (.app f args) ty))
     (tuple : ∀ ty elems, (∀ a, a ∈ elems → motive a) →
@@ -231,6 +236,7 @@ where
     | .mk (.lit v) ty => lit ty v
     | .mk (.var n) ty => var ty n
     | .mk (.letBind n v b) ty => letBind ty n v b (go v) (go b)
+    | .mk (.lam ps b) ty => lam ty ps b (go b)
     | .mk (.app f args) ty => app ty f args (goList args)
     | .mk (.tuple elems) ty => tuple ty elems (goList elems)
     | .mk (.proj e i) ty => proj ty e i (go e)
@@ -281,6 +287,7 @@ def TExpr.ofImpExpr : ImpExpr → TExpr
   | .lit v => .mk (.lit v) .unknown
   | .var n => .mk (.var n) .unknown
   | .letBind n val body => .mk (.letBind n (ofImpExpr val) (ofImpExpr body)) .unknown
+  | .lam ps body => .mk (.lam ps (ofImpExpr body)) .unknown
   | .app f args => .mk (.app f (liftList args)) .unknown
   | .tuple elems => .mk (.tuple (liftList elems)) .unknown
   | .proj e i => .mk (.proj (ofImpExpr e) i) .unknown

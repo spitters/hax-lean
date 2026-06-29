@@ -50,6 +50,7 @@ noncomputable def toRawCode : ImpExpr → RawCode Value
   | .var _ => .ret .unit  -- Variable resolution handled externally
   | .letBind _ val body =>
     .bind (toRawCode val) fun _ => toRawCode body
+  | .lam _ _ => .ret .unit  -- Closures handled externally (like app/var)
   | .app _ _ => .ret .unit  -- Function calls handled by builtins externally
   | .tuple elems =>
     toRawCodeList elems fun vs => .ret (.tuple vs)

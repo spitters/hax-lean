@@ -71,6 +71,7 @@ def explicitMonadic : ImpExpr → ImpExpr
   | .unitVal => .unitVal
   | .letBind n val body =>
       .letBind n (explicitMonadic val) (explicitMonadic body)
+  | .lam ps body => .lam ps (explicitMonadic body)
   | .app f args => .app f (mapExpr args)
   | .tuple elems => .tuple (mapExpr elems)
   | .proj e i => .proj (explicitMonadic e) i
@@ -242,6 +243,8 @@ theorem explicitMonadic_preserves_noRefs (e : ImpExpr)
   | unitVal => exact .unitVal
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [explicitMonadic, explicitMonadic.mapExpr_eq]
@@ -311,6 +314,8 @@ theorem explicitMonadic_preserves_noMut (e : ImpExpr)
   | unitVal => exact .unitVal
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [explicitMonadic, explicitMonadic.mapExpr_eq]
@@ -380,6 +385,8 @@ theorem explicitMonadic_preserves_noLoops (e : ImpExpr)
   | unitVal => exact .unitVal
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [explicitMonadic, explicitMonadic.mapExpr_eq]
@@ -446,6 +453,8 @@ theorem explicitMonadic_preserves_noEarlyExit (e : ImpExpr)
   | unitVal => exact .unitVal
   | letBind _ _ _ ih1 ih2 =>
     cases h with | letBind h1 h2 => exact .letBind (ih1 h1) (ih2 h2)
+  | lam _ _ ih =>
+    cases h with | lam h1 => exact .lam (ih h1)
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [explicitMonadic, explicitMonadic.mapExpr_eq]

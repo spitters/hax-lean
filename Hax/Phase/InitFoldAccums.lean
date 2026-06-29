@@ -95,6 +95,7 @@ def initMissingFoldAccums (bound : List String := []) : ImpExpr → ImpExpr
     let v' := initMissingFoldAccums bound v
     let body' := initMissingFoldAccums (n :: bound) body
     .letBind n v' body'
+  | .lam ps body => .lam ps (initMissingFoldAccums (ps ++ bound) body)
   | .seq a b =>
     let a' := initMissingFoldAccums bound a
     let boundsFromA := collectBoundNamesT a

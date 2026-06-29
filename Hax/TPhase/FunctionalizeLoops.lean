@@ -26,6 +26,7 @@ def tFunctionalizeLoopsAux (nested : Bool) : TExpr → TExpr
   | .mk (.letBind n val body) ty =>
       .mk (.letBind n (tFunctionalizeLoopsAux nested val)
         (tFunctionalizeLoopsAux nested body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tFunctionalizeLoopsAux nested body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr nested args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr nested elems)) ty
   | .mk (.proj e i) ty => .mk (.proj (tFunctionalizeLoopsAux nested e) i) ty
@@ -152,6 +153,8 @@ theorem tFunctionalizeLoopsAux_erase (nested : Bool) (e : TExpr) :
   induction e using TExpr.ind generalizing nested with
   | lit | var | unitVal => rfl
   | continue_ => simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux]
+  | lam _ _ _ ih =>
+    simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
   | letBind _ _ _ _ ih1 ih2 =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih1, ih2]
   | seq _ _ _ ih1 ih2 =>
