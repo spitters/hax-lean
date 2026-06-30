@@ -65,15 +65,14 @@ All four are denotation-preserving:
 
 ## Termination
 
-Rules **A**, **D** are structurally decreasing. Rule **B** rotates a
-balanced binary tree of letBinds; the right-leaning form is canonical
-and is a fixpoint of B itself. Rule **C** duplicates `rest` but each
-sub-letBind is strictly smaller (smaller `val`), so successive
-C-applications terminate.
-
-The implementation uses `partial def` for ergonomics — the recursive
-calls on rewrites cross the structural boundary. A total reformulation
-via explicit fuel (bounded by AST size) is a follow-up.
+The pass is **total**: it takes an explicit `fuel : Nat`, every
+recursive call decrements it, and `fuel = 0` returns the input
+unchanged. The B/C re-invocations that cross the structural boundary are
+bounded by `fuel`. With `fuel` larger than the (finite) recursion depth
+the result is the rewrite fixpoint (rules A/D structurally decreasing; B
+rotates to the right-leaning canonical fixpoint; C's sub-letBinds are
+strictly smaller). `tPipelineFull` supplies a generous quadratic-in-size
+fuel, so production output matches the previous `partial`-`def` fixpoint.
 -/
 
 namespace Hax
@@ -82,7 +81,7 @@ namespace Hax
     contains a `forFoldReturn` / `forFoldRevReturn` / `whileFoldReturn`
     whose body has a function-level early-return (`.cfBreak _` at the
     body surface). -/
-partial def tHasNestedFoldWithReturn (e : TExpr) : Bool :=
+def tHasNestedFoldWithReturn (e : TExpr) : Bool :=
   match e with
   | .mk (.forFoldReturn _ _ _ b) _ | .mk (.forFoldRevReturn _ _ _ b) _
   | .mk (.whileFoldReturn _ b) _ =>
@@ -90,7 +89,7 @@ partial def tHasNestedFoldWithReturn (e : TExpr) : Bool :=
   | .mk (.letBind _ v body) _ => tHasNestedFoldWithReturn v || tHasNestedFoldWithReturn body
   | .mk (.seq a b) _ => tHasNestedFoldWithReturn a || tHasNestedFoldWithReturn b
   | .mk (.ifThenElse _ t e') _ => tHasNestedFoldWithReturn t || tHasNestedFoldWithReturn e'
-  | .mk (.match_ _ arms) _ => arms.any (fun (_, b) => tHasNestedFoldWithReturn b)
+  | .mk (.match_ _ arms) _ => tNestedAnyArms arms
   | .mk (.ann e') _ => tHasNestedFoldWithReturn e'
   | _ => false
 where
@@ -99,90 +98,95 @@ where
     | .mk (.ifThenElse _ t e) _ => tBodyHasSurfaceCfBreak t || tBodyHasSurfaceCfBreak e
     | .mk (.letBind _ _ b) _ => tBodyHasSurfaceCfBreak b
     | .mk (.seq a b) _ => tBodyHasSurfaceCfBreak a || tBodyHasSurfaceCfBreak b
-    | .mk (.match_ _ arms) _ => arms.any (fun (_, b) => tBodyHasSurfaceCfBreak b)
+    | .mk (.match_ _ arms) _ => tBodyAnyArms arms
     | .mk (.ann e) _ => tBodyHasSurfaceCfBreak e
     -- Stop at inner loop bodies — their cfBreaks belong to them.
     | .mk (.forFold _ _ _ _) _ | .mk (.forFoldRev _ _ _ _) _
     | .mk (.forFoldReturn _ _ _ _) _ | .mk (.forFoldRevReturn _ _ _ _) _
     | .mk (.whileFold _ _) _ | .mk (.whileFoldReturn _ _) _ => false
     | _ => false
+  tBodyAnyArms : List (ImpPat × TExpr) → Bool
+    | [] => false
+    | (_, b) :: rest => tBodyHasSurfaceCfBreak b || tBodyAnyArms rest
+  tNestedAnyArms : List (ImpPat × TExpr) → Bool
+    | [] => false
+    | (_, b) :: rest => tHasNestedFoldWithReturn b || tNestedAnyArms rest
 
 /-- Typed flattening pass. Bottom-up structural traversal; at each
     `.letBind "_"` apply A/B/C/D as appropriate. Preserves outer types
     on every node. -/
-partial def tFlattenLetFoldReturn : TExpr → TExpr
-  | .mk (.lit v) ty => .mk (.lit v) ty
-  | .mk (.var n) ty => .mk (.var n) ty
-  | .mk .unitVal ty => .mk .unitVal ty
-  | .mk .continue_ ty => .mk .continue_ ty
-  | .mk (.break_ none) ty => .mk (.break_ none) ty
-  | .mk (.break_ (some e)) ty => .mk (.break_ (some (tFlattenLetFoldReturn e))) ty
-  | .mk (.lam ps body) ty => .mk (.lam ps (tFlattenLetFoldReturn body)) ty
-  | .mk (.app f args) ty => .mk (.app f (args.map tFlattenLetFoldReturn)) ty
-  | .mk (.tuple es) ty => .mk (.tuple (es.map tFlattenLetFoldReturn)) ty
-  | .mk (.proj e i) ty => .mk (.proj (tFlattenLetFoldReturn e) i) ty
-  | .mk (.ifThenElse c t e) ty =>
-    .mk (.ifThenElse (tFlattenLetFoldReturn c) (tFlattenLetFoldReturn t) (tFlattenLetFoldReturn e)) ty
-  | .mk (.match_ scrut arms) ty =>
-    .mk (.match_ (tFlattenLetFoldReturn scrut)
-      (arms.map fun (p, e) => (p, tFlattenLetFoldReturn e))) ty
-  | .mk (.seq a b) ty =>
-    let a' := tFlattenLetFoldReturn a
-    let b' := tFlattenLetFoldReturn b
-    -- Rule C' (seq-if-distribute): if `a'` is `ifThenElse c t e` and
-    -- one branch contains a `forFoldReturn` with cfBreak, push `b'`
-    -- into both branches so the fold's early-return reaches the
-    -- function tail. Without this, the renderer at
-    -- `Hax/PrettyPrint.lean:1701-1706` falls back to
-    -- `let _ := <if-expr>; rest` which produces unresolved type
-    -- metavariables for the fold's ControlFlow result.
-    --
-    -- The duplicated `b'` runs once dynamically (exactly one branch
-    -- of the if executes). Denotation-preserving for the same reason
-    -- as rule C.
+def tFlattenLetFoldReturn : Nat → TExpr → TExpr
+  | 0, e => e
+  | _ + 1, .mk (.lit v) ty => .mk (.lit v) ty
+  | _ + 1, .mk (.var n) ty => .mk (.var n) ty
+  | _ + 1, .mk .unitVal ty => .mk .unitVal ty
+  | _ + 1, .mk .continue_ ty => .mk .continue_ ty
+  | _ + 1, .mk (.break_ none) ty => .mk (.break_ none) ty
+  | fuel + 1, .mk (.break_ (some e)) ty =>
+    .mk (.break_ (some (tFlattenLetFoldReturn fuel e))) ty
+  | fuel + 1, .mk (.lam ps body) ty => .mk (.lam ps (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.app f args) ty => .mk (.app f (args.map (tFlattenLetFoldReturn fuel))) ty
+  | fuel + 1, .mk (.tuple es) ty => .mk (.tuple (es.map (tFlattenLetFoldReturn fuel))) ty
+  | fuel + 1, .mk (.proj e i) ty => .mk (.proj (tFlattenLetFoldReturn fuel e) i) ty
+  | fuel + 1, .mk (.ifThenElse c t e) ty =>
+    .mk (.ifThenElse (tFlattenLetFoldReturn fuel c) (tFlattenLetFoldReturn fuel t)
+      (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.match_ scrut arms) ty =>
+    .mk (.match_ (tFlattenLetFoldReturn fuel scrut)
+      (arms.map fun pe => (pe.1, tFlattenLetFoldReturn fuel pe.2))) ty
+  | fuel + 1, .mk (.seq a b) ty =>
+    let a' := tFlattenLetFoldReturn fuel a
+    let b' := tFlattenLetFoldReturn fuel b
+    -- Rule C' (seq-if-distribute): push `b'` into both `if` branches
+    -- when a branch carries a fold-with-return, so the early-return
+    -- reaches the function tail. Denotation-preserving like rule C.
     match a' with
     | .mk (.ifThenElse c t e) _ =>
       if tHasNestedFoldWithReturn t || tHasNestedFoldWithReturn e then
         .mk (.ifThenElse c
-          (tFlattenLetFoldReturn (.mk (.seq t b') ty))
-          (tFlattenLetFoldReturn (.mk (.seq e b') ty))) ty
+          (tFlattenLetFoldReturn fuel (.mk (.seq t b') ty))
+          (tFlattenLetFoldReturn fuel (.mk (.seq e b') ty))) ty
       else
         .mk (.seq a' b') ty
     | _ => .mk (.seq a' b') ty
-  | .mk (.borrow e) ty => .mk (.borrow (tFlattenLetFoldReturn e)) ty
-  | .mk (.deref e) ty => .mk (.deref (tFlattenLetFoldReturn e)) ty
-  | .mk (.assign n rhs) ty => .mk (.assign n (tFlattenLetFoldReturn rhs)) ty
-  | .mk (.forLoop v lo hi body) ty =>
-    .mk (.forLoop v (tFlattenLetFoldReturn lo) (tFlattenLetFoldReturn hi) (tFlattenLetFoldReturn body)) ty
-  | .mk (.forLoopRev v lo hi body) ty =>
-    .mk (.forLoopRev v (tFlattenLetFoldReturn lo) (tFlattenLetFoldReturn hi) (tFlattenLetFoldReturn body)) ty
-  | .mk (.whileLoop c body) ty =>
-    .mk (.whileLoop (tFlattenLetFoldReturn c) (tFlattenLetFoldReturn body)) ty
-  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tFlattenLetFoldReturn e)) ty
-  | .mk (.questionMark e) ty => .mk (.questionMark (tFlattenLetFoldReturn e)) ty
-  | .mk (.forFold v lo hi body) ty =>
-    .mk (.forFold v (tFlattenLetFoldReturn lo) (tFlattenLetFoldReturn hi) (tFlattenLetFoldReturn body)) ty
-  | .mk (.forFoldRev v lo hi body) ty =>
-    .mk (.forFoldRev v (tFlattenLetFoldReturn lo) (tFlattenLetFoldReturn hi) (tFlattenLetFoldReturn body)) ty
-  | .mk (.whileFold c body) ty =>
-    .mk (.whileFold (tFlattenLetFoldReturn c) (tFlattenLetFoldReturn body)) ty
-  | .mk (.forFoldReturn v lo hi body) ty =>
-    .mk (.forFoldReturn v (tFlattenLetFoldReturn lo) (tFlattenLetFoldReturn hi) (tFlattenLetFoldReturn body)) ty
-  | .mk (.forFoldRevReturn v lo hi body) ty =>
-    .mk (.forFoldRevReturn v (tFlattenLetFoldReturn lo) (tFlattenLetFoldReturn hi) (tFlattenLetFoldReturn body)) ty
-  | .mk (.whileFoldReturn c body) ty =>
-    .mk (.whileFoldReturn (tFlattenLetFoldReturn c) (tFlattenLetFoldReturn body)) ty
-  | .mk (.cfBreak e) ty => .mk (.cfBreak (tFlattenLetFoldReturn e)) ty
-  | .mk (.cfContinue e) ty => .mk (.cfContinue (tFlattenLetFoldReturn e)) ty
-  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tFlattenLetFoldReturn e)) ty
-  | .mk (.ann e) ty => .mk (.ann (tFlattenLetFoldReturn e)) ty
-  | .mk (.namedProj n e) ty => .mk (.namedProj n (tFlattenLetFoldReturn e)) ty
-  | .mk (.letBind n val body) ty =>
-    let val' := tFlattenLetFoldReturn val
-    let body' := tFlattenLetFoldReturn body
-    -- Peel `.ann` wrappers: `tAnnotateLetBindings` (which runs before
-    -- this phase) wraps non-trivial val RHSs in `.ann`, including
-    -- forFoldReturn results. Pattern-match on the inner expression.
+  | fuel + 1, .mk (.borrow e) ty => .mk (.borrow (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.deref e) ty => .mk (.deref (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.assign n rhs) ty => .mk (.assign n (tFlattenLetFoldReturn fuel rhs)) ty
+  | fuel + 1, .mk (.forLoop v lo hi body) ty =>
+    .mk (.forLoop v (tFlattenLetFoldReturn fuel lo) (tFlattenLetFoldReturn fuel hi)
+      (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.forLoopRev v lo hi body) ty =>
+    .mk (.forLoopRev v (tFlattenLetFoldReturn fuel lo) (tFlattenLetFoldReturn fuel hi)
+      (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.whileLoop c body) ty =>
+    .mk (.whileLoop (tFlattenLetFoldReturn fuel c) (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.earlyReturn e) ty => .mk (.earlyReturn (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.questionMark e) ty => .mk (.questionMark (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.forFold v lo hi body) ty =>
+    .mk (.forFold v (tFlattenLetFoldReturn fuel lo) (tFlattenLetFoldReturn fuel hi)
+      (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.forFoldRev v lo hi body) ty =>
+    .mk (.forFoldRev v (tFlattenLetFoldReturn fuel lo) (tFlattenLetFoldReturn fuel hi)
+      (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.whileFold c body) ty =>
+    .mk (.whileFold (tFlattenLetFoldReturn fuel c) (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.forFoldReturn v lo hi body) ty =>
+    .mk (.forFoldReturn v (tFlattenLetFoldReturn fuel lo) (tFlattenLetFoldReturn fuel hi)
+      (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.forFoldRevReturn v lo hi body) ty =>
+    .mk (.forFoldRevReturn v (tFlattenLetFoldReturn fuel lo) (tFlattenLetFoldReturn fuel hi)
+      (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.whileFoldReturn c body) ty =>
+    .mk (.whileFoldReturn (tFlattenLetFoldReturn fuel c) (tFlattenLetFoldReturn fuel body)) ty
+  | fuel + 1, .mk (.cfBreak e) ty => .mk (.cfBreak (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.cfContinue e) ty => .mk (.cfContinue (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.ann e) ty => .mk (.ann (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.namedProj n e) ty => .mk (.namedProj n (tFlattenLetFoldReturn fuel e)) ty
+  | fuel + 1, .mk (.letBind n val body) ty =>
+    let val' := tFlattenLetFoldReturn fuel val
+    let body' := tFlattenLetFoldReturn fuel body
+    -- Peel a `.ann` wrapper inserted by `tAnnotateLetBindings`.
     let valStripped := match val' with
       | .mk (.ann inner) _ => inner
       | _ => val'
@@ -196,19 +200,16 @@ partial def tFlattenLetFoldReturn : TExpr → TExpr
       | .mk (.whileFoldReturn c b) foldTy =>
         .mk (.seq (.mk (.whileFoldReturn c b) foldTy) body') ty
       | .mk (.letBind "_" innerVal innerBody) _ =>
-        tFlattenLetFoldReturn (.mk (.letBind "_" innerVal
+        tFlattenLetFoldReturn fuel (.mk (.letBind "_" innerVal
           (.mk (.letBind "_" innerBody body') ty)) ty)
-      -- Variant: val' is `seq a b`, often produced by an inner letBind
-      -- being rewritten earlier in this pass. Associativity rule B'
-      -- mirrors B for the seq form.
       | .mk (.seq innerA innerB) _ =>
-        tFlattenLetFoldReturn (.mk (.letBind "_" innerA
+        tFlattenLetFoldReturn fuel (.mk (.letBind "_" innerA
           (.mk (.letBind "_" innerB body') ty)) ty)
       | .mk (.ifThenElse c t e) _ =>
         if tHasNestedFoldWithReturn t || tHasNestedFoldWithReturn e then
           .mk (.ifThenElse c
-            (tFlattenLetFoldReturn (.mk (.letBind "_" t body') ty))
-            (tFlattenLetFoldReturn (.mk (.letBind "_" e body') ty))) ty
+            (tFlattenLetFoldReturn fuel (.mk (.letBind "_" t body') ty))
+            (tFlattenLetFoldReturn fuel (.mk (.letBind "_" e body') ty))) ty
         else
           .mk (.letBind n val' body') ty
       | _ => .mk (.letBind n val' body') ty
@@ -242,14 +243,36 @@ that is never read. Both are proved via the env-insensitivity congruence
 outcome and leave the output environments agreeing except at the unread
 `"_"` slot.
 
-**Scope of the whole-pass claim.** `tFlattenLetFoldReturn` itself is a
-`partial def` — its B/C recursions cross the structural boundary, so
-Lean exposes no equational lemmas for it. Consequently neither its
-erase-commutation nor an end-to-end `denote ∘ erase` preservation can be
-discharged from the four identities above until the pass is reformulated
-as a total (fuel-bounded) function. The pass remains a **render-time**
-normalisation outside the `tPipeline_erase` diagram; what is now
-mechanised is the denotation-preservation of each of its four rewrites.
+**Total reformulation.** `tFlattenLetFoldReturn` is now a **total**
+`fuel`-bounded function (`Nat → TExpr → TExpr`): every recursive call
+decrements `fuel`, and `fuel = 0` returns the input unchanged. The B/C
+re-invocations that crossed the structural boundary in the old
+`partial def` are now bounded by `fuel`. The untyped twin
+`flattenLetFoldReturn : Nat → ImpExpr → ImpExpr`
+(`Hax/Phase/FlattenLetFoldReturn.lean`) mirrors it on erased ASTs. At the
+call site (`tPipelineFull`) the fuel is a generous quadratic bound in the
+AST node count, exceeding the (finite) recursion depth, so the output is
+the rewrite fixpoint — identical to the previous `partial` version.
+
+**Composable infrastructure for the whole-pass denotation result.** Now
+that equational lemmas exist, the building blocks are mechanised:
+`Rel "_"` (equal outcome + `AgreeExcept "_"` output states) is a partial
+equivalence (`Rel.symm`, `Rel.trans`) with a bind congruence
+(`Rel.bind`); the A/D rewrites have two-environment forms (`flattenA_rel`,
+`flattenD_rel`) that compose with it; B/C are clean `denote` equalities.
+
+**Remaining (named, no `sorry`).** Two items are not yet discharged:
+1. A *fixed-fuel* erase lemma `(tFlattenLetFoldReturn k e).erase =
+   flattenLetFoldReturn k e.erase` does **not** hold for arbitrary `k`:
+   `ann`/`namedProj` nodes exist in `TExpr` but are removed by `erase`,
+   so they consume fuel on the typed side but not the untyped one. The
+   two agree only once both reach the rewrite fixpoint (sufficient fuel),
+   not at every `k`.
+2. The end-to-end denotation preservation
+   `noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e)) (denote e)`
+   reduces to a heterogeneous structural congruence (relating each
+   `denote`-helper on the flattened subterms to the original) composed
+   with the two-env A/D forms and B/C — the composition itself remains.
 -/
 
 end Hax

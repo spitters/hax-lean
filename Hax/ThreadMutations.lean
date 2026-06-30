@@ -66,7 +66,11 @@ def tAssignedVars : TExpr → List String
   | .mk (.ann e) _ => tAssignedVars e
   | .mk (.namedProj _ e) _ => tAssignedVars e
   | .mk (.break_ (some e)) _ => tAssignedVars e
-  | _ => []
+  | .mk (.lit _) _ => []
+  | .mk (.var _) _ => []
+  | .mk .unitVal _ => []
+  | .mk (.break_ none) _ => []
+  | .mk .continue_ _ => []
 where
   goE : List TExpr → List String
     | [] => []
@@ -106,7 +110,10 @@ def tVarRefs : TExpr → List String
   | .mk (.ann e) _ => tVarRefs e
   | .mk (.namedProj _ e) _ => tVarRefs e
   | .mk (.break_ (some e)) _ => tVarRefs e
-  | _ => []
+  | .mk (.lit _) _ => []
+  | .mk .unitVal _ => []
+  | .mk (.break_ none) _ => []
+  | .mk .continue_ _ => []
 where
   goE : List TExpr → List String
     | [] => []
@@ -150,7 +157,11 @@ def tContainsLoop : TExpr → Bool
   | .mk (.ann e) _ => tContainsLoop e
   | .mk (.namedProj _ e) _ => tContainsLoop e
   | .mk (.break_ (some e)) _ => tContainsLoop e
-  | _ => false
+  | .mk (.lit _) _ => false
+  | .mk (.var _) _ => false
+  | .mk .unitVal _ => false
+  | .mk (.break_ none) _ => false
+  | .mk .continue_ _ => false
 where
   goE : List TExpr → Bool
     | [] => false
@@ -182,6 +193,9 @@ def tReplaceTail : TExpr → TExpr → TExpr
   | .mk (.letBind n v body) ty, newTail => .mk (.letBind n v (tReplaceTail body newTail)) ty
   | .mk (.seq a b) ty, newTail => .mk (.seq a (tReplaceTail b newTail)) ty
   | .mk (.assign n r) ty, newTail => .mk (.seq (.mk (.assign n r) ty) newTail) ty
+  -- Look through the erase-deleted `.ann` marker so the rewrite commutes with
+  -- erasure (no `.ann` exists at this pre-pipeline stage).
+  | .mk (.ann e) ty, newTail => .mk (.ann (tReplaceTail e newTail)) ty
   | _, newTail => newTail
 
 /-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
@@ -201,34 +215,79 @@ def tStripAnn : TExpr → TExpr
     variables, and a competing `_mtup` rebind here would mis-detect the
     accumulator (e.g. collapse it to `()`) and emit inconsistent branch types.
     We still recurse into loop bodies (to reach nested straight-line `if`s) but
-    with `active := false`. -/
-partial def tThreadMut (active : Bool) (e : TExpr) : TExpr :=
-  match e.kind with
-  | .seq (.mk (.ifThenElse c t f) ifTy) rest =>
-    let c := tThreadMut active c
-    let t := tThreadMut active t
-    let f := tThreadMut active f
-    let rest := tThreadMut active rest
-    let used := tVarRefs rest
-    let m := (tAssignedVars t ++ tAssignedVars f).eraseDups.filter used.contains
-    -- Fire at straight-line/top-level position (`active`), or — even inside a fold
-    -- body — when the continuation contains a loop that consumes the merged state.
-    if (!active && !tContainsLoop rest) || m.isEmpty then
-      .mk (.seq (.mk (.ifThenElse c t f) ifTy) rest) e.ty
-    else
-      let tup := tVarTuple m
-      let ifE := .mk (.ifThenElse c (tReplaceTail t tup) (tReplaceTail f tup)) .unknown
-      .mk (.letBind "_mtup" ifE (tDestructure m (.mk (.var "_mtup") .unknown) rest)) e.ty
+    with `active := false`.
+
+    Defined by structural recursion. The `if`-statement join is detected by
+    first threading the `seq` head `a` and its continuation `rest`, then
+    inspecting the *result* `tStripAnn a'` for an `.ifThenElse` (threading `a`
+    first keeps every recursive call on a strict subterm, so the function is
+    non-`partial`; looking through `.ann` keeps the detection in agreement with
+    type erasure — see `ThreadMutationsErase`). This is behaviourally equal to
+    the previous direct `seq (ifThenElse …) rest` match on `.ann`-free inputs
+    (the only inputs at this pre-pipeline stage). -/
+def tThreadMut (active : Bool) : TExpr → TExpr
+  | .mk (.seq a rest) ty =>
+      let a' := tThreadMut active a
+      let rest' := tThreadMut active rest
+      match tStripAnn a' with
+      | .mk (.ifThenElse c t f) _ =>
+          let used := tVarRefs rest'
+          let m := (tAssignedVars t ++ tAssignedVars f).eraseDups.filter used.contains
+          if (!active && !tContainsLoop rest') || m.isEmpty then
+            .mk (.seq a' rest') ty
+          else
+            let tup := tVarTuple m
+            let ifE := .mk (.ifThenElse c (tReplaceTail t tup) (tReplaceTail f tup)) .unknown
+            .mk (.letBind "_mtup" ifE (tDestructure m (.mk (.var "_mtup") .unknown) rest')) ty
+      | _ => .mk (.seq a' rest') ty
   -- Loop / fold bodies: descend with the transformation disabled.
-  | .forLoop v lo hi b => .mk (.forLoop v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
-  | .forLoopRev v lo hi b => .mk (.forLoopRev v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
-  | .forFold v lo hi b => .mk (.forFold v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
-  | .forFoldRev v lo hi b => .mk (.forFoldRev v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
-  | .forFoldReturn v lo hi b => .mk (.forFoldReturn v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
-  | .forFoldRevReturn v lo hi b => .mk (.forFoldRevReturn v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) e.ty
-  | .whileLoop c b => .mk (.whileLoop (tThreadMut active c) (tThreadMut false b)) e.ty
-  | .whileFold c b => .mk (.whileFold (tThreadMut active c) (tThreadMut false b)) e.ty
-  | .whileFoldReturn c b => .mk (.whileFoldReturn (tThreadMut active c) (tThreadMut false b)) e.ty
-  | _ => tMapChildren (tThreadMut active) e
+  | .mk (.forLoop v lo hi b) ty =>
+      .mk (.forLoop v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) ty
+  | .mk (.forLoopRev v lo hi b) ty =>
+      .mk (.forLoopRev v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) ty
+  | .mk (.forFold v lo hi b) ty =>
+      .mk (.forFold v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) ty
+  | .mk (.forFoldRev v lo hi b) ty =>
+      .mk (.forFoldRev v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) ty
+  | .mk (.forFoldReturn v lo hi b) ty =>
+      .mk (.forFoldReturn v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) ty
+  | .mk (.forFoldRevReturn v lo hi b) ty =>
+      .mk (.forFoldRevReturn v (tThreadMut active lo) (tThreadMut active hi) (tThreadMut false b)) ty
+  | .mk (.whileLoop c b) ty => .mk (.whileLoop (tThreadMut active c) (tThreadMut false b)) ty
+  | .mk (.whileFold c b) ty => .mk (.whileFold (tThreadMut active c) (tThreadMut false b)) ty
+  | .mk (.whileFoldReturn c b) ty => .mk (.whileFoldReturn (tThreadMut active c) (tThreadMut false b)) ty
+  -- Every other node: traverse children with the same `active` (as `tMapChildren`).
+  | .mk (.lit v) ty => .mk (.lit v) ty
+  | .mk (.var n) ty => .mk (.var n) ty
+  | .mk (.letBind n val body) ty =>
+      .mk (.letBind n (tThreadMut active val) (tThreadMut active body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tThreadMut active body)) ty
+  | .mk (.app g args) ty => .mk (.app g (mapE active args)) ty
+  | .mk (.tuple elems) ty => .mk (.tuple (mapE active elems)) ty
+  | .mk (.proj e i) ty => .mk (.proj (tThreadMut active e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+      .mk (.ifThenElse (tThreadMut active c) (tThreadMut active t) (tThreadMut active e)) ty
+  | .mk (.match_ scrut arms) ty => .mk (.match_ (tThreadMut active scrut) (mapA active arms)) ty
+  | .mk .unitVal ty => .mk .unitVal ty
+  | .mk (.borrow e) ty => .mk (.borrow (tThreadMut active e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tThreadMut active e)) ty
+  | .mk (.assign n rhs) ty => .mk (.assign n (tThreadMut active rhs)) ty
+  | .mk (.break_ none) ty => .mk (.break_ none) ty
+  | .mk (.break_ (some e)) ty => .mk (.break_ (some (tThreadMut active e))) ty
+  | .mk .continue_ ty => .mk .continue_ ty
+  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tThreadMut active e)) ty
+  | .mk (.questionMark e) ty => .mk (.questionMark (tThreadMut active e)) ty
+  | .mk (.cfBreak e) ty => .mk (.cfBreak (tThreadMut active e)) ty
+  | .mk (.cfContinue e) ty => .mk (.cfContinue (tThreadMut active e)) ty
+  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tThreadMut active e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tThreadMut active e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tThreadMut active e)) ty
+where
+  mapE (active : Bool) : List TExpr → List TExpr
+    | [] => []
+    | e :: es => tThreadMut active e :: mapE active es
+  mapA (active : Bool) : List (ImpPat × TExpr) → List (ImpPat × TExpr)
+    | [] => []
+    | (p, e) :: rest => (p, tThreadMut active e) :: mapA active rest
 
 end Hax

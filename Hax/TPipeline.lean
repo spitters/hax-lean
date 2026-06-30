@@ -57,19 +57,31 @@ def tPipelineWithCFWrap (e : TExpr) : TExpr :=
 
     Composed alongside `tPipeline` so the existing `tPipeline_erase` is
     unchanged. `tElideToNamedProj` is a denotation-identity via the
-    standard erase-then-untyped-denote route. `tFlattenLetFoldReturn`
-    is a **render-time** normalisation whose four rewrites are now
-    mechanised as denotation-preserving identities on the untyped
-    semantics in `Hax/Phase/FlattenLetFoldReturn.lean`
-    (`flattenA_denote`..`flattenD_denote`): B and C are unconditional
-    `denote = denote` equalities; A and D hold under the `noVarRef "_"`
-    freshness side-condition (the universal discard convention), via the
-    env-insensitivity congruence `denote_agreeExcept`. The whole pass is
-    a `partial def`, so its erase-commutation is not reducible to these
-    identities yet (it would need a total fuel-bounded reformulation);
-    the pass therefore stays outside the verified-core diagram. -/
+    standard erase-then-untyped-denote route. `tFlattenLetFoldReturn` is
+    a **render-time** normalisation, now a **total** `fuel`-bounded
+    function (no `partial`). Its four rewrites are mechanised as
+    denotation-preserving identities on the untyped semantics in
+    `Hax/Phase/FlattenLetFoldReturn.lean` (`flattenA_denote`..
+    `flattenD_denote`): B and C are unconditional `denote = denote`
+    equalities; A and D hold under the `noVarRef "_"` freshness
+    side-condition via the env-insensitivity congruence
+    `denote_agreeExcept`, with composable two-environment forms
+    (`flattenA_rel`, `flattenD_rel`) and `Rel` a partial equivalence.
+    The fuel below is a generous quadratic bound in the AST node count,
+    exceeding the recursion depth, so the result is the rewrite fixpoint
+    — byte-identical to the previous `partial def`. A fixed-fuel erase
+    lemma does not hold for all fuel (`ann`/`namedProj` nodes consume
+    typed-side fuel that `erase` removes); the whole-pass denotation
+    preservation reduces to a heterogeneous structural congruence over
+    the now-total pass. -/
 def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
-  tFlattenLetFoldReturn (tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e)))
+  let inner := tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e))
+  -- `tFlattenLetFoldReturn` is now total (fuel-bounded). The fuel is a
+  -- generous quadratic bound in the AST size, exceeding the (finite)
+  -- recursion depth, so the result is the rewrite fixpoint — identical
+  -- to the previous `partial def`.
+  let n := inner.erase.nodeCount
+  tFlattenLetFoldReturn (n * n + n + 1000) inner
 
 /-- Commuting diagram: `erase ∘ tPipeline = pipeline ∘ erase`. -/
 theorem tPipeline_erase (e : TExpr) :

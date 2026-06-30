@@ -388,15 +388,110 @@ theorem forFoldReturn_done {α β γ : Type} (lo hi : Int) (init : α)
     Hax.forFoldReturn lo hi init f = .Continue (.Continue init) := by
   rw [Hax.forFoldReturn]; simp [h]
 
-/-! ## Named gap
+/-! ## Two-level reconciliation (denote' shape lemma)
 
-The full **return-fold environment-threading bridge** — that `denote'` of a
-`forFoldReturn` over `encodeReturnFoldBody accE body` equals the source loop's
-`denote`, threading the environment accumulators through the doubly-nested
-`ControlFlow` value — is **not proved here**. It requires relating the
-semantics' environment mutation to the runtime's value threading across the two
-`ControlFlow` levels (the same env-vs-value impedance the plain case's
-`denote'_cfContinue_run` bridges at one level). Stated for the record as the
-remaining obligation; see report. -/
+`denote'_cfContinue_run` / `denote'_cfBreak_run` reconcile the *one-level*
+encoded tails (`cfContinue`/`cfBreak`) with the `controlFlow` tags the semantics
+consumes. The return fold adds one more tail — the loop break
+`cfBreakContinue accs` — whose denotation is the *two-level*
+`controlFlow true (controlFlow false v)` that `denoteForLoop'Return` reads as a
+loop break. This lemma is the missing reconciliation, lifting the one-level
+lemmas to the doubly-nested encoding. -/
+
+/-- The return-fold loop-break tail `cfBreakContinue accE` threads the
+    accumulator's value into the *inner* `controlFlow false` of a two-level
+    `controlFlow true (controlFlow false ·)` — exactly the value
+    `denoteForLoop'Return` classifies as a loop break (and the runtime
+    `Hax.forFoldReturn` sees as `Break (Continue ·)`). Companion to
+    `denote'_cfContinue_run` (continue) and `denote'_cfBreak_run` (early return),
+    completing the per-tail reconciliation for all three return-fold tags. -/
+theorem denote'_cfBreakContinue_run (bi : Builtins) (fuel : Nat) (accE : ImpExpr)
+    (env env' : Env) (v : Value)
+    (h : (denote' bi fuel accE).run env = (.val v, env'))
+    (hv : v.isControlFlow = false) :
+    (denote' bi fuel (.cfBreakContinue accE)).run env
+      = (.val (.controlFlow true (.controlFlow false v)), env') := by
+  unfold denote'
+  simp only [StateT.run, bind, StateT.bind] at h ⊢
+  rw [h]
+  cases v <;> simp_all [Value.isControlFlow, StateT.pure, pure]
+
+/-! ## Runtime ↔ reference consumption (return fold)
+
+The plain case's core theorem is `forFold_merge_eq_refFold`: the runtime
+`Hax.forFold` consumed by `.merge` equals the reference loop `refFold`. This
+section is the **return-fold analog**: the runtime `Hax.forFoldReturn` consumed
+by the *nested match* (`consumeForFoldReturn`) equals the three-way classified
+reference loop `refFoldReturn`. It is the value-level (runtime) half of the
+return-fold bridge, and — unlike the plain case, which collapses to one
+`ControlFlow` level — it genuinely exercises both levels of the doubly-nested
+result, using the `forFoldReturn_loopBreak`/`_earlyReturn`/`_done` unfold
+structure. -/
+
+/-- The three exit modes of a return fold, as a reference result type. The
+    runtime's `ControlFlow β (ControlFlow γ α)` is consumed into this by
+    `consumeForFoldReturn`; the printer emits the matching nested `match`. -/
+inductive FoldReturnResult (β γ α : Type) where
+  | earlyRet (v : β)   -- function early return (propagated up)
+  | broke (v : γ)      -- loop break (loop yields v)
+  | done (acc : α)     -- normal completion (final accumulator)
+
+/-- Consume the runtime `Hax.forFoldReturn` result into `FoldReturnResult` —
+    the value-level model of the printer's post-fold nested `match`. -/
+def consumeForFoldReturn {β γ α : Type} :
+    ControlFlow β (ControlFlow γ α) → FoldReturnResult β γ α
+  | .Break v => .earlyRet v
+  | .Continue (.Break v) => .broke v
+  | .Continue (.Continue acc) => .done acc
+
+/-- Reference meaning of a **return** fold loop: iterate over `[lo, hi)`,
+    threading the accumulator; the body's per-iteration `ControlFlow (ControlFlow
+    β γ) α` step classifies as `Break (Continue v)` = loop break (yield `v`),
+    `Break (Break v)` = early return (propagate `v`), or `Continue acc` = keep
+    going. This is the imperative `for` loop with both `break` and early
+    `return`, returning which exit fired and with what value. -/
+def refFoldReturn {α β γ : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow (ControlFlow β γ) α) : FoldReturnResult β γ α :=
+  if lo ≥ hi then .done init
+  else
+    match f lo init with
+    | .Break (.Continue v) => .broke v       -- loop break
+    | .Break (.Break v) => .earlyRet v       -- early return
+    | .Continue acc => refFoldReturn (lo + 1) hi acc f
+termination_by (hi - lo).toNat
+
+/-- Runtime `Hax.forFoldReturn` consumed by the nested match equals the
+    reference return-fold `refFoldReturn`: the doubly-nested fold, after the
+    consumer, computes exactly the loop's three-way exit classification and
+    value. The return analog of `forFold_merge_eq_refFold`. -/
+theorem forFoldReturn_consume_eq_refFoldReturn {α β γ : Type} (lo hi : Int)
+    (init : α) (f : Int → α → ControlFlow (ControlFlow β γ) α) :
+    consumeForFoldReturn (Hax.forFoldReturn lo hi init f)
+      = refFoldReturn lo hi init f := by
+  fun_induction Hax.forFoldReturn lo hi init f with
+  | case1 lo init h =>
+    rw [refFoldReturn, if_pos h]; rfl
+  | case2 lo init v h hf =>
+    rw [refFoldReturn, if_neg (by omega), hf]; rfl
+  | case3 lo init v h hf =>
+    rw [refFoldReturn, if_neg (by omega), hf]; rfl
+  | case4 lo init acc h hf ih =>
+    rw [refFoldReturn, if_neg (by omega), hf]; exact ih
+
+/-! ## Residual obligation (shared with the plain case)
+
+What remains unproved — for the return fold **and** the plain fold alike — is the
+**environment-threading loop induction**: that `denoteForLoop'`/
+`denoteForLoop'Return` (the semantics, which thread accumulators through the
+*environment* and discard the continue payload) agree with `Hax.forFold`/
+`Hax.forFoldReturn` (the runtime, which thread accumulators through the *value*),
+for a body produced by the encoding. The per-tail reconciliation those two need
+is now complete at both levels (`denote'_cfContinue_run`, `denote'_cfBreak_run`,
+`denote'_cfBreakContinue_run`), and the value-level consumption is proved equal
+to the reference for both kinds (`forFold_merge_eq_refFold`,
+`forFoldReturn_consume_eq_refFoldReturn`). The remaining step is the StateM/fuel
+induction copying the environment accumulator into the value payload each
+iteration; it is identical in shape for plain and return and is **not** specific
+to the doubly-nested case. Named here, no hidden `sorry`. -/
 
 end Hax

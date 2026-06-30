@@ -47,12 +47,18 @@ outcomes and `AgreeExcept n`-related outputs.
 
 ## Scope
 
-This file proves the four rewrites individually. The *whole pass*
-`tFlattenLetFoldReturn` is a `partial def` (its B/C recursions cross the
-structural boundary), so Lean exposes no equational lemmas for it and
-neither its erase-commutation nor its end-to-end denotation preservation
-can be reduced to these identities until it is reformulated as a total
-(fuel-bounded) function. See the report in
+This file proves the four rewrites individually, then provides the
+**total** `fuel`-bounded twin `flattenLetFoldReturn : Nat → ImpExpr →
+ImpExpr` of the (now also total) typed pass `tFlattenLetFoldReturn`, plus
+the composable infrastructure for the whole-pass result: `Rel "_"` as a
+partial equivalence (`Rel.symm`/`Rel.trans`/`Rel.bind`) and the
+two-environment forms of A and D (`flattenA_rel`, `flattenD_rel`).
+
+The end-to-end statement `noVarRef "_" e → Rel "_" (denote
+(flattenLetFoldReturn k e)) (denote e)` reduces to a heterogeneous
+structural congruence (relating each `denote`-helper on the flattened
+subterms to the original) composed with these forms; that composition is
+the remaining work (no `sorry`). See the report in
 `Hax/TPhase/FlattenLetFoldReturn.lean`.
 -/
 
@@ -578,5 +584,235 @@ theorem flattenD_denote (bi : Builtins) (fuel : Nat) (e rest : ImpExpr)
   | broke w => exact ⟨rfl, Env.AgreeExcept.rfl' _ _⟩
   | continued => exact ⟨rfl, Env.AgreeExcept.rfl' _ _⟩
   | err m => exact ⟨rfl, Env.AgreeExcept.rfl' _ _⟩
+
+/-! ## `Rel` is a partial equivalence; two-env forms of A and D
+
+The whole-pass composition needs `Rel` as a (symmetric, transitive)
+relation and the A/D rewrites in *two-environment* form (so they compose
+with the structural congruence). The two-env forms hold once *both* the
+discarded value and the tail are `"_"`-fresh — which is the case under a
+whole-program `noVarRef "_"` invariant. -/
+
+theorem Env.AgreeExcept.symm {n : String} {s₁ s₂ : Env}
+    (h : Env.AgreeExcept n s₁ s₂) : Env.AgreeExcept n s₂ s₁ :=
+  fun m hm => (h m hm).symm
+
+theorem Env.AgreeExcept.trans {n : String} {s₁ s₂ s₃ : Env}
+    (h₁ : Env.AgreeExcept n s₁ s₂) (h₂ : Env.AgreeExcept n s₂ s₃) :
+    Env.AgreeExcept n s₁ s₃ :=
+  fun m hm => (h₁ m hm).trans (h₂ m hm)
+
+theorem Rel.symm {n : String} {α : Type} {m₁ m₂ : StateM Env α}
+    (h : Rel n m₁ m₂) : Rel n m₂ m₁ := by
+  intro s₁ s₂ hs
+  obtain ⟨ho, hst⟩ := h s₂ s₁ hs.symm
+  exact ⟨ho.symm, hst.symm⟩
+
+theorem Rel.trans {n : String} {α : Type} {a b c : StateM Env α}
+    (hab : Rel n a b) (hbc : Rel n b c) : Rel n a c := by
+  intro s₁ s₃ hs
+  obtain ⟨ho₁, hst₁⟩ := hab s₁ s₁ (Env.AgreeExcept.rfl' n s₁)
+  obtain ⟨ho₂, hst₂⟩ := hbc s₁ s₃ hs
+  exact ⟨ho₁.trans ho₂, hst₁.trans hst₂⟩
+
+/-- **Rewrite A**, two-environment form: under `noVarRef "_" rest`, the
+    discarded `()`-bind and `rest` are `Rel "_"`-related. -/
+theorem flattenA_rel (bi : Builtins) (fuel : Nat) (rest : ImpExpr)
+    (hrest : noVarRef "_" rest = true) :
+    Rel "_" (denote bi fuel (.letBind "_" .unitVal rest)) (denote bi fuel rest) := by
+  intro s₁ s₂ hs
+  rw [denote_letBind, stateM_bind_apply]
+  simp only [denote, stateM_pure_apply, stateM_bind_apply, stateM_modify_apply]
+  exact denote_agreeExcept bi "_" rest fuel hrest _ _
+    (Env.AgreeExcept.extend_left hs .unit)
+
+/-- **Rewrite D**, two-environment form: under `noVarRef "_" e` and
+    `noVarRef "_" rest`, the discarded `letBind "_"` and `seq` are
+    `Rel "_"`-related. -/
+theorem flattenD_rel (bi : Builtins) (fuel : Nat) (e rest : ImpExpr)
+    (he : noVarRef "_" e = true) (hrest : noVarRef "_" rest = true) :
+    Rel "_" (denote bi fuel (.letBind "_" e rest)) (denote bi fuel (.seq e rest)) := by
+  intro s₁ s₂ hs
+  rw [denote_letBind, denote_seq, stateM_bind_apply, stateM_bind_apply]
+  obtain ⟨ho, hst⟩ := denote_agreeExcept bi "_" e fuel he s₁ s₂ hs
+  rw [ho]
+  cases hw : (denote bi fuel e s₂).1 with
+  | val w =>
+    simp only [stateM_bind_apply, stateM_modify_apply]
+    exact denote_agreeExcept bi "_" rest fuel hrest _ _
+      (Env.AgreeExcept.extend_left hst w)
+  | earlyRet w => exact ⟨rfl, hst⟩
+  | broke w => exact ⟨rfl, hst⟩
+  | continued => exact ⟨rfl, hst⟩
+  | err m => exact ⟨rfl, hst⟩
+
+/-- Structural node count (compilable; the derived `sizeOf` instance has
+    no LCNF signature for these ASTs). Used to size the flattening fuel. -/
+def ImpExpr.nodeCount : ImpExpr → Nat
+  | .lit _ => 1
+  | .var _ => 1
+  | .unitVal => 1
+  | .continue_ => 1
+  | .break_ none => 1
+  | .break_ (some e) => 1 + e.nodeCount
+  | .letBind _ v b => 1 + v.nodeCount + b.nodeCount
+  | .lam _ b => 1 + b.nodeCount
+  | .app _ args => 1 + nodeCountList args
+  | .tuple es => 1 + nodeCountList es
+  | .proj e _ => 1 + e.nodeCount
+  | .ifThenElse c t e => 1 + c.nodeCount + t.nodeCount + e.nodeCount
+  | .match_ s arms => 1 + s.nodeCount + nodeCountArms arms
+  | .seq a b => 1 + a.nodeCount + b.nodeCount
+  | .borrow e => 1 + e.nodeCount
+  | .deref e => 1 + e.nodeCount
+  | .assign _ r => 1 + r.nodeCount
+  | .forLoop _ lo hi b => 1 + lo.nodeCount + hi.nodeCount + b.nodeCount
+  | .forLoopRev _ lo hi b => 1 + lo.nodeCount + hi.nodeCount + b.nodeCount
+  | .whileLoop c b => 1 + c.nodeCount + b.nodeCount
+  | .earlyReturn e => 1 + e.nodeCount
+  | .questionMark e => 1 + e.nodeCount
+  | .forFold _ lo hi b => 1 + lo.nodeCount + hi.nodeCount + b.nodeCount
+  | .forFoldRev _ lo hi b => 1 + lo.nodeCount + hi.nodeCount + b.nodeCount
+  | .whileFold c b => 1 + c.nodeCount + b.nodeCount
+  | .forFoldReturn _ lo hi b => 1 + lo.nodeCount + hi.nodeCount + b.nodeCount
+  | .forFoldRevReturn _ lo hi b => 1 + lo.nodeCount + hi.nodeCount + b.nodeCount
+  | .whileFoldReturn c b => 1 + c.nodeCount + b.nodeCount
+  | .cfBreak e => 1 + e.nodeCount
+  | .cfContinue e => 1 + e.nodeCount
+  | .cfBreakContinue e => 1 + e.nodeCount
+  | .typeAscription e _ => 1 + e.nodeCount
+where
+  nodeCountList : List ImpExpr → Nat
+    | [] => 0
+    | e :: es => e.nodeCount + nodeCountList es
+  nodeCountArms : List (ImpPat × ImpExpr) → Nat
+    | [] => 0
+    | (_, e) :: rest => e.nodeCount + nodeCountArms rest
+
+/-! ## Total, fuel-bounded untyped twin of `tFlattenLetFoldReturn`
+
+The typed pass is reformulated as a total `fuel`-bounded function (no
+`partial`): every recursive call decrements `fuel`, and `fuel = 0`
+returns the input unchanged. This file's untyped twin mirrors the typed
+pass on the erased AST, enabling the erase-commutation lemma and the
+end-to-end denotation-preservation. With `fuel` larger than the (finite)
+recursion depth the partial version uses, the output is unchanged. -/
+
+/-- Detect, at the body surface, a function-level early-return (`cfBreak`).
+    Stops at inner loop bodies (their `cfBreak`s belong to them). -/
+def bodyHasSurfaceCfBreak : ImpExpr → Bool
+  | .cfBreak _ => true
+  | .ifThenElse _ t e => bodyHasSurfaceCfBreak t || bodyHasSurfaceCfBreak e
+  | .letBind _ _ b => bodyHasSurfaceCfBreak b
+  | .seq a b => bodyHasSurfaceCfBreak a || bodyHasSurfaceCfBreak b
+  | .match_ _ arms => bodyAnyArms arms
+  | .forFold _ _ _ _ | .forFoldRev _ _ _ _ | .forFoldReturn _ _ _ _
+  | .forFoldRevReturn _ _ _ _ | .whileFold _ _ | .whileFoldReturn _ _ => false
+  | _ => false
+where
+  bodyAnyArms : List (ImpPat × ImpExpr) → Bool
+    | [] => false
+    | (_, b) :: rest => bodyHasSurfaceCfBreak b || bodyAnyArms rest
+
+/-- Whether `e` contains a `*FoldReturn` whose body has a surface
+    function-return. Mirrors the typed `tHasNestedFoldWithReturn`. -/
+def hasNestedFoldWithReturn : ImpExpr → Bool
+  | .forFoldReturn _ _ _ b => bodyHasSurfaceCfBreak b || hasNestedFoldWithReturn b
+  | .forFoldRevReturn _ _ _ b => bodyHasSurfaceCfBreak b || hasNestedFoldWithReturn b
+  | .whileFoldReturn _ b => bodyHasSurfaceCfBreak b || hasNestedFoldWithReturn b
+  | .letBind _ v body => hasNestedFoldWithReturn v || hasNestedFoldWithReturn body
+  | .seq a b => hasNestedFoldWithReturn a || hasNestedFoldWithReturn b
+  | .ifThenElse _ t e => hasNestedFoldWithReturn t || hasNestedFoldWithReturn e
+  | .match_ _ arms => nestedAnyArms arms
+  | _ => false
+where
+  nestedAnyArms : List (ImpPat × ImpExpr) → Bool
+    | [] => false
+    | (_, b) :: rest => hasNestedFoldWithReturn b || nestedAnyArms rest
+
+/-- Total, fuel-bounded flattening pass on the untyped AST. Mirrors the
+    typed `tFlattenLetFoldReturn` on erased expressions: rules A/B/C/D at
+    each discarded `letBind "_"`, plus the seq-if distribution (C′). -/
+def flattenLetFoldReturn : Nat → ImpExpr → ImpExpr
+  | 0, e => e
+  | _ + 1, .lit v => .lit v
+  | _ + 1, .var n => .var n
+  | _ + 1, .unitVal => .unitVal
+  | _ + 1, .continue_ => .continue_
+  | _ + 1, .break_ none => .break_ none
+  | fuel + 1, .break_ (some e) => .break_ (some (flattenLetFoldReturn fuel e))
+  | fuel + 1, .lam ps body => .lam ps (flattenLetFoldReturn fuel body)
+  | fuel + 1, .app f args => .app f (args.map (flattenLetFoldReturn fuel))
+  | fuel + 1, .tuple es => .tuple (es.map (flattenLetFoldReturn fuel))
+  | fuel + 1, .proj e i => .proj (flattenLetFoldReturn fuel e) i
+  | fuel + 1, .ifThenElse c t e =>
+      .ifThenElse (flattenLetFoldReturn fuel c) (flattenLetFoldReturn fuel t)
+        (flattenLetFoldReturn fuel e)
+  | fuel + 1, .match_ scrut arms =>
+      .match_ (flattenLetFoldReturn fuel scrut)
+        (arms.map (fun pe => (pe.1, flattenLetFoldReturn fuel pe.2)))
+  | fuel + 1, .seq a b =>
+      let a' := flattenLetFoldReturn fuel a
+      let b' := flattenLetFoldReturn fuel b
+      match a' with
+      | .ifThenElse c t e =>
+        if hasNestedFoldWithReturn t || hasNestedFoldWithReturn e then
+          .ifThenElse c (flattenLetFoldReturn fuel (.seq t b'))
+            (flattenLetFoldReturn fuel (.seq e b'))
+        else .seq a' b'
+      | _ => .seq a' b'
+  | fuel + 1, .borrow e => .borrow (flattenLetFoldReturn fuel e)
+  | fuel + 1, .deref e => .deref (flattenLetFoldReturn fuel e)
+  | fuel + 1, .assign n rhs => .assign n (flattenLetFoldReturn fuel rhs)
+  | fuel + 1, .forLoop v lo hi body =>
+      .forLoop v (flattenLetFoldReturn fuel lo) (flattenLetFoldReturn fuel hi)
+        (flattenLetFoldReturn fuel body)
+  | fuel + 1, .forLoopRev v lo hi body =>
+      .forLoopRev v (flattenLetFoldReturn fuel lo) (flattenLetFoldReturn fuel hi)
+        (flattenLetFoldReturn fuel body)
+  | fuel + 1, .whileLoop c body =>
+      .whileLoop (flattenLetFoldReturn fuel c) (flattenLetFoldReturn fuel body)
+  | fuel + 1, .earlyReturn e => .earlyReturn (flattenLetFoldReturn fuel e)
+  | fuel + 1, .questionMark e => .questionMark (flattenLetFoldReturn fuel e)
+  | fuel + 1, .forFold v lo hi body =>
+      .forFold v (flattenLetFoldReturn fuel lo) (flattenLetFoldReturn fuel hi)
+        (flattenLetFoldReturn fuel body)
+  | fuel + 1, .forFoldRev v lo hi body =>
+      .forFoldRev v (flattenLetFoldReturn fuel lo) (flattenLetFoldReturn fuel hi)
+        (flattenLetFoldReturn fuel body)
+  | fuel + 1, .whileFold c body =>
+      .whileFold (flattenLetFoldReturn fuel c) (flattenLetFoldReturn fuel body)
+  | fuel + 1, .forFoldReturn v lo hi body =>
+      .forFoldReturn v (flattenLetFoldReturn fuel lo) (flattenLetFoldReturn fuel hi)
+        (flattenLetFoldReturn fuel body)
+  | fuel + 1, .forFoldRevReturn v lo hi body =>
+      .forFoldRevReturn v (flattenLetFoldReturn fuel lo) (flattenLetFoldReturn fuel hi)
+        (flattenLetFoldReturn fuel body)
+  | fuel + 1, .whileFoldReturn c body =>
+      .whileFoldReturn (flattenLetFoldReturn fuel c) (flattenLetFoldReturn fuel body)
+  | fuel + 1, .cfBreak e => .cfBreak (flattenLetFoldReturn fuel e)
+  | fuel + 1, .cfContinue e => .cfContinue (flattenLetFoldReturn fuel e)
+  | fuel + 1, .cfBreakContinue e => .cfBreakContinue (flattenLetFoldReturn fuel e)
+  | fuel + 1, .typeAscription e ty => .typeAscription (flattenLetFoldReturn fuel e) ty
+  | fuel + 1, .letBind n val body =>
+      let val' := flattenLetFoldReturn fuel val
+      let body' := flattenLetFoldReturn fuel body
+      if n == "_" then
+        match val' with
+        | .unitVal => body'
+        | .forFoldReturn v lo hi b => .seq (.forFoldReturn v lo hi b) body'
+        | .forFoldRevReturn v lo hi b => .seq (.forFoldRevReturn v lo hi b) body'
+        | .whileFoldReturn c b => .seq (.whileFoldReturn c b) body'
+        | .letBind "_" innerVal innerBody =>
+          flattenLetFoldReturn fuel (.letBind "_" innerVal (.letBind "_" innerBody body'))
+        | .seq innerA innerB =>
+          flattenLetFoldReturn fuel (.letBind "_" innerA (.letBind "_" innerB body'))
+        | .ifThenElse c t e =>
+          if hasNestedFoldWithReturn t || hasNestedFoldWithReturn e then
+            .ifThenElse c (flattenLetFoldReturn fuel (.letBind "_" t body'))
+              (flattenLetFoldReturn fuel (.letBind "_" e body'))
+          else .letBind n val' body'
+        | _ => .letBind n val' body'
+      else .letBind n val' body'
 
 end Hax
