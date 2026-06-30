@@ -394,9 +394,9 @@ exactly matching Rust's `as` semantics for unsigned integers. -/
 
 /-! ### Signed Integer Operations
 
-Rust signed integers use two's complement wrapping. Since Lean 4.26 has no
-`Int8`/`Int16`/`Int32`/`Int64`, we represent them as `Int` with explicit
-modular reduction. `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
+Rust signed integers use two's complement wrapping. We represent them as `Int`
+with explicit modular reduction (so the wrapping is explicit rather than relying
+on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 
 /-- Signed modular reduction: maps integer to [-2^(w-1), 2^(w-1)). -/
 @[inline] def bmod_signed (bits : Nat) (n : Int) : Int :=
