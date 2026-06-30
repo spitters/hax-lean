@@ -69,11 +69,15 @@ def tPipelineWithCFWrap (e : TExpr) : TExpr :=
     (`flattenA_rel`, `flattenD_rel`) and `Rel` a partial equivalence.
     The fuel below is a generous quadratic bound in the AST node count,
     exceeding the recursion depth, so the result is the rewrite fixpoint
-    — byte-identical to the previous `partial def`. A fixed-fuel erase
-    lemma does not hold for all fuel (`ann`/`namedProj` nodes consume
-    typed-side fuel that `erase` removes); the whole-pass denotation
-    preservation reduces to a heterogeneous structural congruence over
-    the now-total pass. -/
+    — byte-identical to the previous `partial def`. The whole-pass
+    denotation preservation `flattenLetFoldReturn_denote`
+    (`noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e))
+    (denote e)`) is **proved** on the total untyped twin (axiom-clean),
+    by a heterogeneous structural congruence composed with the four
+    rewrite identities. A fixed-fuel erase lemma does not hold for all
+    fuel (`ann`/`namedProj` nodes consume typed-side fuel that `erase`
+    removes), so the whole-pass theorem is stated on the untyped twin to
+    avoid that obstruction. -/
 def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
   let inner := tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e))
   -- `tFlattenLetFoldReturn` is now total (fuel-bounded). The fuel is a

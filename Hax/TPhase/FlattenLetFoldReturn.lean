@@ -261,18 +261,27 @@ equivalence (`Rel.symm`, `Rel.trans`) with a bind congruence
 (`Rel.bind`); the A/D rewrites have two-environment forms (`flattenA_rel`,
 `flattenD_rel`) that compose with it; B/C are clean `denote` equalities.
 
-**Remaining (named, no `sorry`).** Two items are not yet discharged:
-1. A *fixed-fuel* erase lemma `(tFlattenLetFoldReturn k e).erase =
-   flattenLetFoldReturn k e.erase` does **not** hold for arbitrary `k`:
-   `ann`/`namedProj` nodes exist in `TExpr` but are removed by `erase`,
-   so they consume fuel on the typed side but not the untyped one. The
-   two agree only once both reach the rewrite fixpoint (sufficient fuel),
-   not at every `k`.
-2. The end-to-end denotation preservation
-   `noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e)) (denote e)`
-   reduces to a heterogeneous structural congruence (relating each
-   `denote`-helper on the flattened subterms to the original) composed
-   with the two-env A/D forms and B/C — the composition itself remains.
+**Whole-pass denotation preservation (proved).** The end-to-end theorem
+`flattenLetFoldReturn_denote`,
+`noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e)) (denote e)`,
+is mechanised on the total untyped twin (axiom-clean). It is a
+heterogeneous structural congruence — the helper relations
+`denote{Args,MatchArms,ForLoop,ForLoopRev,While}_rel_het` relate each
+`denote`-helper on the flattened subterms to the original, and
+`flatten_noVarRef` propagates the freshness invariant — composed with the
+four rewrite identities (A/D via `flattenA_rel`/`flattenD_rel`; B/C and
+their seq-forms `flattenBseq_eq`/`flattenCseq_eq`) through the `Rel`
+partial equivalence.
+
+**Remaining (named, no `sorry`).** A *fixed-fuel* erase lemma
+`(tFlattenLetFoldReturn k e).erase = flattenLetFoldReturn k e.erase` does
+**not** hold for arbitrary `k`: `ann`/`namedProj` nodes exist in `TExpr`
+but are removed by `erase`, so they consume fuel on the typed side but
+not the untyped one. The two agree only once both reach the rewrite
+fixpoint (sufficient fuel), not at every `k`. The whole-pass theorem
+above is stated on the untyped twin precisely to avoid this obstruction:
+it compares to the fuel-independent original `denote`, so `ann` passes
+straight to the induction hypothesis.
 -/
 
 end Hax

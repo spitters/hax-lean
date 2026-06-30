@@ -54,12 +54,13 @@ the composable infrastructure for the whole-pass result: `Rel "_"` as a
 partial equivalence (`Rel.symm`/`Rel.trans`/`Rel.bind`) and the
 two-environment forms of A and D (`flattenA_rel`, `flattenD_rel`).
 
-The end-to-end statement `noVarRef "_" e → Rel "_" (denote
-(flattenLetFoldReturn k e)) (denote e)` reduces to a heterogeneous
-structural congruence (relating each `denote`-helper on the flattened
-subterms to the original) composed with these forms; that composition is
-the remaining work (no `sorry`). See the report in
-`Hax/TPhase/FlattenLetFoldReturn.lean`.
+The end-to-end statement `flattenLetFoldReturn_denote`,
+`noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e)) (denote e)`,
+is **proved**: a heterogeneous structural congruence (relating each
+`denote`-helper on the flattened subterms to the original, via
+`flatten_noVarRef` and the `*_rel_het` helpers) composed with the four
+rewrite identities through the `Rel` partial equivalence. See the report
+in `Hax/TPhase/FlattenLetFoldReturn.lean`.
 -/
 
 namespace Hax
@@ -814,5 +815,473 @@ def flattenLetFoldReturn : Nat → ImpExpr → ImpExpr
           else .letBind n val' body'
         | _ => .letBind n val' body'
       else .letBind n val' body'
+
+/-! ## The flattening pass preserves `"_"`-freshness
+
+`flattenLetFoldReturn` only rearranges discarded binds; it never
+introduces a `.var "_"`. So the whole-program invariant `noVarRef "_"` is
+preserved, which is the side-condition under which rewrites A/D (hence
+the whole pass) are denotation-preserving. -/
+
+theorem allExpr_map_flatten (k : Nat)
+    (ih : ∀ a, noVarRef "_" a = true → noVarRef "_" (flattenLetFoldReturn k a) = true) :
+    ∀ args, noVarRef.allExpr "_" args = true →
+      noVarRef.allExpr "_" (args.map (flattenLetFoldReturn k)) = true := by
+  intro args
+  induction args with
+  | nil => intro _; rfl
+  | cons a as iha =>
+    intro h
+    simp only [noVarRef.allExpr, Bool.and_eq_true] at h
+    simp only [List.map_cons, noVarRef.allExpr, Bool.and_eq_true]
+    exact ⟨ih a h.1, iha h.2⟩
+
+theorem allArms_map_flatten (k : Nat)
+    (ih : ∀ a, noVarRef "_" a = true → noVarRef "_" (flattenLetFoldReturn k a) = true) :
+    ∀ arms, noVarRef.allArms "_" arms = true →
+      noVarRef.allArms "_" (arms.map (fun pe => (pe.1, flattenLetFoldReturn k pe.2))) = true := by
+  intro arms
+  induction arms with
+  | nil => intro _; rfl
+  | cons pa as iha =>
+    obtain ⟨p, e⟩ := pa
+    intro h
+    simp only [noVarRef.allArms, Bool.and_eq_true] at h
+    simp only [List.map_cons, noVarRef.allArms, Bool.and_eq_true]
+    exact ⟨ih e h.1, iha h.2⟩
+
+/-- `flattenLetFoldReturn` preserves the `noVarRef "_"` invariant. -/
+theorem flatten_noVarRef :
+    ∀ (k : Nat) (e : ImpExpr), noVarRef "_" e = true →
+      noVarRef "_" (flattenLetFoldReturn k e) = true := by
+  intro k
+  induction k with
+  | zero => intro e he; simpa only [flattenLetFoldReturn] using he
+  | succ k ih =>
+    intro e
+    induction e using ImpExpr.ind with
+    | lit | var | unitVal | continue_ | break_none =>
+      intro he; simpa only [flattenLetFoldReturn] using he
+    | break_some e _ | borrow e _ | deref e _ | earlyReturn e _ | questionMark e _
+    | cfBreak e _ | cfContinue e _ | cfBreakContinue e _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef] at he ⊢; exact ih _ he
+    | proj e i _ | lam _ e _ | assign _ e _ | typeAscription e _ _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef] at he ⊢; exact ih _ he
+    | app f args _ | tuple args _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef] at he ⊢
+      exact allExpr_map_flatten k ih _ he
+    | match_ scrut arms _ _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef, Bool.and_eq_true] at he ⊢
+      exact ⟨ih _ he.1, allArms_map_flatten k ih _ he.2⟩
+    | ifThenElse c t e _ _ _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef, Bool.and_eq_true] at he ⊢
+      exact ⟨⟨ih _ he.1.1, ih _ he.1.2⟩, ih _ he.2⟩
+    | forLoop _ lo hi body _ _ _ | forLoopRev _ lo hi body _ _ _
+    | forFold _ lo hi body _ _ _ | forFoldRev _ lo hi body _ _ _
+    | forFoldReturn _ lo hi body _ _ _ | forFoldRevReturn _ lo hi body _ _ _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef, Bool.and_eq_true] at he ⊢
+      exact ⟨⟨ih _ he.1.1, ih _ he.1.2⟩, ih _ he.2⟩
+    | whileLoop c body _ _ | whileFold c body _ _ | whileFoldReturn c body _ _ =>
+      intro he; simp only [flattenLetFoldReturn, noVarRef, Bool.and_eq_true] at he ⊢
+      exact ⟨ih _ he.1, ih _ he.2⟩
+    | seq a b _ _ =>
+      intro he
+      simp only [noVarRef, Bool.and_eq_true] at he
+      obtain ⟨ha, hb⟩ := he
+      have hfa := ih a ha
+      have hfb := ih b hb
+      simp only [flattenLetFoldReturn]
+      split
+      · next c t e heq =>
+        have hfa' := hfa; rw [heq] at hfa'; simp only [noVarRef, Bool.and_eq_true] at hfa'
+        split
+        · simp only [noVarRef, Bool.and_eq_true]
+          exact ⟨⟨hfa'.1.1, ih _ (by simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfa'.1.2, hfb⟩)⟩,
+                 ih _ (by simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfa'.2, hfb⟩)⟩
+        · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfa, hfb⟩
+      · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfa, hfb⟩
+    | letBind n val body _ _ =>
+      intro he
+      simp only [noVarRef, Bool.and_eq_true] at he
+      obtain ⟨hv, hb⟩ := he
+      have hfv := ih val hv
+      have hfb := ih body hb
+      simp only [flattenLetFoldReturn]
+      split
+      · -- n = "_"
+        split
+        · exact hfb
+        · next v lo hi b heq =>
+          rw [heq] at hfv; simp only [noVarRef, Bool.and_eq_true] at hfv ⊢; exact ⟨hfv, hfb⟩
+        · next v lo hi b heq =>
+          rw [heq] at hfv; simp only [noVarRef, Bool.and_eq_true] at hfv ⊢; exact ⟨hfv, hfb⟩
+        · next c b heq =>
+          rw [heq] at hfv; simp only [noVarRef, Bool.and_eq_true] at hfv ⊢; exact ⟨hfv, hfb⟩
+        · next innerVal innerBody heq =>
+          rw [heq] at hfv; simp only [noVarRef, Bool.and_eq_true] at hfv
+          exact ih _ (by simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv.1, hfv.2, hfb⟩)
+        · next innerA innerB heq =>
+          rw [heq] at hfv; simp only [noVarRef, Bool.and_eq_true] at hfv
+          exact ih _ (by simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv.1, hfv.2, hfb⟩)
+        · next c t e heq =>
+          have hfv' := hfv; rw [heq] at hfv'; simp only [noVarRef, Bool.and_eq_true] at hfv'
+          split
+          · simp only [noVarRef, Bool.and_eq_true]
+            exact ⟨⟨hfv'.1.1, ih _ (by simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv'.1.2, hfb⟩)⟩,
+                   ih _ (by simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv'.2, hfb⟩)⟩
+          · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv, hfb⟩
+        · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv, hfb⟩
+      · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv, hfb⟩
+
+/-! ## Heterogeneous helper congruences
+
+The whole-pass theorem needs each `denote`-helper, run on the *flattened*
+subterms, to be `Rel`-related to the same helper on the originals. These
+mirror the homogeneous `denote*_rel` lemmas but relate two distinct
+bodies/argument lists given a pointwise `Rel`. -/
+
+theorem denoteForLoop_rel_het (bi : Builtins) (n var : String) (body body' : ImpExpr)
+    (Hb : ∀ df, Rel n (denote bi df body') (denote bi df body)) :
+    ∀ df lo hi, Rel n (denoteForLoop bi df var lo hi body')
+      (denoteForLoop bi df var lo hi body) := by
+  intro df
+  induction df with
+  | zero =>
+    intro lo hi; unfold denoteForLoop
+    split
+    · exact Rel.pure _
+    · split
+      · exact Rel.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi; unfold denoteForLoop
+    split
+    · exact Rel.pure _
+    · split
+      · exact Rel.pure _
+      · apply Rel.bind (Rel.modify_extend n var (.int lo))
+        intro _
+        apply Rel.bind (Hb (k + 1))
+        intro rb
+        cases rb <;>
+          first
+            | (simp only [Nat.add_sub_cancel]; exact ih (lo + 1) hi)
+            | exact Rel.pure _
+
+theorem denoteForLoopRev_rel_het (bi : Builtins) (n var : String) (body body' : ImpExpr)
+    (Hb : ∀ df, Rel n (denote bi df body') (denote bi df body)) :
+    ∀ df lo hi, Rel n (denoteForLoopRev bi df var lo hi body')
+      (denoteForLoopRev bi df var lo hi body) := by
+  intro df
+  induction df with
+  | zero =>
+    intro lo hi; unfold denoteForLoopRev
+    split
+    · exact Rel.pure _
+    · split
+      · exact Rel.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi; unfold denoteForLoopRev
+    split
+    · exact Rel.pure _
+    · split
+      · exact Rel.pure _
+      · apply Rel.bind (Rel.modify_extend n var (.int (hi - 1)))
+        intro _
+        apply Rel.bind (Hb (k + 1))
+        intro rb
+        cases rb <;>
+          first
+            | (simp only [Nat.add_sub_cancel]; exact ih lo (hi - 1))
+            | exact Rel.pure _
+
+theorem denoteWhile_rel_het (bi : Builtins) (n : String) (cond cond' body body' : ImpExpr)
+    (Hc : ∀ df, Rel n (denote bi df cond') (denote bi df cond))
+    (Hb : ∀ df, Rel n (denote bi df body') (denote bi df body)) :
+    ∀ df, Rel n (denoteWhile bi df cond' body') (denoteWhile bi df cond body) := by
+  intro df
+  induction df with
+  | zero =>
+    unfold denoteWhile
+    split
+    · exact Rel.pure _
+    · exact absurd rfl ‹_›
+  | succ k ih =>
+    unfold denoteWhile
+    split
+    · exact Rel.pure _
+    · apply Rel.bind (Hc (k + 1))
+      intro rc
+      split <;>
+        try exact Rel.pure _
+      · apply Rel.bind (Hb (k + 1))
+        intro rb
+        split <;>
+          first
+            | (simp only [Nat.add_sub_cancel]; exact ih)
+            | exact Rel.pure _
+
+theorem denoteArgs_rel_het (bi : Builtins) (n : String) (df : Nat) (f : ImpExpr → ImpExpr) :
+    ∀ (es : List ImpExpr),
+      (∀ e ∈ es, Rel n (denote bi df (f e)) (denote bi df e)) →
+      Rel n (denoteArgs bi df (es.map f)) (denoteArgs bi df es) := by
+  intro es
+  induction es with
+  | nil => intro _; simp only [List.map_nil, denoteArgs]; exact Rel.pure _
+  | cons e es ih =>
+    intro hall
+    simp only [List.map_cons, denoteArgs]
+    apply Rel.bind (hall e (List.mem_cons_self ..))
+    intro r
+    cases r <;>
+      first
+        | (apply Rel.bind (ih (fun e' he' => hall e' (List.mem_cons_of_mem _ he')))
+           intro rest
+           exact Rel.pure _)
+        | exact Rel.pure _
+
+theorem denoteMatchArms_rel_het (bi : Builtins) (n : String) (df : Nat) (v : Value)
+    (f : ImpExpr → ImpExpr) :
+    ∀ (arms : List (ImpPat × ImpExpr)),
+      (∀ pa ∈ arms, Rel n (denote bi df (f pa.2)) (denote bi df pa.2)) →
+      Rel n (denoteMatchArms bi df v (arms.map (fun pe => (pe.1, f pe.2))))
+        (denoteMatchArms bi df v arms) := by
+  intro arms
+  induction arms with
+  | nil => intro _; simp only [List.map_nil, denoteMatchArms]; exact Rel.pure _
+  | cons pa rest ih =>
+    obtain ⟨pat, body⟩ := pa
+    intro hall s₁ s₂ hs
+    simp only [List.map_cons, denoteMatchArms, stateM_bind_apply, stateM_get_apply]
+    have hmp := matchPat_agree n pat v s₁ s₂ hs
+    cases hp1 : matchPat pat v s₁ <;> cases hp2 : matchPat pat v s₂ <;>
+      simp only [hp1, hp2, OptAgree] at hmp
+    · exact ih (fun pa' hpa' => hall pa' (List.mem_cons_of_mem _ hpa')) s₁ s₂ hs
+    · simp only [stateM_bind_apply, stateM_set_apply]
+      exact hall (pat, body) (List.mem_cons_self ..) _ _ hmp
+
+/-- Heterogeneous `letBind` congruence: relate `letBind` on flattened
+    pieces to `letBind` on the originals. -/
+theorem denote_letBind_rel_het (bi : Builtins) (n name : String) (df : Nat)
+    (v v' b b' : ImpExpr)
+    (Hv : Rel n (denote bi df v') (denote bi df v))
+    (Hb : ∀ d, Rel n (denote bi d b') (denote bi d b)) :
+    Rel n (denote bi df (.letBind name v' b')) (denote bi df (.letBind name v b)) := by
+  simp only [denote_letBind]
+  apply Rel.bind Hv
+  intro rv
+  cases rv <;>
+    first
+      | (apply Rel.bind (Rel.modify_extend n name _); intro _; exact Hb df)
+      | exact Rel.pure _
+
+/-- The seq-form B′ identity: a discarded `seq` head re-associates into a
+    nested `seq`/`letBind "_"`. A clean `denote` equality (no freshness):
+    `seq` does not bind `"_"`, so the `"_"` slot is set once, after the
+    inner expression, on both sides. -/
+theorem flattenBseq_eq (bi : Builtins) (df : Nat) (iA iB body' : ImpExpr) :
+    denote bi df (.letBind "_" (.seq iA iB) body')
+      = denote bi df (.seq iA (.letBind "_" iB body')) := by
+  simp only [denote_letBind, denote_seq, bind_assoc]
+  congr 1
+  funext r
+  cases r <;> first | rfl | simp only [pure_bind]
+
+/-- Heterogeneous `seq` congruence. -/
+theorem denote_seq_rel_het (bi : Builtins) (n : String) (df : Nat) (a a' b b' : ImpExpr)
+    (Ha : Rel n (denote bi df a') (denote bi df a))
+    (Hb : ∀ d, Rel n (denote bi d b') (denote bi d b)) :
+    Rel n (denote bi df (.seq a' b')) (denote bi df (.seq a b)) := by
+  simp only [denote_seq]
+  apply Rel.bind Ha
+  intro r
+  split <;> first | exact Hb df | exact Rel.pure _
+
+/-- Heterogeneous `ifThenElse` congruence. -/
+theorem denote_ite_rel_het (bi : Builtins) (n : String) (df : Nat) (c c' t t' e e' : ImpExpr)
+    (Hc : Rel n (denote bi df c') (denote bi df c))
+    (Ht : Rel n (denote bi df t') (denote bi df t))
+    (He : Rel n (denote bi df e') (denote bi df e)) :
+    Rel n (denote bi df (.ifThenElse c' t' e')) (denote bi df (.ifThenElse c t e)) := by
+  simp only [denote]
+  apply Rel.bind Hc
+  intro rc
+  split <;> first | exact Ht | exact He | exact Rel.pure _
+
+/-- The seq-form C′ identity: distribute a discarded `seq` over an `if`.
+    A clean `denote` equality. -/
+theorem flattenCseq_eq (bi : Builtins) (df : Nat) (c t e b' : ImpExpr) :
+    denote bi df (.seq (.ifThenElse c t e) b')
+      = denote bi df (.ifThenElse c (.seq t b') (.seq e b')) := by
+  simp only [denote_seq, denote, bind_assoc]
+  congr 1
+  funext rc
+  split <;> simp only [pure_bind]
+
+/-! ## Whole-pass denotation preservation
+
+Under the `noVarRef "_"` invariant, the total fuel-bounded pass
+`flattenLetFoldReturn` preserves denotation up to the `"_"` slot
+(`Rel "_"`). The structural cases are heterogeneous congruences (via the
+`ih` at fuel `k`); the discarded-`letBind`/`seq` cases compose the four
+rewrite identities (`flattenA_rel`/`flattenB_denote`/`flattenC_denote`/
+`flattenD_rel`, plus the seq-form `flattenBseq_eq`/`flattenCseq_eq`)
+through the `Rel` partial equivalence. -/
+theorem flattenLetFoldReturn_denote (bi : Builtins) :
+    ∀ (k : Nat) (e : ImpExpr), noVarRef "_" e = true →
+      ∀ df, Rel "_" (denote bi df (flattenLetFoldReturn k e)) (denote bi df e) := by
+  intro k
+  induction k with
+  | zero => intro e he df; simp only [flattenLetFoldReturn]; exact denote_agreeExcept bi "_" e df he
+  | succ k ih =>
+    intro e
+    induction e using ImpExpr.ind with
+    | lit | var | unitVal | continue_ | break_none =>
+      intro he df; simp only [flattenLetFoldReturn]; exact denote_agreeExcept bi "_" _ df he
+    | lam _ body _ =>
+      intro _ df; simp only [flattenLetFoldReturn, denote]; exact Rel.pure _
+    | borrow e _ | deref e _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      exact ih e he df
+    | typeAscription e _ _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      exact ih e he df
+    | break_some e _ | earlyReturn e _ | questionMark e _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (ih e he df); intro r; split <;> exact Rel.pure _
+    | proj e i _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (ih e he df); intro r; split <;> (try split) <;> exact Rel.pure _
+    | cfBreak e _ | cfContinue e _ | cfBreakContinue e _ =>
+      intro _ df; simp only [flattenLetFoldReturn, denote]; exact Rel.pure _
+    | assign name rhs _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (ih rhs he df); intro r
+      cases r <;>
+        first
+          | (apply Rel.bind (Rel.modify_extend "_" name _); intro _; exact Rel.pure _)
+          | exact Rel.pure _
+    | app f args _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (denoteArgs_rel_het bi "_" df (flattenLetFoldReturn k) args
+        (fun a ha => ih a (noVarRef_allExpr_mem he a ha) df))
+      intro mvals; split <;> (try split) <;> exact Rel.pure _
+    | tuple args _ =>
+      intro he df; simp only [noVarRef] at he; simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (denoteArgs_rel_het bi "_" df (flattenLetFoldReturn k) args
+        (fun a ha => ih a (noVarRef_allExpr_mem he a ha) df))
+      intro mvals; split <;> exact Rel.pure _
+    | match_ scrut arms _ _ =>
+      intro he df; simp only [noVarRef, Bool.and_eq_true] at he
+      simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (ih scrut he.1 df); intro rs
+      split
+      · exact denoteMatchArms_rel_het bi "_" df _ (flattenLetFoldReturn k) arms
+          (fun pa hpa => ih pa.2 (noVarRef_allArms_mem he.2 pa hpa) df)
+      · exact Rel.pure _
+    | ifThenElse c t e _ _ _ =>
+      intro he df; simp only [noVarRef, Bool.and_eq_true] at he
+      simp only [flattenLetFoldReturn]
+      exact denote_ite_rel_het bi "_" df c _ t _ e _ (ih c he.1.1 df) (ih t he.1.2 df) (ih e he.2 df)
+    | forLoop var lo hi body _ _ _ =>
+      intro he df; simp only [noVarRef, Bool.and_eq_true] at he
+      simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (ih lo he.1.1 df); intro rlo
+      apply Rel.bind (ih hi he.1.2 df); intro rhi
+      split <;>
+        first
+          | exact denoteForLoop_rel_het bi "_" var body _ (fun d => ih body he.2 d) _ _ _
+          | exact Rel.pure _
+    | forLoopRev var lo hi body _ _ _ =>
+      intro he df; simp only [noVarRef, Bool.and_eq_true] at he
+      simp only [flattenLetFoldReturn, denote]
+      apply Rel.bind (ih lo he.1.1 df); intro rlo
+      apply Rel.bind (ih hi he.1.2 df); intro rhi
+      split <;>
+        first
+          | exact denoteForLoopRev_rel_het bi "_" var body _ (fun d => ih body he.2 d) _ _ _
+          | exact Rel.pure _
+    | whileLoop c body _ _ =>
+      intro he df; simp only [noVarRef, Bool.and_eq_true] at he
+      simp only [flattenLetFoldReturn, denote]
+      exact denoteWhile_rel_het bi "_" c _ body _ (fun d => ih c he.1 d) (fun d => ih body he.2 d) df
+    | forFold _ _ _ _ _ _ _ | forFoldRev _ _ _ _ _ _ _ | whileFold _ _ _ _
+    | forFoldReturn _ _ _ _ _ _ _ | forFoldRevReturn _ _ _ _ _ _ _ | whileFoldReturn _ _ _ _ =>
+      intro he df; simp only [flattenLetFoldReturn, denote]; exact Rel.pure _
+    | seq a b _ _ =>
+      intro he df
+      simp only [noVarRef, Bool.and_eq_true] at he
+      obtain ⟨ha, hb⟩ := he
+      have hfb := flatten_noVarRef k b hb
+      have seqCong := denote_seq_rel_het bi "_" df a (flattenLetFoldReturn k a) b
+        (flattenLetFoldReturn k b) (ih a ha df) (fun d => ih b hb d)
+      simp only [flattenLetFoldReturn]
+      split
+      · next c t e heq =>
+        have hfa := flatten_noVarRef k a ha
+        rw [heq] at hfa; simp only [noVarRef, Bool.and_eq_true] at hfa
+        split
+        · refine (denote_ite_rel_het bi "_" df _ _ _ _ _ _
+                    (denote_agreeExcept bi "_" c df hfa.1.1)
+                    (ih (.seq t (flattenLetFoldReturn k b)) ?_ df)
+                    (ih (.seq e (flattenLetFoldReturn k b)) ?_ df)).trans ?_
+          · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfa.1.2, hfb⟩
+          · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfa.2, hfb⟩
+          · rw [← flattenCseq_eq, ← heq]; exact seqCong
+        · exact seqCong
+      · exact seqCong
+    | letBind n val body _ _ =>
+      intro he df
+      simp only [noVarRef, Bool.and_eq_true] at he
+      obtain ⟨hv, hb⟩ := he
+      have hfv := flatten_noVarRef k val hv
+      have hfb := flatten_noVarRef k body hb
+      have letCong := denote_letBind_rel_het bi "_" n df val (flattenLetFoldReturn k val) body
+        (flattenLetFoldReturn k body) (ih val hv df) (fun d => ih body hb d)
+      simp only [flattenLetFoldReturn]
+      split
+      · next hn =>
+        obtain rfl : n = "_" := eq_of_beq hn
+        split
+        · next heq =>
+          rw [heq] at letCong
+          exact ((flattenA_rel bi df _ hfb).symm).trans letCong
+        · next v lo hi b heq =>
+          rw [heq] at hfv letCong
+          exact ((flattenD_rel bi df _ _ hfv hfb).symm).trans letCong
+        · next v lo hi b heq =>
+          rw [heq] at hfv letCong
+          exact ((flattenD_rel bi df _ _ hfv hfb).symm).trans letCong
+        · next c b heq =>
+          rw [heq] at hfv letCong
+          exact ((flattenD_rel bi df _ _ hfv hfb).symm).trans letCong
+        · next iv ib heq =>
+          rw [heq] at hfv letCong
+          simp only [noVarRef, Bool.and_eq_true] at hfv
+          refine (ih _ ?_ df).trans ?_
+          · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv.1, hfv.2, hfb⟩
+          · rw [← flattenB_denote]; exact letCong
+        · next iA iB heq =>
+          rw [heq] at hfv letCong
+          simp only [noVarRef, Bool.and_eq_true] at hfv
+          refine (ih _ ?_ df).trans
+            ((flattenD_rel bi df iA (.letBind "_" iB (flattenLetFoldReturn k body)) hfv.1 ?_).trans ?_)
+          · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv.1, hfv.2, hfb⟩
+          · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv.2, hfb⟩
+          · rw [← flattenBseq_eq]; exact letCong
+        · next c t e heq =>
+          have hfv' := hfv; rw [heq] at hfv'; simp only [noVarRef, Bool.and_eq_true] at hfv'
+          split
+          · refine (denote_ite_rel_het bi "_" df _ _ _ _ _ _
+                      (denote_agreeExcept bi "_" c df hfv'.1.1)
+                      (ih (.letBind "_" t (flattenLetFoldReturn k body)) ?_ df)
+                      (ih (.letBind "_" e (flattenLetFoldReturn k body)) ?_ df)).trans ?_
+            · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv'.1.2, hfb⟩
+            · simp only [noVarRef, Bool.and_eq_true]; exact ⟨hfv'.2, hfb⟩
+            · rw [← flattenC_denote, ← heq]; exact letCong
+          · exact letCong
+        · exact letCong
+      · exact letCong
 
 end Hax

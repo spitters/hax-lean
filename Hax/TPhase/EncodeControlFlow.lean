@@ -110,9 +110,19 @@ The runtime semantics of these consumers is captured by `refFold` /
   accumulator. Companion shape lemmas (`encode_*_denote'`) show the encoded
   tails evaluate, under the ControlFlow-aware `denote'`, to the `Value.controlFlow`
   tags `denoteForLoop'` consumes.
-* **Return case:** `forFoldReturn_eq_refFoldReturn` characterises the
-  doubly-nested runtime fold; the full env-threading bridge for the return case
-  is identified as `encodeReturnFold_denote'_bridge` (gap, see its docstring).
+* **Return case (GREEN):** `forFoldReturn_consume_eq_refFoldReturn` characterises
+  the doubly-nested runtime fold (consumed by the nested match) against the
+  three-way reference `refFoldReturn`.
+* **Environment-threading loop induction (GREEN, both kinds):**
+  `denoteForLoop'_eq_forFold` and `denoteForLoop'Return_eq_forFoldReturn` — the
+  semantics loops (`denoteForLoop'` / `denoteForLoop'Return`, which thread the
+  accumulator through the *environment* and discard the continue payload) agree
+  with the runtime folds (`Hax.forFold` / `Hax.forFoldReturn`, value-threaded),
+  for a body satisfying the per-iteration reconciliation `hstep`. The fuel/range
+  induction's step is one application of the per-tail reconciliation, with the
+  environment accumulator and the runtime accumulator in lockstep. This closes
+  the env-vs-value bridge for both the plain (one `ControlFlow` level) and the
+  return (doubly-nested) folds.
 -/
 
 namespace Hax
@@ -478,20 +488,162 @@ theorem forFoldReturn_consume_eq_refFoldReturn {α β γ : Type} (lo hi : Int)
   | case4 lo init acc h hf ih =>
     rw [refFoldReturn, if_neg (by omega), hf]; exact ih
 
-/-! ## Residual obligation (shared with the plain case)
+/-! ## Environment-threading loop induction (plain)
 
-What remains unproved — for the return fold **and** the plain fold alike — is the
-**environment-threading loop induction**: that `denoteForLoop'`/
-`denoteForLoop'Return` (the semantics, which thread accumulators through the
-*environment* and discard the continue payload) agree with `Hax.forFold`/
-`Hax.forFoldReturn` (the runtime, which thread accumulators through the *value*),
-for a body produced by the encoding. The per-tail reconciliation those two need
-is now complete at both levels (`denote'_cfContinue_run`, `denote'_cfBreak_run`,
-`denote'_cfBreakContinue_run`), and the value-level consumption is proved equal
-to the reference for both kinds (`forFold_merge_eq_refFold`,
-`forFoldReturn_consume_eq_refFoldReturn`). The remaining step is the StateM/fuel
-induction copying the environment accumulator into the value payload each
-iteration; it is identical in shape for plain and return and is **not** specific
-to the doubly-nested case. Named here, no hidden `sorry`. -/
+The final bridge for the plain fold: `denoteForLoop'` (the semantics — it threads
+accumulators through the *environment* and discards the continue payload) agrees
+with `Hax.forFold` (the runtime — it threads through the *value*), for a body
+that satisfies the per-iteration reconciliation `hstep`. `hstep` is exactly the
+per-tail behaviour of `denote'_cfContinue_run`/`denote'_cfBreak_run`, lifted to
+"run the body at loop index `i` from an env whose accumulator variable `a` holds
+`aval`": it yields a `controlFlow` whose tag is the runtime step `g i aval`'s
+break/continue and whose payload is that step's value, and it leaves the new
+accumulator in `env' a`. The proof is the fuel/range induction; its inductive
+step is one application of `hstep` with the environment accumulator and the
+runtime accumulator in lockstep (`env' a = some (g i aval).merge`). -/
+
+set_option linter.unusedSimpArgs false in
+/-- `denoteForLoop'` over an encoded body equals `Hax.forFold`, env- and
+    value-threaded accumulators kept in lockstep. The runtime result's `.merge`
+    is always the final environment accumulator; the returned outcome is `.unit`
+    on normal completion and the break value on break. -/
+theorem denoteForLoop'_eq_forFold
+    (bi : Builtins) (var a : String) (body : ImpExpr)
+    (g : Int → Value → ControlFlow Value Value)
+    (hstep : ∀ (fuel : Nat) (i : Int) (env : Env) (aval : Value), env a = some aval →
+        ∃ env', (denote' bi fuel body).run (Env.extend env var (.int i))
+              = (.val (.controlFlow (g i aval).isBreak (g i aval).merge), env')
+          ∧ env' a = some (g i aval).merge) :
+    ∀ (fuel : Nat) (lo hi : Int) (env : Env) (aval : Value),
+      env a = some aval → (hi - lo).toNat ≤ fuel →
+      ∃ env'',
+        (denoteForLoop' bi fuel var lo hi body).run env
+          = ((if (Hax.forFold lo hi aval g).isBreak then
+                Outcome.val (Hax.forFold lo hi aval g).merge
+              else Outcome.val .unit), env'')
+        ∧ env'' a = some (Hax.forFold lo hi aval g).merge := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi env aval ha hfuel
+    have hge : lo ≥ hi := by omega
+    refine ⟨env, ?_, ?_⟩
+    · rw [denoteForLoop', if_pos hge, Hax.forFold, if_pos hge]
+      simp [ControlFlow.isBreak, ControlFlow.merge, StateT.run, pure, StateT.pure]
+    · rw [Hax.forFold, if_pos hge]; simpa [ControlFlow.merge] using ha
+  | succ n ih =>
+    intro lo hi env aval ha hfuel
+    by_cases hge : lo ≥ hi
+    · refine ⟨env, ?_, ?_⟩
+      · rw [denoteForLoop', if_pos hge, Hax.forFold, if_pos hge]
+        simp [ControlFlow.isBreak, ControlFlow.merge, StateT.run, pure, StateT.pure]
+      · rw [Hax.forFold, if_pos hge]; simpa [ControlFlow.merge] using ha
+    · obtain ⟨env', hrun, ha'⟩ := hstep (n + 1) lo env aval ha
+      rw [denoteForLoop', if_neg hge, if_neg (Nat.succ_ne_zero n)]
+      simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
+        StateT.modifyGet, pure, StateT.pure] at hrun ⊢
+      rw [hrun]
+      cases hg : g lo aval with
+      | Break w =>
+        rw [hg] at ha'
+        rw [Hax.forFold, if_neg hge, hg]
+        simp only [ControlFlow.isBreak, ControlFlow.merge, if_true]
+        exact ⟨env', rfl, ha'⟩
+      | Continue w =>
+        rw [hg] at ha'
+        obtain ⟨env'', hrec, ha3⟩ := ih (lo + 1) hi env' w ha' (by omega)
+        rw [Hax.forFold, if_neg hge, hg]
+        simp only [ControlFlow.isBreak, ControlFlow.merge, Nat.add_sub_cancel]
+        simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
+          StateT.modifyGet, pure, StateT.pure] at hrec
+        exact ⟨env'', hrec, ha3⟩
+
+/-! ## Environment-threading loop induction (return fold)
+
+The lift to the return fold. One subtlety the plain case lacks: the
+ControlFlow-aware `denote'` *short-circuits* `controlFlow` values, so the
+encoded early return `cfBreak (cfBreak v)` collapses, under `denote'`, to the
+*one-level* `controlFlow true v` (the inner break is absorbed). This is exactly
+the `denoteForLoop'Return` early-return tag, and after consumption it still
+corresponds to the runtime's two-level `Break (Break v)` → `earlyRet v`. So the
+per-iteration body step is encoded by `encReturnStep` below (one level for early
+return, two for loop break), and the loop result is compared after
+`consumeForFoldReturn` via `retOutcome`. -/
+
+/-- Value encoding of a return-fold body step, as `denote'` produces it for the
+    encoded body: continue → `controlFlow false`, loop break → two-level
+    `controlFlow true (controlFlow false)`, early return → one-level
+    `controlFlow true` (the `denote'` short-circuit of `cfBreak (cfBreak ·)`). -/
+def encReturnStep : ControlFlow (ControlFlow Value Value) Value → Value
+  | .Continue acc => .controlFlow false acc
+  | .Break (.Continue v) => .controlFlow true (.controlFlow false v)
+  | .Break (.Break v) => .controlFlow true v
+
+/-- The denote outcome each consumed return-fold result corresponds to:
+    normal completion → `unit` (accumulator is in the env), loop break → the
+    break value, early return → the propagated `controlFlow true v`. -/
+def retOutcome : FoldReturnResult Value Value Value → Outcome
+  | .done _ => .val .unit
+  | .broke v => .val v
+  | .earlyRet v => .val (.controlFlow true v)
+
+set_option linter.unusedSimpArgs false in
+/-- `denoteForLoop'Return` over an encoded body agrees with `Hax.forFoldReturn`
+    consumed by the nested match (`consumeForFoldReturn`), mapped to the denote
+    outcome by `retOutcome`. The return analog of `denoteForLoop'_eq_forFold`,
+    exercising both `ControlFlow` levels. `hER` records that early-return values
+    are data (not `controlFlow`), so they classify as an early return rather than
+    a loop break. -/
+theorem denoteForLoop'Return_eq_forFoldReturn
+    (bi : Builtins) (var a : String) (body : ImpExpr)
+    (g : Int → Value → ControlFlow (ControlFlow Value Value) Value)
+    (hstep : ∀ (fuel : Nat) (i : Int) (env : Env) (aval : Value), env a = some aval →
+        ∃ env', (denote' bi fuel body).run (Env.extend env var (.int i))
+              = (.val (encReturnStep (g i aval)), env')
+          ∧ (∀ acc, g i aval = .Continue acc → env' a = some acc))
+    (hER : ∀ (i : Int) (av v : Value), g i av = .Break (.Break v) → v.isControlFlow = false) :
+    ∀ (fuel : Nat) (lo hi : Int) (env : Env) (aval : Value),
+      env a = some aval → (hi - lo).toNat ≤ fuel →
+      ∃ env'',
+        (denoteForLoop'Return bi fuel var lo hi body).run env
+          = (retOutcome (consumeForFoldReturn (Hax.forFoldReturn lo hi aval g)), env'') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi env aval ha hfuel
+    have hge : lo ≥ hi := by omega
+    refine ⟨env, ?_⟩
+    rw [denoteForLoop'Return, if_pos hge, Hax.forFoldReturn, if_pos hge]
+    simp [consumeForFoldReturn, retOutcome, StateT.run, pure, StateT.pure]
+  | succ n ih =>
+    intro lo hi env aval ha hfuel
+    by_cases hge : lo ≥ hi
+    · refine ⟨env, ?_⟩
+      rw [denoteForLoop'Return, if_pos hge, Hax.forFoldReturn, if_pos hge]
+      simp [consumeForFoldReturn, retOutcome, StateT.run, pure, StateT.pure]
+    · obtain ⟨env', hrun, hacc⟩ := hstep (n + 1) lo env aval ha
+      rw [denoteForLoop'Return, if_neg hge, if_neg (Nat.succ_ne_zero n)]
+      simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
+        StateT.modifyGet, pure, StateT.pure] at hrun ⊢
+      rw [hrun]
+      rw [Hax.forFoldReturn, if_neg hge]
+      cases hg : g lo aval with
+      | Continue acc =>
+        have hacc' : env' a = some acc := hacc acc hg
+        obtain ⟨env'', hrec⟩ := ih (lo + 1) hi env' acc hacc' (by omega)
+        simp only [hg, encReturnStep, Nat.add_sub_cancel]
+        simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
+          StateT.modifyGet, pure, StateT.pure] at hrec
+        exact ⟨env'', hrec⟩
+      | Break br =>
+        cases br with
+        | Continue v =>
+          simp only [hg, encReturnStep, consumeForFoldReturn, retOutcome]
+          exact ⟨env', rfl⟩
+        | Break v =>
+          have hvcf : v.isControlFlow = false := hER lo aval v hg
+          simp only [hg, encReturnStep, consumeForFoldReturn, retOutcome]
+          refine ⟨env', ?_⟩
+          cases v <;> simp_all [Value.isControlFlow, StateT.run, pure, StateT.pure]
 
 end Hax
