@@ -10,6 +10,7 @@ import Hax.ImpType
 import Hax.Canonicalize
 import Hax.Phase.RewriteAppName
 import Hax.Phase.InitFoldAccums
+import Hax.TPhase.EncodeControlFlow
 
 /-!
 # Lean 4 Pretty-Printer for ImpExpr (DEPRECATED — untyped path)
@@ -1514,41 +1515,34 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     let accs := accs.filter fun a => !localVars.contains a
     let (initStr, paramStr) := accStrings accs
     if !accs.isEmpty then
-      let body' := transformWhileFoldBody accs body
+      -- Verified plain-fold encoder (whileFold body is single-level `ControlFlow α α`).
+      let body' := encodeForFoldBody (accTuple accs) body
       -- Use _ for condition lambda (condition rarely uses accumulator names)
       s!"{ind}Hax.whileFold {initStr} (fun _ => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
     else
       -- Even with empty accs, wrap if-then-else branches that need ControlFlow
-      let body' := transformWhileFoldBody [] body
+      let body' := encodeForFoldBody (accTuple []) body
       s!"{ind}Hax.whileFold () (fun _ => {toLean c 0}) fun _acc =>\n{atLine body' (lvl + 1)}"
   | .forFoldReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
-    -- First wrap bare values/accumulators in cfContinue (forFoldReturn body must return ControlFlow)
-    let body' := transformForFoldCfBody true accs body
-    -- Then nest cfBreak for early function returns
-    let body' := nestCfBreakForReturn body'
+    -- Verified return-fold encoder (doubly-nested `ControlFlow (ControlFlow β γ) α`,
+    -- consumed by the nested match): threads accs as loop breaks (`cfBreakContinue`),
+    -- nests genuine early returns (`cfBreak (cfBreak v)`).
+    let body' := encodeReturnFoldBody (accTuple accs) body
     s!"{ind}Hax.forFoldReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .forFoldRevReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
-    let body' := transformForFoldCfBody true accs body
-    let body' := nestCfBreakForReturn body'
+    let body' := encodeReturnFoldBody (accTuple accs) body
     s!"{ind}Hax.forFoldRevReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .whileFoldReturn c body =>
     let accs := extractAccumulators body
     let localVars := collectLetBindVars body
     let accs := accs.filter fun a => !localVars.contains a
     let (initStr, paramStr) := accStrings accs
-    -- Use the RETURN-aware body transform (same as forFoldReturn), NOT
-    -- transformWhileFoldBody: the latter encodes loop exits/continues as
-    -- single-level `cfBreak accs`, which `nestCfBreakForReturn` then double-wraps
-    -- into `cfBreak (cfBreak accs)` — a function early-return of the accumulator,
-    -- type-clashing with genuine early returns. transformForFoldCfBody emits
-    -- `cfBreakContinue`/`cfContinue`, which the nester leaves intact.
-    let body' := transformForFoldCfBody true accs body
-    -- Nest cfBreak for early returns (same as forFoldReturn)
-    let body' := nestCfBreakForReturn body'
+    -- Verified return-fold encoder (same doubly-nested shape as forFoldReturn).
+    let body' := encodeReturnFoldBody (accTuple accs) body
     s!"{ind}Hax.whileFoldReturn {initStr} (fun {paramStr} => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
 
   -- Pre-pipeline constructors (should not appear in output, but handle gracefully)
@@ -1624,9 +1618,9 @@ where
                      else s!"\n{toLean body (lvl + 2)}"
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
     else
-      -- ControlFlow fold (has break/continue), consumed via `.merge`: single-level
-      -- `ControlFlow β α`, so loop breaks stay `cfBreak (accs)` (isReturn = false).
-      let body' := transformForFoldCfBody false accs body
+      -- ControlFlow fold consumed via `.merge` (single-level `ControlFlow β α`):
+      -- the verified plain-fold encoder.
+      let body' := encodeForFoldBody (accTuple accs) body
       s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   /-- Flatten seq chains into proper let-bindings. -/
   seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=
