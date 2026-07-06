@@ -2196,6 +2196,19 @@ partial def toLeanImpExpr (e : ImpExpr) : String :=
 def toLeanImpExprDef (name : String) (e : ImpExpr) : String :=
   s!"def {sanitizeName (name ++ "_impExpr")} : ImpExpr :=\n  {toLeanImpExpr e}\n"
 
+/-- Generate the sibling `LowCT` def that lowers the emitted `ImpExpr` literal
+    through CatCrypt's verified front.  Names `haxToLowCT`/`LowCT` by identifier
+    only — hax-lean cannot import CatCrypt's AST, so these resolve when the
+    emitted file is compiled in the CatCrypt project (where
+    `CatCrypt.Crypto.Hax.HaxToLowCT.haxToLowCT : ImpExpr → Option LowCT` is in
+    scope).  The `Option` return is preserved verbatim: the front is partial
+    (some `ImpExpr` shapes have no `LowCT` image), and CatCrypt's bridges
+    consume the `Option`.  A `#print <name>_lowct` renders the reviewable
+    `kernel%`/`orch%` surface via `VIR.KernelDelab`. -/
+def toLeanLowCTDef (name : String) (_e : ImpExpr) : String :=
+  let impExprName := sanitizeName (name ++ "_impExpr")
+  s!"def {sanitizeName (name ++ "_lowct")} : Option LowCT :=\n  haxToLowCT {impExprName}\n"
+
 /-! ## Auto-Preamble Generation
 
 Analyzes extracted ImpExpr AST together with struct metadata from the
