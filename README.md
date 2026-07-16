@@ -189,7 +189,7 @@ transformations are proved; the I/O ring around them is trusted.
 |-----------------------|-------------------------------------------------|
 | `TPhase/*`, `Phase/*` | **Verified.** `_erase` / `_ty` / `*_correct`.   |
 | `TPipeline`, `Pipeline`, `TPipelineErase` | **Verified.** Composition + full-chain commuting square. |
-| `Json/Parser.lean`    | **Verified.** RFC 8259 conformance.             |
+| `Json/Lexer.lean`, `Json/Parser.lean` | **Partially verified.** Totality (`parse_total`), trailing-content rejection, and tokeniser shape-validity are proved; accept/reject and small roundtrips are covered by concrete test theorems. Parser soundness (`parse_sound`), full RFC 8259 number/string conformance (escapes, surrogate pairs, exponents), and the general roundtrip `parse (tokenize (serialize j)) = .ok j` are in progress. |
 | `HaxAdapter.lean`     | Trusted *at the top level*. Companion `AdapterRefinement.lean` proves per-constructor JSON-to-AST refinement (`JsonRefinesExpr`, ~30 theorems including the `reconstructForLoops` preservation cases); the end-to-end `parseHaxExpr_refines` remains open, blocked on `partial def` equational lemmas and a JSON-size termination measure. |
 | `PrettyPrint{T}.lean` | Trusted. AST → Lean source; a structural emit, since control-flow encoding is done by the verified `EncodeControlFlow` phase. No preservation proof. |
 | `Runtime.lean`        | Trusted. Width-aware builtins; declares two intentional interface axioms (`bridgeCast`, `sha256`) that the CatCrypt-side bridge instantiates. |
@@ -212,10 +212,34 @@ game-based cryptographic proofs via that deep embedding, and the
 typed-pipeline output drops directly into the `SurfaceDeps.lean` extraction
 bridge.
 
-The `_lowct` sibling defs (see the CLI table above) lower into CatCrypt's
-`LowCT` IR, whose command language is inspired by bedrock2's `bedrockC` and the
-`rust_cmd` command IR in
-[AU-COBRA/AUCurves](https://github.com/AU-COBRA/AUCurves).
+### `ImpExpr` and `LowCT`
+
+The `_lowct` sibling defs (see the CLI table above) apply CatCrypt's front
+`haxToLowCT : ImpExpr → Option LowCT` to the extracted `ImpExpr`. The two IRs
+play complementary roles:
+
+- **`ImpExpr`** is this pipeline's imperative *expression* AST — the working
+  form of the phases and the handoff format of the extraction. (CatCrypt mirrors
+  it as `CatCrypt.Hax.AST.ImpExpr`; the emitter's `ImpExpr` literals elaborate
+  against that copy.)
+- **`LowCT`** is CatCrypt's typed, low-level *constant-time command* IR over
+  tower-field elements — branchless select, kernel-call ABIs, machine
+  intrinsics, limb stores. It is the **frontend IR of the CatCrypt compiler**,
+  whose verified backend lowers it to Jasmin / x86 — a compiler close in design
+  to the one used in [AUCurves](https://github.com/AU-COBRA/AUCurves), from which
+  `LowCT` and its `bedrockC` / `rust_cmd` command language are ported.
+
+The map is **partial**: `ImpExpr` is expression-shaped while `LowCT` is
+statement-shaped, so `haxToLowCT` is defined on the A-normal-form
+("LowCT-representable") subset of `ImpExpr` and returns `none` elsewhere; its
+domain is characterised decidably (`haxToLowCT_isSome_iff_anf`). The connection
+is **semantic**, not merely syntactic — `haxToLowCT_simulates` establishes that
+the `LowCT` command's `RustExec` execution agrees with the `ImpExpr` big-step
+`denote` (structural cases closed; scalar/tower leaf-call cases in progress).
+
+So `LowCT` is the *imperative, machine-facing* target of an `ImpExpr` — the
+counterpart to `RawCode`, its *functional, proof-facing* target — and both are
+reached from the same extracted `ImpExpr`.
 
 ## Upstream & related
 
