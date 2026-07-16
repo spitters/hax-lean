@@ -110,4 +110,35 @@ theorem tokenizeAux_quote (n : Nat) (rest : List Char) :
          else .error "malformed string escape sequence") := by
   rfl
 
+/-! ## General string acceptance through `tokenize`
+
+The Conformance module proves the number analogue `tokenize_accepts_number`
+fully generally but leaves the string case at representative concrete `decide`
+checks (`takeString`'s quote/escape scan is heavier). This capstone closes that
+gap: a quoted body that is `takeString`-recoverable (`wfBody`) and passes the
+RFC 8259 §7/§8.2 validator (`validStringContentL`) is tokenized to exactly one
+`strT` token. `wfBody` admits escaped bodies (a `\` escapes the next char), so
+this covers escaped bodies, not merely the escape-free / ASCII fragment. -/
+
+/-- **General string acceptance.** A `takeString`-recoverable body `bs` that
+satisfies the RFC 8259 string-content grammar, wrapped in quotes, is tokenized
+to exactly one `strT` token carrying `bs`. -/
+theorem tokenize_string_singleton (bs : List Char)
+    (hwf : wfBody bs = true) (hv : validStringContentL bs = true) :
+    tokenize (String.ofList ('"' :: (bs ++ ['"']))) = .ok [.strT (String.ofList bs)] := by
+  unfold tokenize
+  rw [String.toList_ofList]
+  rw [tokenizeAux_quote]
+  rw [takeString_wf (2 * ('"' :: (bs ++ ['"'])).length) bs [] [] hwf (by simp; omega)]
+  simp only [List.reverse_nil, List.nil_append, hv, if_true]
+  rw [tokenizeAux_nil _ (by simp)]
+  simp [Except.map]
+
+/-- The capstone covers escaped bodies: the escaped body `a\nb` is
+`takeString`-recoverable and valid, so it tokenizes to a single `strT`. -/
+example :
+    tokenize (String.ofList ('"' :: (['a', '\\', 'n', 'b'] ++ ['"'])))
+      = .ok [.strT (String.ofList ['a', '\\', 'n', 'b'])] :=
+  tokenize_string_singleton ['a', '\\', 'n', 'b'] (by decide) (by decide)
+
 end Hax.Json.RoundtripStr
