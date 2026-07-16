@@ -23,8 +23,7 @@ no-`mathlib` project had:
 * **Value inversion:** `parseJsonNumber (Int.repr i) = some (JsonNumber.fromInt i)`
   — a left-inverse of `Int.toString`/`Int.repr` under `String.toInt?`.
 
-This file supplies both. The shape half re-homes the `validNumberLit_repr`
-development from `Hax/ProbeTmp.lean` (made self-contained here). The value
+This file supplies both. The shape half proves `validNumberLit_repr`; the value
 half proves `(Int.repr i).toInt? = some i` from the digit-inversion lemmas in
 Lean core / Std.
 -/
@@ -35,10 +34,7 @@ open Hax.Json.Lexer
 open Hax.Json.Parser
 open Hax.Json.Roundtrip
 
-/-! ## Shape acceptance: `Int.repr i` is a valid number literal
-
-Re-homed from `Hax/ProbeTmp.lean` (copied verbatim; that file is a scratch
-probe and is not imported here). -/
+/-! ## Shape acceptance: `Int.repr i` is a valid number literal -/
 
 theorem isDigit_bridge (c : Char) (h : c.isDigit = true) : isDigit c = true := by
   simp only [Char.isDigit, Bool.and_eq_true, decide_eq_true_eq] at h
