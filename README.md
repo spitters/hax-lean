@@ -108,9 +108,7 @@ Each pass carries an `_erase` refinement and the untyped `denote` semantics is
 preserved end-to-end, so the imperative→functional lowering is a sequence of
 correctness-proven steps — `TPhase/EncodeControlFlow.lean` relates imperative
 loops to functional folds, and `ToRawCode.lean` targets the functional
-embedding. A comparison of the verified `haxpipeT` backend against upstream
-hax's unverified `lean_refines` backend lives in
-[`docs/backend-comparison-lean-refines.md`](docs/backend-comparison-lean-refines.md).
+embedding.
 
 ## File layout
 
