@@ -13,9 +13,6 @@ These passes rewrite the ImpExpr produced by the verified pipeline into a
 canonicalization, the unverified `toLean` pretty-printer becomes a trivial
 syntax mapping and per-function agreement is `rfl` by construction.
 
-See `docs/canonicalization-plan.md` for the full plan and inventory of
-transformations being moved out of `toLean`.
-
 ## Pass list (this file)
 
 * `canonicalizeDeadCFBindings` — drops `letBind n (cfBreak _) body` when
