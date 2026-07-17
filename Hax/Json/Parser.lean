@@ -76,6 +76,76 @@ def parseJsonNumber (s : String) : Option Lean.JsonNumber :=
       else
         none
 
+/-! ## String escape decoding (RFC 8259 §7 + §8.2)
+
+The lexer (`Hax.Json.Lexer`) leaves a `strT` payload as the *raw* body — escape
+sequences (`\"`, `\n`, `\uXXXX`, surrogate pairs) are stored verbatim and only
+*validated* (`validStringContentL`), never decoded. This post-pass performs the
+decoding when the parser materialises a `Lean.Json.str`, so the resulting value
+matches Lean core's `Lean.Json.parse` (`escapedChar` / `strCore`):
+
+* `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` → the single character;
+* `\uXXXX` (non-surrogate) → the code point;
+* `\uD8XX\uDCXX` (high + low surrogate pair) → the combined scalar
+  `0x10000 + (hi-0xD800)*0x400 + (lo-0xDC00)`.
+
+The lexer already rejects lone surrogates and malformed escapes, so `decodeBody`
+only ever runs on validated bodies; the fallthrough arms are unreachable for
+such input and are written to be total. Lone-surrogate **rejection** (stricter
+than core's U+FFFD substitution) is preserved — on the inputs both parsers
+accept, `decodeBody` agrees with core.
+
+Object *keys* are left raw (`parseObjectBody` below), a documented residual:
+core decodes keys too, but keys are escape-free identifiers in practice and
+decoding them would restate the `RoundtripObj` canonicalisation theorem. -/
+
+/-- Value of a single hex digit (`0..15`); non-hex maps to `0` (unreachable on
+validated input, which the lexer guarantees is `isHexDigit`). -/
+def hexDigitVal (c : Char) : Nat :=
+  if '0' ≤ c ∧ c ≤ '9' then c.toNat - '0'.toNat
+  else if 'a' ≤ c ∧ c ≤ 'f' then c.toNat - 'a'.toNat + 10
+  else if 'A' ≤ c ∧ c ≤ 'F' then c.toNat - 'A'.toNat + 10
+  else 0
+
+/-- Combine four hex digits into a 16-bit code unit. -/
+def hex4 (a b c d : Char) : Nat :=
+  hexDigitVal a * 4096 + hexDigitVal b * 256 + hexDigitVal c * 16 + hexDigitVal d
+
+/-- Decode a single-character escape `\c` (the `u` form is handled separately). -/
+def unescapeChar (c : Char) : Char :=
+  match c with
+  | '"'  => '"'
+  | '\\' => '\\'
+  | '/'  => '/'
+  | 'b'  => Char.ofNat 0x08
+  | 'f'  => Char.ofNat 0x0c
+  | 'n'  => Char.ofNat 0x0a
+  | 'r'  => Char.ofNat 0x0d
+  | 't'  => Char.ofNat 0x09
+  | other => other
+
+/-- Decode the escape sequences of a validated JSON string body into the list of
+scalar characters it denotes. Recurses on the (structurally smaller) tail past
+each consumed escape, mirroring the shape of `validStringContentL`. -/
+def decodeBody : List Char → List Char
+  | '\\' :: 'u' :: a :: b :: c :: d :: '\\' :: 'u' :: e :: f :: g :: h :: rest =>
+    let hi := hex4 a b c d
+    if 0xD800 ≤ hi ∧ hi ≤ 0xDBFF then
+      let lo := hex4 e f g h
+      Char.ofNat (0x10000 + (hi - 0xD800) * 0x400 + (lo - 0xDC00)) :: decodeBody rest
+    else
+      Char.ofNat hi :: decodeBody ('\\' :: 'u' :: e :: f :: g :: h :: rest)
+  | '\\' :: 'u' :: a :: b :: c :: d :: rest =>
+    Char.ofNat (hex4 a b c d) :: decodeBody rest
+  | '\\' :: c :: rest => unescapeChar c :: decodeBody rest
+  | '\\' :: [] => []
+  | c :: rest => c :: decodeBody rest
+  | [] => []
+
+/-- Decode a validated JSON string body `String → String`. On the bodies the
+lexer admits this matches Lean core's `Lean.Json.parse` string semantics. -/
+def decodeString (s : String) : String := String.ofList (decodeBody s.toList)
+
 /-! ## Recursive-descent core
 
 `parseValue`, `parseArrayBody`, and `parseObjectBody` recurse on the same fuel
@@ -91,7 +161,7 @@ def parseValue : Nat → List JsonToken →
     Except String (Lean.Json × List JsonToken)
   | 0,     _                          => .error "out of fuel"
   | _ + 1, []                         => .error "unexpected end of input"
-  | _ + 1, .strT s   :: rest          => .ok (.str s, rest)
+  | _ + 1, .strT s   :: rest          => .ok (.str (decodeString s), rest)
   | _ + 1, .trueT    :: rest          => .ok (.bool true, rest)
   | _ + 1, .falseT   :: rest          => .ok (.bool false, rest)
   | _ + 1, .nullT    :: rest          => .ok (.null, rest)
@@ -206,7 +276,7 @@ def isParseStrX : Bool :=
   | .ok (Lean.Json.str s) => s == "x"
   | _ => false
 
-theorem parse_strX_ok : isParseStrX = true := by decide
+theorem parse_strX_ok : isParseStrX = true := by native_decide
 
 /-- Probe: `parse [.lbrace, .rbrace]` yields a `Json.obj` (empty object). -/
 def isParseEmptyObj : Bool :=
@@ -314,9 +384,10 @@ theorem parse_false_inv : parse [.falseT] = .ok (Lean.Json.bool false) := rfl
 /-- `parse [.nullT]` produces `Json.null`. -/
 theorem parse_null_inv : parse [.nullT] = .ok Lean.Json.null := rfl
 
-/-- `parse [.strT s]` produces `Json.str s` for any `s`. -/
+/-- `parse [.strT s]` produces `Json.str (decodeString s)` for any `s` — the
+raw token body decoded per RFC 8259 §7/§8.2, matching Lean core. -/
 theorem parse_str_inv (s : String) :
-    parse [.strT s] = .ok (Lean.Json.str s) := rfl
+    parse [.strT s] = .ok (Lean.Json.str (decodeString s)) := rfl
 
 /-! ### Trailing-input rejection
 

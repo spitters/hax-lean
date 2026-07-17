@@ -12,6 +12,7 @@ import Hax.Json.ParserComplete
 import Hax.Json.RoundtripNum
 import Hax.Json.RoundtripStr
 import Hax.Json.RoundtripObj
+import Hax.Json.OfficialVectors
 
 /-!
 # JSON verified-parser suite — build aggregator
@@ -33,4 +34,6 @@ change to the lexer/parser substrate silently rots the proofs. CI builds
 * `RoundtripNum` — the `num` leaf on the integer fragment.
 * `RoundtripStr` — general tokenize-level string acceptance.
 * `RoundtripObj` — the `obj` leaf, roundtrip modulo canonicalisation.
+* `OfficialVectors` — JSONTestSuite / RFC 8259 accept/reject vectors run through
+  `parseJsonString`, asserting decoded string values and control-char rejection.
 -/

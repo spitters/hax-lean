@@ -50,7 +50,7 @@ mutual
 /-- `ValuePStrict toks v rest`: strict single-value parse. Mirrors `parseValue`. -/
 inductive ValuePStrict : List JsonToken → Lean.Json → List JsonToken → Prop where
   | str {s : String} {rest : List JsonToken} :
-      ValuePStrict (JsonToken.strT s :: rest) (Lean.Json.str s) rest
+      ValuePStrict (JsonToken.strT s :: rest) (Lean.Json.str (decodeString s)) rest
   | trueT {rest : List JsonToken} :
       ValuePStrict (JsonToken.trueT :: rest) (Lean.Json.bool true) rest
   | falseT {rest : List JsonToken} :

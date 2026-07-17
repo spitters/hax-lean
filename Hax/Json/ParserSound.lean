@@ -72,7 +72,7 @@ mutual
 leaving `rest` unconsumed. Mirrors `parseValue`. -/
 inductive ValueP : List JsonToken → Lean.Json → List JsonToken → Prop where
   | str {s : String} {rest : List JsonToken} :
-      ValueP (JsonToken.strT s :: rest) (Lean.Json.str s) rest
+      ValueP (JsonToken.strT s :: rest) (Lean.Json.str (decodeString s)) rest
   | trueT {rest : List JsonToken} :
       ValueP (JsonToken.trueT :: rest) (Lean.Json.bool true) rest
   | falseT {rest : List JsonToken} :

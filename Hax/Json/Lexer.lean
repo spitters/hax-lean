@@ -82,6 +82,13 @@ excluding the `u` form which is handled separately. -/
 @[inline] def isSingleEscape (c : Char) : Bool :=
   c = '"' || c = '\\' || c = '/' || c = 'b' || c = 'f' || c = 'n' || c = 'r' || c = 't'
 
+/-- RFC 8259 §7: the unescaped characters permitted in a string are
+`%x20-21 / %x23-5B / %x5D-10FFFF`. In particular the control characters
+U+0000..U+001F must be escaped; a raw control character in the body is a
+violation. (`"` and `\` are handled by the escape / terminator logic, so the
+only remaining restriction on a *plain* body character is this lower bound.) -/
+@[inline] def isJsonControl (c : Char) : Bool := c.val < 0x20
+
 /-- A `\uXXXX` 4-hex sequence is a *high* surrogate (U+D800..U+DBFF) iff the
 hex digits are `D8XX`, `D9XX`, `DAXX`, or `DBXX` (case-insensitive). -/
 @[inline] def isHighSurrogate (h0 h1 h2 h3 : Char) : Bool :=
@@ -162,9 +169,8 @@ def validNumberLit (s : String) : Bool := validNumberLitL s.toList
 Validates the *unquoted* body — the caller is expected to have stripped the
 surrounding `"..."`. Every backslash must be followed by either a single
 character drawn from `["\/bfnrt]`, or `u` followed by exactly four hex digits.
-Bare control characters (e.g. raw newlines) are NOT rejected here; the lexer
-already guarantees these never reach the body since `takeString` walks the
-raw input character-by-character.
+Bare control characters U+0000..U+001F are **rejected** (RFC 8259 §7): a plain
+body character must satisfy `¬ isJsonControl`, matching Lean core's parser.
 
 **Surrogate-pair rule (RFC 8259 §8.2, B4):** an isolated `\uD8XX..\uDBXX`
 (high surrogate) must be followed immediately by `\uDCXX..\uDFXX` (low
@@ -192,7 +198,9 @@ def validStringContentL : List Char → Bool
       && validStringContentL rest
   | '\\' :: c :: rest => isSingleEscape c && validStringContentL rest
   | '\\' :: [] => false
-  | _ :: rest => validStringContentL rest
+  -- A plain (non-`\`) body character: reject raw control characters
+  -- (U+0000..U+001F) per RFC 8259 §7; `A` rejects them too.
+  | c :: rest => if isJsonControl c then false else validStringContentL rest
 
 /-- A `String` body is well-formed JSON string content per RFC 8259 §7. -/
 def validStringContent (s : String) : Bool := validStringContentL s.toList
