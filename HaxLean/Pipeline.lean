@@ -13,12 +13,11 @@ import HaxLean.Phase.LocalMutation
 import HaxLean.Phase.FunctionalizeLoops
 import HaxLean.Phase.CfIntoMonads
 import HaxLean.Phase.ExplicitMonadic
-import HaxLean.ToRawCode
 
 /-!
 # End-to-End Pipeline
 
-Compose all five phases and translate to `RawCode`.
+Compose the phases; the output lands in the `FullyFunctional` fragment of `ImpExpr`.
 
 ```
 ImpExpr
@@ -27,28 +26,20 @@ ImpExpr
   --[functionalizeLoops]-> ImpExpr  (NoLoops)
   --[cfIntoMonads]-------> ImpExpr  (NoEarlyExit)
   --[explicitMonadic]----> ImpExpr  (FullyFunctional, explicit CF encoding)
-  --[toRawCode]----------> RawCode
 ```
 
 ## Main definitions
 
 * `pipeline` — full phase composition (4 core phases)
 * `pipelineExt` — extended pipeline with explicit monadic encoding (5 phases)
-* `pipelineToRawCode` — pipeline + translation to RawCode
 * `pipeline_fullyFunctional` — all feature predicates hold after pipeline
 -/
 
 namespace Hax
 
-open Hax.Deep
-
 /-- The full 4-phase pipeline. -/
 def pipeline (e : ImpExpr) : ImpExpr :=
   cfIntoMonads (functionalizeLoops (localMutation (mutatedVars e) (dropReferences e)))
-
-/-- Pipeline + translation to RawCode. -/
-noncomputable def pipelineToRawCode (e : ImpExpr) : RawCode Value :=
-  toRawCode (pipeline e)
 
 /-- The pipeline output has no references. -/
 theorem pipeline_noRefs (e : ImpExpr) : NoReferences (pipeline e) := by

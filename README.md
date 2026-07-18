@@ -97,20 +97,19 @@ refinement), composed end-to-end (`pipeline_correct`, `pipelineExt_full_correct`
   `FullyFunctional` *fragment of `ImpExpr`* (still evaluated by the same `denote`).
   `TPhase/EncodeControlFlow.lean` additionally relates imperative loops to the
   runtime folds the pretty-printer emits.
-- a **functional** deep embedding (`Deep/RawCode`, a `ret` / `bind` / `fail` free
-  monad). **This edge is a direction, not a verified backend.** `ToRawCode.lean`'s
-  translation is a lossy structural placeholder with *no* correctness proof (see
-  its status note: it drops calls/variables/loop structure), and the real semantic
-  `RawCode` (with `SPComp` semantics) lives in CatCrypt, not here.
+A **functional deep-embedding backend is not built here.** The earlier lossy
+`toRawCode` / `Deep/RawCode` stub was removed — it was unused and unverified. When a
+functional embedding is needed it is provided by CatCrypt's *verified* `RawCode`
+reflection (`rawCode%` / `SPComp` quoting) applied to emitted code, whose
+faithfulness (`RawCode.eval (rawCode% c) = c`) is proved there.
 
 The intended endpoint — a *proven* functional↔imperative refinement — follows the
 design of *The Last Yard* (Haselwarter, Hvass, Hansen, Winterhalter, Hritcu,
 Spitters, IACR ePrint [2023/185](https://eprint.iacr.org/2023/185)) and the
 multi-backend hax methodology (Bhargavan, Hansen, Kiefer, Schneider-Bensch,
 Spitters, IACR ePrint [2025/980](https://eprint.iacr.org/2025/980)). The verified
-`imperative → clean functional model` abstraction of the pipeline output is
-provided **downstream, in CatCrypt** (`ascend`/`Corres` over `LowCT`/`semScalar`),
-not by `toRawCode`.
+`imperative → clean functional model` abstraction of the pipeline output is provided
+**downstream, in CatCrypt** (`ascend`/`Corres` over `LowCT`/`semScalar`).
 
 ## File layout
 
@@ -147,10 +146,8 @@ Hax/
 │   ├── InitFoldAccums / StructMetaT
 ├── Pipeline.lean / PipelineCF.lean  # untyped pipeline + correctness
 ├── TPipeline.lean / TPipelineErase.lean  # typed pipeline + full-chain commuting square
-├── ToRawCode.lean                   # translation to free-monad RawCode
 ├── PrettyPrint.lean / PrettyPrintT.lean  # AST → Lean source (structural emit, trusted)
-├── CLI.lean / MainT.lean            # haxpipeT entry point
-└── Deep/RawCode.lean                # minimal RawCode stub (ret/bind/fail)
+└── CLI.lean / MainT.lean            # haxpipeT entry point
 ```
 
 ## Building
@@ -206,11 +203,10 @@ transformations are proved; the I/O ring around them is trusted.
 
 ## Relationship to CatCrypt
 
-`Hax/Deep/RawCode.lean` is a minimal extract of CatCrypt's free-monad deep
-embedding (ret / bind / fail). In CatCrypt, `toRawCode` connects to
-game-based cryptographic proofs via that deep embedding, and the
-typed-pipeline output drops directly into the `SurfaceDeps.lean` extraction
-bridge.
+CatCrypt's *functional, proof-facing* form is its own free-monad deep embedding
+`RawCode` (with `SPComp` semantics), obtained by *verified reflection* (`rawCode%` /
+`SPComp` quoting), not by a translation in this repo. The typed-pipeline output
+drops directly into the `SurfaceDeps.lean` extraction bridge for game-based proofs.
 
 ### `ImpExpr` and `LowCT`
 
@@ -237,9 +233,9 @@ is **semantic**, not merely syntactic — `haxToLowCT_simulates` establishes tha
 the `LowCT` command's `RustExec` execution agrees with the `ImpExpr` big-step
 `denote` (structural cases closed; scalar/tower leaf-call cases in progress).
 
-So `LowCT` is the *imperative, machine-facing* target of an `ImpExpr` — the
-counterpart to `RawCode`, its *functional, proof-facing* target — and both are
-reached from the same extracted `ImpExpr`.
+So `LowCT` is the *imperative, machine-facing* target of an `ImpExpr`; its
+*functional, proof-facing* counterpart is CatCrypt's `RawCode` (obtained there by
+reflection, not translated in this repo).
 
 ## Upstream & related
 

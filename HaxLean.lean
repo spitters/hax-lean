@@ -10,7 +10,6 @@ import HaxLean.Phase.CfIntoMonads
 import HaxLean.Phase.ExplicitMonadic
 import HaxLean.Phase.RewriteAppName
 import HaxLean.Phase.InitFoldAccums
-import HaxLean.ToRawCode
 import HaxLean.Pipeline
 import HaxLean.PipelineCF
 import HaxLean.Phase.ExplicitMonadicCF
