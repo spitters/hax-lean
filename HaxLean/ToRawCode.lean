@@ -35,6 +35,23 @@ When connecting to the real CatCrypt `RawCode` (which has `sample`,
 `get`, `put`, `oracleCall`), predicates like `NoOracleCall` and
 `IsDeterministic` can be proved against the real type — the translation
 only produces `ret`, `bind`, and `fail`.
+
+## Status — UNVERIFIED and semantically LOSSY
+
+`toRawCode` is a structural placeholder, **not** a semantics-preserving
+translation, and it has **no correctness proof**:
+
+* it discards function calls (→ `fail`), variables (→ `.unit`), and — even after
+  `FullyFunctional` — carries no evidence that the result's evaluation matches the
+  source `ImpExpr.denote` (which is `StateM Env Outcome`-valued, a different domain
+  from any `RawCode` evaluation);
+* the only theorems about it are structural (`*_noOracleCall`); there is **no**
+  `(toRawCode e).eval = ImpExpr.denote e` lemma, and none can hold as written.
+
+So this is the *functional-backend direction*, not a verified backend. The verified
+`imperative → clean functional model` abstraction of the pipeline lives in
+CatCrypt's `ascend`/`Corres` (over `LowCT`/`semScalar`), not here. Do not cite
+`toRawCode`/`pipelineToRawCode` as a verified extraction edge.
 -/
 
 namespace Hax

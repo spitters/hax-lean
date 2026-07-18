@@ -84,31 +84,33 @@ reduce to):
 | `pipeline_correct`            | `denote (pipeline e) = denote e` (fuel-bounded, well-scoped)    |
 | `pipeline_full_correct`       | untyped pipeline preserves `denote'` (ControlFlow-aware)        |
 | `pipelineExt_full_correct`    | end-to-end over all 5 phases including `explicitMonadic`        |
-| `pipelineToRawCode_noOracleCall` | translated free-monad output contains no oracle calls        |
 
 ## Backends and refinement
 
-The extraction is organised around several representations with machine-checked
-correctness proofs *relating* them, rather than a single opaque translation:
+The **verified** core is the imperative pipeline: each pass carries a
+machine-checked `denote`-preservation proof (and the typed layer an `_erase`
+refinement), composed end-to-end (`pipeline_correct`, `pipelineExt_full_correct`).
 
 - an **imperative** IR (`ImpExpr`, typed as `TExpr` — references, mutable
-  assignment, `for` / `while` loops, `break` / `continue` / `return`), and
-- a **functional** target (`Deep/RawCode`, a pure `ret` / `bind` / `fail` free
-  monad) reached once every imperative feature has been eliminated
-  (`FullyFunctional`).
+  assignment, `for` / `while` loops, `break` / `continue` / `return`). The pipeline
+  eliminates every imperative feature, `denote`-preserving, landing in the
+  `FullyFunctional` *fragment of `ImpExpr`* (still evaluated by the same `denote`).
+  `TPhase/EncodeControlFlow.lean` additionally relates imperative loops to the
+  runtime folds the pretty-printer emits.
+- a **functional** deep embedding (`Deep/RawCode`, a `ret` / `bind` / `fail` free
+  monad). **This edge is a direction, not a verified backend.** `ToRawCode.lean`'s
+  translation is a lossy structural placeholder with *no* correctness proof (see
+  its status note: it drops calls/variables/loop structure), and the real semantic
+  `RawCode` (with `SPComp` semantics) lives in CatCrypt, not here.
 
-This functional↔imperative refinement follows the design of *The Last Yard*
-(Haselwarter, Hvass, Hansen, Winterhalter, Hritcu, Spitters, IACR ePrint
-[2023/185](https://eprint.iacr.org/2023/185)) — connecting functional Hacspec
-specifications to imperative SSProve code with equivalence proofs — and the
+The intended endpoint — a *proven* functional↔imperative refinement — follows the
+design of *The Last Yard* (Haselwarter, Hvass, Hansen, Winterhalter, Hritcu,
+Spitters, IACR ePrint [2023/185](https://eprint.iacr.org/2023/185)) and the
 multi-backend hax methodology (Bhargavan, Hansen, Kiefer, Schneider-Bensch,
-Spitters, IACR ePrint [2025/980](https://eprint.iacr.org/2025/980)).
-
-Each pass carries an `_erase` refinement and the untyped `denote` semantics is
-preserved end-to-end, so the imperative→functional lowering is a sequence of
-correctness-proven steps — `TPhase/EncodeControlFlow.lean` relates imperative
-loops to functional folds, and `ToRawCode.lean` targets the functional
-embedding.
+Spitters, IACR ePrint [2025/980](https://eprint.iacr.org/2025/980)). The verified
+`imperative → clean functional model` abstraction of the pipeline output is
+provided **downstream, in CatCrypt** (`ascend`/`Corres` over `LowCT`/`semScalar`),
+not by `toRawCode`.
 
 ## File layout
 
