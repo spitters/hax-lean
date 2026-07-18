@@ -97,11 +97,10 @@ refinement), composed end-to-end (`pipeline_correct`, `pipelineExt_full_correct`
   `FullyFunctional` *fragment of `ImpExpr`* (still evaluated by the same `denote`).
   `TPhase/EncodeControlFlow.lean` additionally relates imperative loops to the
   runtime folds the pretty-printer emits.
-A **functional deep-embedding backend is not built here.** The earlier lossy
-`toRawCode` / `Deep/RawCode` stub was removed — it was unused and unverified. When a
-functional embedding is needed it is provided by CatCrypt's *verified* `RawCode`
-reflection (`rawCode%` / `SPComp` quoting) applied to emitted code, whose
-faithfulness (`RawCode.eval (rawCode% c) = c`) is proved there.
+This repo builds no functional deep-embedding backend. When a functional
+embedding is needed, CatCrypt's *verified* `RawCode` reflection (`rawCode%` /
+`SPComp` quoting) provides it over emitted code, with proved faithfulness
+(`RawCode.eval (rawCode% c) = c`).
 
 The intended endpoint — a *proven* functional↔imperative refinement — follows the
 design of *The Last Yard* (Haselwarter, Hvass, Hansen, Winterhalter, Hritcu,
@@ -114,8 +113,8 @@ Spitters, IACR ePrint [2025/980](https://eprint.iacr.org/2025/980)). The verifie
 ## File layout
 
 ```
-Hax.lean                             # root import (typed + untyped)
-Hax/
+HaxLean.lean                         # root import (typed + untyped)
+HaxLean/
 ├── AST.lean                         # ImpExpr: untyped imperative AST (incl. first-class lam)
 ├── TExpr.lean                       # typed expression AST
 ├── ImpType.lean                     # type language for typed AST
@@ -152,11 +151,8 @@ Hax/
 
 ## Building
 
-```bash
-lake build              # verify the proofs
-lake build haxpipeT     # build the CLI: .lake/build/bin/haxpipeT
-bash tests/run_tests.sh # integration tests (skipped if no hax JSON fixture)
-```
+See [BUILDING.md](BUILDING.md) for building the proofs, the `haxpipeT` CLI, the
+JSON suite, the tests, and the API docs.
 
 ## Running the CLI
 
@@ -174,8 +170,8 @@ source via the typed pipeline.
 haxpipeT --hax INPUT.json --emit-certified --name MyModule -o out.lean
 ```
 
-Generated Lean files compile standalone against this repo's `Hax.*`
-modules.
+Generated Lean files compile standalone against this repo's `HaxLean.*`
+modules (which provide the `Hax.*` runtime namespace).
 
 ## Trusted vs. verified
 
@@ -186,7 +182,7 @@ transformations are proved; the I/O ring around them is trusted.
 |-----------------------|-------------------------------------------------|
 | `TPhase/*`, `Phase/*` | **Verified.** `_erase` / `_ty` / `*_correct`.   |
 | `TPipeline`, `Pipeline`, `TPipelineErase` | **Verified.** Composition + full-chain commuting square. |
-| `Json/*.lean` (verified-parser suite, forced into the build by `Json/All.lean`) | **Verified against RFC 8259, with documented scope limits.** The parser is pinned from *both* sides: soundness (`parse_sound`, a fuel-free relational grammar) and completeness (`parse_complete` over a tightened `ValuePStrict`), plus faithful rejection of the empty and trailing-comma streams. Number conformance §6 is general (`tokenize_accepts_number` / `tokenize_number_reject`, `∀`); string conformance §7/§8.2 has a general tokenize-acceptance capstone (`tokenize_string_singleton`, escaped bodies included) over the escape/surrogate validator lemmas. Roundtrip `tokenize (serialize j) >>= parse = .ok j` holds on the `null`/`bool`/`arr` fragment (nested induction), the integer-mantissa `num` fragment (`Int.toInt?_repr` inversion), and — since `Json.obj` stores a `Std.TreeMap.Raw` the parser rebuilds via `mkObj`, so structural equality is provably unattainable — the `obj` case **modulo canonicalisation**. Every module is `sorry`-free and axiom-clean (`propext`/`Classical.choice`/`Quot.sound`); totality (`parse_total`) and trailing-content rejection are also proved. Open: `num` beyond integer mantissa (serializer drops the exponent) and full escaped-string roundtrip. |
+| `Json/*.lean` (verified-parser suite, forced into the build by `Json/All.lean`) | **Verified against RFC 8259, with documented scope limits.** The parser is pinned from *both* sides: soundness (`parse_sound`, a fuel-free relational grammar) and completeness (`parse_complete` over a tightened `ValuePStrict`), plus faithful rejection of the empty and trailing-comma streams. Number conformance §6 is general (`tokenize_accepts_number` / `tokenize_number_reject`, `∀`); string conformance §7/§8.2 has a general tokenize-acceptance capstone (`tokenize_string_singleton`, escaped bodies included) over the escape/surrogate validator lemmas. Roundtrip `tokenize (serialize j) >>= parse = .ok j` holds on the `null`/`bool`/`arr` fragment (nested induction), the integer-mantissa `num` fragment (`Int.toInt?_repr` inversion), and — since `Json.obj` stores a `Std.TreeMap.Raw` the parser rebuilds via `mkObj`, so structural equality is provably unattainable — the `obj` case **modulo canonicalisation**. Totality (`parse_total`) and trailing-content rejection are also proved. Open: `num` beyond integer mantissa (serializer drops the exponent) and full escaped-string roundtrip. |
 | `HaxAdapter.lean`     | Trusted *at the top level*. Companion `AdapterRefinement.lean` proves per-constructor JSON-to-AST refinement (`JsonRefinesExpr`, ~30 theorems including the `reconstructForLoops` preservation cases); the end-to-end `parseHaxExpr_refines` remains open, blocked on `partial def` equational lemmas and a JSON-size termination measure. |
 | `PrettyPrint{T}.lean` | Trusted. AST → Lean source; a structural emit, since control-flow encoding is done by the verified `EncodeControlFlow` phase. No preservation proof. |
 | `Runtime.lean`        | Trusted. Width-aware builtins; declares two intentional interface axioms (`bridgeCast`, `sha256`) that the CatCrypt-side bridge instantiates. |

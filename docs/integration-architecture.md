@@ -45,7 +45,7 @@ Input is hax's JSON AST dump; output is Lean 4 source plus a deps class.
 haxpipeT --emit-certified input.json --name my_fn -o out.lean
 ```
 
-Generated files import `Hax.Runtime` and use the width-aware runtime
+Generated files import `HaxLean.Runtime` and use the width-aware runtime
 builtins. They compile standalone against this repo (no hax, no Mathlib).
 
 ### Translation validation
@@ -63,10 +63,9 @@ a per-invocation certificate for the 5 core phases.
 
 ### Downstream deep embedding
 
-`Hax/Deep/RawCode.lean` carries a minimal free-monad stub (`ret`/`bind`/`fail`).
-Downstream projects can replace it with their own deep embedding; the
-certified `tToRawCode` path lifts extracted code into that embedding with
-a commuting-diagram correspondence.
+This repo builds no functional deep embedding. When one is needed, CatCrypt
+supplies it by verified reflection (`rawCode%` / `SPComp` quoting) over the
+emitted code, not by a translation here.
 
 ## Trusted Computing Base
 

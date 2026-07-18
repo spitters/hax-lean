@@ -4,9 +4,6 @@ A self-contained JSON parser for Lean 4 (Lean core + `Std`, **no Mathlib**),
 with machine-checked soundness, conformance, and roundtrip theorems. `haxpipeT`
 uses it to parse hax's JSON AST dumps; it is also usable standalone.
 
-Every proof module is `sorry`-free and axiom-clean — each depends only on
-`propext`, `Classical.choice`, and `Quot.sound`.
-
 ## Modules
 
 | Module | Contents |
@@ -31,4 +28,5 @@ Every proof module is `sorry`-free and axiom-clean — each depends only on
   `Std.TreeMap.Raw` and distinct trees with equal contents share a `toList`.
 - Full escaped-string roundtrip is open (general string *acceptance* is proved).
 
-Build the suite with `lake build Hax.Json.All`.
+See [BUILDING.md](../../BUILDING.md) to build the parser suite (the
+`HaxLean.Json.All` target).
