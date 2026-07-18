@@ -1,9 +1,11 @@
 # Changelog
 
-## 0.0.1 — 2026-07-18
+## Unreleased
 
-First tagged release of hax-lean: a verified hax/Aeneas Rust-to-functional
-pipeline in Lean 4, with the `haxpipeT` CLI.
+No stable release yet — this is pre-release research code; interfaces, proofs,
+and the emitted surface may change without notice. Do not depend on it as a
+stable API. A verified hax/Aeneas Rust-to-functional pipeline in Lean 4, with the
+`haxpipeT` CLI.
 
 - Typed, syntax-directed `TExpr → TExpr` pipeline with per-phase feature
   elimination, preservation, and semantics-preservation guarantees.
