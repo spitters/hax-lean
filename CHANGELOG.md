@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-alpha.1 — 2026-07-18 (pre-release)
 
-No stable release yet — this is pre-release research code; interfaces, proofs,
-and the emitted surface may change without notice. Do not depend on it as a
-stable API. A verified hax/Aeneas Rust-to-functional pipeline in Lean 4, with the
-`haxpipeT` CLI.
+Pre-release research code (SemVer pre-release; major version 0). Interfaces,
+proofs, and the emitted surface may change without notice — do not depend on it
+as a stable API. A verified hax/Aeneas Rust-to-functional pipeline in Lean 4,
+with the `haxpipeT` CLI.
 
 - Typed, syntax-directed `TExpr → TExpr` pipeline with per-phase feature
   elimination, preservation, and semantics-preservation guarantees.
