@@ -1,0 +1,60 @@
+% hax-lean — verified hax pipeline blueprint (leanblueprint).
+% Build:  leanblueprint pdf     (print) ;  leanblueprint web   (dependency-graph site)
+% Each \lean{...}\leanok node links an informal statement to its formal theorem.
+
+\chapter{A verified hax pipeline}
+
+\section{Guarantees}
+
+The pipeline is a typed, syntax-directed AST-to-AST transformation
+($\mathsf{TExpr}\to\mathsf{TExpr}$). Each phase carries three layered guarantees:
+(1) \emph{feature elimination} --- it removes certain AST constructors;
+(2) \emph{preservation} --- it does not re-introduce constructors removed
+earlier; (3) \emph{semantics preservation} --- the untyped erase commutes with
+the phase, so big-step denotation is preserved.
+
+\begin{definition}[No control-flow constructors]
+  \label{def:nocf}
+  \lean{NoCFConstructors}
+  \leanok
+  The predicate stating an expression is free of the control-flow constructors
+  the pipeline eliminates.
+\end{definition}
+
+\section{Control-flow elimination is sound}
+
+\begin{theorem}[Loop functionalisation preserves early-exit freedom]
+  \label{thm:funloops-preserves}
+  \lean{functionalizeLoops_preserves_noEarlyExit}
+  \leanok
+  Functionalising loops does not re-introduce early exits.
+\end{theorem}
+
+\begin{theorem}[Control-flow pipeline]
+  \label{thm:pipeline-cf}
+  \uses{def:nocf, thm:funloops-preserves}
+  \lean{pipeline_cf}
+  \leanok
+  The control-flow elimination pipeline produces an expression with no
+  control-flow constructors.
+\end{theorem}
+
+\section{Semantics preservation, end to end}
+
+\begin{theorem}[Full pipeline correctness]
+  \label{thm:pipeline-full}
+  \uses{def:nocf, thm:pipeline-cf}
+  \lean{pipeline_full_correct}
+  \leanok
+  For a loop-scoped, question-mark-free, control-flow-free source expression,
+  the denotation of the pipeline output equals the control-flow-encoded
+  denotation of the input --- big-step semantics is preserved through the whole
+  pipeline.
+\end{theorem}
+
+\section{What remains}
+
+The blueprint states the control-flow spine and the end-to-end preservation
+capstone. Filling in the per-phase feature-elimination and erase-commutation
+nodes (one per \texttt{HaxLean/Phase/*} and \texttt{TPhase/*}) makes the
+dependency graph a faithful map of the proof.
