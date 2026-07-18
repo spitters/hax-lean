@@ -5,8 +5,8 @@ package «hax-lean» where
   leanOptions := #[⟨`autoImplicit, false⟩]
 
 @[default_target]
-lean_lib Hax where
+lean_lib HaxLean where
   srcDir := "."
 
 lean_exe haxpipeT where
-  root := `Hax.MainT
+  root := `HaxLean.MainT
