@@ -4,6 +4,7 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 import HaxLean.CLI
+import HaxLean.Secrecy
 import HaxLean.PrettyPrintT
 import HaxLean.TPipeline
 import HaxLean.InlineClosures
@@ -110,7 +111,19 @@ def main (args : List String) : IO UInt32 := do
     -- Generate typed certified output (rawTdefs for param annotations, postPipelineTdefs for bodies)
     -- rawTdefs has hax types preserved (for deps class + param annotations)
     -- postPipelineTdefs has pipeline-transformed bodies (for rendering)
-    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs newtypes enumMeta aliasMeta)
+    -- IF/CT transfer (phase 2): emit the source-declared secret bindings as an
+    -- additive `<name>_secrecy` def, recognized from secret-integer newtypes
+    -- (`HaxLean/Secrecy.lean`). The source is the per-function parameter types
+    -- (`FnTypeInfo.paramTypes`, pre-newtype-unwrap), which carry a secret `U8`
+    -- (or a `[U8; n]`/`&[U8]` buffer of them) as an `.adt "U8"`. Consumed by
+    -- `SourceSecrecy` on the CatCrypt side; empty until a kernel adopts the
+    -- secret-integer discipline. Additive, so it does not disturb the existing
+    -- `_haxpipe.lean` format.
+    let paramBindings := fnTypes.flatMap (fun p => p.2.paramTypes)
+    let secretNames := (secrecyOfBindings paramBindings).eraseDups
+    let secrecyLit := "[" ++ ", ".intercalate (secretNames.map (fun s => "\"" ++ s ++ "\"")) ++ "]"
+    let secrecyDef := s!"\n/-- Source-declared secret bindings (IF/CT transfer): binding names whose Rust\ntype is a secret integer. Consumed by `SourceSecrecy` on the CatCrypt side. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
+    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs newtypes enumMeta aliasMeta ++ secrecyDef)
     return 0
 
   -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===
