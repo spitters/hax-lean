@@ -2,12 +2,12 @@
 
 Formal verification of the [hax](https://github.com/hacspec/hax) compiler phases
 that lower a Rust subset to a purely functional form, with the `haxpipeT` CLI that
-drives the pipeline on hax JSON dumps.
-
-An experimental research prototype — a verified counterpart to part of the
+drives the pipeline on hax JSON dumps. It is a verified counterpart to part of the
 [hax](https://github.com/hacspec/hax) and
 [Aeneas](https://github.com/AeneasVerif/aeneas) Rust-to-functional pipelines.
-Interfaces and proofs are evolving.
+
+> 🚧 **Under construction — experimental research prototype.** Interfaces, proofs,
+> and the emitted surface are evolving, and breaking changes are expected.
 
 ## Three roles of a cryptographic spec
 
