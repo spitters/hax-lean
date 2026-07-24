@@ -22,8 +22,8 @@ owned x86/ARM/RISC-V bytes. Two source-declared aspects travel with the body:
 - **Information flow / constant-time.** Each certified function emits a
   `<name>_secrecy : List String` table — the bindings whose Rust type is a secret
   newtype (an integer whose only escape is `.declassify()`, or a secret buffer or
-  scalar), recognized by `secrecyOfBindings` (which sees through `[U8; n]` and
-  `&[U8]` buffers). The CatCrypt constant-time gate reads that list and rejects
+  scalar), recognized by `secrecyOfBindings`. 
+  The CatCrypt compiler's constant-time gate reads that list and rejects
   data-dependent use of a secret, so the source's secret/public distinction
   survives extraction rather than being erased at the integer boundary.
 - **Prime-IR.** A trait surface (`Field` / `ModArith` / `EcGroup`) names each
@@ -31,8 +31,7 @@ owned x86/ARM/RISC-V bytes. Two source-declared aspects travel with the body:
   denotes. The CatCrypt compiler recognizes those calls by name and ties each to
   its dialect operation (`Field::mul` to `ZMod p` multiplication, and so on); a
   source-declared modulus (a `pub const`) travels through and is reconstructed
-  downstream, so the prime is derived from the source rather than trusted. The
-  traits compile unchanged with `rustc`.
+  downstream.
 
 **Role 2 — crypto-proof anchor.** The extraction's typeclass surface (`<X>Deps`)
 wires into an abstract CatCrypt security proof, which consumes the protocol shape
@@ -43,8 +42,7 @@ proof leaves opaque is proven equal to the value the compiler emits, so the
 guarantee holds of the compiled implementation.
 
 **Role 3 — independent validation.** The crate's own functions run against
-published test vectors (RFC/NIST) — an evidence base for the realization,
-disjoint from the Lean side.
+published test vectors (RFC/NIST) — providing evidence that this is the right spec.
 
 ## Backends and refinement
 
@@ -58,11 +56,8 @@ eliminates every imperative feature while preserving `denote`, landing in the
 `TPhase/EncodeControlFlow.lean` relates imperative loops to the runtime folds the
 pretty-printer emits.
 
-This repo builds no functional deep-embedding backend. CatCrypt supplies the
-functional form over emitted code through verified `RawCode` reflection (`rawCode%`
-/ `SPComp` quoting), with proved faithfulness (`RawCode.eval (rawCode% c) = c`),
-and supplies the imperative→functional abstraction downstream (`ascend` / `Corres`
-over `LowCT` / `semScalar`). The refinement endpoint follows *The Last Yard* (IACR
+Through CatCrypt, Hax provides both an imperative and functional deep-embedding backend. 
+CatCrypt supplies the a proof that those agree following the ideas in *The Last Yard* (IACR
 ePrint [2023/185](https://eprint.iacr.org/2023/185)) and the multi-backend hax
 methodology (IACR ePrint [2025/980](https://eprint.iacr.org/2025/980)).
 
