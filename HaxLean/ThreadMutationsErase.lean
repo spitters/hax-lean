@@ -147,6 +147,19 @@ def replaceTail : ImpExpr → ImpExpr → ImpExpr
   | .letBind n v body, newTail => .letBind n v (replaceTail body newTail)
   | .seq a b, newTail => .seq a (replaceTail b newTail)
   | .assign n r, newTail => .seq (.assign n r) newTail
+  | .ifThenElse c t f, newTail => .ifThenElse c (replaceTail t newTail) (replaceTail f newTail)
+  | .forLoop v lo hi b, newTail => .seq (.forLoop v lo hi b) newTail
+  | .forLoopRev v lo hi b, newTail => .seq (.forLoopRev v lo hi b) newTail
+  | .whileLoop c b, newTail => .seq (.whileLoop c b) newTail
+  | .forFold v lo hi b, newTail => .seq (.forFold v lo hi b) newTail
+  | .forFoldRev v lo hi b, newTail => .seq (.forFoldRev v lo hi b) newTail
+  | .whileFold c b, newTail => .seq (.whileFold c b) newTail
+  | .forFoldReturn v lo hi b, newTail => .seq (.forFoldReturn v lo hi b) newTail
+  | .forFoldRevReturn v lo hi b, newTail => .seq (.forFoldRevReturn v lo hi b) newTail
+  | .whileFoldReturn c b, newTail => .seq (.whileFoldReturn c b) newTail
+  | .earlyReturn e, newTail => .seq (.earlyReturn e) newTail
+  | .break_ b, newTail => .seq (.break_ b) newTail
+  | .continue_, newTail => .seq .continue_ newTail
   | _, newTail => newTail
 
 /-- Untyped twin of `tVarTuple`. -/
@@ -216,9 +229,12 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
   induction e using TExpr.ind with
   | letBind _ _ _ _ _ ih => simp_all [tReplaceTail, replaceTail, TExpr.erase]
   | seq _ _ _ _ ih => simp_all [tReplaceTail, replaceTail, TExpr.erase]
-  | assign => simp [tReplaceTail, replaceTail, TExpr.erase]
+  | ifThenElse _ _ _ _ _ iht ihf =>
+    first
+      | (simp only [tReplaceTail, replaceTail, TExpr.erase, iht, ihf]; done)
+      | simp_all [tReplaceTail, replaceTail, TExpr.erase]
   | ann _ _ ih => simp_all [tReplaceTail, replaceTail, TExpr.erase]
-  | _ => rfl
+  | _ => first | rfl | simp [tReplaceTail, replaceTail, TExpr.erase]
 
 @[simp] theorem tVarTuple_erase (vs : List String) :
     (tVarTuple vs).erase = varTuple vs := by

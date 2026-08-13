@@ -12,6 +12,7 @@ import HaxLean.Phase.LocalMutation
 import HaxLean.Phase.FunctionalizeLoops
 import HaxLean.Phase.CfIntoMonads
 import HaxLean.Pipeline
+import HaxLean.ThreadMutations
 
 /-!
 # Test Programs
@@ -264,5 +265,37 @@ example (fuel : Nat) : denote defaultBuiltins fuel (pipeline simpleMut) =
   · -- NoEarlyExit after phases 1-2
     simp [mutatedVars]
     exact .letBind .lit (.seq (.seq (.letBind .lit .var) .unitVal) .var)
+
+/-! ## Mutation threading across an `if`-statement join
+
+A branch of a statement-`if` can end in a further statement — a nested `if`, a
+loop — and the mutation it performs has to survive `tThreadMut`. Each fixture
+below assigns inside such a tail; the check reads the assignment (resp. the
+loop) back out of the threaded result. -/
+
+/-- `if a { if b { acc = 1; } } acc` — the assignment sits at the tail of the
+    outer branch, inside a nested `if`. -/
+def tailNestedIf : TExpr :=
+  .mk (.seq
+    (.mk (.ifThenElse (.mk (.var "a") .unknown)
+      (.mk (.ifThenElse (.mk (.var "b") .unknown)
+        (.mk (.assign "acc" (.mk (.lit (.int 1)) .unknown)) .unit)
+        (.mk .unitVal .unit)) .unit)
+      (.mk .unitVal .unit)) .unit)
+    (.mk (.var "acc") .unknown)) .unknown
+
+/-- `if a { for i in 0..4 { acc = i; } } acc` — the assignment sits at the tail
+    of the branch, inside a loop. -/
+def tailLoop : TExpr :=
+  .mk (.seq
+    (.mk (.ifThenElse (.mk (.var "a") .unknown)
+      (.mk (.forLoop "i" (.mk (.lit (.int 0)) .unknown) (.mk (.lit (.int 4)) .unknown)
+        (.mk (.assign "acc" (.mk (.var "i") .unknown)) .unit)) .unit)
+      (.mk .unitVal .unit)) .unit)
+    (.mk (.var "acc") .unknown)) .unknown
+
+#eval tAssignedVars (tThreadMut true tailNestedIf)  -- ["acc"]
+#eval tAssignedVars (tThreadMut true tailLoop)      -- ["acc"]
+#eval tContainsLoop (tThreadMut true tailLoop)      -- true
 
 end Hax.Tests

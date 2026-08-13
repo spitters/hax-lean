@@ -25,9 +25,9 @@ and rebound after the join:
 
 where `{v₁,…,vₙ}` = variables assigned in either branch that are still used in `rest`.
 Because the appended tuple sits in the assigns' continuation, after `localMutation`
-+ rendering each `vᵢ` resolves to its mutated value. A bonus: a loop sitting at a
-branch tail now has a continuation, so `functionalizeLoops`/the renderer emit its
-`.merge` + projection instead of leaving a bare `whileFold` (a `ControlFlow`).
++ rendering each `vᵢ` resolves to its mutated value. A loop sitting at a branch
+tail gains a continuation, so `functionalizeLoops`/the renderer emit its
+`.merge` + projection instead of a bare `whileFold` (a `ControlFlow`).
 
 Run BEFORE the typed pipeline (parse-time normalization, not a verified phase).
 -/
@@ -188,11 +188,50 @@ def tDestructure : List String → TExpr → TExpr → TExpr
       (tDestructure vs (.mk (.proj tup 1) .unknown) cont)) cont.ty
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
-    bindings (and keeping a trailing `assign` as a statement before `newTail`). -/
+    bindings.
+
+    A branch of a statement-`if` ends in whatever its Rust block ended in, and
+    that tail is a statement whenever the block's last item was one: an
+    assignment, a nested `if`, a loop, a `return`, a jump. Each such tail keeps
+    its effect —
+
+    * an `if` distributes `newTail` into both of its branches, so the branch
+      that mutates reaches the join with its mutation;
+    * an assignment, loop, `return`, `break` or `continue` is kept as a
+      statement in front of `newTail`.
+
+    A tail that is a pure value is dropped, since `newTail` supplies the value
+    the enclosing rewrite wants. -/
 def tReplaceTail : TExpr → TExpr → TExpr
   | .mk (.letBind n v body) ty, newTail => .mk (.letBind n v (tReplaceTail body newTail)) ty
   | .mk (.seq a b) ty, newTail => .mk (.seq a (tReplaceTail b newTail)) ty
   | .mk (.assign n r) ty, newTail => .mk (.seq (.mk (.assign n r) ty) newTail) ty
+  | .mk (.ifThenElse c t f) _, newTail =>
+      .mk (.ifThenElse c (tReplaceTail t newTail) (tReplaceTail f newTail)) newTail.ty
+  | .mk (.forLoop v lo hi b) ty, newTail =>
+      .mk (.seq (.mk (.forLoop v lo hi b) ty) newTail) ty
+  | .mk (.forLoopRev v lo hi b) ty, newTail =>
+      .mk (.seq (.mk (.forLoopRev v lo hi b) ty) newTail) ty
+  | .mk (.whileLoop c b) ty, newTail =>
+      .mk (.seq (.mk (.whileLoop c b) ty) newTail) ty
+  | .mk (.forFold v lo hi b) ty, newTail =>
+      .mk (.seq (.mk (.forFold v lo hi b) ty) newTail) ty
+  | .mk (.forFoldRev v lo hi b) ty, newTail =>
+      .mk (.seq (.mk (.forFoldRev v lo hi b) ty) newTail) ty
+  | .mk (.whileFold c b) ty, newTail =>
+      .mk (.seq (.mk (.whileFold c b) ty) newTail) ty
+  | .mk (.forFoldReturn v lo hi b) ty, newTail =>
+      .mk (.seq (.mk (.forFoldReturn v lo hi b) ty) newTail) ty
+  | .mk (.forFoldRevReturn v lo hi b) ty, newTail =>
+      .mk (.seq (.mk (.forFoldRevReturn v lo hi b) ty) newTail) ty
+  | .mk (.whileFoldReturn c b) ty, newTail =>
+      .mk (.seq (.mk (.whileFoldReturn c b) ty) newTail) ty
+  | .mk (.earlyReturn e) ty, newTail =>
+      .mk (.seq (.mk (.earlyReturn e) ty) newTail) ty
+  | .mk (.break_ b) ty, newTail =>
+      .mk (.seq (.mk (.break_ b) ty) newTail) ty
+  | .mk .continue_ ty, newTail =>
+      .mk (.seq (.mk .continue_ ty) newTail) ty
   -- Look through the erase-deleted `.ann` marker so the rewrite commutes with
   -- erasure (no `.ann` exists at this pre-pipeline stage).
   | .mk (.ann e) ty, newTail => .mk (.ann (tReplaceTail e newTail)) ty
