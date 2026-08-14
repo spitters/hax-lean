@@ -266,12 +266,14 @@ example (fuel : Nat) : denote defaultBuiltins fuel (pipeline simpleMut) =
     simp [mutatedVars]
     exact .letBind .lit (.seq (.seq (.letBind .lit .var) .unitVal) .var)
 
-/-! ## Mutation threading across an `if`-statement join
+/-! ## Mutation threading across an `if`- or `match`-statement join
 
 A branch of a statement-`if` can end in a further statement — a nested `if`, a
-loop — and the mutation it performs has to survive `tThreadMut`. Each fixture
-below assigns inside such a tail; the check reads the assignment (resp. the
-loop) back out of the threaded result. -/
+`match`, a loop — and the mutation it performs has to survive `tThreadMut`. A
+`match` used as a statement joins its arms the way an `if` joins its branches.
+Each fixture below assigns inside such a position; the check reads the
+assignment (resp. the loop, resp. the `_mtup` join binding) back out of the
+threaded result. -/
 
 /-- `if a { if b { acc = 1; } } acc` — the assignment sits at the tail of the
     outer branch, inside a nested `if`. -/
@@ -294,8 +296,40 @@ def tailLoop : TExpr :=
       (.mk .unitVal .unit)) .unit)
     (.mk (.var "acc") .unknown)) .unknown
 
+/-- `if a { match t { A => acc = 1, _ => {} } } acc` — the assignment sits at
+    the tail of the branch, inside a `match`. -/
+def tailMatch : TExpr :=
+  .mk (.seq
+    (.mk (.ifThenElse (.mk (.var "a") .unknown)
+      (.mk (.match_ (.mk (.var "t") .unknown)
+        [(.ctorPat "A" [], .mk (.assign "acc" (.mk (.lit (.int 1)) .unknown)) .unit),
+         (.wildcard, .mk .unitVal .unit)]) .unit)
+      (.mk .unitVal .unit)) .unit)
+    (.mk (.var "acc") .unknown)) .unknown
+
+/-- `match t { A => acc = 1, _ => {} } acc` — the `match` is the statement whose
+    arms join, with no enclosing `if`. -/
+def matchStmt : TExpr :=
+  .mk (.seq
+    (.mk (.match_ (.mk (.var "t") .unknown)
+      [(.ctorPat "A" [], .mk (.assign "acc" (.mk (.lit (.int 1)) .unknown)) .unit),
+       (.wildcard, .mk .unitVal .unit)]) .unit)
+    (.mk (.var "acc") .unknown)) .unknown
+
+/-- `match t { A => 1, _ => 2 } acc` — arms that assign nothing, so the join is
+    declined and the expression is returned unchanged. -/
+def pureMatchStmt : TExpr :=
+  .mk (.seq
+    (.mk (.match_ (.mk (.var "t") .unknown)
+      [(.ctorPat "A" [], .mk (.lit (.int 1)) .unknown),
+       (.wildcard, .mk (.lit (.int 2)) .unknown)]) .unknown)
+    (.mk (.var "acc") .unknown)) .unknown
+
 #eval tAssignedVars (tThreadMut true tailNestedIf)  -- ["acc"]
 #eval tAssignedVars (tThreadMut true tailLoop)      -- ["acc"]
 #eval tContainsLoop (tThreadMut true tailLoop)      -- true
+#eval tAssignedVars (tThreadMut true tailMatch)     -- ["acc"]
+#eval (tVarRefs (tThreadMut true matchStmt)).contains "_mtup"        -- true
+#eval (tThreadMut true pureMatchStmt).erase == pureMatchStmt.erase   -- true
 
 end Hax.Tests

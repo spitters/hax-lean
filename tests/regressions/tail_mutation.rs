@@ -1,9 +1,10 @@
-// Reproducer: a mutation at the tail of an `if`-statement branch.
+// Reproducer: a mutation at the tail of an `if`- or `match`-statement branch.
 //
 // Each function below mutates a variable from a position that is the *last
-// item* of an `if` branch — a nested `if`, a loop, an `else if` chain. The
-// mutated variable is read after the `if`, so `tThreadMut` restructures the
-// join and `tReplaceTail` rewrites each branch.
+// item* of an `if` branch — a nested `if`, a `match`, a loop, an `else if`
+// chain — or from an arm of a `match` used as a statement. The mutated
+// variable is read after the join, so `tThreadMut` restructures the join and
+// `tReplaceTail` rewrites each branch or arm.
 //
 // Drive it through the emitter with:
 //

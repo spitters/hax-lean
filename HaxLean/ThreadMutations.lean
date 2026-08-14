@@ -7,7 +7,7 @@ import HaxLean.TExpr
 import HaxLean.InlineClosures
 
 /-!
-# Pre-pipeline normalization: thread mutations across `if`-statement joins
+# Pre-pipeline normalization: thread mutations across `if`- and `match`-statement joins
 
 A Rust `let mut v = …; if c { v = … } else { v = … }; <use v>` lowers (before this
 pass) to `seq (ifThenElse c (assign v …) (assign v …)) rest`. `localMutation` then
@@ -15,15 +15,19 @@ rewrites each `assign v x` to a *locally-scoped* `let v := x; …` — so the ne
 never escapes the branch, and `rest` sees the stale `v`. Worse, the branches end up
 with mismatched types (a value-yielding arm vs a `()` arm).
 
-This pass restructures an `if` used as a STATEMENT (its value discarded by an
-enclosing `seq`) so the mutated, still-live variables are returned by every branch
-and rebound after the join:
+This pass restructures an `if` or a `match` used as a STATEMENT (its value discarded
+by an enclosing `seq`) so the mutated, still-live variables are returned by every
+branch and rebound after the join:
 
     seq (if c then T else E) rest
   ↦ letBind _mtup (if c then (T; (v₁,…,vₙ)) else (E; (v₁,…,vₙ)))
        (let v₁ := _mtup.0; …; let vₙ := _mtup.(n-1); rest)
 
-where `{v₁,…,vₙ}` = variables assigned in either branch that are still used in `rest`.
+    seq (match s with | pᵢ => Bᵢ) rest
+  ↦ letBind _mtup (match s with | pᵢ => (Bᵢ; (v₁,…,vₙ)))
+       (let v₁ := _mtup.0; …; let vₙ := _mtup.(n-1); rest)
+
+where `{v₁,…,vₙ}` = variables assigned in some branch that are still used in `rest`.
 Because the appended tuple sits in the assigns' continuation, after `localMutation`
 + rendering each `vᵢ` resolves to its mutated value. A loop sitting at a branch
 tail gains a continuation, so `functionalizeLoops`/the renderer emit its
@@ -192,11 +196,12 @@ def tDestructure : List String → TExpr → TExpr → TExpr
 
     A branch of a statement-`if` ends in whatever its Rust block ended in, and
     that tail is a statement whenever the block's last item was one: an
-    assignment, a nested `if`, a loop, a `return`, a jump. Each such tail keeps
-    its effect —
+    assignment, a nested `if`, a `match`, a loop, a `return`, a jump. Each such
+    tail keeps its effect —
 
     * an `if` distributes `newTail` into both of its branches, so the branch
       that mutates reaches the join with its mutation;
+    * a `match` distributes `newTail` into every arm body, for the same reason;
     * an assignment, loop, `return`, `break` or `continue` is kept as a
       statement in front of `newTail`.
 
@@ -208,6 +213,8 @@ def tReplaceTail : TExpr → TExpr → TExpr
   | .mk (.assign n r) ty, newTail => .mk (.seq (.mk (.assign n r) ty) newTail) ty
   | .mk (.ifThenElse c t f) _, newTail =>
       .mk (.ifThenElse c (tReplaceTail t newTail) (tReplaceTail f newTail)) newTail.ty
+  | .mk (.match_ s arms) _, newTail =>
+      .mk (.match_ s (goA arms newTail)) newTail.ty
   | .mk (.forLoop v lo hi b) ty, newTail =>
       .mk (.seq (.mk (.forLoop v lo hi b) ty) newTail) ty
   | .mk (.forLoopRev v lo hi b) ty, newTail =>
@@ -236,6 +243,10 @@ def tReplaceTail : TExpr → TExpr → TExpr
   -- erasure (no `.ann` exists at this pre-pipeline stage).
   | .mk (.ann e) ty, newTail => .mk (.ann (tReplaceTail e newTail)) ty
   | _, newTail => newTail
+where
+  goA : List (ImpPat × TExpr) → TExpr → List (ImpPat × TExpr)
+    | [], _ => []
+    | (p, e) :: rest, newTail => (p, tReplaceTail e newTail) :: goA rest newTail
 
 /-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
     `if`-statement detection in `tThreadMut` looks through `.ann` and thus
@@ -245,7 +256,7 @@ def tStripAnn : TExpr → TExpr
   | .mk (.ann e) _ => tStripAnn e
   | e => e
 
-/-- Thread mutations across `if`-statement joins (see module docstring).
+/-- Thread mutations across `if`- and `match`-statement joins (see module docstring).
 
     `active` gates the join-threading transformation. It is `true` in
     straight-line / function-tail position and `false` inside a loop or fold
@@ -256,14 +267,14 @@ def tStripAnn : TExpr → TExpr
     We still recurse into loop bodies (to reach nested straight-line `if`s) but
     with `active := false`.
 
-    Defined by structural recursion. The `if`-statement join is detected by
-    first threading the `seq` head `a` and its continuation `rest`, then
-    inspecting the *result* `tStripAnn a'` for an `.ifThenElse` (threading `a`
-    first keeps every recursive call on a strict subterm, so the function is
+    Defined by structural recursion. The join is detected by first threading
+    the `seq` head `a` and its continuation `rest`, then inspecting the *result*
+    `tStripAnn a'` for an `.ifThenElse` or a `.match_` (threading `a` first
+    keeps every recursive call on a strict subterm, so the function is
     non-`partial`; looking through `.ann` keeps the detection in agreement with
-    type erasure — see `ThreadMutationsErase`). This is behaviourally equal to
-    the previous direct `seq (ifThenElse …) rest` match on `.ann`-free inputs
-    (the only inputs at this pre-pipeline stage). -/
+    type erasure — see `ThreadMutationsErase`). On `.ann`-free inputs (the only
+    inputs at this pre-pipeline stage) this agrees with a direct
+    `seq (ifThenElse …) rest` / `seq (match_ …) rest` match. -/
 def tThreadMut (active : Bool) : TExpr → TExpr
   | .mk (.seq a rest) ty =>
       let a' := tThreadMut active a
@@ -278,6 +289,19 @@ def tThreadMut (active : Bool) : TExpr → TExpr
             let tup := tVarTuple m
             let ifE := .mk (.ifThenElse c (tReplaceTail t tup) (tReplaceTail f tup)) .unknown
             .mk (.letBind "_mtup" ifE (tDestructure m (.mk (.var "_mtup") .unknown) rest')) ty
+      -- The arm bodies of a statement-`match` join exactly as the two branches
+      -- of a statement-`if` do; `tAssignedVars.goA` collects the assignments of
+      -- the bodies alone, leaving the scrutinee (the analogue of the condition)
+      -- in place.
+      | .mk (.match_ s arms) _ =>
+          let used := tVarRefs rest'
+          let m := (tAssignedVars.goA arms).eraseDups.filter used.contains
+          if (!active && !tContainsLoop rest') || m.isEmpty then
+            .mk (.seq a' rest') ty
+          else
+            let tup := tVarTuple m
+            let matchE := .mk (.match_ s (tReplaceTail.goA arms tup)) .unknown
+            .mk (.letBind "_mtup" matchE (tDestructure m (.mk (.var "_mtup") .unknown) rest')) ty
       | _ => .mk (.seq a' rest') ty
   -- Loop / fold bodies: descend with the transformation disabled.
   | .mk (.forLoop v lo hi b) ty =>
