@@ -57,6 +57,27 @@ def parseHaxInputTyped (input : String) :
   let json ← IO.ofExcept (Json.parseVerified input)
   IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
 
+/-- Keep the first entry for each name, in first-occurrence order.
+
+A hax export lists every function twice over: once as a top-level `Fn` item
+and once inside each enclosing `Mod` item, whose sub-item list repeats the
+whole module. The adapter walks both, so a function nested `d` modules deep
+arrives `d + 1` times. `toLeanCertifiedFileTyped` drops the repeats by name
+before rendering, so they contribute nothing to the output; applying the same
+rule here keeps them out of the pipeline, the erasure and the validator. -/
+def dedupByName {α : Type} (xs : List (String × α)) : List (String × α) :=
+  let step (acc : Array (String × α) × List String) (p : String × α) :
+      Array (String × α) × List String :=
+    if acc.2.contains p.1 then acc else (acc.1.push p, p.1 :: acc.2)
+  (xs.foldl step (#[], [])).1.toList
+
+/-- Elapsed milliseconds since `start`, reported on stderr under `label`.
+    Returns the current clock so the caller can chain phases. -/
+def phaseTick (label : String) (start : Nat) : IO Nat := do
+  let now ← IO.monoMsNow
+  IO.eprintln s!"TIMING {label}: {now - start} ms"
+  return now
+
 def main (args : List String) : IO UInt32 := do
   let opts := parseArgs args
 
@@ -64,14 +85,34 @@ def main (args : List String) : IO UInt32 := do
     IO.println helpText
     return 0
 
+  let t0 ← IO.monoMsNow
   let input ← readInput opts.inputFile
 
   -- === TYPED PATH: parse into TExpr with full type preservation ===
   let useTypedPath := opts.haxFormat && opts.emitMode == "certified"
 
   if useTypedPath then
-    let (_expr, fnTypes, rawTdefs, procTdefs) ← parseHaxInputTyped input
-    let structMeta ← parseHaxStructMeta input
+    let t ← phaseTick "read-input" t0
+    -- One JSON parse feeds every consumer below. Tokenizing and parsing a
+    -- whole-crate export is the dominant cost of the run, and the input is
+    -- immutable, so the parse is hoisted here. The small metadata tables are
+    -- derived first; `parseHaxFileWithTExpr` is the last use of `inputJson`,
+    -- so the JSON tree is released before the pipeline runs.
+    let inputJson ← IO.ofExcept (Json.parseVerified input)
+    let t ← phaseTick "json-parse" t
+    let structMeta := structMetaOfJson inputJson
+    let newtypes := HaxAdapter.buildNewtypeMap inputJson
+    let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
+    let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
+    IO.eprintln s!"INFO structs={structMeta.length} newtypes={newtypes.length} enums={enumMeta.length} aliases={aliasMeta.length}"
+    let t ← phaseTick "metadata" t
+    let (_expr, fnTypes, rawTdefs, procTdefs) ←
+      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson)
+    let fnTypes := dedupByName fnTypes
+    let rawTdefs := dedupByName rawTdefs
+    let procTdefs := dedupByName procTdefs
+    IO.eprintln s!"INFO defs={procTdefs.length}"
+    let t ← phaseTick "adapter-to-texpr" t
 
     -- Filter if requested
     let rawTdefs := match opts.filterFns with
@@ -90,19 +131,19 @@ def main (args : List String) : IO UInt32 := do
     -- when `x : T` is a newtype struct, so the renderer can emit a
     -- type-aware unwrap `«T.0» x` instead of the polymorphic-identity
     -- `«.0»`. Pass is verified (`tElideToNamedProj_erase`).
-    let inputJson ← IO.ofExcept (Json.parseVerified input)
-    let newtypes := HaxAdapter.buildNewtypeMap inputJson
-    let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
-    let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
     -- Pre-pipeline normalizations: lower `Fn::call` of let-bound `.lam` closures
     -- to direct applications, and thread mutations across `if`-statement joins.
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
       (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
+    IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
+    let t ← phaseTick "tPipelineFull" t
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
     let allWarnings := erased.foldl (fun acc (_, e) =>
       acc ++ HaxAdapter.validateExtraction e) ([] : List String)
+    IO.eprintln s!"INFO warnings={allWarnings.length}"
+    let t ← phaseTick "erase-validate" t
     if !allWarnings.isEmpty then
       for w in allWarnings do
         IO.eprintln s!"WARNING: {w}"
@@ -123,7 +164,13 @@ def main (args : List String) : IO UInt32 := do
     let secretNames := (secrecyOfBindings paramBindings).eraseDups
     let secrecyLit := "[" ++ ", ".intercalate (secretNames.map (fun s => "\"" ++ s ++ "\"")) ++ "]"
     let secrecyDef := s!"\n/-- Source-declared secret bindings (IF/CT transfer): binding names whose Rust\ntype is a secret integer. Consumed by `SourceSecrecy` on the CatCrypt side. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
-    IO.println (toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs newtypes enumMeta aliasMeta ++ secrecyDef)
+    let rendered :=
+      toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
+        newtypes enumMeta aliasMeta ++ secrecyDef
+    IO.eprintln s!"INFO output-bytes={rendered.length}"
+    let _ ← phaseTick "render" t
+    IO.println rendered
+    let _ ← phaseTick "total" t0
     return 0
 
   -- === UNTYPED PATH: same as haxpipe (for non-certified emit modes) ===

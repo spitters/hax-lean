@@ -31,13 +31,17 @@ def parseHaxInput (input : String) : IO ImpExpr := do
   let json ← IO.ofExcept (Json.parseVerified input)
   IO.ofExcept (HaxAdapter.parseHaxFile json)
 
-/-- Parse struct metadata from hax JSON for preamble generation.
+/-- Struct metadata read off an already-parsed hax JSON value.
     Returns list of (struct_name, [(field_name, type_tag)]). -/
+def structMetaOfJson (json : Json) : StructMeta :=
+  let structInfos := HaxAdapter.parseStructDefsFromJson json
+  structInfos.map fun si =>
+    (si.name, si.fields.map fun fi => (fi.name, fi.typeTag, fi.impType))
+
+/-- Parse struct metadata from hax JSON for preamble generation. -/
 def parseHaxStructMeta (input : String) : IO StructMeta := do
   let json ← IO.ofExcept (Json.parseVerified input)
-  let structInfos := HaxAdapter.parseStructDefsFromJson json
-  return structInfos.map fun si =>
-    (si.name, si.fields.map fun fi => (fi.name, fi.typeTag, fi.impType))
+  return structMetaOfJson json
 
 /-- Parse hax JSON with per-function type information.
     Returns both the ImpExpr and a list of (name, FnTypeInfo). -/
