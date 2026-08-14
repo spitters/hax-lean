@@ -175,6 +175,28 @@ private def runtimeName (f : String) : String :=
   -- or everything else: sanitize and pass through
   | f => widthAwareRuntime f
 
+/-- Render a resolved struct-field update — field `i` of an `n`-field
+    tuple-encoded struct — as the `Hax.struct_update_fst`/`_snd` composition
+    over the rendered struct expression `sStr` (atomic) and value `vStr`.
+    A single-field struct is encoded as the bare field, so its update is the
+    value itself. -/
+def renderStructUpdate (i n : Nat) (sStr vStr : String) : String :=
+  if n ≤ 1 then vStr
+  else
+    let proj (k : Nat) : String := sStr ++ String.join (List.replicate k ".2")
+    let depth := if i + 1 == n then n - 2 else i
+    let core := if i + 1 == n then s!"Hax.struct_update_snd {proj (n - 2)} {vStr}"
+                else s!"Hax.struct_update_fst {proj i} {vStr}"
+    (List.range depth).reverse.foldl
+      (fun acc d => s!"Hax.struct_update_snd {proj d} ({acc})") core
+
+/-- Render a `Namespace::Ctor` app head as the qualified Lean constructor
+    `Namespace.Ctor`. The adapter emits this head for a user enum-variant
+    construction, whose bare variant name could also resolve to a same-named
+    struct constructor def in the extraction namespace. -/
+def renderQualifiedCtor (f : String) : String :=
+  ".".intercalate ((f.splitOn "::").map sanitizeName)
+
 /-- Map an operator name and result type to a width-specific runtime function.
     Falls back to `runtimeName` when the type is not a fixed-width integer. -/
 private def runtimeNameTyped (f : String) (ty : ImpType) : String :=
@@ -742,7 +764,7 @@ private def accTuple (accs : List String) : ImpExpr :=
 -- transformForFoldCfBody / nestCfBreakForReturn) were removed: the printer's fold
 -- cases now use the VERIFIED `encodeForFoldBody` / `encodeReturnFoldBody`
 -- (Hax/TPhase/EncodeControlFlow.lean), proven correct against the runtime fold
--- semantics. The bug-prone heuristic encoder is no longer in the codebase.
+-- semantics.
 
 
 /-- Check if a forFoldReturn body contains cfBreak (early return from function). -/
@@ -1036,7 +1058,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- { Some(p) => p, None => return None }` after the explicit-match
   -- desugar wraps the Some arm in `cfContinue p`.
   | .letBind n (.cfContinue v) body =>
-    -- Drop the binding only when the body genuinely doesn't reference `n`
+    -- Drop the binding only when the body does not reference `n`
     -- (e.g. `_iter_unused`). For `_tup` produced by tuple-destructure
     -- lowering of `let pat = match { Some v => v | None => return None }`,
     -- the body uses `_tup.0`, `_tup.1`, ... so we must emit the binding
@@ -1232,7 +1254,16 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     -- Vec::new() → empty array literal (polymorphic)
     | "new", [] => "#[]"
     | _, _ =>
-    let fname := runtimeName f
+    -- Resolved struct-field update: `struct_update#S#i#n s v` renders as the
+    -- `Hax.struct_update_fst`/`_snd` composition on the tuple encoding.
+    match parseStructUpdateHead f, args with
+    | some (_, i, n), [sE, vE] =>
+      renderStructUpdate i n (parensIf (toLean sE 0) (!isAtom sE))
+        (parensIf (toLean vE 0) (!isAtom vE))
+    | _, _ =>
+    -- Qualified enum-variant construction: `E::V` renders as `E.V`.
+    let fname := if (f.splitOn "::").length > 1 then renderQualifiedCtor f
+                 else runtimeName f
     if args.isEmpty then fname
     else
       let argStrs := args.map fun a => parensIf (toLean a 0) (!isAtom a)
@@ -1346,26 +1377,27 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     let accs := accs.filter fun a => !localVars.contains a
     let (initStr, paramStr) := accStrings accs
     if !accs.isEmpty then
-      -- Verified plain-fold encoder (whileFold body is single-level `ControlFlow α α`).
-      let body' := encodeForFoldBody (accTuple accs) body
+      -- Verified plain-fold encoder (whileFold body is single-level `ControlFlow α α`),
+      -- after distributing statements that follow a conditional break.
+      let body' := encodeForFoldBody (accTuple accs) (distributeStmtCF body)
       -- Use _ for condition lambda (condition rarely uses accumulator names)
       s!"{ind}Hax.whileFold {initStr} (fun _ => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
     else
       -- Even with empty accs, wrap if-then-else branches that need ControlFlow
-      let body' := encodeForFoldBody (accTuple []) body
+      let body' := encodeForFoldBody (accTuple []) (distributeStmtCF body)
       s!"{ind}Hax.whileFold () (fun _ => {toLean c 0}) fun _acc =>\n{atLine body' (lvl + 1)}"
   | .forFoldReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
     -- Verified return-fold encoder (doubly-nested `ControlFlow (ControlFlow β γ) α`,
     -- consumed by the nested match): threads accs as loop breaks (`cfBreakContinue`),
-    -- nests genuine early returns (`cfBreak (cfBreak v)`).
-    let body' := encodeReturnFoldBody (accTuple accs) body
+    -- nests early returns (`cfBreak (cfBreak v)`).
+    let body' := encodeReturnFoldBody (accTuple accs) (distributeStmtCF body)
     s!"{ind}Hax.forFoldReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .forFoldRevReturn v lo hi body =>
     let accs := extractAccumulators body
     let (initStr, paramStr) := accStrings accs
-    let body' := encodeReturnFoldBody (accTuple accs) body
+    let body' := encodeReturnFoldBody (accTuple accs) (distributeStmtCF body)
     s!"{ind}Hax.forFoldRevReturn {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   | .whileFoldReturn c body =>
     let accs := extractAccumulators body
@@ -1373,7 +1405,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     let accs := accs.filter fun a => !localVars.contains a
     let (initStr, paramStr) := accStrings accs
     -- Verified return-fold encoder (same doubly-nested shape as forFoldReturn).
-    let body' := encodeReturnFoldBody (accTuple accs) body
+    let body' := encodeReturnFoldBody (accTuple accs) (distributeStmtCF body)
     s!"{ind}Hax.whileFoldReturn {initStr} (fun {paramStr} => {toLean c 0}) fun {paramStr} =>\n{atLine body' (lvl + 1)}"
 
   -- Pre-pipeline constructors (should not appear in output, but handle gracefully)
@@ -1450,8 +1482,9 @@ where
       s!"{ind}Hax.{simpleName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{ind1}let _ := {bodyStr}\n{ind1}()"
     else
       -- ControlFlow fold consumed via `.merge` (single-level `ControlFlow β α`):
-      -- the verified plain-fold encoder.
-      let body' := encodeForFoldBody (accTuple accs) body
+      -- the verified plain-fold encoder, after distributing statements that
+      -- follow a conditional break.
+      let body' := encodeForFoldBody (accTuple accs) (distributeStmtCF body)
       s!"{ind}Hax.{cfName} {loStr} {hiStr} {initStr} fun {sanitizeName v} {paramStr} =>\n{atLine body' (lvl + 1)}"
   /-- Flatten seq chains into proper let-bindings. -/
   seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=
@@ -2195,19 +2228,6 @@ partial def toLeanImpExpr (e : ImpExpr) : String :=
 /-- Generate a certified extraction definition: ImpExpr literal. -/
 def toLeanImpExprDef (name : String) (e : ImpExpr) : String :=
   s!"def {sanitizeName (name ++ "_impExpr")} : ImpExpr :=\n  {toLeanImpExpr e}\n"
-
-/-- Generate the sibling `LowCT` def that lowers the emitted `ImpExpr` literal
-    through CatCrypt's verified front.  Names `haxToLowCT`/`LowCT` by identifier
-    only — hax-lean cannot import CatCrypt's AST, so these resolve when the
-    emitted file is compiled in the CatCrypt project (where
-    `CatCrypt.Crypto.Hax.HaxToLowCT.haxToLowCT : ImpExpr → Option LowCT` is in
-    scope).  The `Option` return is preserved verbatim: the front is partial
-    (some `ImpExpr` shapes have no `LowCT` image), and CatCrypt's bridges
-    consume the `Option`.  A `#print <name>_lowct` renders the reviewable
-    `kernel%`/`orch%` surface via `VIR.KernelDelab`. -/
-def toLeanLowCTDef (name : String) (_e : ImpExpr) : String :=
-  let impExprName := sanitizeName (name ++ "_impExpr")
-  s!"def {sanitizeName (name ++ "_lowct")} : Option LowCT :=\n  haxToLowCT {impExprName}\n"
 
 /-! ## Auto-Preamble Generation
 
@@ -3336,9 +3356,13 @@ def computeStructPassthrough (structMeta : StructMeta)
   let initial := structMeta.map fun (sname, fields) =>
     if fields.length <= 1 then (sname, false)
     else
-      -- Check if any field projection is used in the code
-      let projUsed := fields.any fun (fname, _, _) =>
-        allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}"
+      -- Check if any field projection or field update is used in the code.
+      -- A `struct_update#<sname>#…` head rebuilds the tuple, so a struct whose
+      -- fields are written needs the tuple type exactly like one whose fields
+      -- are read.
+      let projUsed := (fields.any fun (fname, _, _) =>
+          allAppNames.contains s!".{fname}" || allAppNames.contains s!"{sname}.{fname}")
+        || allAppNames.any (·.startsWith s!"struct_update#{sname}#")
       -- If projections are used, NEVER make pass-through (the struct needs tuple type)
       if projUsed then (sname, false)
       else
@@ -3529,6 +3553,8 @@ def generatePreamble (defs : List (String × ImpExpr))
   let deps := allNamesWithVars.filter fun f =>
     !definedNames.contains f &&
     !structNames.contains f && !isFieldProjection f &&
+    -- Qualified enum-variant heads (`E::V`) are constructors, not deps.
+    (f.splitOn "::").length == 1 &&
     (!isAlwaysBuiltin f || freeVarDeps.contains f)
   -- Compute max arity for each dependency
   let depArities := deps.map fun d =>

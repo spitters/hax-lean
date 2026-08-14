@@ -312,69 +312,98 @@ def callWriteback (writers : List (String × Nat)) (f : String) (args : List Imp
     | some i => (args[i]?).bind mutArgRoot
     | none => none
 
+/-- Untyped twin of `tMutArgField`. -/
+def mutArgField : ImpExpr → Option (String × String)
+  | .borrow e => mutArgField e
+  | .deref e => mutArgField e
+  | .typeAscription e _ => mutArgField e
+  | .app pf [sE] =>
+    if pf.startsWith "." && pf != ".0" then
+      (mutArgRoot sE).map fun r => (r, (pf.drop 1).toString)
+    else none
+  | _ => none
+
+/-- Untyped twin of `tCallWritebackField`. -/
+def callWritebackField (sf : StructFieldNames) (writers : List (String × Nat))
+    (f : String) (args : List ImpExpr) : Option (String × String × Nat × Nat) :=
+  if f == ".0" then none
+  else
+    match writers.lookup f with
+    | some i =>
+      (args[i]?).bind fun a =>
+        (mutArgField a).bind fun rf =>
+          (resolveStructField sf rf.2).map fun sin => (rf.1, sin)
+    | none => none
+
 /-- Untyped twin of `tRebindCall`. -/
-def rebindCall (writers : List (String × Nat)) (f : String) (args : List ImpExpr) : ImpExpr :=
+def rebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : String)
+    (args : List ImpExpr) : ImpExpr :=
   match callWriteback writers f args with
   | some v => .assign v (.app f args)
-  | none => .app f args
+  | none =>
+    match callWritebackField sf writers f args with
+    | some (root, sname, i, n) =>
+      .assign root (.app (structUpdateHead sname i n) [.var root, .app f args])
+    | none => .app f args
 
 /-- Untyped twin of `tRebindMutCalls`. -/
-def rebindMutCalls (writers : List (String × Nat)) : ImpExpr → ImpExpr
-  | .app f args => rebindCall writers f (mapE writers args)
+def rebindMutCalls (sf : StructFieldNames) (writers : List (String × Nat)) : ImpExpr → ImpExpr
+  | .app f args => rebindCall sf writers f (mapE sf writers args)
   | .lit v => .lit v
   | .var n => .var n
   | .letBind n val body =>
-      .letBind n (rebindMutCalls writers val) (rebindMutCalls writers body)
-  | .lam ps body => .lam ps (rebindMutCalls writers body)
-  | .tuple elems => .tuple (mapE writers elems)
-  | .proj e i => .proj (rebindMutCalls writers e) i
+      .letBind n (rebindMutCalls sf writers val) (rebindMutCalls sf writers body)
+  | .lam ps body => .lam ps (rebindMutCalls sf writers body)
+  | .tuple elems => .tuple (mapE sf writers elems)
+  | .proj e i => .proj (rebindMutCalls sf writers e) i
   | .ifThenElse c t e =>
-      .ifThenElse (rebindMutCalls writers c) (rebindMutCalls writers t)
-        (rebindMutCalls writers e)
-  | .match_ scrut arms => .match_ (rebindMutCalls writers scrut) (mapA writers arms)
+      .ifThenElse (rebindMutCalls sf writers c) (rebindMutCalls sf writers t)
+        (rebindMutCalls sf writers e)
+  | .match_ scrut arms => .match_ (rebindMutCalls sf writers scrut) (mapA sf writers arms)
   | .unitVal => .unitVal
-  | .seq a b => .seq (rebindMutCalls writers a) (rebindMutCalls writers b)
-  | .borrow e => .borrow (rebindMutCalls writers e)
-  | .deref e => .deref (rebindMutCalls writers e)
-  | .assign n rhs => .assign n (rebindMutCalls writers rhs)
+  | .seq a b => .seq (rebindMutCalls sf writers a) (rebindMutCalls sf writers b)
+  | .borrow e => .borrow (rebindMutCalls sf writers e)
+  | .deref e => .deref (rebindMutCalls sf writers e)
+  | .assign n rhs => .assign n (rebindMutCalls sf writers rhs)
   | .forLoop v lo hi b =>
-      .forLoop v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
-        (rebindMutCalls writers b)
+      .forLoop v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
+        (rebindMutCalls sf writers b)
   | .forLoopRev v lo hi b =>
-      .forLoopRev v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
-        (rebindMutCalls writers b)
-  | .whileLoop c b => .whileLoop (rebindMutCalls writers c) (rebindMutCalls writers b)
+      .forLoopRev v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
+        (rebindMutCalls sf writers b)
+  | .whileLoop c b => .whileLoop (rebindMutCalls sf writers c) (rebindMutCalls sf writers b)
   | .break_ none => .break_ none
-  | .break_ (some e) => .break_ (some (rebindMutCalls writers e))
+  | .break_ (some e) => .break_ (some (rebindMutCalls sf writers e))
   | .continue_ => .continue_
-  | .earlyReturn e => .earlyReturn (rebindMutCalls writers e)
-  | .questionMark e => .questionMark (rebindMutCalls writers e)
+  | .earlyReturn e => .earlyReturn (rebindMutCalls sf writers e)
+  | .questionMark e => .questionMark (rebindMutCalls sf writers e)
   | .forFold v lo hi b =>
-      .forFold v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
-        (rebindMutCalls writers b)
+      .forFold v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
+        (rebindMutCalls sf writers b)
   | .forFoldRev v lo hi b =>
-      .forFoldRev v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
-        (rebindMutCalls writers b)
-  | .whileFold c b => .whileFold (rebindMutCalls writers c) (rebindMutCalls writers b)
+      .forFoldRev v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
+        (rebindMutCalls sf writers b)
+  | .whileFold c b => .whileFold (rebindMutCalls sf writers c) (rebindMutCalls sf writers b)
   | .forFoldReturn v lo hi b =>
-      .forFoldReturn v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
-        (rebindMutCalls writers b)
+      .forFoldReturn v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
+        (rebindMutCalls sf writers b)
   | .forFoldRevReturn v lo hi b =>
-      .forFoldRevReturn v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
-        (rebindMutCalls writers b)
+      .forFoldRevReturn v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
+        (rebindMutCalls sf writers b)
   | .whileFoldReturn c b =>
-      .whileFoldReturn (rebindMutCalls writers c) (rebindMutCalls writers b)
-  | .cfBreak e => .cfBreak (rebindMutCalls writers e)
-  | .cfContinue e => .cfContinue (rebindMutCalls writers e)
-  | .cfBreakContinue e => .cfBreakContinue (rebindMutCalls writers e)
-  | .typeAscription e ty => .typeAscription (rebindMutCalls writers e) ty
+      .whileFoldReturn (rebindMutCalls sf writers c) (rebindMutCalls sf writers b)
+  | .cfBreak e => .cfBreak (rebindMutCalls sf writers e)
+  | .cfContinue e => .cfContinue (rebindMutCalls sf writers e)
+  | .cfBreakContinue e => .cfBreakContinue (rebindMutCalls sf writers e)
+  | .typeAscription e ty => .typeAscription (rebindMutCalls sf writers e) ty
 where
-  mapE (writers : List (String × Nat)) : List ImpExpr → List ImpExpr
+  mapE (sf : StructFieldNames) (writers : List (String × Nat)) : List ImpExpr → List ImpExpr
     | [] => []
-    | e :: es => rebindMutCalls writers e :: mapE writers es
-  mapA (writers : List (String × Nat)) : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
+    | e :: es => rebindMutCalls sf writers e :: mapE sf writers es
+  mapA (sf : StructFieldNames) (writers : List (String × Nat)) :
+      List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
     | [] => []
-    | (p, e) :: rest => (p, rebindMutCalls writers e) :: mapA writers rest
+    | (p, e) :: rest => (p, rebindMutCalls sf writers e) :: mapA sf writers rest
 
 /-- Untyped twin of `tReturnMutParam`. -/
 def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
@@ -402,12 +431,43 @@ def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
       | none => simp [h]
       | some a => simp [h, tMutArgRoot_erase]
 
-@[simp] theorem tRebindCall_erase (writers : List (String × Nat)) (f : String)
-    (args : List TExpr) (ty : ImpType) :
-    (tRebindCall writers f args ty).erase = rebindCall writers f (args.map TExpr.erase) := by
-  simp only [tRebindCall, rebindCall, tCallWriteback_erase]
-  cases callWriteback writers f (args.map TExpr.erase) <;>
-    simp [TExpr.erase, TExpr.eraseList_eq]
+@[simp] theorem tMutArgField_erase (e : TExpr) : tMutArgField e = mutArgField e.erase := by
+  induction e using TExpr.ind with
+  | borrow _ _ ih => simpa only [tMutArgField, TExpr.erase, mutArgField] using ih
+  | deref _ _ ih => simpa only [tMutArgField, TExpr.erase, mutArgField] using ih
+  | ann _ _ ih => simpa only [tMutArgField, TExpr.erase] using ih
+  | app ty f args _ =>
+    match args with
+    | [] => rfl
+    | [sE] => simp [tMutArgField, mutArgField, TExpr.erase, tMutArgRoot_erase]
+    | _ :: _ :: _ => rfl
+  -- `.namedProj T e` erases to the excluded `.0` projection head.
+  | namedProj _ _ _ _ => simp [tMutArgField, TExpr.erase, mutArgField]
+  | _ => rfl
+
+@[simp] theorem tCallWritebackField_erase (sf : StructFieldNames)
+    (writers : List (String × Nat)) (f : String) (args : List TExpr) :
+    tCallWritebackField sf writers f args
+      = callWritebackField sf writers f (args.map TExpr.erase) := by
+  simp only [tCallWritebackField, callWritebackField]
+  split
+  · rfl
+  · cases writers.lookup f with
+    | none => rfl
+    | some i =>
+      cases h : args[i]? with
+      | none => simp [h]
+      | some a => simp [h, tMutArgField_erase]
+
+@[simp] theorem tRebindCall_erase (sf : StructFieldNames) (writers : List (String × Nat))
+    (f : String) (args : List TExpr) (ty : ImpType) :
+    (tRebindCall sf writers f args ty).erase
+      = rebindCall sf writers f (args.map TExpr.erase) := by
+  simp only [tRebindCall, rebindCall, tCallWriteback_erase, tCallWritebackField_erase]
+  cases callWriteback writers f (args.map TExpr.erase)
+  · cases callWritebackField sf writers f (args.map TExpr.erase) <;>
+      simp [TExpr.erase, TExpr.eraseList_eq]
+  · simp [TExpr.erase, TExpr.eraseList_eq]
 
 @[simp] theorem tReturnMutParam_erase (param : Option String) (body : TExpr) :
     (tReturnMutParam param body).erase = returnMutParam param body.erase := by
@@ -416,21 +476,23 @@ def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
   | some v => simp [tReturnMutParam, returnMutParam, tReplaceTail_erase, TExpr.erase]
 
 /-- Commuting diagram: type erasure commutes with `tRebindMutCalls`. -/
-theorem tRebindMutCalls_erase (writers : List (String × Nat)) (e : TExpr) :
-    (tRebindMutCalls writers e).erase = rebindMutCalls writers e.erase := by
+theorem tRebindMutCalls_erase (sf : StructFieldNames) (writers : List (String × Nat))
+    (e : TExpr) :
+    (tRebindMutCalls sf writers e).erase = rebindMutCalls sf writers e.erase := by
   apply tRebindMutCalls.induct
-    (motive_2 := fun e => (tRebindMutCalls writers e).erase
-                  = rebindMutCalls writers e.erase)
-    (motive_1 := fun es => (tRebindMutCalls.mapE writers es).map TExpr.erase
-                  = rebindMutCalls.mapE writers (es.map TExpr.erase))
+    (motive_2 := fun e => (tRebindMutCalls sf writers e).erase
+                  = rebindMutCalls sf writers e.erase)
+    (motive_1 := fun es => (tRebindMutCalls.mapE sf writers es).map TExpr.erase
+                  = rebindMutCalls.mapE sf writers (es.map TExpr.erase))
     (motive_3 := fun arms =>
-                  (tRebindMutCalls.mapA writers arms).map (fun pe => (pe.1, pe.2.erase))
-                  = rebindMutCalls.mapA writers (arms.map (fun pe => (pe.1, pe.2.erase))))
+                  (tRebindMutCalls.mapA sf writers arms).map (fun pe => (pe.1, pe.2.erase))
+                  = rebindMutCalls.mapA sf writers (arms.map (fun pe => (pe.1, pe.2.erase))))
   all_goals (try intros)
   all_goals
     first
       | rfl
-      | simp_all [tRebindMutCalls, rebindMutCalls, rebindCall, callWriteback, TExpr.erase,
+      | simp_all [tRebindMutCalls, rebindMutCalls, rebindCall, callWriteback,
+          callWritebackField, TExpr.erase,
           tRebindMutCalls.mapE, tRebindMutCalls.mapA, rebindMutCalls.mapE, rebindMutCalls.mapA,
           tRebindCall_erase, TExpr.eraseList_eq, TExpr.eraseArms_eq]
 

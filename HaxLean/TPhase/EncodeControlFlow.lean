@@ -62,7 +62,7 @@ So:
   * **Return fold** (`isReturn = true`), body type
     `ControlFlow (ControlFlow β γ) α` (two levels): a loop break is
     `cfBreakContinue accs` = `Break (Continue accs)` — the inner `Continue`
-    distinguishes it from a genuine early function return, which is
+    distinguishes it from an early function return, which is
     `cfBreak (cfBreak v)` = `Break (Break v)` (applied afterwards by
     `nestReturn`). `Hax.forFoldReturn` maps `Break (Continue v)` → loop break
     returning `v`, and `Break (Break v)` → early return propagating `Break v`.
@@ -154,6 +154,66 @@ def hasSurfaceCF : ImpExpr → Bool
   | .ifThenElse _ t e => hasSurfaceCF t || hasSurfaceCF e
   | _ => false
 
+/-- Does *every* execution path of `e` end in a surface control-flow node?
+    Sound underapproximation (a `match` counts as non-CF, like
+    `hasSurfaceCF`): the only use is the dead-code drop in the `seq` case of
+    the encoders, and underapproximating only ever keeps a following tail. -/
+def allPathsCF : ImpExpr → Bool
+  | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
+  | .letBind _ _ b => allPathsCF b
+  | .seq a b => allPathsCF a || allPathsCF b
+  | .ifThenElse _ t e => allPathsCF t && allPathsCF e
+  | _ => false
+
+/-- Does `e` carry an effect a tail encoding must keep — an assignment, a
+    loop, or a surface control-flow node? An all-pure `match` at a fold-body
+    tail is replaced by the continue like any other pure-value tail; a `match`
+    with an effectful arm has the encoding distributed into its arms. -/
+def keepsTailEffect : ImpExpr → Bool
+  | .assign _ _ => true
+  | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
+  | .forLoop _ _ _ _ | .forLoopRev _ _ _ _ | .whileLoop _ _ => true
+  | .forFold _ _ _ _ | .forFoldRev _ _ _ _ | .whileFold _ _ => true
+  | .forFoldReturn _ _ _ _ | .forFoldRevReturn _ _ _ _ | .whileFoldReturn _ _ => true
+  | .letBind _ v b => keepsTailEffect v || keepsTailEffect b
+  | .seq a b => keepsTailEffect a || keepsTailEffect b
+  | .ifThenElse c t e => keepsTailEffect c || keepsTailEffect t || keepsTailEffect e
+  | .match_ s arms => keepsTailEffect s || goA arms
+  | _ => false
+where
+  goA : List (ImpPat × ImpExpr) → Bool
+    | [] => false
+    | (_, e) :: rest => keepsTailEffect e || goA rest
+
+/-- Push `e2` into the non-CF tails of the statement `e1` — the distributed
+    form of `e1; e2` when `e1` breaks on *some* paths only. A CF tail keeps
+    `e2` off its (unreachable) path; a `seq` distributes into its own tail,
+    which is where its completed paths continue. -/
+def seqIntoStmtTails (e2 : ImpExpr) : ImpExpr → ImpExpr
+  | .letBind n v b => .letBind n v (seqIntoStmtTails e2 b)
+  | .ifThenElse c t e => .ifThenElse c (seqIntoStmtTails e2 t) (seqIntoStmtTails e2 e)
+  | .seq a b => .seq a (seqIntoStmtTails e2 b)
+  | .cfBreak v => .cfBreak v
+  | .cfContinue v => .cfContinue v
+  | .cfBreakContinue v => .cfBreakContinue v
+  | t => .seq t e2
+
+/-- Distribute the statements that follow a *conditionally* breaking statement
+    into that statement's non-breaking branches, so the fold-body encoders see
+    every `seq` head as either CF-free or CF-on-every-path:
+    `if c { break }; rest` becomes `if c { break } else { rest }`, which
+    encodes and renders as the standard conditional-break loop body. Applied to
+    a fold body before encoding. -/
+def distributeStmtCF : ImpExpr → ImpExpr
+  | .seq e1 e2 =>
+      let e1' := distributeStmtCF e1
+      let e2' := distributeStmtCF e2
+      if hasSurfaceCF e1' && !allPathsCF e1' then seqIntoStmtTails e2' e1'
+      else .seq e1' e2'
+  | .letBind n v b => .letBind n (distributeStmtCF v) (distributeStmtCF b)
+  | .ifThenElse c t e => .ifThenElse c (distributeStmtCF t) (distributeStmtCF e)
+  | e => e
+
 /-! ## The encoding -/
 
 /-- Plain-fold control-flow encoding (`isReturn = false`): thread the
@@ -169,37 +229,75 @@ def hasSurfaceCF : ImpExpr → Bool
 def encodeForFoldBody (accE : ImpExpr) : ImpExpr → ImpExpr
   | .letBind n v body => .letBind n v (encodeForFoldBody accE body)
   | .seq e1 e2 =>
-      -- Dead-code after surface CF: a tail following an unconditional break is
-      -- unreachable.
-      if hasSurfaceCF e1 then encodeForFoldBody accE e1
+      -- Dead-code after CF: a tail following a head that leaves on every path
+      -- is unreachable. A head with *conditional* CF keeps its tail; callers
+      -- normalize that shape away first with `distributeStmtCF`.
+      if allPathsCF e1 then encodeForFoldBody accE e1
       else .seq e1 (encodeForFoldBody accE e2)
   | .ifThenElse c t e =>
       .ifThenElse c (encodeForFoldBody accE t) (encodeForFoldBody accE e)
+  -- A match with an effectful arm carries the encoding into every arm; an
+  -- all-pure match is a pure-value tail and is replaced by the continue.
+  | .match_ s arms =>
+      if keepsTailEffect (.match_ s arms) then .match_ s (goA accE arms)
+      else .cfContinue accE
+  -- A mutation or a nested loop at the tail is kept ahead of the continue.
+  | .assign n r => .seq (.assign n r) (.cfContinue accE)
+  | .forLoop v lo hi b => .seq (.forLoop v lo hi b) (.cfContinue accE)
+  | .forLoopRev v lo hi b => .seq (.forLoopRev v lo hi b) (.cfContinue accE)
+  | .whileLoop c b => .seq (.whileLoop c b) (.cfContinue accE)
+  | .forFold v lo hi b => .seq (.forFold v lo hi b) (.cfContinue accE)
+  | .forFoldRev v lo hi b => .seq (.forFoldRev v lo hi b) (.cfContinue accE)
+  | .whileFold c b => .seq (.whileFold c b) (.cfContinue accE)
+  | .forFoldReturn v lo hi b => .seq (.forFoldReturn v lo hi b) (.cfContinue accE)
+  | .forFoldRevReturn v lo hi b => .seq (.forFoldRevReturn v lo hi b) (.cfContinue accE)
+  | .whileFoldReturn c b => .seq (.whileFoldReturn c b) (.cfContinue accE)
   | .cfBreak .unitVal => .cfBreak accE
   | .cfBreak v => .cfBreak v
   | .cfContinue v => .cfContinue v
   | .cfBreakContinue v => .cfBreakContinue v
   | _ => .cfContinue accE
+where
+  goA (accE : ImpExpr) : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
+    | [] => []
+    | (p, e) :: rest => (p, encodeForFoldBody accE e) :: goA accE rest
 
 /-- Return-fold loop-body encoding (`isReturn = true`): like
     `encodeForFoldBody`, but a **loop break** is `cfBreakContinue accE`
-    (= `Break (Continue accE)`), the inner `Continue` distinguishing it from a
-    genuine early function return. Genuine early returns (`cfBreak v`, v ≠ unit)
+    (= `Break (Continue accE)`), the inner `Continue` distinguishing it from an
+    early function return. Early returns (`cfBreak v`, v ≠ unit)
     are nested afterwards by `nestReturn`. -/
 def encodeReturnCfBody (accE : ImpExpr) : ImpExpr → ImpExpr
   | .letBind n v body => .letBind n v (encodeReturnCfBody accE body)
   | .seq e1 e2 =>
-      if hasSurfaceCF e1 then encodeReturnCfBody accE e1
+      if allPathsCF e1 then encodeReturnCfBody accE e1
       else .seq e1 (encodeReturnCfBody accE e2)
   | .ifThenElse c t e =>
       .ifThenElse c (encodeReturnCfBody accE t) (encodeReturnCfBody accE e)
+  | .match_ s arms =>
+      if keepsTailEffect (.match_ s arms) then .match_ s (goA accE arms)
+      else .cfContinue accE
+  | .assign n r => .seq (.assign n r) (.cfContinue accE)
+  | .forLoop v lo hi b => .seq (.forLoop v lo hi b) (.cfContinue accE)
+  | .forLoopRev v lo hi b => .seq (.forLoopRev v lo hi b) (.cfContinue accE)
+  | .whileLoop c b => .seq (.whileLoop c b) (.cfContinue accE)
+  | .forFold v lo hi b => .seq (.forFold v lo hi b) (.cfContinue accE)
+  | .forFoldRev v lo hi b => .seq (.forFoldRev v lo hi b) (.cfContinue accE)
+  | .whileFold c b => .seq (.whileFold c b) (.cfContinue accE)
+  | .forFoldReturn v lo hi b => .seq (.forFoldReturn v lo hi b) (.cfContinue accE)
+  | .forFoldRevReturn v lo hi b => .seq (.forFoldRevReturn v lo hi b) (.cfContinue accE)
+  | .whileFoldReturn c b => .seq (.whileFoldReturn c b) (.cfContinue accE)
   | .cfBreak .unitVal => .cfBreakContinue accE              -- loop break
   | .cfBreak v => .cfBreak v                                 -- early return (nested later)
   | .cfContinue v => .cfContinue v
   | .cfBreakContinue v => .cfBreakContinue v
   | _ => .cfContinue accE
+where
+  goA (accE : ImpExpr) : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
+    | [] => []
+    | (p, e) :: rest => (p, encodeReturnCfBody accE e) :: goA accE rest
 
-/-- Nest a genuine early-return `cfBreak v` into `cfBreak (cfBreak v)`
+/-- Nest an early-return `cfBreak v` into `cfBreak (cfBreak v)`
     (= `Break (Break v)`) inside a return-fold body, where the body type is
     `ControlFlow (ControlFlow β γ) α`. Loop breaks are already `cfBreakContinue`
     and are left intact. Total structural port of `nestCfBreakForReturn`. -/
@@ -327,10 +425,34 @@ encoding: the encoding is correct *given* the accumulator expression. -/
 def tEncodeForFoldBody (accT : TExpr) : TExpr → TExpr
   | .mk (.letBind n v body) ty => .mk (.letBind n v (tEncodeForFoldBody accT body)) ty
   | .mk (.seq e1 e2) ty =>
-      if hasSurfaceCF e1.erase then tEncodeForFoldBody accT e1
+      if allPathsCF e1.erase then tEncodeForFoldBody accT e1
       else .mk (.seq e1 (tEncodeForFoldBody accT e2)) ty
   | .mk (.ifThenElse c t e) ty =>
       .mk (.ifThenElse c (tEncodeForFoldBody accT t) (tEncodeForFoldBody accT e)) ty
+  | .mk (.match_ s arms) ty =>
+      if keepsTailEffect (TExpr.mk (.match_ s arms) ty).erase then
+        .mk (.match_ s (goA accT arms)) ty
+      else .mk (.cfContinue accT) ty
+  | .mk (.assign n r) ty =>
+      .mk (.seq (.mk (.assign n r) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.forLoop v lo hi b) ty =>
+      .mk (.seq (.mk (.forLoop v lo hi b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.forLoopRev v lo hi b) ty =>
+      .mk (.seq (.mk (.forLoopRev v lo hi b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.whileLoop c b) ty =>
+      .mk (.seq (.mk (.whileLoop c b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.forFold v lo hi b) ty =>
+      .mk (.seq (.mk (.forFold v lo hi b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.forFoldRev v lo hi b) ty =>
+      .mk (.seq (.mk (.forFoldRev v lo hi b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.whileFold c b) ty =>
+      .mk (.seq (.mk (.whileFold c b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.forFoldReturn v lo hi b) ty =>
+      .mk (.seq (.mk (.forFoldReturn v lo hi b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.forFoldRevReturn v lo hi b) ty =>
+      .mk (.seq (.mk (.forFoldRevReturn v lo hi b) ty) (.mk (.cfContinue accT) ty)) ty
+  | .mk (.whileFoldReturn c b) ty =>
+      .mk (.seq (.mk (.whileFoldReturn c b) ty) (.mk (.cfContinue accT) ty)) ty
   | .mk (.ann e) ty => .mk (.ann (tEncodeForFoldBody accT e)) ty
   | .mk (.cfBreak v) ty =>
       match v.erase with
@@ -339,6 +461,10 @@ def tEncodeForFoldBody (accT : TExpr) : TExpr → TExpr
   | .mk (.cfContinue v) ty => .mk (.cfContinue v) ty
   | .mk (.cfBreakContinue v) ty => .mk (.cfBreakContinue v) ty
   | .mk _ ty => .mk (.cfContinue accT) ty
+where
+  goA (accT : TExpr) : List (ImpPat × TExpr) → List (ImpPat × TExpr)
+    | [] => []
+    | (p, e) :: rest => (p, tEncodeForFoldBody accT e) :: goA accT rest
 
 set_option linter.unusedSimpArgs false in
 /-- Type erasure commutes with the typed encoding. -/
@@ -349,11 +475,26 @@ theorem tEncodeForFoldBody_erase (accT : TExpr) (e : TExpr) :
     simp [tEncodeForFoldBody, TExpr.erase, encodeForFoldBody, ihb]
   case seq ty e1 e2 ih1 ih2 =>
     simp only [tEncodeForFoldBody, TExpr.erase, encodeForFoldBody]
-    by_cases h : hasSurfaceCF e1.erase
+    by_cases h : allPathsCF e1.erase
     · simp [h, ih1]
     · simp [h, ih2, TExpr.erase]
   case ifThenElse ty c t e _ iht ihe =>
     simp [tEncodeForFoldBody, TExpr.erase, encodeForFoldBody, iht, ihe]
+  case match_ ty scrut arms ihs iharms =>
+    simp only [tEncodeForFoldBody, TExpr.erase, encodeForFoldBody, TExpr.eraseArms_eq]
+    by_cases h :
+        keepsTailEffect (.match_ scrut.erase (arms.map (fun pe => (pe.1, pe.2.erase))))
+    · simp only [h, if_true, TExpr.erase, TExpr.eraseArms_eq]
+      congr 1
+      clear h
+      induction arms with
+      | nil => rfl
+      | cons pa rest ih =>
+        obtain ⟨p, e⟩ := pa
+        simp only [tEncodeForFoldBody.goA, encodeForFoldBody.goA, List.map_cons,
+          iharms (p, e) (List.mem_cons_self ..),
+          ih (fun pa hpa => iharms pa (List.mem_cons_of_mem _ hpa))]
+    · simp [h, TExpr.erase]
   case ann ty e ih =>
     simp [tEncodeForFoldBody, TExpr.erase, ih]
   case cfBreak ty e _ =>
@@ -434,7 +575,7 @@ section is the **return-fold analog**: the runtime `Hax.forFoldReturn` consumed
 by the *nested match* (`consumeForFoldReturn`) equals the three-way classified
 reference loop `refFoldReturn`. It is the value-level (runtime) half of the
 return-fold bridge, and — unlike the plain case, which collapses to one
-`ControlFlow` level — it genuinely exercises both levels of the doubly-nested
+`ControlFlow` level — it exercises both levels of the doubly-nested
 result, using the `forFoldReturn_loopBreak`/`_earlyReturn`/`_done` unfold
 structure. -/
 

@@ -13,6 +13,7 @@ import HaxLean.Phase.FunctionalizeLoops
 import HaxLean.Phase.CfIntoMonads
 import HaxLean.Pipeline
 import HaxLean.ThreadMutations
+import HaxLean.PrettyPrint
 
 /-!
 # Test Programs
@@ -342,8 +343,9 @@ The five signatures below are the four shapes a signature can take (write-back,
 a result that carries a value, two `&mut` parameters, and a `&mut` parameter
 written only through a field) plus a function whose parameter is written only by
 a nested write-back call. The three bodies decide which candidates survive: `f`
-assigns its parameter, `m` writes through a field and so assigns `_assign`
-instead, and `n` writes only by calling `f`. -/
+assigns its parameter, `m` writes through a field — which the parse arms lower
+to a `struct_update` assignment of the parameter itself — and `n` writes only
+by calling `f`. -/
 
 def mutStateTy : ImpType := .array .int 8
 def mutBlockTy : ImpType := .array .int 64
@@ -366,12 +368,17 @@ def writebackFns : List (String × FnTypeInfo) :=
   [("f", writebackSig), ("h", valueSig), ("k", twoMutSig), ("m", fieldSig),
    ("n", nestedSig)]
 
+/-- Field layout of the struct `S` behind `m`'s `&mut self`. -/
+def sFields : StructFieldNames := [("S", ["h", "buf"])]
+
 /-- `st = q;` — `f`'s body. -/
 def writebackBody : TExpr :=
   .mk (.seq (.mk (.assign "st" (.mk (.var "q") mutStateTy)) .unit) (.mk .unitVal .unit)) .unit
-/-- `self.buf = q;` — `m`'s body, whose write lands on `_assign`. -/
+/-- `self.buf = q;` — `m`'s body, as the parse arms lower it under `sFields`:
+    an assignment of `self` to a functional field update. -/
 def fieldBody : TExpr :=
-  .mk (.seq (.mk (.assign "_assign" (.mk (.var "q") mutStateTy)) .unit)
+  .mk (.seq (.mk (.assign "self" (.mk (.app "struct_update#S#1#2"
+      [.mk (.var "self") (.adt "S" []), .mk (.var "q") mutStateTy]) (.adt "S" []))) .unit)
     (.mk .unitVal .unit)) .unit
 /-- `f(&mut v, blk);` — `n`'s body. -/
 def nestedBody : TExpr :=
@@ -402,20 +409,144 @@ def valueCall : TExpr :=
     (.array .int 32)
 
 def writebackTable : List (String × Nat) :=
-  mutWriteTable (mutWriteFns writebackFns writebackDefs)
+  mutWriteTable (mutWriteFns sFields writebackFns writebackDefs)
 
 #eval mutWriteCandidates writebackFns
   -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
-#eval mutWriteStep writebackDefs [] (mutWriteCandidates writebackFns)
-  -- [("f", 0, "st")]
-#eval mutWriteFns writebackFns writebackDefs        -- [("f", 0, "st"), ("n", 0, "v")]
-#eval mutWriteParams (mutWriteFns writebackFns writebackDefs)  -- [("f", "st"), ("n", "v")]
-#eval tAssignedVars (tRebindMutCalls writebackTable writebackStmt)      -- ["st"]
-#eval tAssignedVars (tRebindMutCalls writebackTable writebackIndexed)   -- []
-#eval (tRebindMutCalls writebackTable valueCall).erase == valueCall.erase  -- true
-#eval tAssignedVars (tThreadMut true (tRebindMutCalls writebackTable writebackStmt))  -- ["st"]
+#eval mutWriteStep sFields writebackDefs [] (mutWriteCandidates writebackFns)
+  -- [("f", 0, "st"), ("m", 0, "self")]
+#eval mutWriteFns sFields writebackFns writebackDefs
+  -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
+#eval mutWriteParams (mutWriteFns sFields writebackFns writebackDefs)
+  -- [("f", "st"), ("m", "self"), ("n", "v")]
+#eval tAssignedVars (tRebindMutCalls sFields writebackTable writebackStmt)      -- ["st"]
+#eval tAssignedVars (tRebindMutCalls sFields writebackTable writebackIndexed)   -- []
+#eval (tRebindMutCalls sFields writebackTable valueCall).erase == valueCall.erase  -- true
+#eval tAssignedVars
+  (tThreadMut true (tRebindMutCalls sFields writebackTable writebackStmt))  -- ["st"]
 #eval (tReturnMutParam (some "st") writebackBody).erase
         == ImpExpr.seq (.assign "st" (.var "q")) (.var "st")            -- true
 #eval (tReturnMutParam none writebackBody).erase == writebackBody.erase  -- true
+
+/-! ## Struct-field writes
+
+A write through a struct-field place lowers to an assignment of the root
+variable to a functional `struct_update`; the renderer expands the resolved
+head into the `Hax.struct_update_fst`/`_snd` composition. The fixtures pin the
+lowering on the two handled place shapes, the declined shapes, the call-site
+field write-back, and the rendered composition. -/
+
+/-- `self.buf` over `self : S`. -/
+def fieldWriteLhs : TExpr :=
+  .mk (.app ".buf" [.mk (.var "self") (.adt "S" [])]) mutStateTy
+
+/-- `self.buf[i]`. -/
+def fieldElemLhs : TExpr :=
+  .mk (.app "index" [fieldWriteLhs, .mk (.var "i") .int]) .int
+
+/-- Erased view of a lowered assignment, for comparison. -/
+def loweredErase (k : Option TExprKind) : Option ImpExpr :=
+  k.map fun k => (TExpr.mk k .unit).erase
+
+#eval loweredErase (HaxAdapter.tFieldPlaceAssign sFields fieldWriteLhs
+        (fun _ => .mk (.var "q") mutStateTy))
+  == some (ImpExpr.assign "self"
+       (.app "struct_update#S#1#2" [.var "self", .var "q"]))  -- true
+#eval loweredErase (HaxAdapter.tFieldPlaceAssign sFields fieldElemLhs
+        (fun _ => .mk (.var "q") .int))
+  == some (ImpExpr.assign "self" (.app "struct_update#S#1#2" [.var "self",
+       .app "array_update" [.app ".buf" [.var "self"], .var "i", .var "q"]]))  -- true
+-- Declined: no layout, an ambiguous field name, a non-variable root.
+#eval (HaxAdapter.tFieldPlaceAssign [] fieldWriteLhs
+        (fun _ => .mk (.var "q") mutStateTy)).isNone  -- true
+#eval (HaxAdapter.tFieldPlaceAssign [("S", ["buf"]), ("T", ["buf"])] fieldWriteLhs
+        (fun _ => .mk (.var "q") mutStateTy)).isNone  -- true
+#eval (HaxAdapter.tFieldPlaceAssign sFields
+        (.mk (.app ".buf" [.mk (.app ".inner" [.mk (.var "self") .unknown]) .unknown])
+          mutStateTy)
+        (fun _ => .mk (.var "q") mutStateTy)).isNone  -- true
+
+/-- `f(&mut self.buf, blk)` — the write-back argument is a field place, so the
+    call becomes a functional field update of `self` from the call's result. -/
+def writebackFieldCall : TExpr :=
+  .mk (.app "f" [.mk (.borrow fieldWriteLhs) (.ref mutStateTy true),
+    .mk (.var "blk") (.ref mutBlockTy false)]) .unit
+
+#eval (tRebindMutCalls sFields writebackTable writebackFieldCall).erase
+  == ImpExpr.assign "self" (.app "struct_update#S#1#2" [.var "self",
+       .app "f" [.borrow (.app ".buf" [.var "self"]), .var "blk"]])  -- true
+
+-- Rendered composition, one shape per position class.
+#eval renderStructUpdate 0 2 "s" "v" == "Hax.struct_update_fst s v"  -- true
+#eval renderStructUpdate 1 4 "self" "v"
+  == "Hax.struct_update_snd self (Hax.struct_update_fst self.2 v)"  -- true
+#eval renderStructUpdate 3 4 "s" "v"
+  == "Hax.struct_update_snd s (Hax.struct_update_snd s.2 (Hax.struct_update_snd s.2.2 v))"
+  -- true
+#eval renderStructUpdate 0 1 "s" "v" == "v"  -- true
+#eval toLean (.app "struct_update#S#1#4" [.var "self", .var "v"])
+  == "Hax.struct_update_snd self (Hax.struct_update_fst self.2 v)"  -- true
+
+-- Qualified enum-variant construction renders as the Lean constructor.
+#eval toLean (.app "LoginOutcome::LoggedIn" [.var "session_key"])
+  == "LoginOutcome.LoggedIn session_key"  -- true
+
+/-! ## Fold-body tails that carry mutations
+
+The plain-fold encoder distributes into a `match` tail, keeps a mutation or a
+nested loop ahead of the continue, and still replaces a pure-value tail. A
+statement following a conditional break is distributed into the non-breaking
+branches by `distributeStmtCF` before encoding. -/
+
+/-- Fold body ending in a `match` whose arm assigns. -/
+def foldMatchTail : ImpExpr :=
+  .match_ (.var "t")
+    [(.ctorPat "A" [], .assign "acc" (.lit (.int 1))),
+     (.wildcard, .var "acc")]
+
+#eval encodeForFoldBody (.var "acc") foldMatchTail ==
+  ImpExpr.match_ (.var "t")
+    [(.ctorPat "A" [], .seq (.assign "acc" (.lit (.int 1))) (.cfContinue (.var "acc"))),
+     (.wildcard, .cfContinue (.var "acc"))]  -- true
+-- An all-pure match is a pure-value tail: replaced by the continue.
+#eval encodeForFoldBody (.var "acc")
+    (.match_ (.var "t") [(.ctorPat "A" [], .lit (.int 1)), (.wildcard, .lit (.int 2))])
+  == ImpExpr.cfContinue (.var "acc")  -- true
+
+/-- Fold body ending in a nested fold. -/
+def foldLoopTail : ImpExpr :=
+  .seq (.assign "x" (.lit (.int 1)))
+    (.forFold "i" (.lit (.int 0)) (.lit (.int 4)) (.assign "acc" (.var "i")))
+
+#eval encodeForFoldBody (.var "acc") foldLoopTail ==
+  ImpExpr.seq (.assign "x" (.lit (.int 1)))
+    (.seq (.forFold "i" (.lit (.int 0)) (.lit (.int 4)) (.assign "acc" (.var "i")))
+      (.cfContinue (.var "acc")))  -- true
+
+/-- Typed twin of `foldMatchTail`, for the erase square. -/
+def foldMatchTailT : TExpr :=
+  .mk (.match_ (.mk (.var "t") .unknown)
+    [(.ctorPat "A" [], .mk (.assign "acc" (.mk (.lit (.int 1)) .unknown)) .unit),
+     (.wildcard, .mk (.var "acc") .unknown)]) .unknown
+
+#eval (tEncodeForFoldBody (.mk (.var "acc") .unknown) foldMatchTailT).erase
+  == encodeForFoldBody (.var "acc") foldMatchTail  -- true
+
+/-- `if c { break }; acc = 1` — a conditional break followed by a write. -/
+def breakThenWrite : ImpExpr :=
+  .seq (.ifThenElse (.var "c") (.cfBreak .unitVal) .unitVal)
+    (.assign "acc" (.lit (.int 1)))
+
+#eval distributeStmtCF breakThenWrite ==
+  ImpExpr.ifThenElse (.var "c") (.cfBreak .unitVal)
+    (.seq .unitVal (.assign "acc" (.lit (.int 1))))  -- true
+#eval encodeForFoldBody (.var "acc") (distributeStmtCF breakThenWrite) ==
+  ImpExpr.ifThenElse (.var "c") (.cfBreak (.var "acc"))
+    (.seq .unitVal (.seq (.assign "acc" (.lit (.int 1)))
+      (.cfContinue (.var "acc"))))  -- true
+-- An unconditional break still drops its dead tail.
+#eval encodeForFoldBody (.var "acc")
+    (.seq (.cfBreak .unitVal) (.assign "acc" (.lit (.int 1))))
+  == ImpExpr.cfBreak (.var "acc")  -- true
 
 end Hax.Tests

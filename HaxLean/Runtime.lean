@@ -538,6 +538,17 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
   let n := i.toNat
   if h : n < arr.size then arr.set n v else arr
 
+/-- Functional field update on a tuple-encoded struct: replace the head field.
+    A field at position `i` of `n` (with `i < n - 1`) updates as
+    `struct_update_snd^i` around one `struct_update_fst`; the last field uses
+    `struct_update_snd` at depth `n - 2`. The emitter composes these from the
+    `struct_update#S#i#n` head. -/
+@[inline] def struct_update_fst {α β : Type} (s : α × β) (v : α) : α × β := (v, s.2)
+
+/-- Functional field update on a tuple-encoded struct: replace the tail
+    (the fields after the first), keeping the head field. -/
+@[inline] def struct_update_snd {α β : Type} (s : α × β) (t : β) : α × β := (s.1, t)
+
 /-- Push an element onto an array. -/
 @[inline] def push {α : Type} (arr : Array α) (x : α) : Array α := arr.push x
 
@@ -646,7 +657,7 @@ collapses to `Int` and the wrapping semantics live in the dedicated
 `add_u8`/`bitxor_u64`/etc. families above.
 
 These shims provide that collapse: the width argument is discarded and the
-operation runs on `Int`. Anything that genuinely needs wrap-on-overflow at
+operation runs on `Int`. Anything that needs wrap-on-overflow at
 the `UInt{w}` level can call the named variants directly. -/
 
 /-- Width-tagged cast: collapses to identity on `Int`. The width argument is

@@ -46,7 +46,7 @@ def toSignedSuffix : IntWidth → String
   | .w8 => "i8" | .w16 => "i16" | .w32 => "i32" | .w64 => "i64"
   | .w128 => "i128" | .wsize => "isize"
 
-/-- Lean 4 type name for signed integers (all map to Int for now). -/
+/-- Lean 4 type name for signed integers (every width maps to `Int`). -/
 def toSignedLeanType : IntWidth → String
   | _ => "Int"
 
@@ -376,5 +376,45 @@ structure FnTypeInfo where
   paramTypes : List (String × ImpType)
   retType : ImpType
   deriving Inhabited
+
+/-! ## Struct-field layout (functional field updates)
+
+A write through a struct-field place (`self.buf = v`, `self.buf[i] = v`, a
+`&mut self.h` call argument) lowers to an assignment of the place's *root*
+variable to a functional update of the tuple-encoded struct. The layout needed
+to resolve a field name to its tuple position is shared between the adapter's
+assignment lowering and the `&mut` write-back rewrite, so it lives here. -/
+
+/-- Field-name layout of the structs of an export: struct name to its field
+    names in declaration order. -/
+abbrev StructFieldNames := List (String × List String)
+
+/-- The struct owning field `fname`, with the field's position and the struct's
+    field count, when exactly one struct of `sf` declares that field name. An
+    ambiguous or unknown field name resolves to `none`, and the write that
+    asked keeps its previous lowering. -/
+def resolveStructField (sf : StructFieldNames) (fname : String) :
+    Option (String × Nat × Nat) :=
+  match sf.filter (fun p => p.2.contains fname) with
+  | [(sname, fs)] => (fs.idxOf? fname).map fun i => (sname, i, fs.length)
+  | _ => none
+
+/-- App head carrying a resolved struct-field update:
+    `struct_update#<struct>#<index>#<count>`. The `#` sigil keeps the head out
+    of the Deps class (`isAlwaysBuiltin`); the renderer reads the index and
+    count to emit the `Hax.struct_update_fst`/`_snd` composition on the tuple
+    encoding, and the struct name marks the struct as tuple-encoded (never
+    pass-through). -/
+def structUpdateHead (sname : String) (i n : Nat) : String :=
+  s!"struct_update#{sname}#{i}#{n}"
+
+/-- Decode a `struct_update#<struct>#<index>#<count>` head. -/
+def parseStructUpdateHead (f : String) : Option (String × Nat × Nat) :=
+  match f.splitOn "#" with
+  | ["struct_update", sname, iStr, nStr] =>
+    match iStr.toNat?, nStr.toNat? with
+    | some i, some n => some (sname, i, n)
+    | _, _ => none
+  | _ => none
 
 end Hax

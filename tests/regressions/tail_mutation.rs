@@ -210,14 +210,103 @@ pub fn bump_first(v: [u64; 2]) -> [u64; 2] {
 }
 
 // ---------------------------------------------------------------------------
+// `&mut self` struct-field writes
+//
+// A write through a struct-field place has no mutable struct in the
+// extraction; it lowers to an assignment of the root variable to a functional
+// `struct_update` of the tuple encoding. The failure mode this guards against
+// is the field write landing on the `_assign` sink (emitted as `let _ := …`),
+// which leaves `self` at its input value and makes every method on the struct
+// constant in its own writes.
+
+pub struct Counter {
+    h: [u32; 8],
+    buf: [u8; 64],
+    buf_len: usize,
+}
+
+/// Writes through its single `&mut` parameter — the shape `compress` takes in
+/// a hash implementation.
+///
+/// ```lean
+/// def mix (h : Array (Int)) (x : Int) :=
+///   let h := Hax.array_update h (0 : Int) (Hax.wrapping_add_w 32 (Hax.index h (0 : Int)) x)
+///   h
+/// ```
+pub fn mix(h: &mut [u32; 8], x: u32) {
+    h[0] = h[0].wrapping_add(x);
+}
+
+impl Counter {
+    /// Every statement writes through `self`: a field-element write, a plain
+    /// field write, and a write-back call whose `&mut` argument is a field
+    /// place. Each becomes an assignment of `self` to a `struct_update` of the
+    /// tuple encoding, and the method itself becomes a write-back function
+    /// returning `self`.
+    ///
+    /// ```lean
+    /// def Counter_absorb (self : Counter_T) (b : Int) :=
+    ///   let self := Hax.struct_update_snd self (Hax.struct_update_fst self.2
+    ///     (Hax.array_update («.buf» self) («.buf_len» self) b))
+    ///   let self := Hax.struct_update_snd self (Hax.struct_update_snd self.2
+    ///     (Hax.add («.buf_len» self) (1 : Int)))
+    ///   let self := Hax.struct_update_fst self (mix («.h» self) (Hax.castVal_w 32 b))
+    ///   self
+    /// ```
+    pub fn absorb(&mut self, b: u8) {
+        self.buf[self.buf_len] = b;
+        self.buf_len = self.buf_len + 1;
+        mix(&mut self.h, b as u32);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fold-body tails that carry mutations
+//
+// The fold-body encoders replace a pure-value tail by `cfContinue acc`. A
+// `match` at the tail distributes the encoding into its arms, and a nested
+// loop at the tail is kept ahead of the continue; the failure mode this
+// guards against is either being *replaced* by the continue, dropping the
+// mutation (or the whole inner loop).
+
+/// `match` at the fold-body tail: the arm's write must survive.
+pub fn match_tail(n: usize, sel: bool) -> u64 {
+    let mut acc = 0u64;
+    for _i in 0..n {
+        match sel {
+            true => acc = acc + 2,
+            false => acc = acc + 1,
+        }
+    }
+    acc
+}
+
+/// Nested loop at the fold-body tail: the inner loop must survive.
+pub fn loop_at_tail(n: usize) -> [u64; 4] {
+    let mut acc = [0u64; 4];
+    for _i in 0..n {
+        for j in 0..4 {
+            acc[j] = acc[j] + 1;
+        }
+    }
+    acc
+}
+
+// ---------------------------------------------------------------------------
 // Statement after a conditional break in a loop body
 //
-// `encodeForFoldBody`'s `seq` case drops the tail whenever the head contains a
-// surface control-flow node, and `hasSurfaceCF` reports an `ifThenElse` whose
-// *one* branch breaks. Whether the shape below reaches that case, or whether an
-// earlier pass has already inlined the tail into the non-breaking branch, is
-// what this function measures: if `acc` comes back all zeros the tail was
-// dropped.
+// `distributeStmtCF` pushes the statements that follow a conditional break
+// into the non-breaking branch before the fold-body encoding, so the write
+// below survives on the non-breaking iterations.
+//
+// ```lean
+// Hax.whileFold … fun acc =>
+//   if Hax.gt i limit then
+//     Hax.cfBreak acc
+//   else
+//     let acc := Hax.array_update acc …
+//     Hax.cfContinue acc
+// ```
 
 pub fn break_then_write(n: usize, limit: usize) -> [u64; 4] {
     let mut acc = [0u64; 4];

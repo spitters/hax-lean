@@ -250,6 +250,11 @@ than guessing from method names.
 structure ImplSelfTypeMap where
   impls : List (Nat × String) := []
   collisions : List String := []
+  /-- Struct name → field names in declaration order, for lowering a write
+      through a struct-field place (`self.buf = v`) to a functional
+      `struct_update` of the root variable. Empty when the caller has no
+      struct metadata; field writes then keep the `_assign` sink. -/
+  structFields : StructFieldNames := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -257,6 +262,71 @@ structure ImplSelfTypeMap where
     items, used by `tElideToNamedProj` to rewrite `.app ".0" [x]`
     calls into `.namedProj T x` markers when `x : T`. -/
 abbrev NewtypeMap := List (String × ImpType)
+
+/-! ## Struct-field assignment lowering
+
+A Rust write through a struct-field place — `self.buf = v`, `self.buf[i] = v`,
+`self.buf_len += 1` — has no mutable struct in the extraction; its meaning is a
+functional update of the *root* variable. The lowering emits
+`assign root (struct_update#S#i#n root newValue)`, an ordinary assignment the
+mutation-threading passes and the renderer's accumulator extraction already
+carry (the same shape an array-element write takes). The renderer expands the
+`struct_update#S#i#n` head into the `Hax.struct_update_fst`/`_snd` composition
+on the tuple encoding. -/
+
+/-- Strip `deref` wrappers from a typed place expression. -/
+def tStripDerefPlace : TExpr → TExpr
+  | .mk (.deref e) _ => tStripDerefPlace e
+  | e => e
+
+/-- View a typed expression as a single-level struct-field place: the root
+    variable, the field name, and the deref-stripped struct expression. `none`
+    for the newtype projection `.0`, a nested field path, or a root that is not
+    a plain variable. -/
+def tFieldProjPlace : TExpr → Option (String × String × TExpr)
+  | .mk (.app pf [sE]) _ =>
+    if pf.startsWith "." && pf != ".0" then
+      match tStripDerefPlace sE with
+      | .mk (.var n) ty => some (n, (pf.drop 1).toString, .mk (.var n) ty)
+      | _ => none
+    else none
+  | _ => none
+
+/-- Lower an assignment through a struct-field place to an assignment of the
+    place's root variable. `lhs'` is the deref-stripped place; `mkVal` builds
+    the written value from the place's current-value read (identity for `=`,
+    the compound operator's application for `op=`). Handled places, over a root
+    variable `x` whose field `f` resolves through `sf` to position `i` of `n`:
+
+      x.f      ↦ assign x (struct_update#S#i#n x (mkVal x.f))
+      x.f[j]   ↦ assign x (struct_update#S#i#n x (array_update x.f j (mkVal x.f[j])))
+
+    Every other place — an unresolved or ambiguous field name, a nested field
+    path, a non-variable root — is `none`, and the caller keeps its previous
+    lowering. -/
+def tFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
+    (mkVal : TExpr → TExpr) : Option TExprKind :=
+  match lhs' with
+  | .mk (.app ind [fieldE, idx]) _ =>
+    if ind == "index" || ind == "index_mut" then
+      match tFieldProjPlace fieldE with
+      | some (root, fname, sE) =>
+        match resolveStructField sf fname with
+        | some (sname, i, n) =>
+          let read := TExpr.mk (.app "index" [fieldE, idx]) .unknown
+          let newArr := TExpr.mk (.app "array_update" [fieldE, idx, mkVal read]) fieldE.ty
+          some (.assign root (TExpr.mk (.app (structUpdateHead sname i n) [sE, newArr]) sE.ty))
+        | none => none
+      | none => none
+    else none
+  | _ =>
+    match tFieldProjPlace lhs' with
+    | some (root, fname, sE) =>
+      match resolveStructField sf fname with
+      | some (sname, i, n) =>
+        some (.assign root (TExpr.mk (.app (structUpdateHead sname i n) [sE, mkVal lhs']) sE.ty))
+      | none => none
+    | none => none
 
 /-- Extract the short name of a struct/enum from an `Adt` type JSON.
     Returns `none` if the JSON doesn't have the expected shape. -/
@@ -2492,8 +2562,18 @@ where
         return .assign outerName (TExpr.mk (.app "array_update" [outerArr, outerIdx, innerUpdate]) outerArr.ty)
       | .app "index" [arr, idx] =>
         let arrName := getVarName (stripD arr)
-        return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, rhs]) rhs.ty)
-      | _ => return .assign "_assign" rhs
+        if arrName == "_assign" then
+          -- Element of a struct-field place: self.buf[i] = v.
+          match tFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
+          | some k => return k
+          | none => return .assign "_assign" rhs
+        else
+          return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, rhs]) rhs.ty)
+      | _ =>
+        -- Struct-field place: self.buf = v.
+        match tFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
+        | some k => return k
+        | none => return .assign "_assign" rhs
 
     else if let .ok data := j.getObjVal? "AssignOp" then
       let rawOp := match data.getObjVal? "op" with
@@ -2511,8 +2591,20 @@ where
       | .app "index" [arr, idx] =>
         let arrName := match (stripD2 arr).kind with
           | .var n => n | _ => "_assign"
-        return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs, rhs]) lhs.ty]) arr.ty)
-      | _ => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
+        if arrName == "_assign" then
+          -- Element of a struct-field place: self.buf[i] op= v.
+          match tFieldPlaceAssign implMap.structFields lhs'
+              (fun read => TExpr.mk (.app op [read, rhs]) lhs.ty) with
+          | some k => return k
+          | none => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
+        else
+          return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs, rhs]) lhs.ty]) arr.ty)
+      | _ =>
+        -- Struct-field place: self.buf_len op= v.
+        match tFieldPlaceAssign implMap.structFields lhs'
+            (fun read => TExpr.mk (.app op [read, rhs]) lhs.ty) with
+        | some k => return k
+        | none => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
 
     else if let .ok data := j.getObjVal? "Borrow" then
       let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
@@ -2805,6 +2897,12 @@ where
 
   /-- Parse a hax AdtExpr into TExprKind. -/
   parseTAdtExpr (j : Json) : Except String TExprKind := do
+    -- The head is the variant DefId's short name. For a struct construction
+    -- the variant DefId is the struct's own DefId, so the head is the bare
+    -- struct constructor def (`Sha256`); a core constructor keeps its bare
+    -- name, which `runtimeName` maps (`RangeTo` ↦ `Hax.RangeTo`). The
+    -- `type_namespace` DefId resolves to the enclosing module, not the type
+    -- name, so it is used only as a fallback when no variant DefId is present.
     let name := match j.getObjVal? "info" with
       | .ok info => match info.getObjVal? "variant" with
         | .ok variantDefId => extractDefIdName variantDefId
@@ -3223,14 +3321,17 @@ private partial def fnNameCollisions (root : Json) : List String :=
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
     processed typed defs (for pipeline/rendering)). -/
-partial def parseHaxFileWithTExpr (j : Json) :
+partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := []) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
   -- Build the impl-self-type map once from the full JSON. This lets the
   -- recursive parse disambiguate user-defined methods (e.g. `Crs::len`)
-  -- from stdlib ones (`slice::len`) at every Call node.
+  -- from stdlib ones (`slice::len`) at every Call node. `structFields`
+  -- (struct name → field names, from the caller's struct metadata) lets the
+  -- assignment arms lower struct-field writes to `struct_update` assignments.
   let implMap : ImplSelfTypeMap :=
-    { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j }
+    { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j,
+      structFields := structFields }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []

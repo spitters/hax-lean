@@ -138,7 +138,7 @@ typed pipeline.
 
 | Flag | Output |
 |------|--------|
-| `--emit-certified --hax` | Typed extraction: surface code plus post-pipeline `ImpExpr` literals, with hax JSON types preserved end-to-end. Each certified function also gets a sibling `<name>_lowct` def (`Option LowCT`) lowering its `ImpExpr` through CatCrypt's verified front (`haxToLowCT`), so the extraction is renderable as the reviewable kernel/orchestration surface the proofs consume. **The production path.** |
+| `--emit-certified --hax` | Typed extraction: surface code plus post-pipeline `ImpExpr` literals, with hax JSON types preserved end-to-end. **The production path.** |
 | `--emit-json`            | Transformed `ImpExpr` AST as JSON (debug / inspection). |
 | `--emit-debug-meta`      | Debug metadata about hax types and struct layouts. |
 
@@ -202,9 +202,9 @@ CatCrypt's functional, proof-facing form is its own free-monad deep embedding
 `SPComp` quoting), not by a translation in this repo. The typed-pipeline output
 drops directly into the `SurfaceDeps.lean` extraction bridge for game-based proofs.
 
-The `_lowct` sibling defs (see the CLI table above) apply CatCrypt's front
-`haxToLowCT : ImpExpr → Option LowCT` to the extracted `ImpExpr`. The two IRs play
-complementary roles:
+CatCrypt's front `haxToLowCT : ImpExpr → Option LowCT` lowers an extracted
+`ImpExpr` on the CatCrypt side (composed after `aNormalize`, which its domain
+requires). The two IRs play complementary roles:
 
 - **`ImpExpr`** is this pipeline's imperative *expression* AST — the working form
   of the phases and the handoff format of the extraction. (CatCrypt mirrors it as

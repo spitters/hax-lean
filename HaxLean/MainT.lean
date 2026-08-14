@@ -106,8 +106,12 @@ def main (args : List String) : IO UInt32 := do
     let aliasMeta := HaxAdapter.parseTypeAliasDefsFromJson inputJson
     IO.eprintln s!"INFO structs={structMeta.length} newtypes={newtypes.length} enums={enumMeta.length} aliases={aliasMeta.length}"
     let t ← phaseTick "metadata" t
+    -- Struct-field layout for the assignment lowering and the `&mut`
+    -- write-back rewrite: struct name → field names in declaration order.
+    let structFields : StructFieldNames :=
+      structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
     let (_expr, fnTypes, rawTdefs, procTdefs) ←
-      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson)
+      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields)
     let fnTypes := dedupByName fnTypes
     let rawTdefs := dedupByName rawTdefs
     let procTdefs := dedupByName procTdefs
@@ -139,12 +143,12 @@ def main (args : List String) : IO UInt32 := do
     -- rewrite: a body whose own tail is a write-back call has to be an
     -- assignment before `tReplaceTail` reaches it, or the call is dropped as a
     -- pure value.
-    let writeFns := mutWriteFns fnTypes procTdefs
+    let writeFns := mutWriteFns structFields fnTypes procTdefs
     let writers := mutWriteTable writeFns
     let writeParams := mutWriteParams writeFns
     IO.eprintln s!"INFO mut-writeback-fns={writers.length}/{(mutWriteCandidates fnTypes).length}"
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      let te := tReturnMutParam (writeParams.lookup n) (tRebindMutCalls writers te)
+      let te := tReturnMutParam (writeParams.lookup n) (tRebindMutCalls structFields writers te)
       (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
     let t ← phaseTick "tPipelineFull" t
