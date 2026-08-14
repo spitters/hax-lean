@@ -277,6 +277,109 @@ def tokenizeAux : Nat → List Char → Except String (List JsonToken)
         else
           .error s!"unexpected character: {c}"
 
+/-- Accumulator-passing form of `tokenizeAux`: every branch is a tail call, so
+the compiled code is a loop and the stack depth is constant in the length of
+the input. `tokenizeAux` prepends each token to the result of the recursive
+call, which puts the call under `Except.map` and costs one stack frame per
+token; `tokenizeAcc` pushes onto `acc` instead and returns `acc.toList` at the
+end. The two agree (`tokenizeAcc_eq`), and the `@[csimp]` lemma below directs
+the compiler to this one. -/
+def tokenizeAcc : Nat → List Char → Array JsonToken → Except String (List JsonToken)
+  | 0,     _,         _   => .error "out of fuel"
+  | _ + 1, [],        acc => .ok acc.toList
+  | n + 1, c :: rest, acc =>
+    if isWs c then
+      tokenizeAcc n rest acc
+    else if c = '{' then
+      tokenizeAcc n rest (acc.push JsonToken.lbrace)
+    else if c = '}' then
+      tokenizeAcc n rest (acc.push JsonToken.rbrace)
+    else if c = '[' then
+      tokenizeAcc n rest (acc.push JsonToken.lbracket)
+    else if c = ']' then
+      tokenizeAcc n rest (acc.push JsonToken.rbracket)
+    else if c = ':' then
+      tokenizeAcc n rest (acc.push JsonToken.colon)
+    else if c = ',' then
+      tokenizeAcc n rest (acc.push JsonToken.comma)
+    else if c = '"' then
+      match takeString n [] rest with
+      | none => .error "unterminated string literal"
+      | some (body, tail) =>
+        if validStringContentL body then
+          tokenizeAcc n tail (acc.push (JsonToken.strT (String.ofList body)))
+        else
+          .error "malformed string escape sequence"
+    else
+      match takeKeyword (c :: rest) with
+      | some (tok, tail) =>
+        tokenizeAcc n tail (acc.push tok)
+      | none =>
+        if isNumChar c then
+          let (num, tail) := takeNumber n [c] rest
+          if validNumberLitL num then
+            tokenizeAcc n tail (acc.push (JsonToken.numT (String.ofList num)))
+          else
+            .error "malformed number literal"
+        else
+          .error s!"unexpected character: {c}"
+
+/-- `tokenizeAcc` computes `tokenizeAux` with the accumulator prepended. -/
+theorem tokenizeAcc_eq : ∀ (n : Nat) (cs : List Char) (acc : Array JsonToken),
+    tokenizeAcc n cs acc = (tokenizeAux n cs).map (acc.toList ++ ·)
+  | 0,     _,         _   => by simp [tokenizeAcc, tokenizeAux, Except.map]
+  | _ + 1, [],        acc => by simp [tokenizeAcc, tokenizeAux, Except.map]
+  | n + 1, c :: rest, acc => by
+    rw [tokenizeAcc, tokenizeAux]
+    by_cases hws : isWs c
+    · simp only [hws, if_pos]
+      exact tokenizeAcc_eq n rest acc
+    all_goals simp only [hws, Bool.false_eq_true, if_false]
+    split
+    · rw [tokenizeAcc_eq n rest (acc.push JsonToken.lbrace)]
+      cases tokenizeAux n rest <;> simp [Except.map]
+    split
+    · rw [tokenizeAcc_eq n rest (acc.push JsonToken.rbrace)]
+      cases tokenizeAux n rest <;> simp [Except.map]
+    split
+    · rw [tokenizeAcc_eq n rest (acc.push JsonToken.lbracket)]
+      cases tokenizeAux n rest <;> simp [Except.map]
+    split
+    · rw [tokenizeAcc_eq n rest (acc.push JsonToken.rbracket)]
+      cases tokenizeAux n rest <;> simp [Except.map]
+    split
+    · rw [tokenizeAcc_eq n rest (acc.push JsonToken.colon)]
+      cases tokenizeAux n rest <;> simp [Except.map]
+    split
+    · rw [tokenizeAcc_eq n rest (acc.push JsonToken.comma)]
+      cases tokenizeAux n rest <;> simp [Except.map]
+    split
+    · split
+      · rfl
+      · split
+        · rw [tokenizeAcc_eq n _ (acc.push (JsonToken.strT (String.ofList _)))]
+          cases tokenizeAux n _ <;> simp [Except.map]
+        · rfl
+    · split
+      · rw [tokenizeAcc_eq n _ (acc.push _)]
+        cases tokenizeAux n _ <;> simp [Except.map]
+      · split
+        · split
+          · rw [tokenizeAcc_eq n _ (acc.push (JsonToken.numT (String.ofList _)))]
+            cases tokenizeAux n _ <;> simp [Except.map]
+          · rfl
+        · rfl
+
+/-- Tail-recursive tokenizer, definitionally the entry point of `tokenizeAcc`. -/
+def tokenizeAuxTR (n : Nat) (cs : List Char) : Except String (List JsonToken) :=
+  tokenizeAcc n cs #[]
+
+@[csimp]
+theorem tokenizeAux_eq_tokenizeAuxTR : @tokenizeAux = @tokenizeAuxTR := by
+  funext n cs
+  rw [tokenizeAuxTR, tokenizeAcc_eq]
+  cases tokenizeAux n cs <;> simp [Except.map]
+
 /-- Top-level tokenizer: convert a Lean `String` to a list of JSON tokens. The
 fuel is set to twice the input length (a generous safe upper bound on the
 number of recursive calls — each call consumes ≥1 char and the helpers
