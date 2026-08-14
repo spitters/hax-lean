@@ -582,15 +582,16 @@ partial def parseHaxType (j : Json) : ImpType :=
       if elemTypes.isEmpty then .unit
       else .tuple elemTypes
     else if let .ok refData := tyKind.getObjVal? "Ref" then
-      -- Ref encoding. Older hax emits `[Region, inner, Mutability]` (3-elt);
-      -- current hax emits `[Region, inner]` (2-elt, with mutability elsewhere
-      -- or defaulting to immutable). Handle both, falling back to the inner
+      -- Ref encoding. hax emits `[Region, inner, Mutability]` (3-elt), with
+      -- mutability as the boolean `true` for `&mut` and `false` for `&`; an
+      -- older shape spells it `"Mut"`, and a 2-elt shape carries no
+      -- mutability at all. Handle all three, falling back to the inner
       -- type's parse rather than `.unknown` so refs don't collapse the
       -- type-inference cascade — `Ref Array Int` should typecheck against
       -- `Array Int` thanks to the AutoDerefCoe at the consumer surface.
       match refData with
       | .arr #[_, inner, mut_] =>
-        .ref (parseHaxType inner) (mut_ == .str "Mut")
+        .ref (parseHaxType inner) (mut_ == .bool true || mut_ == .str "Mut")
       | .arr #[_, inner] =>
         .ref (parseHaxType inner) false
       | _ => .unknown
@@ -1932,7 +1933,7 @@ partial def parseHaxFileWithTypes (j : Json) :
               result := result ++ sub
             | _ => pure ()
           | _ =>
-            -- Skip Impl blocks for now (methods may lack bodies)
+            -- Impl blocks are skipped: a method there may carry no body.
             pure ()
         | none => pure ()
     return result

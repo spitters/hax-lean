@@ -131,9 +131,20 @@ def main (args : List String) : IO UInt32 := do
     -- when `x : T` is a newtype struct, so the renderer can emit a
     -- type-aware unwrap `«T.0» x` instead of the polymorphic-identity
     -- `«.0»`. Pass is verified (`tElideToNamedProj_erase`).
-    -- Pre-pipeline normalizations: lower `Fn::call` of let-bound `.lam` closures
-    -- to direct applications, and thread mutations across `if`-statement joins.
+    -- Pre-pipeline normalizations: turn each `&mut` write-back into an
+    -- assignment (`tRebindMutCalls` at the call, `tReturnMutParam` at the
+    -- definition, both reading the signature table below), lower `Fn::call` of
+    -- let-bound `.lam` closures to direct applications, and thread mutations
+    -- across `if`-statement joins. The call rewrite runs before the definition
+    -- rewrite: a body whose own tail is a write-back call has to be an
+    -- assignment before `tReplaceTail` reaches it, or the call is dropped as a
+    -- pure value.
+    let writeFns := mutWriteFns fnTypes procTdefs
+    let writers := mutWriteTable writeFns
+    let writeParams := mutWriteParams writeFns
+    IO.eprintln s!"INFO mut-writeback-fns={writers.length}/{(mutWriteCandidates fnTypes).length}"
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
+      let te := tReturnMutParam (writeParams.lookup n) (tRebindMutCalls writers te)
       (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
     let t ← phaseTick "tPipelineFull" t

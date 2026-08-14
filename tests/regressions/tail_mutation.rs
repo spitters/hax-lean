@@ -1,4 +1,6 @@
-// Reproducer: a mutation at the tail of an `if`- or `match`-statement branch.
+// Reproducers for mutations the emitter can drop: one at the tail of an `if`-
+// or `match`-statement branch (first section), one written through a `&mut`
+// argument (second section).
 //
 // Each function below mutates a variable from a position that is the *last
 // item* of an `if` branch — a nested `if`, a `match`, a loop, an `else if`
@@ -126,4 +128,104 @@ pub fn else_if_chain(x: u64, p: bool, q: bool) -> u64 {
         x = x + 1;
     }
     x
+}
+
+// ---------------------------------------------------------------------------
+// `&mut` write-back
+//
+// A function taking `&mut v` and yielding `()` writes through `v`. The
+// extraction has no references, so the function returns `v` and each caller
+// rebinds its own variable from the result. The failure mode this guards
+// against is a call kept in statement position with its result dropped, which
+// leaves the caller's variable at its pre-call value and makes the whole
+// function constant in its inputs.
+
+/// Writes through its single `&mut` parameter and yields `()`.
+///
+/// ```lean
+/// def scale (v : Array (Int)) (k : Int) :=
+///   let v := Hax.array_update v (0 : Int) (Hax.wrapping_mul_w 64 (Hax.index v (0 : Int)) k)
+///   let v := Hax.array_update v (1 : Int) (Hax.wrapping_mul_w 64 (Hax.index v (1 : Int)) k)
+///   v
+/// ```
+pub fn scale(v: &mut [u64; 2], k: u64) {
+    v[0] = v[0].wrapping_mul(k);
+    v[1] = v[1].wrapping_mul(k);
+}
+
+/// Calls a write-back function in statement position and reads the variable
+/// afterwards.
+///
+/// ```lean
+/// def scale_twice (v : Array (Int)) (k : Int) : Array (Int) :=
+///   let out := v
+///   let out := scale out k
+///   let out := scale out k
+///   out
+/// ```
+pub fn scale_twice(v: [u64; 2], k: u64) -> [u64; 2] {
+    let mut out = v;
+    scale(&mut out, k);
+    scale(&mut out, k);
+    out
+}
+
+/// Calls a write-back function inside a loop body, so the mutated variable
+/// becomes the fold accumulator.
+///
+/// ```lean
+/// def scale_rounds (v : Array (Int)) (k : Int) (n : Int) : Array (Int) :=
+///   let out := v
+///   let out := Hax.foldRange (0 : Int) n out fun _i out =>
+///     scale out k
+///   out
+/// ```
+pub fn scale_rounds(v: [u64; 2], k: u64, n: usize) -> [u64; 2] {
+    let mut out = v;
+    for _i in 0..n {
+        scale(&mut out, k);
+    }
+    out
+}
+
+/// Two `&mut` parameters: no single parameter is the result, so the write-back
+/// rewrite is declined and both mutations are still lost. Kept as the marker
+/// for the remaining gap.
+pub fn swap_first(a: &mut [u64; 2], b: &mut [u64; 2]) {
+    let t = a[0];
+    a[0] = b[0];
+    b[0] = t;
+}
+
+/// A `&mut` borrow of an element rather than of a variable: the callee's result
+/// is that element, so the write-back rewrite is declined here too.
+pub fn bump(x: &mut u64) {
+    *x = x.wrapping_add(1);
+}
+
+pub fn bump_first(v: [u64; 2]) -> [u64; 2] {
+    let mut out = v;
+    bump(&mut out[0]);
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Statement after a conditional break in a loop body
+//
+// `encodeForFoldBody`'s `seq` case drops the tail whenever the head contains a
+// surface control-flow node, and `hasSurfaceCF` reports an `ifThenElse` whose
+// *one* branch breaks. Whether the shape below reaches that case, or whether an
+// earlier pass has already inlined the tail into the non-breaking branch, is
+// what this function measures: if `acc` comes back all zeros the tail was
+// dropped.
+
+pub fn break_then_write(n: usize, limit: usize) -> [u64; 4] {
+    let mut acc = [0u64; 4];
+    for i in 0..n {
+        if i > limit {
+            break;
+        }
+        acc[i % 4] = acc[i % 4] + 1;
+    }
+    acc
 }

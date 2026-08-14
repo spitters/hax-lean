@@ -289,6 +289,151 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
     | nil => simp [tDestructure, destructure, TExpr.erase]
     | cons v₂ vs => simp [tDestructure, destructure, TExpr.erase, ih]
 
+/-! ## Untyped twins of the `&mut` write-back rewrites
+
+The write-back table is built from function signatures, which are not part of an
+expression, so both sides read the same `List (String × Nat)` and the square
+below is over that shared table. -/
+
+/-- Untyped twin of `tMutArgRoot`. -/
+def mutArgRoot : ImpExpr → Option String
+  | .var n => some n
+  | .borrow e => mutArgRoot e
+  | .deref e => mutArgRoot e
+  | .typeAscription e _ => mutArgRoot e
+  | _ => none
+
+/-- Untyped twin of `tCallWriteback`. -/
+def callWriteback (writers : List (String × Nat)) (f : String) (args : List ImpExpr) :
+    Option String :=
+  if f == ".0" then none
+  else
+    match writers.lookup f with
+    | some i => (args[i]?).bind mutArgRoot
+    | none => none
+
+/-- Untyped twin of `tRebindCall`. -/
+def rebindCall (writers : List (String × Nat)) (f : String) (args : List ImpExpr) : ImpExpr :=
+  match callWriteback writers f args with
+  | some v => .assign v (.app f args)
+  | none => .app f args
+
+/-- Untyped twin of `tRebindMutCalls`. -/
+def rebindMutCalls (writers : List (String × Nat)) : ImpExpr → ImpExpr
+  | .app f args => rebindCall writers f (mapE writers args)
+  | .lit v => .lit v
+  | .var n => .var n
+  | .letBind n val body =>
+      .letBind n (rebindMutCalls writers val) (rebindMutCalls writers body)
+  | .lam ps body => .lam ps (rebindMutCalls writers body)
+  | .tuple elems => .tuple (mapE writers elems)
+  | .proj e i => .proj (rebindMutCalls writers e) i
+  | .ifThenElse c t e =>
+      .ifThenElse (rebindMutCalls writers c) (rebindMutCalls writers t)
+        (rebindMutCalls writers e)
+  | .match_ scrut arms => .match_ (rebindMutCalls writers scrut) (mapA writers arms)
+  | .unitVal => .unitVal
+  | .seq a b => .seq (rebindMutCalls writers a) (rebindMutCalls writers b)
+  | .borrow e => .borrow (rebindMutCalls writers e)
+  | .deref e => .deref (rebindMutCalls writers e)
+  | .assign n rhs => .assign n (rebindMutCalls writers rhs)
+  | .forLoop v lo hi b =>
+      .forLoop v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
+        (rebindMutCalls writers b)
+  | .forLoopRev v lo hi b =>
+      .forLoopRev v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
+        (rebindMutCalls writers b)
+  | .whileLoop c b => .whileLoop (rebindMutCalls writers c) (rebindMutCalls writers b)
+  | .break_ none => .break_ none
+  | .break_ (some e) => .break_ (some (rebindMutCalls writers e))
+  | .continue_ => .continue_
+  | .earlyReturn e => .earlyReturn (rebindMutCalls writers e)
+  | .questionMark e => .questionMark (rebindMutCalls writers e)
+  | .forFold v lo hi b =>
+      .forFold v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
+        (rebindMutCalls writers b)
+  | .forFoldRev v lo hi b =>
+      .forFoldRev v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
+        (rebindMutCalls writers b)
+  | .whileFold c b => .whileFold (rebindMutCalls writers c) (rebindMutCalls writers b)
+  | .forFoldReturn v lo hi b =>
+      .forFoldReturn v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
+        (rebindMutCalls writers b)
+  | .forFoldRevReturn v lo hi b =>
+      .forFoldRevReturn v (rebindMutCalls writers lo) (rebindMutCalls writers hi)
+        (rebindMutCalls writers b)
+  | .whileFoldReturn c b =>
+      .whileFoldReturn (rebindMutCalls writers c) (rebindMutCalls writers b)
+  | .cfBreak e => .cfBreak (rebindMutCalls writers e)
+  | .cfContinue e => .cfContinue (rebindMutCalls writers e)
+  | .cfBreakContinue e => .cfBreakContinue (rebindMutCalls writers e)
+  | .typeAscription e ty => .typeAscription (rebindMutCalls writers e) ty
+where
+  mapE (writers : List (String × Nat)) : List ImpExpr → List ImpExpr
+    | [] => []
+    | e :: es => rebindMutCalls writers e :: mapE writers es
+  mapA (writers : List (String × Nat)) : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
+    | [] => []
+    | (p, e) :: rest => (p, rebindMutCalls writers e) :: mapA writers rest
+
+/-- Untyped twin of `tReturnMutParam`. -/
+def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
+  match param with
+  | some v => replaceTail body (.var v)
+  | none => body
+
+@[simp] theorem tMutArgRoot_erase (e : TExpr) : tMutArgRoot e = mutArgRoot e.erase := by
+  induction e using TExpr.ind with
+  | borrow _ _ ih => simpa only [tMutArgRoot, TExpr.erase, mutArgRoot] using ih
+  | deref _ _ ih => simpa only [tMutArgRoot, TExpr.erase, mutArgRoot] using ih
+  | ann _ _ ih => simpa only [tMutArgRoot, TExpr.erase] using ih
+  | _ => rfl
+
+@[simp] theorem tCallWriteback_erase (writers : List (String × Nat)) (f : String)
+    (args : List TExpr) :
+    tCallWriteback writers f args = callWriteback writers f (args.map TExpr.erase) := by
+  simp only [tCallWriteback, callWriteback]
+  split
+  · rfl
+  · cases writers.lookup f with
+    | none => rfl
+    | some i =>
+      cases h : args[i]? with
+      | none => simp [h]
+      | some a => simp [h, tMutArgRoot_erase]
+
+@[simp] theorem tRebindCall_erase (writers : List (String × Nat)) (f : String)
+    (args : List TExpr) (ty : ImpType) :
+    (tRebindCall writers f args ty).erase = rebindCall writers f (args.map TExpr.erase) := by
+  simp only [tRebindCall, rebindCall, tCallWriteback_erase]
+  cases callWriteback writers f (args.map TExpr.erase) <;>
+    simp [TExpr.erase, TExpr.eraseList_eq]
+
+@[simp] theorem tReturnMutParam_erase (param : Option String) (body : TExpr) :
+    (tReturnMutParam param body).erase = returnMutParam param body.erase := by
+  cases param with
+  | none => rfl
+  | some v => simp [tReturnMutParam, returnMutParam, tReplaceTail_erase, TExpr.erase]
+
+/-- Commuting diagram: type erasure commutes with `tRebindMutCalls`. -/
+theorem tRebindMutCalls_erase (writers : List (String × Nat)) (e : TExpr) :
+    (tRebindMutCalls writers e).erase = rebindMutCalls writers e.erase := by
+  apply tRebindMutCalls.induct
+    (motive_2 := fun e => (tRebindMutCalls writers e).erase
+                  = rebindMutCalls writers e.erase)
+    (motive_1 := fun es => (tRebindMutCalls.mapE writers es).map TExpr.erase
+                  = rebindMutCalls.mapE writers (es.map TExpr.erase))
+    (motive_3 := fun arms =>
+                  (tRebindMutCalls.mapA writers arms).map (fun pe => (pe.1, pe.2.erase))
+                  = rebindMutCalls.mapA writers (arms.map (fun pe => (pe.1, pe.2.erase))))
+  all_goals (try intros)
+  all_goals
+    first
+      | rfl
+      | simp_all [tRebindMutCalls, rebindMutCalls, rebindCall, callWriteback, TExpr.erase,
+          tRebindMutCalls.mapE, tRebindMutCalls.mapA, rebindMutCalls.mapE, rebindMutCalls.mapA,
+          tRebindCall_erase, TExpr.eraseList_eq, TExpr.eraseArms_eq]
+
 /-! ## Untyped twin of `tThreadMut` -/
 
 /-- Untyped twin of `tThreadMut` (see that function's docstring). -/

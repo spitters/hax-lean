@@ -248,6 +248,187 @@ where
     | [], _ => []
     | (p, e) :: rest, newTail => (p, tReplaceTail e newTail) :: goA rest newTail
 
+/-! ## `&mut` write-back
+
+A Rust `fn f(v: &mut T, …)` writes through the reference and yields `()`. The
+extraction has no references, so `f` returns `v`'s final value and every caller
+rebinds its own variable from that result:
+
+    f(&mut x, y)  ↦  x = f(x, y)
+
+Both halves read one table, `mutWriteFns`: the parameter position a function
+writes back through. A signature admits a candidate (`mutWriteCandidates`) and
+the body decides it (`mutWriteStep`) — a `&mut` parameter written only through
+one of its own fields or elements assigns nothing, and such a function keeps its
+`()` result. `tReturnMutParam` puts the parameter at the end of the callee's
+body and `tRebindMutCalls` turns each call into an assignment, both from that
+one table, so the two sides agree on which functions return a value by
+construction. The result is an ordinary `.assign`, which `tThreadMut`,
+`localMutation` and the renderer's accumulator extraction already carry.
+
+`tRebindMutCalls` runs before `tReturnMutParam`: a body whose own tail is a
+write-back call has to become an assignment first, or `tReplaceTail` drops it
+as a pure value. -/
+
+/-- The position and name of the parameter a function writes back through: the
+    single `&mut` parameter of a function whose Rust result is `()`. Several
+    `&mut` parameters, or a result that carries a value, leave the function
+    with no write-back parameter. -/
+def mutWriteParam (retTy : ImpType) (params : List (String × ImpType)) :
+    Option (Nat × String) :=
+  match retTy with
+  | .unit =>
+      match params.zipIdx.filterMap (fun pi =>
+          match pi.1.2 with
+          | .ref _ true => some (pi.2, pi.1.1)
+          | _ => none) with
+      | [ip] => some ip
+      | _ => none
+  | _ => none
+
+/-- Each function whose signature admits a write-back parameter, as
+    `(function, position, parameter)`. -/
+def mutWriteCandidates (fns : List (String × FnTypeInfo)) : List (String × Nat × String) :=
+  fns.filterMap fun ni =>
+    (mutWriteParam ni.2.retType ni.2.paramTypes).map (fun ip => (ni.1, ip.1, ip.2))
+
+/-- Write-back positions of a resolved table, read at call sites by
+    `tRebindMutCalls`. -/
+def mutWriteTable (ws : List (String × Nat × String)) : List (String × Nat) :=
+  ws.map (fun c => (c.1, c.2.1))
+
+/-- Write-back parameter names of a resolved table, read at the definition by
+    `tReturnMutParam`. -/
+def mutWriteParams (ws : List (String × Nat × String)) : List (String × String) :=
+  ws.map (fun c => (c.1, c.2.2))
+
+/-- The variable an argument in write-back position writes to: the root of the
+    place passed there. `none` for an index or a field, whose callee result is
+    that component rather than the whole variable. -/
+def tMutArgRoot : TExpr → Option String
+  | .mk (.var n) _ => some n
+  | .mk (.borrow e) _ => tMutArgRoot e
+  | .mk (.deref e) _ => tMutArgRoot e
+  | .mk (.ann e) _ => tMutArgRoot e
+  | _ => none
+
+/-- The variable a call to `f` writes back to under the write-back table. The
+    newtype-projection head `.0` is excluded: it is a field read the renderer
+    introduces, not a Rust function, and it is the head an erased `.namedProj`
+    carries. -/
+def tCallWriteback (writers : List (String × Nat)) (f : String) (args : List TExpr) :
+    Option String :=
+  if f == ".0" then none
+  else
+    match writers.lookup f with
+    | some i => (args[i]?).bind tMutArgRoot
+    | none => none
+
+/-- The node a call becomes under the write-back table: an assignment binding
+    the write-back variable to the call's result, or the call itself. -/
+def tRebindCall (writers : List (String × Nat)) (f : String) (args : List TExpr)
+    (ty : ImpType) : TExpr :=
+  match tCallWriteback writers f args with
+  | some v => .mk (.assign v (.mk (.app f args) ty)) ty
+  | none => .mk (.app f args) ty
+
+/-- Bind the write-back variable of every call to a write-back function from
+    that call's result. A call to any other function, and a call whose
+    write-back argument is an index or a field rather than a variable, keeps
+    its own value. -/
+def tRebindMutCalls (writers : List (String × Nat)) : TExpr → TExpr
+  | .mk (.app f args) ty => tRebindCall writers f (mapE writers args) ty
+  | .mk (.lit v) ty => .mk (.lit v) ty
+  | .mk (.var n) ty => .mk (.var n) ty
+  | .mk (.letBind n val body) ty =>
+      .mk (.letBind n (tRebindMutCalls writers val) (tRebindMutCalls writers body)) ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tRebindMutCalls writers body)) ty
+  | .mk (.tuple elems) ty => .mk (.tuple (mapE writers elems)) ty
+  | .mk (.proj e i) ty => .mk (.proj (tRebindMutCalls writers e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+      .mk (.ifThenElse (tRebindMutCalls writers c) (tRebindMutCalls writers t)
+        (tRebindMutCalls writers e)) ty
+  | .mk (.match_ scrut arms) ty =>
+      .mk (.match_ (tRebindMutCalls writers scrut) (mapA writers arms)) ty
+  | .mk .unitVal ty => .mk .unitVal ty
+  | .mk (.seq a b) ty =>
+      .mk (.seq (tRebindMutCalls writers a) (tRebindMutCalls writers b)) ty
+  | .mk (.borrow e) ty => .mk (.borrow (tRebindMutCalls writers e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tRebindMutCalls writers e)) ty
+  | .mk (.assign n rhs) ty => .mk (.assign n (tRebindMutCalls writers rhs)) ty
+  | .mk (.forLoop v lo hi b) ty =>
+      .mk (.forLoop v (tRebindMutCalls writers lo) (tRebindMutCalls writers hi)
+        (tRebindMutCalls writers b)) ty
+  | .mk (.forLoopRev v lo hi b) ty =>
+      .mk (.forLoopRev v (tRebindMutCalls writers lo) (tRebindMutCalls writers hi)
+        (tRebindMutCalls writers b)) ty
+  | .mk (.whileLoop c b) ty =>
+      .mk (.whileLoop (tRebindMutCalls writers c) (tRebindMutCalls writers b)) ty
+  | .mk (.break_ none) ty => .mk (.break_ none) ty
+  | .mk (.break_ (some e)) ty => .mk (.break_ (some (tRebindMutCalls writers e))) ty
+  | .mk .continue_ ty => .mk .continue_ ty
+  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tRebindMutCalls writers e)) ty
+  | .mk (.questionMark e) ty => .mk (.questionMark (tRebindMutCalls writers e)) ty
+  | .mk (.forFold v lo hi b) ty =>
+      .mk (.forFold v (tRebindMutCalls writers lo) (tRebindMutCalls writers hi)
+        (tRebindMutCalls writers b)) ty
+  | .mk (.forFoldRev v lo hi b) ty =>
+      .mk (.forFoldRev v (tRebindMutCalls writers lo) (tRebindMutCalls writers hi)
+        (tRebindMutCalls writers b)) ty
+  | .mk (.whileFold c b) ty =>
+      .mk (.whileFold (tRebindMutCalls writers c) (tRebindMutCalls writers b)) ty
+  | .mk (.forFoldReturn v lo hi b) ty =>
+      .mk (.forFoldReturn v (tRebindMutCalls writers lo) (tRebindMutCalls writers hi)
+        (tRebindMutCalls writers b)) ty
+  | .mk (.forFoldRevReturn v lo hi b) ty =>
+      .mk (.forFoldRevReturn v (tRebindMutCalls writers lo) (tRebindMutCalls writers hi)
+        (tRebindMutCalls writers b)) ty
+  | .mk (.whileFoldReturn c b) ty =>
+      .mk (.whileFoldReturn (tRebindMutCalls writers c) (tRebindMutCalls writers b)) ty
+  | .mk (.cfBreak e) ty => .mk (.cfBreak (tRebindMutCalls writers e)) ty
+  | .mk (.cfContinue e) ty => .mk (.cfContinue (tRebindMutCalls writers e)) ty
+  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tRebindMutCalls writers e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tRebindMutCalls writers e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tRebindMutCalls writers e)) ty
+where
+  mapE (writers : List (String × Nat)) : List TExpr → List TExpr
+    | [] => []
+    | e :: es => tRebindMutCalls writers e :: mapE writers es
+  mapA (writers : List (String × Nat)) : List (ImpPat × TExpr) → List (ImpPat × TExpr)
+    | [] => []
+    | (p, e) :: rest => (p, tRebindMutCalls writers e) :: mapA writers rest
+
+/-- End a write-back function's body with its write-back parameter, keeping
+    every statement of the body ahead of it. The body's own tail is the Rust
+    `()` result and carries no information, so replacing it loses nothing. A
+    function with no write-back parameter is unchanged. -/
+def tReturnMutParam (param : Option String) (body : TExpr) : TExpr :=
+  match param with
+  | some v => tReplaceTail body (.mk (.var v) .unknown)
+  | none => body
+
+/-- Keep the candidates whose body assigns their write-back parameter once the
+    calls inside it are rebound under `prev`. A parameter written only through a
+    field or an element of itself is assigned nothing, and such a function keeps
+    its `()` result, so its callers keep discarding it and its emitted form is
+    unchanged. -/
+def mutWriteStep (defs : List (String × TExpr)) (prev : List (String × Nat))
+    (cands : List (String × Nat × String)) : List (String × Nat × String) :=
+  cands.filter fun c =>
+    match defs.lookup c.1 with
+    | some body => (tAssignedVars (tRebindMutCalls prev body)).contains c.2.2
+    | none => false
+
+/-- The write-back functions of an export. Two rounds, so a parameter written
+    only by a nested write-back call is reached; the same table drives the call
+    sites and the definitions, so the two sides cannot disagree about which
+    functions return a value. -/
+def mutWriteFns (fns : List (String × FnTypeInfo)) (defs : List (String × TExpr)) :
+    List (String × Nat × String) :=
+  let cands := mutWriteCandidates fns
+  let r1 := mutWriteStep defs [] cands
+  mutWriteStep defs (mutWriteTable r1) cands
+
 /-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
     `if`-statement detection in `tThreadMut` looks through `.ann` and thus
     commutes with type erasure. No `.ann` nodes exist at this pre-pipeline

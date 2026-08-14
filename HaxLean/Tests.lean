@@ -332,4 +332,90 @@ def pureMatchStmt : TExpr :=
 #eval (tVarRefs (tThreadMut true matchStmt)).contains "_mtup"        -- true
 #eval (tThreadMut true pureMatchStmt).erase == pureMatchStmt.erase   -- true
 
+/-! ## `&mut` write-back
+
+A Rust `fn f(v: &mut T, …)` yields `()` and writes through `v`. The extraction
+returns `v` from `f` and rebinds it at every call, both sides reading the table
+`mutWriteFns` resolves from the export's signatures and bodies.
+
+The five signatures below are the four shapes a signature can take (write-back,
+a result that carries a value, two `&mut` parameters, and a `&mut` parameter
+written only through a field) plus a function whose parameter is written only by
+a nested write-back call. The three bodies decide which candidates survive: `f`
+assigns its parameter, `m` writes through a field and so assigns `_assign`
+instead, and `n` writes only by calling `f`. -/
+
+def mutStateTy : ImpType := .array .int 8
+def mutBlockTy : ImpType := .array .int 64
+
+/-- `fn f(st: &mut [u32; 8], blk: &[u8; 64])`. -/
+def writebackSig : FnTypeInfo :=
+  ⟨[("st", .ref mutStateTy true), ("blk", .ref mutBlockTy false)], .unit⟩
+/-- `fn h(st: &mut [u32; 8]) -> [u8; 32]`. -/
+def valueSig : FnTypeInfo := ⟨[("st", .ref mutStateTy true)], .array .int 32⟩
+/-- `fn k(st: &mut [u32; 8], o: &mut [u8; 64])`. -/
+def twoMutSig : FnTypeInfo :=
+  ⟨[("st", .ref mutStateTy true), ("o", .ref mutBlockTy true)], .unit⟩
+/-- `fn m(self: &mut S)`. -/
+def fieldSig : FnTypeInfo := ⟨[("self", .ref (.adt "S" []) true)], .unit⟩
+/-- `fn n(v: &mut [u32; 8], blk: &[u8; 64])`. -/
+def nestedSig : FnTypeInfo :=
+  ⟨[("v", .ref mutStateTy true), ("blk", .ref mutBlockTy false)], .unit⟩
+
+def writebackFns : List (String × FnTypeInfo) :=
+  [("f", writebackSig), ("h", valueSig), ("k", twoMutSig), ("m", fieldSig),
+   ("n", nestedSig)]
+
+/-- `st = q;` — `f`'s body. -/
+def writebackBody : TExpr :=
+  .mk (.seq (.mk (.assign "st" (.mk (.var "q") mutStateTy)) .unit) (.mk .unitVal .unit)) .unit
+/-- `self.buf = q;` — `m`'s body, whose write lands on `_assign`. -/
+def fieldBody : TExpr :=
+  .mk (.seq (.mk (.assign "_assign" (.mk (.var "q") mutStateTy)) .unit)
+    (.mk .unitVal .unit)) .unit
+/-- `f(&mut v, blk);` — `n`'s body. -/
+def nestedBody : TExpr :=
+  .mk (.seq
+    (.mk (.app "f" [.mk (.borrow (.mk (.var "v") mutStateTy)) (.ref mutStateTy true),
+      .mk (.var "blk") (.ref mutBlockTy false)]) .unit) (.mk .unitVal .unit)) .unit
+
+def writebackDefs : List (String × TExpr) :=
+  [("f", writebackBody), ("m", fieldBody), ("n", nestedBody)]
+
+/-- `f(&mut st, blk); digest(st)` — the call in statement position whose result
+    carries `st`'s update. -/
+def writebackStmt : TExpr :=
+  .mk (.seq
+    (.mk (.app "f" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true),
+      .mk (.var "blk") (.ref mutBlockTy false)]) .unit)
+    (.mk (.app "digest" [.mk (.var "st") mutStateTy]) mutBlockTy)) mutBlockTy
+
+/-- `f(&mut a[0])` — the borrowed place is an element, so the result is that
+    element rather than `a`. -/
+def writebackIndexed : TExpr :=
+  .mk (.app "f" [.mk (.borrow (.mk (.app "index"
+    [.mk (.var "a") mutStateTy, .mk (.lit (.int 0)) .int]) .int)) (.ref .int true)]) .unit
+
+/-- `h(&mut st)` — a call to a function that is not a write-back function. -/
+def valueCall : TExpr :=
+  .mk (.app "h" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true)])
+    (.array .int 32)
+
+def writebackTable : List (String × Nat) :=
+  mutWriteTable (mutWriteFns writebackFns writebackDefs)
+
+#eval mutWriteCandidates writebackFns
+  -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
+#eval mutWriteStep writebackDefs [] (mutWriteCandidates writebackFns)
+  -- [("f", 0, "st")]
+#eval mutWriteFns writebackFns writebackDefs        -- [("f", 0, "st"), ("n", 0, "v")]
+#eval mutWriteParams (mutWriteFns writebackFns writebackDefs)  -- [("f", "st"), ("n", "v")]
+#eval tAssignedVars (tRebindMutCalls writebackTable writebackStmt)      -- ["st"]
+#eval tAssignedVars (tRebindMutCalls writebackTable writebackIndexed)   -- []
+#eval (tRebindMutCalls writebackTable valueCall).erase == valueCall.erase  -- true
+#eval tAssignedVars (tThreadMut true (tRebindMutCalls writebackTable writebackStmt))  -- ["st"]
+#eval (tReturnMutParam (some "st") writebackBody).erase
+        == ImpExpr.seq (.assign "st" (.var "q")) (.var "st")            -- true
+#eval (tReturnMutParam none writebackBody).erase == writebackBody.erase  -- true
+
 end Hax.Tests
