@@ -382,9 +382,22 @@ private partial def extractCondMutationsAux (locals : List String) :
       (n, rhs) :: extractCondMutationsAux locals rest
     else extractCondMutationsAux locals rest
   | .seq .unitVal rest => extractCondMutationsAux locals rest
+  -- A nested conditional or loop in statement position mutates variables of
+  -- the enclosing branch; both arms and the loop body are searched, so a
+  -- variable assigned only under a nested `if` is still an accumulator.
+  | .seq (.ifThenElse _ t e) rest =>
+    extractCondMutationsAux locals t ++ extractCondMutationsAux locals e
+      ++ extractCondMutationsAux locals rest
+  | .seq (.forFold _ _ _ body) rest | .seq (.forFoldRev _ _ _ body) rest
+  | .seq (.whileFold _ body) rest =>
+    extractCondMutationsAux locals body ++ extractCondMutationsAux locals rest
   | .seq _ rest => extractCondMutationsAux locals rest
   | .letBind n rhs (.var v) =>
     if n == v && !locals.contains n then [(n, rhs)] else []
+  | .ifThenElse _ t e =>
+    extractCondMutationsAux locals t ++ extractCondMutationsAux locals e
+  | .forFold _ _ _ body | .forFoldRev _ _ _ body | .whileFold _ body =>
+    extractCondMutationsAux locals body
   -- Recurse into non-mutation letBind. Track fresh-init locals so that
   -- subsequent mutation-shaped `let n := X; n` patterns whose `n` is the
   -- inner-introduced local are NOT mistaken for outer accumulators.
@@ -402,6 +415,29 @@ private partial def extractCondMutationsAux (locals : List String) :
 /-- Top-level wrapper. -/
 private partial def extractCondMutations (e : ImpExpr) : List (String × ImpExpr) :=
   extractCondMutationsAux [] e
+
+/-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
+    bindings. An `if` or `match` at the tail distributes `newTail` into its
+    branches; a loop at the tail is kept as a statement ahead of `newTail`; a
+    pure value at the tail is replaced. The untyped twin of `tReplaceTail`. -/
+private partial def replaceTail (newTail : ImpExpr) : ImpExpr → ImpExpr
+  | .letBind n v body => .letBind n v (replaceTail newTail body)
+  | .seq a b => .seq a (replaceTail newTail b)
+  | .ifThenElse c t f => .ifThenElse c (replaceTail newTail t) (replaceTail newTail f)
+  | .match_ s arms => .match_ s (arms.map fun (p, b) => (p, replaceTail newTail b))
+  | e@(.forFold ..) | e@(.forFoldRev ..) | e@(.whileFold ..)
+  | e@(.forFoldReturn ..) | e@(.forFoldRevReturn ..) | e@(.whileFoldReturn ..) =>
+    .seq e newTail
+  | _ => newTail
+
+/-- Variables a statement-`if` branch mutates under nested control (a nested
+    `if`, `match` or loop) that the flat per-variable conditional rendering
+    cannot reach: the mutations `extractCondMutations` finds beyond the
+    top-level bindings of the branch. -/
+private def nestedCondMutations (branch : ImpExpr) : List String :=
+  let flat := (extractCondAllBindings branch).map (·.1)
+  ((extractCondMutations branch).map (·.1)).filter fun n =>
+    !flat.contains n && !n.startsWith "_assign"
 
 /-- Transform a forFold body for accumulator-based rendering.
     Converts env-based mutation patterns to let-chain with accumulator return.
@@ -1588,6 +1624,17 @@ where
         let ifInd := indent ifLvl
         let ifInd1 := indent (ifLvl + 1)
         s!"{ifInd}if {condToLean cond} then\n{atLine thn (ifLvl + 1)}\n{ifInd}else\n{ifInd1}Hax.cfContinue ()\n{seqToLean lvl .unitVal e2}"
+      else if !(nestedCondMutations thn ++ nestedCondMutations els).isEmpty then
+        -- A branch mutates a variable under nested control (a nested `if`,
+        -- `match` or loop). The join returns the tuple of every variable
+        -- either branch mutates and rebinds it:
+        --   let (v₁, …, vₙ) := if cond then <thn; (v₁, …, vₙ)> else <els; (v₁, …, vₙ)>
+        let names := ((extractCondMutations thn ++ extractCondMutations els).map (·.1)
+          |>.filter (fun n => !n.startsWith "_assign")).eraseDups
+        let tup := accTuple names
+        let ifE : ImpExpr := .ifThenElse cond (replaceTail tup thn) (replaceTail tup els)
+        let pat := toLean tup 0
+        s!"{ind}let {pat} :=\n{atLine ifE (lvl + 1)}\n{atLine e2 lvl}"
       else if els == .unitVal then
         -- One-sided: if cond then {let x := rhs; x} else unitVal
         let allBindings := extractCondAllBindings thn
@@ -4326,3 +4373,4 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax
+

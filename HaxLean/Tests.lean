@@ -549,4 +549,36 @@ def breakThenWrite : ImpExpr :=
     (.seq (.cfBreak .unitVal) (.assign "acc" (.lit (.int 1))))
   == ImpExpr.cfBreak (.var "acc")  -- true
 
+/-! ## Mutations under a nested `if` inside a loop body
+
+The post-pipeline form of
+
+    let mut in_idx = 0; let mut bits = 0u32; let mut total = 0u32;
+    for out_idx in 0..out_len {
+        if bits == 0 {
+            if in_idx < input.len() { total = input[in_idx] as u32; in_idx += 1; }
+            bits = 8;
+        }
+        bits -= 4;
+        result[out_idx] = ((total >> bits) & 15) as u8;
+    }
+
+(FIPS 205 `base_w`). `total` and `in_idx` are assigned only under the nested
+`if`; both are carried in the `whileFold` state and rebound at the join of the
+outer `if`. -/
+def nestedIfLoop : ImpExpr :=
+  (.letBind "result" (.app "repeat" [(.lit (ImpLit.int 0)), (.lit (ImpLit.int 35))]) (.letBind "in_idx" (.lit (ImpLit.int 0)) (.letBind "bits" (.lit (ImpLit.int 0)) (.letBind "total" (.lit (ImpLit.int 0)) (.letBind "out_idx" (.lit (ImpLit.int 0)) (.seq (.whileFold (.lit (ImpLit.bool true)) (.ifThenElse (.app "Lt" [(.var "out_idx"), (.var "out_len")]) (.seq (.ifThenElse (.app "Eq" [(.var "bits"), (.lit (ImpLit.int 0))]) (.seq (.ifThenElse (.app "Lt" [(.var "in_idx"), (.app "len" [(.var "input")])]) (.seq (.seq (.letBind "total" (.app "cast#32" [(.app "index" [(.var "input"), (.var "in_idx")])]) (.var "total")) .unitVal) (.seq (.seq (.letBind "in_idx" (.app "Add" [(.var "in_idx"), (.lit (ImpLit.int 1))]) (.var "in_idx")) .unitVal) .unitVal)) .unitVal) (.seq (.seq (.letBind "bits" (.lit (ImpLit.int 8)) (.var "bits")) .unitVal) .unitVal)) .unitVal) (.seq (.seq (.letBind "bits" (.app "Sub" [(.var "bits"), (.lit (ImpLit.int 4))]) (.var "bits")) .unitVal) (.seq (.seq (.letBind "result" (.app "array_update" [(.var "result"), (.var "out_idx"), (.app "cast#8" [(.app "BitAnd#32" [(.app "Shr#32" [(.var "total"), (.var "bits")]), (.lit (ImpLit.int 15))])])]) (.var "result")) .unitVal) (.seq (.seq (.letBind "out_idx" (.app "Add" [(.var "out_idx"), (.lit (ImpLit.int 1))]) (.var "out_idx")) .unitVal) .unitVal)))) (.seq (.cfBreak .unitVal) .unitVal))) (.var "result")))))))
+
+/-- The rendering of `e` contains `s` exactly once. -/
+def rendersOnce (e : ImpExpr) (s : String) : Bool :=
+  ((toLean e).splitOn s).length == 2
+
+#guard rendersOnce nestedIfLoop "Hax.whileFold (total, in_idx, bits, result, out_idx)"
+#guard rendersOnce nestedIfLoop "let (total, in_idx, bits) :="
+#guard rendersOnce nestedIfLoop
+  "let total := if Hax.lt in_idx (Hax.array_len input) then Hax.castVal_w 32 (Hax.index input in_idx) else total"
+#guard rendersOnce nestedIfLoop
+  "let in_idx := if Hax.lt in_idx (Hax.array_len input) then Hax.add in_idx (1 : Int) else in_idx"
+#guard rendersOnce nestedIfLoop "Hax.cfContinue (total, in_idx, bits, result, out_idx)"
+
 end Hax.Tests

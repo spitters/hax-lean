@@ -318,3 +318,49 @@ pub fn break_then_write(n: usize, limit: usize) -> [u64; 4] {
     }
     acc
 }
+
+// ---------------------------------------------------------------------------
+// Mutations under a nested `if` inside a loop body
+//
+// The renderer's accumulator extraction reads the mutations of a statement-`if`
+// branch through nested `if`s, `match`es and loops, and a branch that mutates
+// under nested control is joined by a tuple rebinding. The failure mode this
+// guards against is a fold state holding only the variables assigned at the top
+// level of the branch, so the loop reads the initial `total` and `in_idx` on
+// every iteration.
+//
+// ```lean
+// Hax.whileFold (total, in_idx, bits, result, out_idx) (fun _ => true)
+//     fun (total, in_idx, bits, result, out_idx) =>
+//   if Hax.lt out_idx out_len then
+//     let (total, in_idx, bits) :=
+//       if Hax.beq bits (0 : Int) then
+//         let total := if Hax.lt in_idx (Hax.array_len input) then … else total
+//         let in_idx := if Hax.lt in_idx (Hax.array_len input) then Hax.add in_idx (1 : Int) else in_idx
+//         let bits := (8 : Int)
+//         (total, in_idx, bits)
+//       else
+//         (total, in_idx, bits)
+//     …
+// ```
+
+/// FIPS 205 `base_w` at `w = 16`: `total` and `in_idx` are assigned only under
+/// the nested `if`.
+pub fn nested_if_in_loop(input: &[u8], out_len: usize) -> [u8; 35] {
+    let mut result = [0u8; 35];
+    let mut in_idx = 0;
+    let mut bits = 0u32;
+    let mut total = 0u32;
+    for out_idx in 0..out_len {
+        if bits == 0 {
+            if in_idx < input.len() {
+                total = input[in_idx] as u32;
+                in_idx += 1;
+            }
+            bits = 8;
+        }
+        bits -= 4;
+        result[out_idx] = ((total >> bits) & 15) as u8;
+    }
+    result
+}

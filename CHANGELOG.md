@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The renderer's accumulator extraction reads a statement-`if` branch's
+  mutations through nested `if`s, `match`es and loops, and a branch that
+  mutates a variable under nested control is joined by a tuple rebinding
+  (`let (v₁, …, vₙ) := if c then … else …`). A loop whose body assigned a
+  variable only under a nested `if` previously omitted it from the fold state
+  (FIPS 205 `base_w`: `total` and `in_idx`).
+
 ## 0.1.0-alpha.1 — 2026-07-18 (pre-release)
 
 Pre-release research code (SemVer pre-release; major version 0). Interfaces,
