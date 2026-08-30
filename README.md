@@ -1,9 +1,9 @@
 # Verified Hax Pipeline in Lean 4
 
-Formal verification of the [hax](https://github.com/hacspec/hax) compiler phases
+Formal verification of the [hax](https://github.com/cryspen/hax) compiler phases
 that lower a Rust subset to a purely functional form, with the `haxpipeT` CLI that
 drives the pipeline on hax JSON dumps. It is a verified counterpart to part of the
-[hax](https://github.com/hacspec/hax) and
+[hax](https://github.com/cryspen/hax) and
 [Aeneas](https://github.com/AeneasVerif/aeneas) Rust-to-functional pipelines.
 
 > 🚧 **Under construction — experimental research prototype.** Interfaces, proofs,
@@ -133,7 +133,7 @@ Untyped-layer correctness, the foundation the typed `_erase` equations reduce to
 ## Running the CLI
 
 `haxpipeT` reads a hax JSON dump (produced by `cargo hax json` from the
-[hax](https://github.com/hacspec/hax) toolchain) and emits Lean 4 source via the
+[hax](https://github.com/cryspen/hax) toolchain) and emits Lean 4 source via the
 typed pipeline.
 
 | Flag | Output |
@@ -231,7 +231,7 @@ functional, proof-facing counterpart is CatCrypt's `RawCode`.
 ## Upstream & related
 
 - **hax** — the upstream Rust extraction toolchain this project formalizes:
-  <https://github.com/hacspec/hax>
+  <https://github.com/cryspen/hax>
 - **hax paper** — Bhargavan, Buyse, Franceschino, Hansen, Kiefer,
   Schneider-Bensch, Spitters, *hax: Verifying Security-Critical Rust Software
   using Multiple Provers*, IACR ePrint 2025/142:
