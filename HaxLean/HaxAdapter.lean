@@ -960,8 +960,8 @@ decreasing_by exact getObjVal?_decreases h_c
     `j` is the `contents` (ExprKind). -/
 def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
   -- Unit variants come as plain strings
-  match j with
-  | .str "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
+  match j.getStr? with
+  | .ok "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
   | _ => pure ()
 
   -- Struct variants: {"VariantName": {fields...}}
@@ -1139,7 +1139,7 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
       | .ok opJ => binOpName opJ
       | _ => "op"
     -- Strip "Assign" suffix to get base op (BitXorAssign → BitXor)
-    let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
+    let op := if rawOp.endsWith "Assign" then (rawOp.dropEnd 6).toString else rawOp
     match h_AO_lhs : data.getObjVal? "lhs" with
     | .ok lhsJ =>
       let lhs ← parseHaxExpr lhsJ
@@ -2579,7 +2579,7 @@ where
       let rawOp := match data.getObjVal? "op" with
         | .ok opJ => binOpName opJ
         | _ => "op"
-      let op := if rawOp.endsWith "Assign" then rawOp.dropRight 6 else rawOp
+      let op := if rawOp.endsWith "Assign" then (rawOp.dropEnd 6).toString else rawOp
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let rec stripD2 : TExpr → TExpr

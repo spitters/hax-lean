@@ -100,7 +100,7 @@ private theorem denoteMatchArms'_wrapReturns_wrapContinue
     obtain ⟨pat, body⟩ := pa
     simp only [List.map_cons]
     unfold denoteMatchArms'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases hm : matchPat pat v env with
     | some env' =>
       simp only [set, StateT.set, bind, StateT.bind]
@@ -878,7 +878,7 @@ private theorem denoteMatchArms'_explicitMonadic (bi : Builtins) (fuel : Nat)
     obtain ⟨pat, body⟩ := pa
     simp only [List.map_cons]
     unfold denoteMatchArms'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases hm : matchPat pat v env with
     | some env' =>
       simp only [set, StateT.set, bind, StateT.bind]

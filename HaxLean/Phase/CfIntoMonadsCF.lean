@@ -22,13 +22,13 @@ up to `Outcome.encodeCF4` encoding (`earlyRet v` → `val (controlFlow true v)`)
 * `NoLoops e` — no `forLoop`, `whileLoop`, `break_`, or `continue_`
 * `NoQuestionMark e` — no `questionMark` subexpressions
 
-## Refactored design
+## Design
 
 With dedicated AST constructors (`cfBreak`, `cfContinue`, `forFold`, etc.),
-the `NoReservedApps` precondition is no longer needed. The `app` case in
-`CF4_combined` now only handles regular function calls (non-reserved names).
-The reserved-name dispatch is handled by dedicated constructor cases
-(`cfBreak`, `cfContinue`, `forFold`, `whileFold`, etc.) which unfold to
+the simulation needs no `NoReservedApps` precondition. The `app` case in
+`CF4_combined` handles regular function calls (non-reserved names) only;
+reserved-name dispatch belongs to the dedicated constructor cases
+(`cfBreak`, `cfContinue`, `forFold`, `whileFold`, etc.), which unfold to
 their corresponding `denote'` semantics directly.
 -/
 
@@ -203,7 +203,7 @@ private theorem denoteMatchArms'_cfIntoMonads (bi : Builtins) (fuel : Nat)
     obtain ⟨pat, body⟩ := pa
     simp only [List.map_cons]
     unfold denoteMatchArms'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases hm : matchPat pat v env with
     | some env' =>
       simp only [hm, set, StateT.set, bind, StateT.bind]
@@ -629,7 +629,7 @@ private theorem denoteMatchArms'_earlyRet_not_cf (bi : Builtins) (fuel : Nat)
     intro env w
     obtain ⟨pat, body⟩ := pa
     unfold denoteMatchArms'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases hm : matchPat pat v env with
     | some env' =>
       simp only [hm, set, StateT.set, bind, StateT.bind]
@@ -649,8 +649,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
     simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
   | var n =>
     intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
-    cases env n <;> (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
+    cases env n <;> (intro h; exact Outcome.noConfusion h)
   | unitVal =>
     intro fuel env w; unfold denote'
     simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1633,7 +1633,7 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
   | var n =>
     intro fuel env
     simp only [cfIntoMonads]; unfold denote'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases env n <;> rfl
   | unitVal =>
     intro fuel env; simp only [cfIntoMonads]; unfold denote'; rfl
