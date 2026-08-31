@@ -19,7 +19,7 @@ up to `Outcome.encodeCF3` encoding (broke/continued → controlFlow values).
 ## Refactored design
 
 With dedicated AST constructors (`forFold`, `whileFold`, `cfBreak`, `cfContinue`),
-the `NoReservedApps` predicate is no longer needed. The `denote'` interpreter
+no `NoReservedApps` predicate is needed. The `denote'` interpreter
 dispatches on these constructors directly, eliminating the string-matching in
 `denoteApp'`. This simplifies both the proof obligations and the proof structure:
 - No need to unfold `denoteApp'` and match on 7 string equalities
@@ -382,7 +382,7 @@ private theorem denoteMatchArms_combined (bi : Builtins) (hbi : Builtins.DeepNoC
     obtain ⟨pat, body⟩ := arm
     simp only [List.map_cons]
     unfold denoteMatchArms denoteMatchArms'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases hm : matchPat pat v env with
     | none =>
       simp only [hm]
@@ -481,7 +481,7 @@ private theorem denoteMatchArms_combined_gen (bi : Builtins) (hbi : Builtins.Dee
     obtain ⟨pat, body⟩ := arm
     simp only [List.map_cons]
     unfold denoteMatchArms denoteMatchArms'
-    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
     cases hm : matchPat pat v env with
     | none =>
       simp only [hm]
@@ -1114,8 +1114,8 @@ private theorem denoteWhile_combined_return (nested : Bool)
 
 /-! ### Main theorem
 
-The key simplification from dedicated constructors: `FL_combined` no longer
-needs `NoReservedApps`. For the `app` case, since `app` in the source can only
+With dedicated constructors, `FL_combined` needs no `NoReservedApps`
+hypothesis. For the `app` case, since `app` in the source can only
 have non-reserved names (reserved names use dedicated constructors), `denote'`
 dispatches to `denoteApp'` which is now just the regular builtin call.
 
@@ -1147,18 +1147,18 @@ private theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlo
   | var n =>
     intro fuel env henv
     refine ⟨?_, ?_, ?_, ?_⟩
-    · unfold denote; simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    · unfold denote; simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
       cases env n <;> simp [pure, Pure.pure, StateT.pure] <;> exact henv
-    · unfold denote; simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    · unfold denote; simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
       intro w; cases hx : env n with
       | some v =>
         simp [pure, Pure.pure, StateT.pure, Outcome.val.injEq]; intro hw; subst hw
         exact henv n v hx
       | none => simp [pure, Pure.pure, StateT.pure]
-    · unfold denote; simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+    · unfold denote; simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
       intro w; cases env n <;> simp [pure, Pure.pure, StateT.pure]
     · show denote' bi fuel (.var n) env = _; unfold denote denote'
-      simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get]
+      simp only [bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, pure, Pure.pure]
       cases env n <;> simp [pure, Pure.pure, StateT.pure, Outcome.encodeCF3gen_val,
         Outcome.encodeCF3gen_err]
   | unitVal =>

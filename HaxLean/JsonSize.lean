@@ -188,7 +188,7 @@ private theorem array_fromJson?_arr_id (a : Array Json) :
   show a.mapM (m := Except String) (fun x => Except.ok x) = .ok a
   have : a.mapM (m := Except String) (pure <| id ·) = pure (a.map id) :=
     Array.mapM_pure
-  simpa using this
+  simpa [pure, Except.pure] using this
 
 /-- Strict decrease for every element of an `Array Json` retrieved via
     `j.getObjValAs? (Array Json) k`.
