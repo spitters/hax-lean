@@ -627,6 +627,21 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def slice_range {α : Type} (arr : Array α) (lo hi : Int) : Array α :=
   (arr.toList.drop lo.toNat).take (hi.toNat - lo.toNat) |>.toArray
 
+/-- Range update: `arr` with position `lo + k` set to `src[k]` for every `k`
+    below both `hi - lo` and `src.size`. Positions outside `lo ..< hi`, and
+    positions of that range beyond `src`'s length or `arr`'s size, keep their
+    values, so the result has the size of `arr`.
+
+    The functional form of `arr[lo..hi].copy_from_slice(src)`, whose Rust
+    precondition is `hi - lo = src.len()`. -/
+def slice_update {α : Type} (arr : Array α) (lo hi : Int) (src : Array α) : Array α :=
+  let l := lo.toNat
+  let n := min (hi.toNat - l) src.size
+  (List.range n).foldl
+    (fun acc k => match src[k]? with
+      | some v => acc.setIfInBounds (l + k) v
+      | none => acc) arr
+
 /-- Collect range into array. -/
 @[inline] def range (lo hi : Int) : Array Int :=
   (List.range (hi.toNat - lo.toNat)).map (· + lo.toNat) |>.map (Int.ofNat) |>.toArray

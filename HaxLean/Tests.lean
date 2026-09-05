@@ -491,6 +491,64 @@ def writebackFieldCall : TExpr :=
 #eval toLean (.app "LoginOutcome::LoggedIn" [.var "session_key"])
   == "LoginOutcome.LoggedIn session_key"  -- true
 
+/-! ## Slice-range writes
+
+A write through a slice-range place `x[lo..hi]` lowers to an assignment of `x`
+to a functional `slice_update` of that range from the call's result. The
+fixtures pin the three bounded range spellings, the declined full range, and
+the rendered call. -/
+
+/-- `header[16..48].copy_from_slice(sig)`, as the export spells it. -/
+def sliceRangeCall : TExpr :=
+  .mk (.app "copy_from_slice"
+    [.mk (.app "index_mut" [.mk (.var "header") mutBlockTy,
+        .mk (.app "Range" [.mk (.lit (.int 16)) .int, .mk (.lit (.int 48)) .int]) .unknown])
+      mutBlockTy,
+     .mk (.var "sig") mutBlockTy]) .unit
+
+/-- `header[..16].copy_from_slice(nonce)`, whose lower bound is `0`. -/
+def sliceToCall : TExpr :=
+  .mk (.app "copy_from_slice"
+    [.mk (.app "index_mut" [.mk (.var "header") mutBlockTy,
+        .mk (.app "RangeTo" [.mk (.lit (.int 16)) .int]) .unknown]) mutBlockTy,
+     .mk (.var "nonce") mutBlockTy]) .unit
+
+/-- `header[16..].copy_from_slice(tail)`, whose upper bound is the receiver's
+    length. -/
+def sliceFromCall : TExpr :=
+  .mk (.app "copy_from_slice"
+    [.mk (.app "index_mut" [.mk (.var "header") mutBlockTy,
+        .mk (.app "RangeFrom" [.mk (.lit (.int 16)) .int]) .unknown]) mutBlockTy,
+     .mk (.var "tail") mutBlockTy]) .unit
+
+def sliceWriteTable : List (String × Nat) := writebackTable ++ builtinWriteTable
+
+#eval (tRebindMutCalls sFields sliceWriteTable sliceRangeCall).erase
+  == ImpExpr.assign "header" (.app "slice_update"
+       [.var "header", .lit (.int 16), .lit (.int 48),
+        .app "copy_from_slice"
+          [.app "index_mut" [.var "header", .app "Range" [.lit (.int 16), .lit (.int 48)]],
+           .var "sig"]])  -- true
+#eval (tRebindMutCalls sFields sliceWriteTable sliceToCall).erase
+  == ImpExpr.assign "header" (.app "slice_update"
+       [.var "header", .lit (.int 0), .lit (.int 16),
+        .app "copy_from_slice"
+          [.app "index_mut" [.var "header", .app "RangeTo" [.lit (.int 16)]],
+           .var "nonce"]])  -- true
+#eval (tRebindMutCalls sFields sliceWriteTable sliceFromCall).erase
+  == ImpExpr.assign "header" (.app "slice_update"
+       [.var "header", .lit (.int 16), .app "len" [.var "header"],
+        .app "copy_from_slice"
+          [.app "index_mut" [.var "header", .app "RangeFrom" [.lit (.int 16)]],
+           .var "tail"]])  -- true
+#eval tAssignedVars (tRebindMutCalls sFields sliceWriteTable sliceRangeCall)  -- ["header"]
+-- Declined: a full range carries no bounds.
+#eval (tMutArgSlice (.mk (.app "index_mut" [.mk (.var "header") mutBlockTy,
+    .mk (.app "RangeFull" []) .unknown]) mutBlockTy)).isNone  -- true
+#eval toLean (.app "slice_update"
+    [.var "header", .lit (.int 0), .lit (.int 16), .var "nonce"])
+  == "Hax.slice_update header (0 : Int) (16 : Int) nonce"  -- true
+
 /-! ## Fold-body tails that carry mutations
 
 The plain-fold encoder distributes into a `match` tail, keeps a mutation or a

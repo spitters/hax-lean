@@ -266,7 +266,9 @@ of the callee's body and `tRebindMutCalls` turns each call into an assignment �
 a call whose `&mut` argument is a single-level field place `&mut x.f` becomes a
 functional field update of `x` from the call's result. Both read that one
 table, so the two sides agree on which functions return a value by
-construction. The result is an ordinary `.assign`, which `tThreadMut`,
+construction. A call whose `&mut` argument is a slice-range place
+`&mut x[lo..hi]` becomes a functional range update of `x` in the same way.
+The result is an ordinary `.assign`, which `tThreadMut`,
 `localMutation` and the renderer's accumulator extraction already carry.
 
 `tRebindMutCalls` runs before `tReturnMutParam`: a body whose own tail is a
@@ -317,10 +319,9 @@ def mutWriteParams (ws : List (String × Nat × String)) : List (String × Strin
     that model already expects.
 
     The table covers a receiver that is a plain place — a variable, borrow,
-    deref or ascription, the forms `tMutArgRoot` resolves. A slice-range
-    receiver, `dst[..n].copy_from_slice(src)`, resolves to `none` and is left
-    alone: rebinding it needs a range-update combinator the runtime does not
-    have. -/
+    deref or ascription, the forms `tMutArgRoot` resolves — and a slice-range
+    place `dst[lo..hi]`, which `tMutArgSlice` resolves to its root and bounds
+    and `tRebindCall` rebinds through `slice_update`. -/
 def builtinWriteTable : List (String × Nat) :=
   [("copy_from_slice", 0), ("extend_from_slice", 0), ("push", 0), ("truncate", 0)]
 
@@ -376,10 +377,52 @@ def tCallWritebackField (sf : StructFieldNames) (writers : List (String × Nat))
           (resolveStructField sf rf.2).map fun sin => (rf.1, sin)
     | none => none
 
+/-- The lower and upper bound of a range expression over the variable `root`:
+    `RangeTo hi` starts at `0`, `Range lo hi` carries both bounds, and
+    `RangeFrom lo` ends at `len root`. `none` for `RangeFull` and any other
+    expression. -/
+def tRangeBounds (root : String) : TExpr → Option (TExpr × TExpr)
+  | .mk (.ann e) _ => tRangeBounds root e
+  | .mk (.app "RangeTo" [hi]) _ => some (.mk (.lit (.int 0)) .int, hi)
+  | .mk (.app "Range" [lo, hi]) _ => some (lo, hi)
+  | .mk (.app "RangeFrom" [lo]) _ =>
+    some (lo, .mk (.app "len" [.mk (.var root) .unknown]) .int)
+  | _ => none
+
+/-- The slice-range place a write-back argument passes: the root variable and
+    the range's lower and upper bounds, for an argument of the form
+    `&mut root[lo..hi]`, which the export spells `index_mut root r`. `none` for
+    a plain variable, a field place, a scalar element, a range whose bounds
+    `tRangeBounds` does not carry, or a root that is not itself a variable. -/
+def tMutArgSlice : TExpr → Option (String × TExpr × TExpr)
+  | .mk (.borrow e) _ => tMutArgSlice e
+  | .mk (.deref e) _ => tMutArgSlice e
+  | .mk (.ann e) _ => tMutArgSlice e
+  | .mk (.app f [aE, rE]) _ =>
+    if f == "index_mut" then
+      (tMutArgRoot aE).bind fun r =>
+        (tRangeBounds r rE).map fun b => (r, b.1, b.2)
+    else none
+  | _ => none
+
+/-- The slice-range write-back of a call to `f` under the write-back table:
+    the root variable and the range bounds, when the write-back argument is a
+    slice-range place `&mut root[lo..hi]`. The callee's result is the range's
+    new contents, so such a call becomes
+    `assign root (slice_update root lo hi <call>)`. -/
+def tCallWritebackSlice (writers : List (String × Nat)) (f : String) (args : List TExpr) :
+    Option (String × TExpr × TExpr) :=
+  if f == ".0" then none
+  else
+    match writers.lookup f with
+    | some i => (args[i]?).bind tMutArgSlice
+    | none => none
+
 /-- The node a call becomes under the write-back table: an assignment binding
     the write-back variable — or, for a field-place argument, a functional
-    field update of its root variable — to the call's result, or the call
-    itself. -/
+    field update of its root variable, and for a slice-range argument, a
+    functional range update of its root variable — to the call's result, or
+    the call itself. -/
 def tRebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : String)
     (args : List TExpr) (ty : ImpType) : TExpr :=
   match tCallWriteback writers f args with
@@ -389,7 +432,12 @@ def tRebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : St
     | some (root, sname, i, n) =>
       .mk (.assign root (.mk (.app (structUpdateHead sname i n)
         [.mk (.var root) .unknown, .mk (.app f args) ty]) .unknown)) ty
-    | none => .mk (.app f args) ty
+    | none =>
+      match tCallWritebackSlice writers f args with
+      | some (root, lo, hi) =>
+        .mk (.assign root (.mk (.app "slice_update"
+          [.mk (.var root) .unknown, lo, hi, .mk (.app f args) ty]) .unknown)) ty
+      | none => .mk (.app f args) ty
 
 /-- Bind the write-back variable of every call to a write-back function from
     that call's result. A call to any other function, and a call whose

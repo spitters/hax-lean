@@ -139,6 +139,7 @@ private def runtimeName (f : String) : String :=
   | "wrapping_sub" => "Hax.wrapping_sub"
   | "wrapping_mul" => "Hax.wrapping_mul"
   | "array_update" => "Hax.array_update"
+  | "slice_update" => "Hax.slice_update"
   -- Slice/mutation operations
   | "literal" => "Hax.literal"
   | "str_opaque" => "Hax.literal"
@@ -2023,6 +2024,8 @@ private partial def collectArrayParams (params : List String) : ImpExpr → List
     if params.contains n then [n] else []
   | .app "array_update" ((.var n) :: _) =>
     if params.contains n then [n] else []
+  | .app "slice_update" ((.var n) :: _) =>
+    if params.contains n then [n] else []
   | .app _ args => args.flatMap (collectArrayParams params)
   | .letBind _ v body =>
     collectArrayParams params v ++ collectArrayParams params body
@@ -2295,7 +2298,7 @@ private def isRuntimeName (f : String) : Bool :=
   | "index" | "array_lit" | "repeat" | "push" | "len"
   | "rotate_right" | "rotate_left"
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
-  | "array_update" | "cast" | "castVal"
+  | "array_update" | "slice_update" | "cast" | "castVal"
   | "Some" | "None" | "Ok" | "Err"
   | "panic" | "literal" | "str_opaque" | "deref" | "deref_mut" | "clone" | "to_vec" | "copy_from_slice"
   | "extend_from_slice" | "truncate" | "sha256"
@@ -2316,8 +2319,8 @@ private def isRuntimeName (f : String) : Bool :=
     Mirrors upstream cryspen/hax's `operators` table in
     `engine/backends/lean/lean_refines/lean_refines_backend.ml`. -/
 def builtinTable : List (String × List String) :=
-  [ ("array",            ["index", "array_update", "repeat", "array_lit", "push", "len",
-                          "from_elem", "index_mut", "is_empty", "to_vec"])
+  [ ("array",            ["index", "array_update", "slice_update", "repeat", "array_lit",
+                          "push", "len", "from_elem", "index_mut", "is_empty", "to_vec"])
   , ("collection",       ["copy_from_slice", "extend_from_slice", "truncate",
                           "with_capacity", "into_vec", "into_iter", "iter", "map",
                           "collect", "flat_map", "zip", "next", "new", "enumerate"])
@@ -2514,6 +2517,9 @@ where
       let posSpecific :=
         (f == "index" || f == "array_update") && args.length > 1 &&
           (match args.toArray[1]? with | some a => isVar a | _ => false)
+        || f == "slice_update" && args.length > 2 &&
+          ((match args.toArray[1]? with | some a => isVar a | _ => false)
+            || (match args.toArray[2]? with | some a => isVar a | _ => false))
       (isIntArg || posSpecific) || args.any (isVarUsedAsIntSimple varName)
     | .ifThenElse c t e =>
       isVarUsedAsIntSimple varName c || isVarUsedAsIntSimple varName t ||
@@ -2604,6 +2610,9 @@ partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
     let posSpecific :=
       (f == "index" || f == "array_update" || f == "index_mut") &&
         args.length > 1 && argIsVar 1
+      ||
+      -- slice_update arr lo hi src → positions 1 (lo) and 2 (hi) are Int
+      f == "slice_update" && args.length > 2 && (argIsVar 1 || argIsVar 2)
       ||
       (f == "repeat" || f == "repeat_" || f == "from_elem") &&
         args.length > 1 && argIsVar 1
@@ -2786,6 +2795,8 @@ private partial def inferExprType (paramTypeMap : List (String × ImpType))
     | _ => none
   | .app "with_capacity" _ => some (.array .unknown 0)
   | .app "array_update" [arr, _, _] =>
+    inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr
+  | .app "slice_update" [arr, _, _, _] =>
     inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr
   | .app "push" [arr, _] =>
     inferExprType paramTypeMap structMeta fnBody defsMap depth callRetTypes arr

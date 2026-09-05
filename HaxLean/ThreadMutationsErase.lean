@@ -335,6 +335,35 @@ def callWritebackField (sf : StructFieldNames) (writers : List (String × Nat))
           (resolveStructField sf rf.2).map fun sin => (rf.1, sin)
     | none => none
 
+/-- Untyped twin of `tRangeBounds`. -/
+def rangeBounds (root : String) : ImpExpr → Option (ImpExpr × ImpExpr)
+  | .typeAscription e _ => rangeBounds root e
+  | .app "RangeTo" [hi] => some (.lit (.int 0), hi)
+  | .app "Range" [lo, hi] => some (lo, hi)
+  | .app "RangeFrom" [lo] => some (lo, .app "len" [.var root])
+  | _ => none
+
+/-- Untyped twin of `tMutArgSlice`. -/
+def mutArgSlice : ImpExpr → Option (String × ImpExpr × ImpExpr)
+  | .borrow e => mutArgSlice e
+  | .deref e => mutArgSlice e
+  | .typeAscription e _ => mutArgSlice e
+  | .app f [aE, rE] =>
+    if f == "index_mut" then
+      (mutArgRoot aE).bind fun r =>
+        (rangeBounds r rE).map fun b => (r, b.1, b.2)
+    else none
+  | _ => none
+
+/-- Untyped twin of `tCallWritebackSlice`. -/
+def callWritebackSlice (writers : List (String × Nat)) (f : String) (args : List ImpExpr) :
+    Option (String × ImpExpr × ImpExpr) :=
+  if f == ".0" then none
+  else
+    match writers.lookup f with
+    | some i => (args[i]?).bind mutArgSlice
+    | none => none
+
 /-- Untyped twin of `tRebindCall`. -/
 def rebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : String)
     (args : List ImpExpr) : ImpExpr :=
@@ -344,7 +373,11 @@ def rebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : Str
     match callWritebackField sf writers f args with
     | some (root, sname, i, n) =>
       .assign root (.app (structUpdateHead sname i n) [.var root, .app f args])
-    | none => .app f args
+    | none =>
+      match callWritebackSlice writers f args with
+      | some (root, lo, hi) =>
+        .assign root (.app "slice_update" [.var root, lo, hi, .app f args])
+      | none => .app f args
 
 /-- Untyped twin of `tRebindMutCalls`. -/
 def rebindMutCalls (sf : StructFieldNames) (writers : List (String × Nat)) : ImpExpr → ImpExpr
@@ -459,14 +492,71 @@ def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
       | none => simp [h]
       | some a => simp [h, tMutArgField_erase]
 
+@[simp] theorem tRangeBounds_erase (root : String) (e : TExpr) :
+    (tRangeBounds root e).map (fun b => (b.1.erase, b.2.erase)) = rangeBounds root e.erase := by
+  induction e using TExpr.ind with
+  | ann _ _ ih => simpa only [tRangeBounds, TExpr.erase] using ih
+  | app ty f args _ =>
+    match args with
+    | [] => simp [tRangeBounds, rangeBounds, TExpr.erase]
+    | [_] =>
+      by_cases h : f = "RangeTo"
+      · simp [tRangeBounds, rangeBounds, TExpr.erase, h]
+      · by_cases h' : f = "RangeFrom" <;>
+          simp [tRangeBounds, rangeBounds, TExpr.erase, h, h']
+    | [_, _] => by_cases h : f = "Range" <;> simp [tRangeBounds, rangeBounds, TExpr.erase, h]
+    | _ :: _ :: _ :: _ => simp [tRangeBounds, rangeBounds, TExpr.erase]
+  | _ => rfl
+
+@[simp] theorem tMutArgSlice_erase (e : TExpr) :
+    (tMutArgSlice e).map (fun t => (t.1, t.2.1.erase, t.2.2.erase)) = mutArgSlice e.erase := by
+  induction e using TExpr.ind with
+  | borrow _ _ ih => simpa only [tMutArgSlice, TExpr.erase, mutArgSlice] using ih
+  | deref _ _ ih => simpa only [tMutArgSlice, TExpr.erase, mutArgSlice] using ih
+  | ann _ _ ih => simpa only [tMutArgSlice, TExpr.erase] using ih
+  | app ty f args _ =>
+    match args with
+    | [] => rfl
+    | [_] => rfl
+    | [aE, rE] =>
+      by_cases h : f = "index_mut"
+      · subst h
+        simp only [tMutArgSlice, mutArgSlice, TExpr.erase, TExpr.eraseList_eq,
+          List.map_cons, List.map_nil, beq_self_eq_true, if_true,
+          ← tMutArgRoot_erase, ← tRangeBounds_erase]
+        cases tMutArgRoot aE with
+        | none => rfl
+        | some r => simp only [Option.bind]; cases tRangeBounds r rE <;> rfl
+      · simp [tMutArgSlice, mutArgSlice, TExpr.erase, h]
+    | _ :: _ :: _ :: _ => rfl
+  | namedProj _ _ _ _ => simp [tMutArgSlice, TExpr.erase, mutArgSlice]
+  | _ => rfl
+
+@[simp] theorem tCallWritebackSlice_erase (writers : List (String × Nat)) (f : String)
+    (args : List TExpr) :
+    (tCallWritebackSlice writers f args).map (fun t => (t.1, t.2.1.erase, t.2.2.erase))
+      = callWritebackSlice writers f (args.map TExpr.erase) := by
+  simp only [tCallWritebackSlice, callWritebackSlice]
+  split
+  · rfl
+  · cases writers.lookup f with
+    | none => rfl
+    | some i =>
+      cases h : args[i]? with
+      | none => simp [h]
+      | some a => simp [h, ← tMutArgSlice_erase]
+
 @[simp] theorem tRebindCall_erase (sf : StructFieldNames) (writers : List (String × Nat))
     (f : String) (args : List TExpr) (ty : ImpType) :
     (tRebindCall sf writers f args ty).erase
       = rebindCall sf writers f (args.map TExpr.erase) := by
-  simp only [tRebindCall, rebindCall, tCallWriteback_erase, tCallWritebackField_erase]
+  simp only [tRebindCall, rebindCall, tCallWriteback_erase, tCallWritebackField_erase,
+    ← tCallWritebackSlice_erase]
   cases callWriteback writers f (args.map TExpr.erase)
-  · cases callWritebackField sf writers f (args.map TExpr.erase) <;>
-      simp [TExpr.erase, TExpr.eraseList_eq]
+  · cases callWritebackField sf writers f (args.map TExpr.erase)
+    · cases tCallWritebackSlice writers f args <;>
+        simp [TExpr.erase, TExpr.eraseList_eq]
+    · simp [TExpr.erase, TExpr.eraseList_eq]
   · simp [TExpr.erase, TExpr.eraseList_eq]
 
 @[simp] theorem tReturnMutParam_erase (param : Option String) (body : TExpr) :
@@ -492,7 +582,7 @@ theorem tRebindMutCalls_erase (sf : StructFieldNames) (writers : List (String ×
     first
       | rfl
       | simp_all [tRebindMutCalls, rebindMutCalls, rebindCall, callWriteback,
-          callWritebackField, TExpr.erase,
+          callWritebackField, callWritebackSlice, TExpr.erase,
           tRebindMutCalls.mapE, tRebindMutCalls.mapA, rebindMutCalls.mapE, rebindMutCalls.mapA,
           tRebindCall_erase, TExpr.eraseList_eq, TExpr.eraseArms_eq]
 
