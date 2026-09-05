@@ -144,9 +144,12 @@ def main (args : List String) : IO UInt32 := do
     -- assignment before `tReplaceTail` reaches it, or the call is dropped as a
     -- pure value.
     let writeFns := mutWriteFns structFields fnTypes procTdefs
-    let writers := mutWriteTable writeFns
+    -- The builtin table is appended to the call-site rebind table only, not to
+    -- `writeParams`: `tReturnMutParam` rewrites a callee to return its written
+    -- parameter, and these four have no body in the export to rewrite.
+    let writers := mutWriteTable writeFns ++ builtinWriteTable
     let writeParams := mutWriteParams writeFns
-    IO.eprintln s!"INFO mut-writeback-fns={writers.length}/{(mutWriteCandidates fnTypes).length}"
+    IO.eprintln s!"INFO mut-writeback-fns={writers.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
       let te := tReturnMutParam (writeParams.lookup n) (tRebindMutCalls structFields writers te)
       (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))

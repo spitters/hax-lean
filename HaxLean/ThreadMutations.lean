@@ -305,6 +305,25 @@ def mutWriteTable (ws : List (String × Nat × String)) : List (String × Nat) :
 def mutWriteParams (ws : List (String × Nat × String)) : List (String × String) :=
   ws.map (fun c => (c.1, c.2.2))
 
+/-- Standard-library methods that write through their receiver, with the
+    receiver's argument position.
+
+    `mutWriteFns` derives its table from the export's own signatures and bodies,
+    so it sees only functions the crate defines. These four are `core`/`alloc`
+    methods: the export carries neither a signature nor a body for them, so
+    `mutWriteCandidates` and `mutWriteStep` both filter them out and their call
+    sites are emitted in statement position with the result dropped. The runtime
+    models all four value-returningly, so rebinding the receiver is the emission
+    that model already expects.
+
+    The table covers a receiver that is a plain place — a variable, borrow,
+    deref or ascription, the forms `tMutArgRoot` resolves. A slice-range
+    receiver, `dst[..n].copy_from_slice(src)`, resolves to `none` and is left
+    alone: rebinding it needs a range-update combinator the runtime does not
+    have. -/
+def builtinWriteTable : List (String × Nat) :=
+  [("copy_from_slice", 0), ("extend_from_slice", 0), ("push", 0), ("truncate", 0)]
+
 /-- The variable an argument in write-back position writes to: the root of the
     place passed there. `none` for an index or a field, whose callee result is
     that component rather than the whole variable. -/
