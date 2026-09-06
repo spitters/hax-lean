@@ -3,12 +3,14 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.CLI
-import HaxLean.Secrecy
-import HaxLean.PrettyPrintT
-import HaxLean.TPipeline
-import HaxLean.InlineClosures
-import HaxLean.ThreadMutations
+module
+
+public import HaxLean.CLI
+public import HaxLean.Secrecy
+public import HaxLean.PrettyPrintT
+public import HaxLean.TPipeline
+public import HaxLean.InlineClosures
+public import HaxLean.ThreadMutations
 
 /-!
 # haxpipeT CLI — Typed Extraction Pipeline
@@ -40,6 +42,8 @@ untyped path (`Hax.PrettyPrint.toLeanCertifiedFile`, since 2026-05-14). New
 consumers should use `--emit-certified --hax`. See `Hax/PrettyPrint.lean`
 module docstring for the removal plan.
 -/
+
+@[expose] public section
 
 -- Intentional calls into the deprecated untyped emitter for the fallback
 -- emit modes (`--emit-lean`, `--emit-certified` without `--hax-format`).

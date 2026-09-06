@@ -3,9 +3,11 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.Pipeline
-import HaxLean.Phase.FunctionalizeLoopsCF
-import HaxLean.Phase.CfIntoMonadsCF
+module
+
+public import HaxLean.Pipeline
+public import HaxLean.Phase.FunctionalizeLoopsCF
+public import HaxLean.Phase.CfIntoMonadsCF
 
 /-!
 # Pipeline Semantic Correctness with ControlFlow Encoding
@@ -30,6 +32,8 @@ With dedicated AST constructors, `NoReservedApps` is eliminated:
 - `CF4_on_FL_output` eliminated — `CF4_combined` handles all constructors directly
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-! ### Preservation: functionalizeLoops preserves NoEarlyExit -/
@@ -42,7 +46,7 @@ theorem functionalizeLoops_preserves_noEarlyExit (e : ImpExpr) (h : NoEarlyExit 
 
 /-! ### Phases 1-2 preserve NoCFConstructors -/
 
-private theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
+theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
     (h : NoCFConstructors e) : NoCFConstructors (dropReferences e) := by
   induction e using ImpExpr.ind with
   | lit => exact .lit
@@ -98,7 +102,7 @@ private theorem dropReferences_preserves_noCFConstructors (e : ImpExpr)
   | cfBreakContinue => exact absurd h NoCFConstructors.not_cfBreakContinue
   | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
-private theorem localMutation_preserves_noCFConstructors (vars : List String) (e : ImpExpr)
+theorem localMutation_preserves_noCFConstructors (vars : List String) (e : ImpExpr)
     (h : NoCFConstructors e) : NoCFConstructors (localMutation vars e) := by
   induction e using ImpExpr.ind with
   | lit => exact .lit
@@ -157,7 +161,7 @@ private theorem localMutation_preserves_noCFConstructors (vars : List String) (e
 
 /-! ### Phases 1-3 preserve NoQuestionMark -/
 
-private theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
+theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (dropReferences e) := by
   induction e using ImpExpr.ind with
   | lit => exact .lit
@@ -219,7 +223,7 @@ private theorem dropReferences_preserves_noQuestionMark (e : ImpExpr)
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
   | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
-private theorem localMutation_preserves_noQuestionMark (vars : List String) (e : ImpExpr)
+theorem localMutation_preserves_noQuestionMark (vars : List String) (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (localMutation vars e) := by
   induction e using ImpExpr.ind with
   | lit => exact .lit
@@ -282,7 +286,7 @@ private theorem localMutation_preserves_noQuestionMark (vars : List String) (e :
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih he)
   | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih he)
 
-private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (e : ImpExpr)
+theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (functionalizeLoopsAux nested e) := by
   induction e using ImpExpr.ind generalizing nested with
   | lit => exact .lit
@@ -361,13 +365,13 @@ private theorem functionalizeLoopsAux_preserves_noQuestionMark (nested : Bool) (
   | cfBreakContinue _ ih => cases h with | cfBreakContinue he => exact .cfBreakContinue (ih _ he)
   | typeAscription _ _ ih => cases h with | typeAscription he => exact .typeAscription (ih _ he)
 
-private theorem functionalizeLoops_preserves_noQuestionMark (e : ImpExpr)
+theorem functionalizeLoops_preserves_noQuestionMark (e : ImpExpr)
     (h : NoQuestionMark e) : NoQuestionMark (functionalizeLoops e) :=
   functionalizeLoopsAux_preserves_noQuestionMark false e h
 
 /-! ### Phase 3 produces WellFormedFolds -/
 
-private theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpExpr)
+theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpExpr)
     (h : NoCFConstructors e) : WellFormedFolds (functionalizeLoopsAux nested e) := by
   induction e using ImpExpr.ind generalizing nested with
   | lit => exact .lit
@@ -464,7 +468,7 @@ private theorem functionalizeLoopsAux_wellFormedFolds (nested : Bool) (e : ImpEx
     cases h with | typeAscription he =>
     simp only [functionalizeLoopsAux]; exact .typeAscription (ih nested he)
 
-private theorem functionalizeLoops_wellFormedFolds (e : ImpExpr)
+theorem functionalizeLoops_wellFormedFolds (e : ImpExpr)
     (h : NoCFConstructors e) : WellFormedFolds (functionalizeLoops e) :=
   functionalizeLoopsAux_wellFormedFolds false e h
 

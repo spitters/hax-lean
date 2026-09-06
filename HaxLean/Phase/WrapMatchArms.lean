@@ -3,9 +3,11 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Features
-import HaxLean.Phase.CfIntoMonads
+module
+
+public import HaxLean.AST
+public import HaxLean.Features
+public import HaxLean.Phase.CfIntoMonads
 
 /-!
 # Phase 4.5: Wrap Match Arms with cfContinue
@@ -34,6 +36,8 @@ the sibling check, we'd over-wrap pure expressions.)
 
 Together these give `wrapMatchArmsCF_preserves_FullyFunctional`.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -140,28 +144,28 @@ where
 /-! ## Preservation lemmas -/
 
 /-- Wrapping with cfContinue preserves NoReferences. -/
-private theorem maybeWrapContinue_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
+theorem maybeWrapContinue_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
     NoReferences (maybeWrapContinue e) := by
   unfold maybeWrapContinue
   split
   · exact h
   · exact .cfContinue h
 
-private theorem maybeWrapContinue_preserves_noMut (e : ImpExpr) (h : NoMutation e) :
+theorem maybeWrapContinue_preserves_noMut (e : ImpExpr) (h : NoMutation e) :
     NoMutation (maybeWrapContinue e) := by
   unfold maybeWrapContinue
   split
   · exact h
   · exact .cfContinue h
 
-private theorem maybeWrapContinue_preserves_noLoops (e : ImpExpr) (h : NoLoops e) :
+theorem maybeWrapContinue_preserves_noLoops (e : ImpExpr) (h : NoLoops e) :
     NoLoops (maybeWrapContinue e) := by
   unfold maybeWrapContinue
   split
   · exact h
   · exact .cfContinue h
 
-private theorem maybeWrapContinue_preserves_noEarlyExit (e : ImpExpr) (h : NoEarlyExit e) :
+theorem maybeWrapContinue_preserves_noEarlyExit (e : ImpExpr) (h : NoEarlyExit e) :
     NoEarlyExit (maybeWrapContinue e) := by
   unfold maybeWrapContinue
   split
@@ -169,7 +173,7 @@ private theorem maybeWrapContinue_preserves_noEarlyExit (e : ImpExpr) (h : NoEar
   · exact .cfContinue h
 
 /-- Helper: map preserves NoReferences for arm-bodies via maybeWrapContinue. -/
-private theorem arms_map_preserves_noRefs (arms : List (ImpPat × ImpExpr))
+theorem arms_map_preserves_noRefs (arms : List (ImpPat × ImpExpr))
     (h : ∀ pa, pa ∈ arms → NoReferences pa.2) :
     ∀ pa, pa ∈ arms.map (fun (p, b) => (p, maybeWrapContinue b)) → NoReferences pa.2 := by
   intro pa hpa

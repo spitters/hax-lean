@@ -3,12 +3,14 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.SemanticsCF
-import HaxLean.Phase.ExplicitMonadic
-import HaxLean.Phase.CfIntoMonadsCF
-import HaxLean.Phase.FunctionalizeLoopsCF
-import HaxLean.Pipeline
-import HaxLean.PipelineCF
+module
+
+public import HaxLean.SemanticsCF
+public import HaxLean.Phase.ExplicitMonadic
+public import HaxLean.Phase.CfIntoMonadsCF
+public import HaxLean.Phase.FunctionalizeLoopsCF
+public import HaxLean.Pipeline
+public import HaxLean.PipelineCF
 
 /-!
 # Phase 5 Correctness: Explicit Monadic Encoding
@@ -35,6 +37,8 @@ and identity cases (cfBreak/cfContinue/cfBreakContinue) show wrapContinue is fix
 All theorems in this file are fully proven with no axioms or sorrys.
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-! ## Outcome transformation for wrapReturns -/
@@ -59,7 +63,7 @@ def Outcome.wrapContinue : Outcome → Outcome
 /-! ## wrapReturns semantic theorem -/
 
 /-- `denote'` for `cfContinue e` equals `Outcome.wrapContinue` applied to `denote' e`. -/
-private theorem cfContinue_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
+theorem cfContinue_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
     (e : ImpExpr) :
     ∀ env, denote' bi fuel (.cfContinue e) env =
       let (r, env') := denote' bi fuel e env
@@ -80,7 +84,7 @@ private theorem cfContinue_denote'_wrapContinue (bi : Builtins) (fuel : Nat)
 
 /-- `denoteMatchArms'` with `wrapReturns`-mapped arms produces `wrapContinue`
     of the original result. -/
-private theorem denoteMatchArms'_wrapReturns_wrapContinue
+theorem denoteMatchArms'_wrapReturns_wrapContinue
     (bi : Builtins) (fuel : Nat) (v : Value)
     (arms : List (ImpPat × ImpExpr))
     (ih : ∀ pa, pa ∈ arms → ∀ env, denote' bi fuel (wrapReturns pa.2) env =
@@ -264,7 +268,7 @@ The core results: `wrapReturns` does not change fold behavior because
 ```
 -/
 
-private theorem forLoop_body_neutral (bi : Builtins) (fuel : Nat)
+theorem forLoop_body_neutral (bi : Builtins) (fuel : Nat)
     (var : String) (_lo hi : Int) (body : ImpExpr) :
     ∀ n : Nat, ∀ lo' : Int, ∀ env,
       n ≤ fuel →
@@ -312,7 +316,7 @@ theorem denoteForLoop'_wrapReturns (bi : Builtins) (fuel : Nat)
       denoteForLoop' bi fuel var lo hi body env :=
   fun env => forLoop_body_neutral bi fuel var lo hi body fuel lo env (Nat.le_refl _)
 
-private theorem whileLoop_body_neutral (bi : Builtins) (fuel : Nat)
+theorem whileLoop_body_neutral (bi : Builtins) (fuel : Nat)
     (cond body : ImpExpr) :
     ∀ n : Nat, ∀ env, n ≤ fuel →
       denoteWhile' bi n cond (wrapReturns body) env =
@@ -368,7 +372,7 @@ theorem denoteWhile'_wrapReturns (bi : Builtins) (fuel : Nat)
       denoteWhile' bi fuel cond body env :=
   fun env => whileLoop_body_neutral bi fuel cond body fuel env (Nat.le_refl _)
 
-private theorem forLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
+theorem forLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
     (var : String) (_lo hi : Int) (body : ImpExpr) :
     ∀ n : Nat, ∀ lo' : Int, ∀ env, n ≤ fuel →
       denoteForLoop'Return bi n var lo' hi (wrapReturns body) env =
@@ -420,7 +424,7 @@ theorem denoteForLoop'Return_wrapReturns (bi : Builtins) (fuel : Nat)
       denoteForLoop'Return bi fuel var lo hi body env :=
   fun env => forLoopReturn_body_neutral bi fuel var lo hi body fuel lo env (Nat.le_refl _)
 
-private theorem forLoopRev_body_neutral (bi : Builtins) (fuel : Nat)
+theorem forLoopRev_body_neutral (bi : Builtins) (fuel : Nat)
     (var : String) (lo _hi : Int) (body : ImpExpr) :
     ∀ n : Nat, ∀ hi' : Int, ∀ env,
       n ≤ fuel →
@@ -468,7 +472,7 @@ theorem denoteForLoopRev'_wrapReturns (bi : Builtins) (fuel : Nat)
       denoteForLoopRev' bi fuel var lo hi body env :=
   fun env => forLoopRev_body_neutral bi fuel var lo hi body fuel hi env (Nat.le_refl _)
 
-private theorem forLoopRevReturn_body_neutral (bi : Builtins) (fuel : Nat)
+theorem forLoopRevReturn_body_neutral (bi : Builtins) (fuel : Nat)
     (var : String) (lo _hi : Int) (body : ImpExpr) :
     ∀ n : Nat, ∀ hi' : Int, ∀ env, n ≤ fuel →
       denoteForLoopRev'Return bi n var lo hi' (wrapReturns body) env =
@@ -518,7 +522,7 @@ theorem denoteForLoopRev'Return_wrapReturns (bi : Builtins) (fuel : Nat)
       denoteForLoopRev'Return bi fuel var lo hi body env :=
   fun env => forLoopRevReturn_body_neutral bi fuel var lo hi body fuel hi env (Nat.le_refl _)
 
-private theorem whileLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
+theorem whileLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
     (cond body : ImpExpr) :
     ∀ n : Nat, ∀ env, n ≤ fuel →
       denoteWhile'Return bi n cond (wrapReturns body) env =
@@ -579,7 +583,7 @@ theorem denoteWhile'Return_wrapReturns (bi : Builtins) (fuel : Nat)
 
 /-! ## Fold body congruence lemmas -/
 
-private theorem denoteForLoop'_body_congr (bi : Builtins)
+theorem denoteForLoop'_body_congr (bi : Builtins)
     (var : String) (body1 body2 : ImpExpr)
     (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
     ∀ fuel : Nat, ∀ lo hi : Int, ∀ env,
@@ -616,7 +620,7 @@ private theorem denoteForLoop'_body_congr (bi : Builtins)
         | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih (lo + 1) hi envb
       | _ => rfl
 
-private theorem denoteWhile'_congr (bi : Builtins)
+theorem denoteWhile'_congr (bi : Builtins)
     (cond1 cond2 body1 body2 : ImpExpr)
     (hc : ∀ fuel env, denote' bi fuel cond1 env = denote' bi fuel cond2 env)
     (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
@@ -664,7 +668,7 @@ private theorem denoteWhile'_congr (bi : Builtins)
       | _ => rfl
     | _ => rfl
 
-private theorem denoteForLoop'Return_body_congr (bi : Builtins)
+theorem denoteForLoop'Return_body_congr (bi : Builtins)
     (var : String) (body1 body2 : ImpExpr)
     (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
     ∀ fuel : Nat, ∀ lo hi : Int, ∀ env,
@@ -704,7 +708,7 @@ private theorem denoteForLoop'Return_body_congr (bi : Builtins)
         | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih (lo + 1) hi envb
       | _ => rfl
 
-private theorem denoteForLoopRev'_body_congr (bi : Builtins)
+theorem denoteForLoopRev'_body_congr (bi : Builtins)
     (var : String) (body1 body2 : ImpExpr)
     (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
     ∀ fuel : Nat, ∀ lo hi : Int, ∀ env,
@@ -741,7 +745,7 @@ private theorem denoteForLoopRev'_body_congr (bi : Builtins)
         | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih lo (hi - 1) envb
       | _ => rfl
 
-private theorem denoteForLoopRev'Return_body_congr (bi : Builtins)
+theorem denoteForLoopRev'Return_body_congr (bi : Builtins)
     (var : String) (body1 body2 : ImpExpr)
     (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
     ∀ fuel : Nat, ∀ lo hi : Int, ∀ env,
@@ -781,7 +785,7 @@ private theorem denoteForLoopRev'Return_body_congr (bi : Builtins)
         | _ => simp only [show n + 1 - 1 = n from rfl]; exact ih lo (hi - 1) envb
       | _ => rfl
 
-private theorem denoteWhile'Return_congr (bi : Builtins)
+theorem denoteWhile'Return_congr (bi : Builtins)
     (cond1 cond2 body1 body2 : ImpExpr)
     (hc : ∀ fuel env, denote' bi fuel cond1 env = denote' bi fuel cond2 env)
     (h : ∀ fuel env, denote' bi fuel body1 env = denote' bi fuel body2 env) :
@@ -834,7 +838,7 @@ private theorem denoteWhile'Return_congr (bi : Builtins)
 
 /-! ## Helper: denoteArgs' with identity-transformed args -/
 
-private theorem denoteArgs'_explicitMonadic (bi : Builtins) (fuel : Nat)
+theorem denoteArgs'_explicitMonadic (bi : Builtins) (fuel : Nat)
     (args : List ImpExpr)
     (ih : ∀ a, a ∈ args → ∀ fuel env,
       denote' bi fuel (explicitMonadic a) env = denote' bi fuel a env) :
@@ -865,7 +869,7 @@ private theorem denoteArgs'_explicitMonadic (bi : Builtins) (fuel : Nat)
 
 /-! ## Helper: denoteMatchArms' with identity-transformed arms -/
 
-private theorem denoteMatchArms'_explicitMonadic (bi : Builtins) (fuel : Nat)
+theorem denoteMatchArms'_explicitMonadic (bi : Builtins) (fuel : Nat)
     (v : Value) (arms : List (ImpPat × ImpExpr))
     (ih : ∀ pa, pa ∈ arms → ∀ fuel env,
       denote' bi fuel (explicitMonadic pa.2) env = denote' bi fuel pa.2 env) :

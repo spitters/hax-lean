@@ -3,7 +3,9 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
+module
+
+public import HaxLean.TExpr
 
 /-!
 # Pre-pipeline normalization: lower closure calls to direct applications
@@ -20,6 +22,8 @@ direct application `app f [x, y]` (the args tuple is unbundled), which renders a
 *parameters* (not let-bound lambdas) keep the `Fn::call` form — they are genuine
 opaque dependencies. Run BEFORE the typed pipeline (parse-time normalization).
 -/
+
+@[expose] public section
 
 namespace Hax
 

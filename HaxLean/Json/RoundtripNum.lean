@@ -4,11 +4,15 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Lexer
-import HaxLean.Json.Parser
-import HaxLean.Json.Roundtrip
-import Std.Data.String.ToInt
+module
 
+public import HaxLean.Json.Lexer
+public import HaxLean.Json.Parser
+public import HaxLean.Json.Roundtrip
+public import Std.Data.String.ToInt
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!

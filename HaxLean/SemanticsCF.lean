@@ -3,9 +3,11 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Value
-import HaxLean.Semantics
+module
+
+public import HaxLean.AST
+public import HaxLean.Value
+public import HaxLean.Semantics
 
 /-!
 # ControlFlow-Aware Semantics
@@ -25,6 +27,8 @@ the `other => pure other` branches in the original `denote`.
 * `Builtins.HasErr` — builtins include Err constructor
 * `LoopScoped` — break/continue only appear inside loops
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -237,7 +241,7 @@ The key insight: `denote'` extends `denote` in three ways:
 3. `app "for_fold"` and `app "while_fold"` are interpreted as loops
    using `denoteForLoop'` and `denoteWhile'` respectively -/
 
-private theorem string_sizeOf_pos (s : String) : 0 < sizeOf s := by
+theorem string_sizeOf_pos (s : String) : 0 < sizeOf s := by
   have : sizeOf s ≥ 1 := by
     rcases s with ⟨cs, h⟩; simp only [sizeOf, String._sizeOf_1]; omega
   omega

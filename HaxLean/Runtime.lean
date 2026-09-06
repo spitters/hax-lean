@@ -4,6 +4,8 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
+module
+
 /-!
 # Runtime Library for Generated Lean 4 Code
 
@@ -31,6 +33,8 @@ Fold operations thread an accumulator through a closure that returns
 | `cfContinue e`         | `ControlFlow.Continue` |
 | `cfBreakContinue e`    | `ControlFlow.Break (ControlFlow.Continue e)` |
 -/
+
+@[expose] public section
 
 /-- Rust's `ControlFlow<B, C>`: either stop with `Break b` or continue
     with `Continue c`. -/
@@ -722,7 +726,7 @@ the `UInt{w}` level can call the named variants directly. -/
     without committing to a concrete implementation. The CatCrypt-side
     bridge provides the actual semantics (e.g. via a `Coe` instance or
     a concrete `instance : <CipherDeps>` that interprets the type). -/
-private axiom bridgeCast : {α β : Type} → α → β
+axiom bridgeCast : {α β : Type} → α → β
 
 /-- Tuple-newtype positional projection: `Commitment(inner).0` style access.
     The Rust source has `struct Commitment(Vec<u8>)` and bodies use `c.0`
@@ -742,7 +746,7 @@ axiom sha256 : Array Int → Array Int
     ascription pins β to `Aes256`, the inner `into key : α` keeps
     `α = Array Int`. Without this, `new` would force its arg type
     to equal its return type, breaking opaque-type construction. -/
-noncomputable def «new» {α β : Type} (x : α) : β := bridgeCast x
+@[no_expose] noncomputable def «new» {α β : Type} (x : α) : β := bridgeCast x
 
 /-- Rust `assert!` / `assert_eq!` / `assert_ne!` failure placeholder.
 

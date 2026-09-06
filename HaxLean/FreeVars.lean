@@ -3,7 +3,9 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
+module
+
+public import HaxLean.AST
 
 /-!
 # Free Variable Analysis
@@ -12,6 +14,8 @@ Computes free variables and mutated variables for `ImpExpr`.
 Used by `localMutation` to determine which variables need
 state-passing transformation.
 -/
+
+@[expose] public section
 
 namespace Hax
 

@@ -3,9 +3,11 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.SemanticsCF
-import HaxLean.Phase.CfIntoMonads
-import HaxLean.Phase.FunctionalizeLoopsCF
+module
+
+public import HaxLean.SemanticsCF
+public import HaxLean.Phase.CfIntoMonads
+public import HaxLean.Phase.FunctionalizeLoopsCF
 
 /-!
 # Phase 4 Correctness: Control Flow into Monads
@@ -31,6 +33,8 @@ reserved-name dispatch belongs to the dedicated constructor cases
 (`cfBreak`, `cfContinue`, `forFold`, `whileFold`, etc.), which unfold to
 their corresponding `denote'` semantics directly.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -152,7 +156,7 @@ inductive WellFormedFolds : ImpExpr → Prop where
     This is because `encodeCF4` maps `earlyRet` to `val(controlFlow)`,
     and `denoteArgs'` rejects both `earlyRet` (non-val) and
     `val(controlFlow)` (CF val) equally, returning `none`. -/
-private theorem denoteArgs'_cfIntoMonads (bi : Builtins) (fuel : Nat)
+theorem denoteArgs'_cfIntoMonads (bi : Builtins) (fuel : Nat)
     (args : List ImpExpr)
     (ih : ∀ a, a ∈ args → ∀ env, denote' bi fuel (cfIntoMonads a) env =
       (Outcome.encodeCF4 (denote' bi fuel a env).1, (denote' bi fuel a env).2)) :
@@ -186,7 +190,7 @@ private theorem denoteArgs'_cfIntoMonads (bi : Builtins) (fuel : Nat)
 
 /-- `denoteMatchArms'` with `cfIntoMonads`-mapped arms gives `encodeCF4` of
     the original result. -/
-private theorem denoteMatchArms'_cfIntoMonads (bi : Builtins) (fuel : Nat)
+theorem denoteMatchArms'_cfIntoMonads (bi : Builtins) (fuel : Nat)
     (v : Value) (arms : List (ImpPat × ImpExpr))
     (ih : ∀ pa, pa ∈ arms → ∀ env, denote' bi fuel (cfIntoMonads pa.2) env =
       (Outcome.encodeCF4 (denote' bi fuel pa.2 env).1, (denote' bi fuel pa.2 env).2)) :
@@ -214,7 +218,7 @@ private theorem denoteMatchArms'_cfIntoMonads (bi : Builtins) (fuel : Nat)
 
 /-! ### Helper: encodeCF4 is identity on non-earlyRet outcomes -/
 
-private theorem Outcome.encodeCF4_id_of_not_earlyRet (o : Outcome)
+theorem Outcome.encodeCF4_id_of_not_earlyRet (o : Outcome)
     (h : ∀ v, o ≠ .earlyRet v) : encodeCF4 o = o := by
   cases o with
   | earlyRet v => exact absurd rfl (h v)
@@ -224,7 +228,7 @@ private theorem Outcome.encodeCF4_id_of_not_earlyRet (o : Outcome)
 
 /-- `denoteForLoop'` earlyRet invariant: if the body preserves the invariant,
     so does the loop. -/
-private theorem denoteForLoop'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoop'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoop' bi fuel var lo hi body env).1 = .earlyRet v →
@@ -260,7 +264,7 @@ private theorem denoteForLoop'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
       | continued => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteForLoopRev'` earlyRet invariant. -/
-private theorem denoteForLoopRev'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoopRev'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoopRev' bi fuel var lo hi body env).1 = .earlyRet v →
@@ -296,7 +300,7 @@ private theorem denoteForLoopRev'_earlyRet_not_cf (bi : Builtins) (body : ImpExp
       | continued => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteWhile'` earlyRet invariant. -/
-private theorem denoteWhile'_earlyRet_not_cf (bi : Builtins) (cond body : ImpExpr)
+theorem denoteWhile'_earlyRet_not_cf (bi : Builtins) (cond body : ImpExpr)
     (hcond : ∀ fuel env v, (denote' bi fuel cond env).1 = .earlyRet v → v.isControlFlow = false)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) :
@@ -352,7 +356,7 @@ private theorem denoteWhile'_earlyRet_not_cf (bi : Builtins) (cond body : ImpExp
     | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteForLoopOrig'` earlyRet invariant. -/
-private theorem denoteForLoopOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoopOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoopOrig' bi fuel var lo hi body env).1 = .earlyRet v →
@@ -382,7 +386,7 @@ private theorem denoteForLoopOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpEx
       | continued => simp only [show n + 1 - 1 = n from rfl]; exact ih (lo + 1) envb v
 
 /-- `denoteForLoopRevOrig'` earlyRet invariant. -/
-private theorem denoteForLoopRevOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoopRevOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoopRevOrig' bi fuel var lo hi body env).1 = .earlyRet v →
@@ -412,7 +416,7 @@ private theorem denoteForLoopRevOrig'_earlyRet_not_cf (bi : Builtins) (body : Im
       | continued => simp only [show n + 1 - 1 = n from rfl]; exact ih (hi - 1) envb v
 
 /-- `denoteWhileOrig'` earlyRet invariant. -/
-private theorem denoteWhileOrig'_earlyRet_not_cf (bi : Builtins) (cond body : ImpExpr)
+theorem denoteWhileOrig'_earlyRet_not_cf (bi : Builtins) (cond body : ImpExpr)
     (hcond : ∀ fuel env v, (denote' bi fuel cond env).1 = .earlyRet v → v.isControlFlow = false)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) :
@@ -458,7 +462,7 @@ private theorem denoteWhileOrig'_earlyRet_not_cf (bi : Builtins) (cond body : Im
     | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteForLoop'Return` earlyRet invariant. -/
-private theorem denoteForLoop'Return_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoop'Return_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoop'Return bi fuel var lo hi body env).1 = .earlyRet v →
@@ -503,7 +507,7 @@ private theorem denoteForLoop'Return_earlyRet_not_cf (bi : Builtins) (body : Imp
       | continued => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteWhile'Return` earlyRet invariant. -/
-private theorem denoteWhile'Return_earlyRet_not_cf (bi : Builtins) (cond body : ImpExpr)
+theorem denoteWhile'Return_earlyRet_not_cf (bi : Builtins) (cond body : ImpExpr)
     (hcond : ∀ fuel env v, (denote' bi fuel cond env).1 = .earlyRet v → v.isControlFlow = false)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) :
@@ -570,7 +574,7 @@ private theorem denoteWhile'Return_earlyRet_not_cf (bi : Builtins) (cond body : 
     | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteForLoopRev'Return` earlyRet invariant. -/
-private theorem denoteForLoopRev'Return_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoopRev'Return_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v → v.isControlFlow = false)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoopRev'Return bi fuel var lo hi body env).1 = .earlyRet v →
@@ -615,7 +619,7 @@ private theorem denoteForLoopRev'Return_earlyRet_not_cf (bi : Builtins) (body : 
       | continued => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
 /-- `denoteMatchArms'` earlyRet invariant. -/
-private theorem denoteMatchArms'_earlyRet_not_cf (bi : Builtins) (fuel : Nat)
+theorem denoteMatchArms'_earlyRet_not_cf (bi : Builtins) (fuel : Nat)
     (v : Value) (arms : List (ImpPat × ImpExpr))
     (ih : ∀ pa, pa ∈ arms → ∀ env w,
       (denote' bi fuel pa.2 env).1 = .earlyRet w → w.isControlFlow = false) :
@@ -1302,7 +1306,7 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
 /-! ### Helper: denoteForLoop' never produces earlyRet -/
 
 /-- `denoteForLoop'` never produces `earlyRet` when the body never does. -/
-private theorem denoteForLoop'_no_earlyRet (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoop'_no_earlyRet (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 ≠ .earlyRet v)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoop' bi fuel var lo hi body env).1 ≠ .earlyRet v := by
@@ -1341,7 +1345,7 @@ private theorem denoteForLoop'_no_earlyRet (bi : Builtins) (body : ImpExpr)
 /-! ### Helper: denoteForLoopRev' never produces earlyRet -/
 
 /-- `denoteForLoopRev'` never produces `earlyRet` when the body never does. -/
-private theorem denoteForLoopRev'_no_earlyRet (bi : Builtins) (body : ImpExpr)
+theorem denoteForLoopRev'_no_earlyRet (bi : Builtins) (body : ImpExpr)
     (hbody : ∀ fuel env v, (denote' bi fuel body env).1 ≠ .earlyRet v)
     (fuel : Nat) (var : String) (lo hi : Int) :
     ∀ env v, (denoteForLoopRev' bi fuel var lo hi body env).1 ≠ .earlyRet v := by
@@ -1381,7 +1385,7 @@ private theorem denoteForLoopRev'_no_earlyRet (bi : Builtins) (body : ImpExpr)
 
 /-- `denoteForLoopRev'Return` with `cfIntoMonads body` gives `encodeCF4` of original,
     using the earlyRet-not-CF invariant for the body. -/
-private theorem denoteForLoopRev'Return_sim (bi : Builtins) (var : String) (body : ImpExpr)
+theorem denoteForLoopRev'Return_sim (bi : Builtins) (var : String) (body : ImpExpr)
     (ih_body : ∀ fuel env, denote' bi fuel (cfIntoMonads body) env =
       (Outcome.encodeCF4 (denote' bi fuel body env).1, (denote' bi fuel body env).2))
     (hbody_er_not_cf : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v →
@@ -1437,7 +1441,7 @@ private theorem denoteForLoopRev'Return_sim (bi : Builtins) (var : String) (body
 /-! ### Helper: denoteWhile' simulation for whileFold -/
 
 /-- `denoteWhile'` with `cfIntoMonads` condition gives `encodeCF4` of original. -/
-private theorem denoteWhile'_sim (bi : Builtins) (c body : ImpExpr)
+theorem denoteWhile'_sim (bi : Builtins) (c body : ImpExpr)
     (ih_c : ∀ fuel env, denote' bi fuel (cfIntoMonads c) env =
       (Outcome.encodeCF4 (denote' bi fuel c env).1, (denote' bi fuel c env).2))
     (hbody_no_er : ∀ fuel env v, (denote' bi fuel body env).1 ≠ .earlyRet v) :
@@ -1493,7 +1497,7 @@ private theorem denoteWhile'_sim (bi : Builtins) (c body : ImpExpr)
 
 /-- `denoteForLoop'Return` with `cfIntoMonads body` gives `encodeCF4` of original,
     using the earlyRet-not-CF invariant for the body. -/
-private theorem denoteForLoop'Return_sim (bi : Builtins) (var : String) (body : ImpExpr)
+theorem denoteForLoop'Return_sim (bi : Builtins) (var : String) (body : ImpExpr)
     (ih_body : ∀ fuel env, denote' bi fuel (cfIntoMonads body) env =
       (Outcome.encodeCF4 (denote' bi fuel body env).1, (denote' bi fuel body env).2))
     (hbody_er_not_cf : ∀ fuel env v, (denote' bi fuel body env).1 = .earlyRet v →
@@ -1549,7 +1553,7 @@ private theorem denoteForLoop'Return_sim (bi : Builtins) (var : String) (body : 
 /-! ### Helper: denoteWhile'Return simulation for whileFoldReturn -/
 
 /-- `denoteWhile'Return` with `cfIntoMonads` cond and body gives `encodeCF4` of original. -/
-private theorem denoteWhile'Return_sim (bi : Builtins) (c body : ImpExpr)
+theorem denoteWhile'Return_sim (bi : Builtins) (c body : ImpExpr)
     (ih_c : ∀ fuel env, denote' bi fuel (cfIntoMonads c) env =
       (Outcome.encodeCF4 (denote' bi fuel c env).1, (denote' bi fuel c env).2))
     (ih_body : ∀ fuel env, denote' bi fuel (cfIntoMonads body) env =

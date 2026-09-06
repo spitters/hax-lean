@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.InlineClosures
+module
+
+public import HaxLean.AST
+public import HaxLean.InlineClosures
 
 /-!
 # Untyped twin of the closure-lowering pre-pass + erase commutation
@@ -19,6 +21,8 @@ so the pre-pass is, like the five pipeline phases, a refinement of an untyped
 transformation. Helper twins `stripRefs`/`varName?` mirror `tStripRefs`/
 `tVarName?` and get their own `@[simp]` erase lemmas first.
 -/
+
+@[expose] public section
 
 namespace Hax
 

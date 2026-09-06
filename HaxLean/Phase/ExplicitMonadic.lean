@@ -3,8 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Features
+module
+
+public import HaxLean.AST
+public import HaxLean.Features
 
 /-!
 # Phase 5: Explicit Monadic Encoding
@@ -25,6 +27,8 @@ The phase is semantically neutral for fold bodies because `denoteForLoop'`
 and `denoteWhile'` treat bare values (`val v`) identically to
 `val (controlFlow false v)` — both continue iteration.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -139,7 +143,7 @@ where
 
 /-! ## Feature Preservation: wrapReturns -/
 
-private theorem wrapReturns_preserves (e : ImpExpr)
+theorem wrapReturns_preserves (e : ImpExpr)
     {P : ImpExpr → Prop}
     (h : P e)
     -- P is closed under cfContinue

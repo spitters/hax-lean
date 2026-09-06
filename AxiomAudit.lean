@@ -1,5 +1,9 @@
-import HaxLean.PipelineCF
+module
 
+public import HaxLean.PipelineCF
+
+
+@[expose] public section
 -- Axiom ledger for the pipeline correctness capstones.
 -- Reproduce with:  lake env lean AxiomAudit.lean
 #print axioms Hax.pipeline_full_correct

@@ -3,10 +3,12 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Semantics
-import HaxLean.SemanticsCF
-import HaxLean.Runtime
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Semantics
+public import HaxLean.SemanticsCF
+public import HaxLean.Runtime
 
 /-!
 # Typed Phase: Encode loop control-flow into `ControlFlow`-valued fold bodies
@@ -124,6 +126,8 @@ The runtime semantics of these consumers is captured by `refFold` /
   the env-vs-value bridge for both the plain (one `ControlFlow` level) and the
   return (doubly-nested) folds.
 -/
+
+@[expose] public section
 
 namespace Hax
 

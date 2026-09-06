@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.TPhase.StructMetaT
+module
+
+public import HaxLean.TExpr
+public import HaxLean.TPhase.StructMetaT
 
 /-!
 # Typed phase: `tRewriteNewToStructCtor`
@@ -42,6 +44,8 @@ a typing-invariant hypothesis on the input. We mark this as follow-up
 once a `WellTyped` predicate over `TExpr × StructMeta` lands. The
 sibling phase `tQualifyProjections` documents the same trade-off.
 -/
+
+@[expose] public section
 
 namespace Hax
 

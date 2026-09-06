@@ -3,16 +3,18 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Value
-import HaxLean.Features
-import HaxLean.FreeVars
-import HaxLean.Semantics
-import HaxLean.Phase.DropReferences
-import HaxLean.Phase.LocalMutation
-import HaxLean.Phase.FunctionalizeLoops
-import HaxLean.Phase.CfIntoMonads
-import HaxLean.Phase.ExplicitMonadic
+module
+
+public import HaxLean.AST
+public import HaxLean.Value
+public import HaxLean.Features
+public import HaxLean.FreeVars
+public import HaxLean.Semantics
+public import HaxLean.Phase.DropReferences
+public import HaxLean.Phase.LocalMutation
+public import HaxLean.Phase.FunctionalizeLoops
+public import HaxLean.Phase.CfIntoMonads
+public import HaxLean.Phase.ExplicitMonadic
 
 /-!
 # End-to-End Pipeline
@@ -34,6 +36,8 @@ ImpExpr
 * `pipelineExt` — extended pipeline with explicit monadic encoding (5 phases)
 * `pipeline_fullyFunctional` — all feature predicates hold after pipeline
 -/
+
+@[expose] public section
 
 namespace Hax
 

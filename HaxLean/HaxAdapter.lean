@@ -3,12 +3,14 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.ImpType
-import HaxLean.TExpr
-import HaxLean.InlineClosures
-import HaxLean.JsonSize
-import Lean.Data.Json
+module
+
+public import HaxLean.AST
+public import HaxLean.ImpType
+public import HaxLean.TExpr
+public import HaxLean.InlineClosures
+public import HaxLean.JsonSize
+public import Lean.Data.Json
 
 /-!
 # Hax AST Adapter
@@ -58,12 +60,14 @@ We extract `contents` (the ExprKind) and `ty`, ignoring `span`, `hir_id`, `attri
 | others                 | `.app "unknown" []`     |
 -/
 
+public section
+
 namespace Hax.HaxAdapter
 
 open Lean (Json ToJson FromJson toJson fromJson?)
 
 /-- Extract the first key from a JSON object by trying common keys. -/
-private def firstObjKey (j : Json) : Option String :=
+def firstObjKey (j : Json) : Option String :=
   -- Try pretty-printing and extracting, or try known patterns
   let candidates := ["Add", "Sub", "Mul", "Div", "Rem", "Shl", "Shr",
     "BitAnd", "BitOr", "BitXor", "Eq", "Ne", "Lt", "Le", "Gt", "Ge",
@@ -77,7 +81,7 @@ private def firstObjKey (j : Json) : Option String :=
 
 /-- Extract the last meaningful name from a hax `DefId` path.
     DefId JSON: `{"krate": "...", "path": [{"data": {"TypeNs": "..."}, "disambiguator": 0}, ...]}` -/
-private partial def extractDefIdName (j : Json) (collisions : List String := []) : String :=
+partial def extractDefIdName (j : Json) (collisions : List String := []) : String :=
   -- hax DefId may be: {path: [...]} or {contents: {value: {path: [...]}}}
   -- Unwrap to find the object containing "path"
   let inner := match j.getObjVal? "contents" with
@@ -159,14 +163,14 @@ private partial def extractDefIdName (j : Json) (collisions : List String := [])
 
 /-- Extract a name from a hax `LocalIdent`.
     LocalIdent JSON: `{"name": "x", "id": ...}` -/
-private def extractLocalIdentName (j : Json) : String :=
+def extractLocalIdentName (j : Json) : String :=
   match j.getObjValAs? String "name" with
   | .ok n => n
   | _ => "unknown"
 
 /-- Extract the DefId name from an `item` JSON object.
     hax items have structure: `{id, value: {def_id: ...}}` or `{def_id: ...}`. -/
-private partial def extractItemDefIdName (item : Json) (fallback : String)
+partial def extractItemDefIdName (item : Json) (fallback : String)
     (collisions : List String := []) : String :=
   let defIdJ := match item.getObjVal? "value" with
     | .ok v => match v.getObjVal? "def_id" with
@@ -198,7 +202,7 @@ private partial def extractItemDefIdName (item : Json) (fallback : String)
     every free function call (e.g. `bb_mul` → `baby_bear_bb_mul`,
     `merkle_build_root` → `merkle_merkle_build_root`). All such calls
     leaked into the Deps class instead of resolving to local defs. -/
-private def disambiguateUserMethodName (j : Json) (baseName : String) : String :=
+def disambiguateUserMethodName (j : Json) (baseName : String) : String :=
   -- Look at the DefId's path. Format may be: {contents: {value: {path}}}.
   let inner := match j.getObjVal? "contents" with
     | .ok c => match c.getObjVal? "value" with
@@ -330,7 +334,7 @@ def tFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
 
 /-- Extract the short name of a struct/enum from an `Adt` type JSON.
     Returns `none` if the JSON doesn't have the expected shape. -/
-private partial def extractAdtShortName (adtJ : Json) : Option String := do
+partial def extractAdtShortName (adtJ : Json) : Option String := do
   -- adtJ is the Adt's `value` (containing `def_id`, `generic_args`, etc.)
   let v ← (adtJ.getObjVal? "value").toOption
   let defId ← (v.getObjVal? "def_id").toOption
@@ -405,7 +409,7 @@ partial def buildImplSelfTypeMap (j : Json) : List (Nat × String) :=
     ancestor's interning-id. Returns `none` if no Impl ancestor is
     found in the chain. Uses `getObjVal? "Impl"` rather than pattern-
     matching on `Json.obj`'s internal RBNode representation. -/
-private partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Option Nat :=
+partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Option Nat :=
   if depth == 0 then none
   else
     match defIdJ.getObjVal? "contents" with
@@ -435,14 +439,14 @@ private partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Opti
     | _ => none
 
 /-- Look up an Impl-DefId-id in the map. -/
-private def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String :=
+def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String :=
   m.impls.find? (·.1 == id) |>.map (·.2)
 
 /-- Disambiguate a method-call name using the impl map. Given the
     Call's `fun` JSON (a GlobalName) and the base method name, walk
     the function's DefId.parent chain to find an Impl ancestor. If
     that Impl's self-type is in the map, return `<TypeName>_<base>`. -/
-private def disambiguateMethodCallWithImplMap
+def disambiguateMethodCallWithImplMap
     (funJ : Json) (baseName : String) (implMap : ImplSelfTypeMap) : String :=
   if implMap.impls.isEmpty then baseName
   else
@@ -485,7 +489,7 @@ private def disambiguateMethodCallWithImplMap
 /-- Extract a function name from a hax expression (for Call).
     If the callee is a GlobalName, extract its item's DefId name and
     disambiguate user methods.  Otherwise use a placeholder. -/
-private partial def extractCallName (j : Json) (collisions : List String := []) : String :=
+partial def extractCallName (j : Json) (collisions : List String := []) : String :=
   -- j is the `fun` expression (a Decorated<ExprKind>)
   match j.getObjVal? "contents" with
   | .ok contents =>
@@ -511,7 +515,7 @@ private partial def extractCallName (j : Json) (collisions : List String := []) 
 /-! ## Type mapping -/
 
 /-- Map hax's BinOp to a string name. -/
-private def binOpName (j : Json) : String :=
+def binOpName (j : Json) : String :=
   match j with
   | .str s => s
   | _ =>
@@ -521,7 +525,7 @@ private def binOpName (j : Json) : String :=
     | none => "binop"
 
 /-- Map hax's UnOp to a string name. -/
-private def unOpName (j : Json) : String :=
+def unOpName (j : Json) : String :=
   match j with
   | .str s => s
   | _ =>
@@ -531,7 +535,7 @@ private def unOpName (j : Json) : String :=
 
 /-- Extract the constant length from a hax `{Const: ...}` generic arg.
     Format: `{Const: {contents: {Literal: {Int: {Uint: ["256", "Usize"]}}}}}` -/
-private def extractConstLen (j : Json) : Option Nat :=
+def extractConstLen (j : Json) : Option Nat :=
   let constJ := match j.getObjVal? "Const" with
     | .ok c => c
     | _ => j
@@ -555,7 +559,7 @@ private def extractConstLen (j : Json) : Option Nat :=
   | _ => none
 
 /-- Extract the last TypeNs name from a hax `def_id` path. -/
-private def extractAdtPathName (adtInner : Json) : Option String :=
+def extractAdtPathName (adtInner : Json) : Option String :=
   -- adtInner is the {def_id, generic_args, ...} inside {id, value: ...}
   let defIdJ := match adtInner.getObjVal? "def_id" with
     | .ok d => d
@@ -581,7 +585,7 @@ private def extractAdtPathName (adtInner : Json) : Option String :=
   | _ => none
 
 /-- Extract generic_args from an Adt/Array/Tuple inner value. -/
-private def extractGenericArgs (adtInner : Json) : Array Json :=
+def extractGenericArgs (adtInner : Json) : Array Json :=
   -- adtInner might be {id, value: {def_id, generic_args, ...}} or {def_id, generic_args, ...}
   let inner := match adtInner.getObjVal? "value" with
     | .ok v => v
@@ -1533,23 +1537,23 @@ on the parsed `ImpExpr`. This mirrors the OCaml hax engine's
 We detect `rev` in the call chain and emit `forLoopRev`. -/
 
 /-- Check if a function name is `into_iter` (possibly qualified). -/
-private def isIntoIter (f : String) : Bool :=
+def isIntoIter (f : String) : Bool :=
   f == "into_iter" || f.endsWith "into_iter" ||
   f.endsWith "IntoIterator::into_iter"
 
 /-- Check if a function name is `Iterator::next` (possibly qualified). -/
-private def isIterNext (f : String) : Bool :=
+def isIterNext (f : String) : Bool :=
   f == "next" || f.endsWith "next" ||
   f.endsWith "Iterator::next" || f.endsWith "Iterator__next"
 
 /-- Check if a function name is `rev` (possibly qualified). -/
-private def isRev (f : String) : Bool :=
+def isRev (f : String) : Bool :=
   f == "rev" || f.endsWith "rev" || f.endsWith "Iterator::rev"
 
 /-- Try to extract Range bounds from a constructor call.
     Hax represents `Range { start, end }` as `app "Range" [lo, hi]`
     or as `app "Range::new" [lo, hi]` or as `tuple [lo, hi]` wrapping. -/
-private def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr) :=
+def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr) :=
   match e with
   | .app f [lo, hi] =>
     if f == "Range" || f.endsWith "Range" || f == "new" || f == "Range::new"
@@ -1559,13 +1563,13 @@ private def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr) :=
   | _ => none
 
 /-- Information about a recognized iterator expression. -/
-private inductive IterInfo where
+inductive IterInfo where
   | range (lo hi : ImpExpr) (reversed : Bool)
   | collection (coll : ImpExpr)
 
 /-- Try to extract iterator info from the scrutinee of the outer match.
     Recognizes: `into_iter(Range(lo, hi))` and `into_iter(rev(Range(lo, hi)))`. -/
-private def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
+def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
   match e with
   | .app f [arg] =>
     if isIntoIter f then
@@ -1604,7 +1608,7 @@ private def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
 
 /-- Try to extract the loop variable and body from the inner match on `next()`.
     Pattern: `match next(&mut iter) { None => break, Some(i) => body }` -/
-private def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
+def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
     Option (String × ImpExpr) :=
   -- The inner body may be wrapped in seq, letBind, or be a direct match
   match innerBody with
@@ -1727,7 +1731,7 @@ We normalize:
 
 /-- Strip the "Assign" suffix from a compound op name to get the base op.
     Returns `none` if not a compound assign op. -/
-private def stripAssignSuffix (f : String) : Option String :=
+def stripAssignSuffix (f : String) : Option String :=
   let pairs := [
     ("AddAssign", "Add"), ("SubAssign", "Sub"), ("MulAssign", "Mul"),
     ("DivAssign", "Div"), ("RemAssign", "Rem"),
@@ -1736,12 +1740,12 @@ private def stripAssignSuffix (f : String) : Option String :=
   pairs.findSome? fun (cmpd, base) => if f == cmpd then some base else none
 
 /-- Strip deref wrappers (references are erased by dropReferences phase). -/
-private def stripDeref : ImpExpr → ImpExpr
+def stripDeref : ImpExpr → ImpExpr
   | .deref e => stripDeref e
   | e => e
 
 /-- Extract the variable name from an lvalue expression. -/
-private def extractLValueName : ImpExpr → String
+def extractLValueName : ImpExpr → String
   | .var n => n
   | .deref (.var n) => n
   | .deref (.deref (.var n)) => n
@@ -1824,7 +1828,7 @@ The `kind` field is an externally-tagged enum:
 
 /-- Extract the function name from a hax `Fn` item's `ident` field.
     Format: `[name_string, span_object]`. -/
-private def extractFnName (ident : Json) : String :=
+def extractFnName (ident : Json) : String :=
   match ident with
   | .arr elems => match elems.toList.head? with
     | some (.str n) => n
@@ -1834,7 +1838,7 @@ private def extractFnName (ident : Json) : String :=
 /-- Extract parameter names from a hax function definition's `params` array.
     Each param has `{pat: Decorated<PatKind>, ty: ...}`.
     Returns the list of parameter names (from Binding patterns). -/
-private def extractParamNames (params : Array Json) : List String :=
+def extractParamNames (params : Array Json) : List String :=
   params.toList.filterMap fun p =>
     match p.getObjVal? "pat" with
     | .ok patJ =>
@@ -1857,7 +1861,7 @@ abbrev FnTypeInfo := Hax.FnTypeInfo
 
 /-- Extract parameter names and types from a hax function definition's `params` array.
     Each param has `{pat: Decorated<PatKind>, ty: {id, value: TyKind}}`. -/
-private def extractParamTypes (params : Array Json) : List (String × ImpType) :=
+def extractParamTypes (params : Array Json) : List (String × ImpType) :=
   params.toList.filterMap fun p =>
     let name := match p.getObjVal? "pat" with
       | .ok patJ =>
@@ -1880,7 +1884,7 @@ private def extractParamTypes (params : Array Json) : List (String × ImpType) :
     Emits `letBind "param" (var "param") body` for each parameter,
     which the pipeline processes as identity bindings.
     The `extractFnDefs` in Main.lean then extracts these as function parameters. -/
-private def wrapParams (params : List String) (body : ImpExpr) : ImpExpr :=
+def wrapParams (params : List String) (body : ImpExpr) : ImpExpr :=
   params.foldr (fun p acc => .letBind p (.var p) acc) body
 
 /-- Parse a single top-level item from `hax_frontend_export.json`.
@@ -2084,7 +2088,7 @@ partial def collectCallSignatures (j : Json) : List (String × FnTypeInfo) :=
   | _ => []
 
 /-- Extract call signatures from a single hax JSON item (Fn). -/
-private partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
+partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
   match item.getObjVal? "kind" with
   | .ok kind =>
     match kind.getObjVal? "Fn" with
@@ -2179,7 +2183,7 @@ partial def collectVarRefTypes (j : Json) : List (String × ImpType) :=
   | _ => []
 
 /-- Extract var ref types from a single hax JSON item. -/
-private partial def extractVarRefTypesItem (item : Json) : List (String × ImpType) :=
+partial def extractVarRefTypesItem (item : Json) : List (String × ImpType) :=
   match item.getObjVal? "kind" with
   | .ok kind =>
     match kind.getObjVal? "Fn" with
@@ -2218,7 +2222,7 @@ partial def extractVarRefTypesFromFile (j : Json) : List (String × ImpType) :=
     if acc.any (·.1 == name) then acc else acc ++ [(name, ty)]) []
 
 /-- Extract call return types from a single hax JSON item (Fn). -/
-private partial def extractCallRetTypesItem (item : Json) : List (String × ImpType) :=
+partial def extractCallRetTypesItem (item : Json) : List (String × ImpType) :=
   match item.getObjVal? "kind" with
   | .ok kind =>
     match kind.getObjVal? "Fn" with
@@ -2300,7 +2304,7 @@ partial def parseHaxFileValidated (j : Json) : Except String (ImpExpr × List St
   return (expr, warnings)
 
 /-- Extract the type from a hax Decorated JSON node's `ty` field. -/
-private def extractNodeType (j : Json) : ImpType :=
+def extractNodeType (j : Json) : ImpType :=
   match j.getObjVal? "ty" with
   | .ok tyJ => parseHaxType tyJ
   | _ => .unknown
@@ -2313,7 +2317,7 @@ private def extractNodeType (j : Json) : ImpType :=
     implicit environment slot (null pat) and is dropped by `parseHaxPat`. Returns
     `none` for closures passed directly to a HOF/loop (no inline `body`, or no
     named params) — those keep the existing param-dropping behavior. -/
-private def closureSentinelArg? (exprJ : Json) : Option (List String × Json) :=
+def closureSentinelArg? (exprJ : Json) : Option (List String × Json) :=
   let kind := match exprJ.getObjVal? "contents" with | .ok c => c | _ => exprJ
   match kind.getObjVal? "Closure" with
   | .ok cdata =>
@@ -3271,7 +3275,7 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
 
 /-- The ordered segment names of a hax DefId path (mirrors `extractDefIdName`'s
     `names`). The last is the item name; the second-to-last is its parent module. -/
-private partial def defIdPathNames (defId : Json) : List String :=
+partial def defIdPathNames (defId : Json) : List String :=
   let inner := match defId.getObjVal? "contents" with
     | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
     | _ => defId
@@ -3289,7 +3293,7 @@ private partial def defIdPathNames (defId : Json) : List String :=
 
 /-- Collect `(fnShortName, parentModule)` for every `Fn` item, recursing into
     `Mod` sub-items, for Bug-2 collision detection. -/
-private partial def collectFnNameParents (items : List Json) : List (String × String) :=
+partial def collectFnNameParents (items : List Json) : List (String × String) :=
   items.foldl (init := []) fun acc item =>
     match item.getObjVal? "kind" with
     | .ok kind =>
@@ -3311,7 +3315,7 @@ private partial def collectFnNameParents (items : List Json) : List (String × S
 
 /-- Function short names that collide across ≥2 distinct parent modules. Such
     names are module-qualified at both def and call sites (Bug-2). -/
-private partial def fnNameCollisions (root : Json) : List String :=
+partial def fnNameCollisions (root : Json) : List String :=
   let items := match root with | .arr xs => xs.toList | _ => []
   let pairs := collectFnNameParents items
   let names := (pairs.map (·.1)).eraseDups
@@ -3430,7 +3434,7 @@ structure StructInfo where
   deriving Inhabited
 
 /-- Classify a hax type JSON value into "int", "array", or a struct name. -/
-private def classifyFieldType (tyVal : Json) : String :=
+def classifyFieldType (tyVal : Json) : String :=
   -- Uint types: {"Uint": "U8"}, {"Uint": "U16"}, etc.
   if tyVal.getObjVal? "Uint" |>.isOk then "int"
   -- Int types: {"Int": "I8"}, etc.
@@ -3613,7 +3617,7 @@ structure EnumInfo where
     For both, we extract each field's `ty` via `parseHaxType`. The
     field name is dropped — we emit a positional constructor.
     Unit variants have no `data` field (or `data` absent / null). -/
-private def parseEnumVariantPayload (variantJ : Json) : List ImpType :=
+def parseEnumVariantPayload (variantJ : Json) : List ImpType :=
   let dataJ := match variantJ.getObjVal? "data" with
     | .ok v => v
     | _ => Json.null
@@ -3696,7 +3700,7 @@ def parseEnumDefsFromJson (j : Json) : List EnumInfo :=
 /-- Parse the inner ImpType from a Tuple-variant struct's field list.
     Hax represents `struct T(Inner)` as `kind: Struct(..., {Tuple: [[field0_data]]})`.
     Returns the inner ImpType of the first positional field, if any. -/
-private def parseTupleStructInner (structData : Array Json) : Option ImpType :=
+def parseTupleStructInner (structData : Array Json) : Option ImpType :=
   let variantData := structData.toList[2]?
   match variantData with
   | some vd =>

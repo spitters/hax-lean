@@ -3,10 +3,12 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.ImpType
-import HaxLean.TExpr
-import Lean.Data.Json
+module
+
+public import HaxLean.AST
+public import HaxLean.ImpType
+public import HaxLean.TExpr
+public import Lean.Data.Json
 
 /-!
 # JSON Serialization for Hax AST
@@ -18,17 +20,19 @@ for translation validation and the verified pipeline CLI.
 **Not imported by the proof library** — only used by the executable.
 -/
 
+@[expose] public section
+
 namespace Hax
 
 open Lean (Json ToJson FromJson toJson fromJson?)
 
 /-! ## ImpLit -/
 
-private def intWidthToString : IntWidth → String
+def intWidthToString : IntWidth → String
   | .w8 => "u8" | .w16 => "u16" | .w32 => "u32"
   | .w64 => "u64" | .w128 => "u128" | .wsize => "usize"
 
-private def intWidthFromString : String → Except String IntWidth
+def intWidthFromString : String → Except String IntWidth
   | "u8" | "i8" => .ok .w8 | "u16" | "i16" => .ok .w16
   | "u32" | "i32" => .ok .w32 | "u64" | "i64" => .ok .w64
   | "u128" | "i128" => .ok .w128 | "usize" | "isize" => .ok .wsize
@@ -63,7 +67,7 @@ instance : FromJson ImpLit where
 
 /-! ## ImpPat -/
 
-private partial def impPatToJson : ImpPat → Json
+partial def impPatToJson : ImpPat → Json
   | .wildcard => Json.str "wildcard"
   | .nonePat => Json.str "nonePat"
   | .litPat l => Json.mkObj [("litPat", toJson l)]
@@ -77,7 +81,7 @@ private partial def impPatToJson : ImpPat → Json
         Json.mkObj [("name", Json.str name),
                     ("args", Json.arr (args.map impPatToJson).toArray)])]
 
-private partial def impPatFromJson (j : Json) : Except String ImpPat := do
+partial def impPatFromJson (j : Json) : Except String ImpPat := do
   if let .str "wildcard" := j then return .wildcard
   else if let .str "nonePat" := j then return .nonePat
   else if let .ok l := j.getObjValAs? ImpLit "litPat" then return .litPat l
@@ -103,7 +107,7 @@ instance : FromJson ImpPat where fromJson? := impPatFromJson
 
 /-! ## ImpType -/
 
-private def impTypeToJson : ImpType → Json
+def impTypeToJson : ImpType → Json
   | .bool => Json.str "bool"
   | .int => Json.str "int"
   | .unit => Json.str "unit"
@@ -133,7 +137,7 @@ private def impTypeToJson : ImpType → Json
   | .uint w => Json.mkObj [("uint", toJson w)]
   | .sint w => Json.mkObj [("sint", toJson w)]
 
-private partial def impTypeFromJson (j : Json) : Except String ImpType := do
+partial def impTypeFromJson (j : Json) : Except String ImpType := do
   match j with
   | .str "bool" => return .bool
   | .str "int" => return .int
@@ -182,7 +186,7 @@ instance : FromJson ImpType where fromJson? := impTypeFromJson
 
 /-! ## ImpExpr -/
 
-private partial def impExprToJson : ImpExpr → Json
+partial def impExprToJson : ImpExpr → Json
   | .lit v => Json.mkObj [("lit", toJson v)]
   | .var n => Json.mkObj [("var", Json.str n)]
   | .unitVal => Json.str "unitVal"
@@ -251,7 +255,7 @@ private partial def impExprToJson : ImpExpr → Json
   | .typeAscription e ty =>
     Json.mkObj [("typeAscription", Json.mkObj [("e", impExprToJson e), ("ty", toJson ty)])]
 
-private partial def impExprFromJson (j : Json) : Except String ImpExpr := do
+partial def impExprFromJson (j : Json) : Except String ImpExpr := do
   match j with
   | .str "unitVal" => return .unitVal
   | .str "continue" => return .continue_
@@ -371,10 +375,10 @@ instance : FromJson ImpExpr where fromJson? := impExprFromJson
 /-! ## TExpr / TExprKind -/
 
 mutual
-private partial def texprToJson : TExpr → Json
+partial def texprToJson : TExpr → Json
   | .mk kind ty => Json.mkObj [("kind", texprKindToJson kind), ("ty", toJson ty)]
 
-private partial def texprKindToJson : TExprKind → Json
+partial def texprKindToJson : TExprKind → Json
   | .lit v => Json.mkObj [("lit", toJson v)]
   | .var n => Json.mkObj [("var", Json.str n)]
   | .unitVal => Json.str "unitVal"
@@ -445,7 +449,7 @@ private partial def texprKindToJson : TExprKind → Json
     Json.mkObj [("namedProj", Json.mkObj [("ty", Json.str n), ("e", texprToJson e)])]
 end
 
-private partial def texprFromJson (j : Json) : Except String TExpr := do
+partial def texprFromJson (j : Json) : Except String TExpr := do
   let kind ← texprKindFromJson (← j.getObjVal? "kind")
   let ty ← fromJson? (← j.getObjVal? "ty")
   return .mk kind ty

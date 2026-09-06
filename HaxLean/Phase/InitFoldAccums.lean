@@ -3,7 +3,9 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
+module
+
+public import HaxLean.AST
 
 /-!
 # Post-pipeline pass: `initMissingFoldAccums`
@@ -27,6 +29,8 @@ Moved out of `PrettyPrint.lean` (TCB) into `Hax/Phase/` (verified core)
 on 2026-05-18 to reduce TCB by file convention; the conditional proof
 is a follow-up.
 -/
+
+@[expose] public section
 
 namespace Hax
 

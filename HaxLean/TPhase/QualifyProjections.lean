@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.TPhase.StructMetaT
+module
+
+public import HaxLean.TExpr
+public import HaxLean.TPhase.StructMetaT
 
 /-!
 # Typed phase: `tQualifyProjections`
@@ -41,6 +43,8 @@ phase), but a syntactic erase commuting equation does not hold without
 a typing-invariant hypothesis on the input. We mark this as follow-up
 once a `WellTyped` predicate over `TExpr × StructMeta` lands.
 -/
+
+@[expose] public section
 
 namespace Hax
 

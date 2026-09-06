@@ -3,7 +3,9 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
+module
+
+public import HaxLean.TExpr
 
 /-!
 # Typed phase: `tFixProjectionPaths`
@@ -41,6 +43,8 @@ rewriter dispatches on `e.ty`; the untyped one dispatches on a populated
 with the carried types, but a syntactic erase equation requires a
 `WellTyped` predicate that is follow-up work.
 -/
+
+@[expose] public section
 
 namespace Hax
 

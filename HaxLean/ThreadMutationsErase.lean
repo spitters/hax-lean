@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.ThreadMutations
+module
+
+public import HaxLean.AST
+public import HaxLean.ThreadMutations
 
 /-!
 # Untyped twin of the mutation-threading pre-pass + erase commutation
@@ -20,6 +22,8 @@ verified pipeline phases. The analysis twins (`assignedVars`, `varRefs`,
 `containsLoop`) and the rewrite helpers (`replaceTail`, `varTuple`,
 `destructure`) get their own `@[simp]` erase lemmas first.
 -/
+
+@[expose] public section
 
 namespace Hax
 

@@ -4,9 +4,13 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Lexer
-import Lean.Data.Json.Basic
+module
 
+public import HaxLean.Json.Lexer
+public import Lean.Data.Json.Basic
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!

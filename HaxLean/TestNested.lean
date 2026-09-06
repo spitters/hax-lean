@@ -1,7 +1,11 @@
-import HaxLean.SemanticsCF
-import HaxLean.Phase.FunctionalizeLoops
-import HaxLean.Phase.CfIntoMonads
+module
 
+public import HaxLean.SemanticsCF
+public import HaxLean.Phase.FunctionalizeLoops
+public import HaxLean.Phase.CfIntoMonads
+
+
+@[expose] public section
 namespace Hax.TestNested
 
 -- Test: for i in 0..3 { if i == 1 { return 42; } break 0; }

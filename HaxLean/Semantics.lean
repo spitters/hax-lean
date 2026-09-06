@@ -3,8 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Value
+module
+
+public import HaxLean.AST
+public import HaxLean.Value
 
 /-!
 # Fuel-Bounded Big-Step Semantics
@@ -33,6 +35,8 @@ Termination uses a lexicographic measure `(fuel, sizeOf expr)`:
 - Loop helpers decrease `fuel` when iterating, and their calls to
   `denote body` decrease `sizeOf` relative to the helper's measure.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -488,7 +492,7 @@ def widthArrayOps : Builtins
   | _, _ => none
 
 /-- Signed integer modular reduction: maps to [-2^(w-1), 2^(w-1)). -/
-private def wrapSint (w : IntWidth) (n : Int) : Value :=
+def wrapSint (w : IntWidth) (n : Int) : Value :=
   let m : Int := w.modulus
   let r := n % m
   .sint w (if r ≥ m / 2 then r - m else r)

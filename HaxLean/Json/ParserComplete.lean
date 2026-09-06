@@ -4,8 +4,12 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.ParserSound
+module
 
+public import HaxLean.Json.ParserSound
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!

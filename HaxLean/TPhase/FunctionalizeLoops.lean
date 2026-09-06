@@ -3,9 +3,11 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.TFeatures
-import HaxLean.Phase.FunctionalizeLoops
+module
+
+public import HaxLean.TExpr
+public import HaxLean.TFeatures
+public import HaxLean.Phase.FunctionalizeLoops
 
 /-!
 # Typed Phase 3: Functionalize Loops
@@ -13,10 +15,12 @@ import HaxLean.Phase.FunctionalizeLoops
 Typed version of `functionalizeLoops` on `TExpr`, with a commuting lemma.
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-- Check if a typed expression has early exits (via erasure). -/
-private def tCheckNoEarlyExit (e : TExpr) : Bool :=
+def tCheckNoEarlyExit (e : TExpr) : Bool :=
   checkNoEarlyExit e.erase
 
 /-- Typed version of `functionalizeLoopsAux`. -/
@@ -144,7 +148,7 @@ def tFunctionalizeLoops (e : TExpr) : TExpr :=
   | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [tFunctionalizeLoopsAux.mapArms, ih]
 
 /-- Key lemma: `tCheckNoEarlyExit` matches `checkNoEarlyExit` after erasure. -/
-private theorem tCheckNoEarlyExit_eq (e : TExpr) :
+theorem tCheckNoEarlyExit_eq (e : TExpr) :
     tCheckNoEarlyExit e = checkNoEarlyExit e.erase := rfl
 
 /-- Commuting diagram: type erasure commutes with `tFunctionalizeLoopsAux`. -/

@@ -3,18 +3,20 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.TFeatures
-import HaxLean.TPhase.DropReferences
-import HaxLean.TPhase.LocalMutation
-import HaxLean.TPhase.FunctionalizeLoops
-import HaxLean.TPhase.CfIntoMonads
-import HaxLean.TPhase.WrapMatchArms
-import HaxLean.TPhase.ExplicitMonadic
-import HaxLean.TPhase.AnnotateLets
-import HaxLean.TPhase.ElideNewtypeProj
-import HaxLean.TPhase.FlattenLetFoldReturn
-import HaxLean.Pipeline
+module
+
+public import HaxLean.TExpr
+public import HaxLean.TFeatures
+public import HaxLean.TPhase.DropReferences
+public import HaxLean.TPhase.LocalMutation
+public import HaxLean.TPhase.FunctionalizeLoops
+public import HaxLean.TPhase.CfIntoMonads
+public import HaxLean.TPhase.WrapMatchArms
+public import HaxLean.TPhase.ExplicitMonadic
+public import HaxLean.TPhase.AnnotateLets
+public import HaxLean.TPhase.ElideNewtypeProj
+public import HaxLean.TPhase.FlattenLetFoldReturn
+public import HaxLean.Pipeline
 
 /-!
 # Typed Pipeline
@@ -29,6 +31,8 @@ TExpr ──[tPipeline]──→ TExpr
 ImpExpr ──[pipeline]──→ ImpExpr    (already verified)
 ```
 -/
+
+@[expose] public section
 
 namespace Hax
 

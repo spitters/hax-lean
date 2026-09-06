@@ -4,9 +4,13 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Roundtrip
-import Std.Data.TreeMap
+module
 
+public import HaxLean.Json.Roundtrip
+public import Std.Data.TreeMap
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!

@@ -4,6 +4,8 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
+module
+
 /-!
 # Simplified Rust Type Representation
 
@@ -14,6 +16,8 @@ the hax frontend — no type inference is needed.
 This is used by `TExpr` to annotate every subexpression with its type,
 mirroring hax's `Decorated<ExprKind>` pattern.
 -/
+
+@[expose] public section
 
 namespace Hax
 

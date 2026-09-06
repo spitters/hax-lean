@@ -4,7 +4,9 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.ImpType
+module
+
+public import HaxLean.ImpType
 
 /-!
 # Imperative Expression AST
@@ -25,6 +27,8 @@ functional form that maps to CatCrypt's `RawCode`.
 
 After all four phases, only the *core* constructors survive.
 -/
+
+@[expose] public section
 
 namespace Hax
 

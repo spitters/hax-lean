@@ -3,7 +3,9 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.ImpType
+module
+
+public import HaxLean.ImpType
 
 /-!
 # Shared struct-metadata abbreviation for typed phases
@@ -15,6 +17,8 @@ consume. It is structurally identical to the untyped renderer's
 typed phases can share a single definition without re-declaring it
 (and thereby colliding when imported together).
 -/
+
+@[expose] public section
 
 namespace Hax
 

@@ -3,14 +3,16 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.ImpType
-import HaxLean.HaxAdapter
-import HaxLean.ImpType
-import HaxLean.Canonicalize
-import HaxLean.Phase.RewriteAppName
-import HaxLean.Phase.InitFoldAccums
-import HaxLean.TPhase.EncodeControlFlow
+module
+
+public import HaxLean.AST
+public import HaxLean.ImpType
+public import HaxLean.HaxAdapter
+public import HaxLean.ImpType
+public import HaxLean.Canonicalize
+public import HaxLean.Phase.RewriteAppName
+public import HaxLean.Phase.InitFoldAccums
+public import HaxLean.TPhase.EncodeControlFlow
 
 /-!
 # Lean 4 Pretty-Printer for ImpExpr (DEPRECATED — untyped path)
@@ -42,10 +44,12 @@ Removal target: once `tests/run_tests.sh` and `scripts/run_haxpipe.sh`
 (SSProve-lean) are migrated or removed.
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-- Indent by `n` levels (2 spaces each). -/
-private def indent (n : Nat) : String :=
+def indent (n : Nat) : String :=
   String.ofList (List.replicate (2 * n) ' ')
 
 /-- Sanitize a name for Lean 4: wrap in French quotes if needed. -/
@@ -74,7 +78,7 @@ def sanitizeName (n : String) : String :=
 /-- Handle width-annotated operation names (e.g. "wrapping_add#32").
     The HaxAdapter annotates width-sensitive Rust ops with `#bitwidth` when
     it can infer the type from the Impl discriminator. -/
-private def widthAwareRuntime (f : String) : String :=
+def widthAwareRuntime (f : String) : String :=
   if f.any (· == '#') then
     let parts := f.splitOn "#"
     match parts with
@@ -98,7 +102,7 @@ private def widthAwareRuntime (f : String) : String :=
 
 /-- Map builtin function names to qualified Lean 4 identifiers.
     Known builtins get `Hax.` prefix; constructors map to Lean equivalents. -/
-private def runtimeName (f : String) : String :=
+def runtimeName (f : String) : String :=
   match f with
   -- Arithmetic (lowercase: Int-specific; capitalized: map to lowercase for untyped)
   | "add" | "sub" | "mul" | "div" | "rem" | "neg" => s!"Hax.{f}"
@@ -200,7 +204,7 @@ def renderQualifiedCtor (f : String) : String :=
 
 /-- Map an operator name and result type to a width-specific runtime function.
     Falls back to `runtimeName` when the type is not a fixed-width integer. -/
-private def runtimeNameTyped (f : String) (ty : ImpType) : String :=
+def runtimeNameTyped (f : String) (ty : ImpType) : String :=
   match ty.intWidth? with
   | some w =>
     let suffix := if ty.isSigned then w.toSignedSuffix else w.toSuffix
@@ -238,7 +242,7 @@ private def runtimeNameTyped (f : String) (ty : ImpType) : String :=
   | none => runtimeName f
 
 /-- Select the cast function name based on source and target types. -/
-private def castFnName (srcTy dstTy : ImpType) : String :=
+def castFnName (srcTy dstTy : ImpType) : String :=
   match srcTy, dstTy with
   | .bool, _ =>
     -- Bool → Int/UInt: convert true→1, false→0
@@ -253,7 +257,7 @@ private def castFnName (srcTy dstTy : ImpType) : String :=
     | _, _ => "id"  -- non-integer cast: identity
 
 /-- Format an integer literal with a type annotation when the type is known. -/
-private def litIntTyped (n : Int) (ty : ImpType) : String :=
+def litIntTyped (n : Int) (ty : ImpType) : String :=
   let numStr := if n < 0 then s!"({n})" else toString n
   match ty with
   | .uint w => s!"({numStr} : {w.toLeanType})"
@@ -261,7 +265,7 @@ private def litIntTyped (n : Int) (ty : ImpType) : String :=
   | _ => numStr
 
 /-- Pretty-print a pattern. -/
-private partial def patToLean : ImpPat → String
+partial def patToLean : ImpPat → String
   | .wildcard => "_"
   | .litPat (.bool true) => "true"
   | .litPat (.bool false) => "false"
@@ -293,7 +297,7 @@ private partial def patToLean : ImpPat → String
 /-- Detect tuple destructuring pattern in letBind body.
     Pattern: letBind "a" (proj (var tmpName) 0) (letBind "b" (proj (var tmpName) 1) rest)
     Returns (field names, remaining body) or none. -/
-private partial def isAssertBlock : ImpExpr → Bool
+partial def isAssertBlock : ImpExpr → Bool
   | .app f _ => f == "assert_failed" || f == "assert_failed'"
   | .match_ _ arms => arms.any fun (_, b) => isAssertBlock b
   | .ifThenElse _ t e => isAssertBlock t || isAssertBlock e
@@ -302,7 +306,7 @@ private partial def isAssertBlock : ImpExpr → Bool
   | _ => false
 
 /-- Check if an expression references a variable by name. -/
-private partial def exprContainsVar (name : String) : ImpExpr → Bool
+partial def exprContainsVar (name : String) : ImpExpr → Bool
   | .var n => n == name
   | .app _ args => args.any (exprContainsVar name)
   | .tuple es => es.any (exprContainsVar name)
@@ -320,7 +324,7 @@ private partial def exprContainsVar (name : String) : ImpExpr → Bool
 /-- Detect tuple destructuring pattern in letBind body.
     Pattern: letBind "a" (proj (var tmpName) 0) (letBind "b" (proj (var tmpName) 1) rest)
     Returns (field names, remaining body) or none. -/
-private def extractTupleDestr (tmpName : String) : ImpExpr → Option (List String × ImpExpr)
+def extractTupleDestr (tmpName : String) : ImpExpr → Option (List String × ImpExpr)
   | .letBind n (.proj (.var v) _) rest =>
     if v == tmpName then
       match extractTupleDestr tmpName rest with
@@ -332,7 +336,7 @@ private def extractTupleDestr (tmpName : String) : ImpExpr → Option (List Stri
 /-- Simplify a fold body by removing trivial let-return patterns.
     `letBind n rhs (var n)` → `rhs` when `n` is the only accumulator.
     This avoids indentation issues with bare return values. -/
-private def simplifyFoldBody : ImpExpr → ImpExpr
+def simplifyFoldBody : ImpExpr → ImpExpr
   | .letBind n val (.var v) => if n == v then val else .letBind n val (.var v)
   | e => e
 
@@ -340,7 +344,7 @@ private def simplifyFoldBody : ImpExpr → ImpExpr
     and others return non-unit values. Replaces `()` arms with the fold accumulator variable
     to ensure all arms have the same type.
     This handles patterns like `match ctr with | 0 => foldRange ... | _ => ()` inside folds. -/
-private partial def patchMatchUnitArmsInBody (accVar : String) : ImpExpr → ImpExpr
+partial def patchMatchUnitArmsInBody (accVar : String) : ImpExpr → ImpExpr
   | .letBind n v body => .letBind n v (patchMatchUnitArmsInBody accVar body)
   | .seq a b => .seq a (patchMatchUnitArmsInBody accVar b)
   | .match_ scrut arms =>
@@ -354,7 +358,7 @@ private partial def patchMatchUnitArmsInBody (accVar : String) : ImpExpr → Imp
 
 /-- Extract mutation variable names and their RHS from a conditional then-branch.
     Returns list of (name, rhs) for patterns like `seq (letBind n rhs (var n)) rest`. -/
-private partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr)
+partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr)
   | .seq (.seq a b) c => extractCondAllBindings (.seq a (.seq b c))
   | .seq (.letBind n rhs (.var v)) rest =>
     if n == v then (n, rhs) :: extractCondAllBindings rest
@@ -371,7 +375,7 @@ private partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr
     Looks for the localMutation pattern: `seq (letBind n rhs (var n)) rest`
     which came from `assign n rhs`. Returns unique names in order.
     Also looks inside `ifThenElse` branches for conditional mutations. -/
-private partial def extractCondMutationsAux (locals : List String) :
+partial def extractCondMutationsAux (locals : List String) :
     ImpExpr → List (String × ImpExpr)
   | .seq (.seq a b) c => extractCondMutationsAux locals (.seq a (.seq b c))
   | .seq (.letBind n rhs (.var v)) rest =>
@@ -414,14 +418,14 @@ private partial def extractCondMutationsAux (locals : List String) :
   | _ => []
 
 /-- Top-level wrapper. -/
-private partial def extractCondMutations (e : ImpExpr) : List (String × ImpExpr) :=
+partial def extractCondMutations (e : ImpExpr) : List (String × ImpExpr) :=
   extractCondMutationsAux [] e
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
     bindings. An `if` or `match` at the tail distributes `newTail` into its
     branches; a loop at the tail is kept as a statement ahead of `newTail`; a
     pure value at the tail is replaced. The untyped twin of `tReplaceTail`. -/
-private partial def replaceTail (newTail : ImpExpr) : ImpExpr → ImpExpr
+partial def replaceTail (newTail : ImpExpr) : ImpExpr → ImpExpr
   | .letBind n v body => .letBind n v (replaceTail newTail body)
   | .seq a b => .seq a (replaceTail newTail b)
   | .ifThenElse c t f => .ifThenElse c (replaceTail newTail t) (replaceTail newTail f)
@@ -435,7 +439,7 @@ private partial def replaceTail (newTail : ImpExpr) : ImpExpr → ImpExpr
     `if`, `match` or loop) that the flat per-variable conditional rendering
     cannot reach: the mutations `extractCondMutations` finds beyond the
     top-level bindings of the branch. -/
-private def nestedCondMutations (branch : ImpExpr) : List String :=
+def nestedCondMutations (branch : ImpExpr) : List String :=
   let flat := (extractCondAllBindings branch).map (·.1)
   ((extractCondMutations branch).map (·.1)).filter fun n =>
     !flat.contains n && !n.startsWith "_assign"
@@ -447,7 +451,7 @@ private def nestedCondMutations (branch : ImpExpr) : List String :=
       `seq (letBind "state" rhs (var "state")) unitVal`
     Output:
       `letBind "state" rhs (var "state")` -/
-private partial def collectLetBindVars : ImpExpr → List String
+partial def collectLetBindVars : ImpExpr → List String
   | .letBind n _ (.var v) =>
     if n == v then []  -- mutation pattern, not a fresh binding
     else [n]
@@ -458,7 +462,7 @@ private partial def collectLetBindVars : ImpExpr → List String
 
 /-- Check if an expression contains ControlFlow nodes (cfBreak/cfContinue/cfBreakContinue).
     Recurses into all sub-expressions including nested loop bodies. -/
-private partial def hasControlFlowNodes : ImpExpr → Bool
+partial def hasControlFlowNodes : ImpExpr → Bool
   | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
   | .letBind _ v b => hasControlFlowNodes v || hasControlFlowNodes b
   | .seq e1 e2 => hasControlFlowNodes e1 || hasControlFlowNodes e2
@@ -471,7 +475,7 @@ private partial def hasControlFlowNodes : ImpExpr → Bool
 /-- Check if an expression has cfBreak/cfContinue at the surface level.
     Does NOT recurse into nested loop bodies (forFold/whileFold/forFoldReturn etc.),
     so inner-loop control flow doesn't leak to outer rendering decisions. -/
-private partial def hasSurfaceControlFlow : ImpExpr → Bool
+partial def hasSurfaceControlFlow : ImpExpr → Bool
   | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
   | .letBind _ v b => hasSurfaceControlFlow v || hasSurfaceControlFlow b
   | .seq e1 e2 => hasSurfaceControlFlow e1 || hasSurfaceControlFlow e2
@@ -495,7 +499,7 @@ private partial def hasSurfaceControlFlow : ImpExpr → Bool
     Recurses through let-chains, seq-tails, and if/match arms to find
     the tail expression. Inner-loop bodies and non-tail positions are
     left untouched (their context is determined locally by the renderer). -/
-private partial def wrapTailForFoldWithMerge : ImpExpr → ImpExpr
+partial def wrapTailForFoldWithMerge : ImpExpr → ImpExpr
   | .letBind n v body => .letBind n v (wrapTailForFoldWithMerge body)
   | .seq a b => .seq a (wrapTailForFoldWithMerge b)
   | .ifThenElse c t e =>
@@ -517,7 +521,7 @@ private partial def wrapTailForFoldWithMerge : ImpExpr → ImpExpr
     which came from `assign n rhs`. Returns unique names in order.
     Filters out `_assign`-prefixed names which are intermediate mutation
     temporaries from nested field/index assignments (not real accumulators). -/
-private partial def extractAccumulatorsAux (locals : List String) : ImpExpr → List String
+partial def extractAccumulatorsAux (locals : List String) : ImpExpr → List String
   | .seq (.seq a b) c => extractAccumulatorsAux locals (.seq a (.seq b c))
   | .seq (.letBind n val (.var v)) rest =>
     if n == v && !n.startsWith "_assign" && !locals.contains n then
@@ -572,7 +576,7 @@ private partial def extractAccumulatorsAux (locals : List String) : ImpExpr → 
   | _ => []
 
 /-- Top-level wrapper. -/
-private partial def extractAccumulators (e : ImpExpr) : List String :=
+partial def extractAccumulators (e : ImpExpr) : List String :=
   extractAccumulatorsAux [] e
 
 /-- Build a destructure-and-return wrapper for an inner fold whose
@@ -587,7 +591,7 @@ private partial def extractAccumulators (e : ImpExpr) : List String :=
     Uses a fresh `_innerTuple` name and `extractTupleDestr`-shaped
     `proj` chain so the renderer prints the standard
     `let (a, b, _c) := <fold>` Lean idiom. -/
-private def buildDestructureAndTuple (fold : ImpExpr) (innerAccs outerAccs : List String) :
+def buildDestructureAndTuple (fold : ImpExpr) (innerAccs outerAccs : List String) :
     ImpExpr :=
   let tmp := "_innerTuple"
   let outerTuple : ImpExpr :=
@@ -614,7 +618,7 @@ private def buildDestructureAndTuple (fold : ImpExpr) (innerAccs outerAccs : Lis
 
     Recurses through let-chains, seq-tails, and if/match arms. Inner
     folds NOT in tail position are left untouched. -/
-private partial def wrapTailFoldForOuterAccs (outerAccs : List String) :
+partial def wrapTailFoldForOuterAccs (outerAccs : List String) :
     ImpExpr → ImpExpr
   | .letBind n v body =>
     .letBind n v (wrapTailFoldForOuterAccs outerAccs body)
@@ -647,7 +651,7 @@ private partial def wrapTailFoldForOuterAccs (outerAccs : List String) :
       `seq (letBind "state" rhs (var "state")) unitVal`
     Output:
       `letBind "state" rhs (var "state")` -/
-private partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
+partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
   -- Flatten nested seq
   | .seq (.seq a b) c => transformFoldBody accs (.seq a (.seq b c))
   -- Mutation pattern: seq (letBind n rhs (var n)) rest → letBind n rhs (transform rest)
@@ -698,7 +702,7 @@ private partial def transformFoldBody (accs : List String) : ImpExpr → ImpExpr
     This handles patterns like:
       `let w := ZERO_WORD; let w := array_update w 0 ...; w`
     where the first binding is a fresh init that should be the fold's initial value. -/
-private partial def extractAccInit (accName : String) (allAccs : List String := [])
+partial def extractAccInit (accName : String) (allAccs : List String := [])
     : ImpExpr → Option ImpExpr
   | .seq (.seq a b) c => extractAccInit accName allAccs (.seq a (.seq b c))
   -- seq (letBind accName init (var accName)) rest
@@ -729,7 +733,7 @@ private partial def extractAccInit (accName : String) (allAccs : List String := 
   | _ => none
 
 /-- Format accumulator initial value and lambda parameter for fold rendering. -/
-private def accStrings (accs : List String) : String × String :=
+def accStrings (accs : List String) : String × String :=
   if accs.isEmpty then ("()", "_acc")
   else if accs.length == 1 then
     let name := sanitizeName accs.head!
@@ -744,7 +748,7 @@ private def accStrings (accs : List String) : String × String :=
     These need `let acc := init` emitted BEFORE the fold.
     Skips init expressions that reference variables only defined inside the fold body
     (local bindings like destructured results, loop-local temporaries). -/
-private def accInitOverrides (accs : List String) (body : ImpExpr) :
+def accInitOverrides (accs : List String) (body : ImpExpr) :
     List (String × ImpExpr) :=
   -- Collect all locally-bound variable names inside the fold body
   let locallyBound := collectLetBindVars body
@@ -762,7 +766,7 @@ private def accInitOverrides (accs : List String) (body : ImpExpr) :
 /-- Pull variable names out of a `cfContinue` / `cfBreak` argument that
     threads accumulator state back to the loop. Recognises `.var "n"`
     (single accumulator) and `.tuple [.var "n1", ..]` (multiple). -/
-private def cfArgAccNames : ImpExpr → List String
+def cfArgAccNames : ImpExpr → List String
   | .var n => [n]
   | .tuple elems => elems.filterMap fun
     | .var n => some n
@@ -773,7 +777,7 @@ private def cfArgAccNames : ImpExpr → List String
     The body may be wrapped in an `ifThenElse` (from `while true { if cond ... else break }`),
     so we look inside the `thn` branch for mutation patterns.
     Also skips non-mutation `letBind` wrappers (e.g., `let block := ...`). -/
-private partial def extractWhileAccumulators : ImpExpr → List String
+partial def extractWhileAccumulators : ImpExpr → List String
   | .ifThenElse _ thn _ => extractWhileAccumulators thn
   | .letBind n _ (.var v) => if n == v && !n.startsWith "_assign" then
       -- Mutation pattern at top level
@@ -791,7 +795,7 @@ private partial def extractWhileAccumulators : ImpExpr → List String
   | e => extractAccumulators e
 
 /-- Make an accumulator tuple expression from a list of variable names. -/
-private def accTuple (accs : List String) : ImpExpr :=
+def accTuple (accs : List String) : ImpExpr :=
   match accs with
   | [a] => .var a
   | _ => .tuple (accs.map .var)
@@ -805,7 +809,7 @@ private def accTuple (accs : List String) : ImpExpr :=
 
 
 /-- Check if a forFoldReturn body contains cfBreak (early return from function). -/
-private partial def hasCfBreak : ImpExpr → Bool
+partial def hasCfBreak : ImpExpr → Bool
   | .cfBreak _ => true
   | .cfBreakContinue _ => true
   | .letBind _ v b => hasCfBreak v || hasCfBreak b
@@ -815,7 +819,7 @@ private partial def hasCfBreak : ImpExpr → Bool
   | _ => false
 
 /-- Collect all cfBreak values from an expression (for detecting return type). -/
-private partial def extractAllCfBreakVals : ImpExpr → List ImpExpr
+partial def extractAllCfBreakVals : ImpExpr → List ImpExpr
   | .cfBreak v => [v]
   | .letBind _ v b => extractAllCfBreakVals v ++ extractAllCfBreakVals b
   | .seq a b => extractAllCfBreakVals a ++ extractAllCfBreakVals b
@@ -826,7 +830,7 @@ private partial def extractAllCfBreakVals : ImpExpr → List ImpExpr
 /-- Extract the cfBreak return value from an expression, looking through seq/unitVal wrappers.
     Returns the break value if the expression is essentially a cfBreak (early return),
     or none if it's not. -/
-private partial def extractCfBreak : ImpExpr → Option ImpExpr
+partial def extractCfBreak : ImpExpr → Option ImpExpr
   | .cfBreak val => some val
   | .seq (.cfBreak val) .unitVal => some val
   | .cfContinue _ => none
@@ -850,7 +854,7 @@ private partial def extractCfBreak : ImpExpr → Option ImpExpr
     This allows rendering the whole expression with proper let-bindings and the
     return value at the end (instead of cfBreak wrapper).
     Returns the original expression unchanged if no cfBreak is found. -/
-private partial def stripCfBreak : ImpExpr → ImpExpr
+partial def stripCfBreak : ImpExpr → ImpExpr
   | .cfBreak val => val
   | .seq (.cfBreak val) .unitVal => val
   | .seq .unitVal rest => stripCfBreak rest
@@ -881,7 +885,7 @@ partial def stripFunctionTailCfBreak : ImpExpr → ImpExpr
     `cfBreak` (early return), `cfContinue` (fall through), or `.unitVal`
     (which acts as implicit fall-through when paired with a sibling
     `cfBreak`). -/
-private partial def isCfGuardTail : ImpExpr → Bool
+partial def isCfGuardTail : ImpExpr → Bool
   | .cfBreak _ => true
   | .cfContinue _ => true
   | .unitVal => true  -- implicit fall-through
@@ -895,7 +899,7 @@ private partial def isCfGuardTail : ImpExpr → Bool
     Used together with `isCfGuardTail` to ensure we don't fire the
     CF-guard fusion on plain `if cond then () else ()` patterns that
     aren't actually doing early returns. -/
-private partial def tailHasCfBreak : ImpExpr → Bool
+partial def tailHasCfBreak : ImpExpr → Bool
   | .cfBreak _ => true
   | .seq (.cfBreak _) _ => true
   | .ifThenElse _ thn els => tailHasCfBreak thn || tailHasCfBreak els
@@ -905,7 +909,7 @@ private partial def tailHasCfBreak : ImpExpr → Bool
 
 /-- An if-then-else is a CF guard exactly when both branches are
     CF-guard tails and at least one branch contains a `cfBreak`. -/
-private def isCfGuardIf (thn els : ImpExpr) : Bool :=
+def isCfGuardIf (thn els : ImpExpr) : Bool :=
   isCfGuardTail thn && isCfGuardTail els && (tailHasCfBreak thn || tailHasCfBreak els)
 
 /-- Rewrite a CF-guard `e` so that every `cfContinue`/`unitVal` leaf is
@@ -913,7 +917,7 @@ private def isCfGuardIf (thn els : ImpExpr) : Bool :=
     `val`. Used to fuse `seq <if-with-cf-markers> rest` into a single
     expression where each branch decides between an early return and
     continuing with `rest` inlined. -/
-private partial def inlineRestIntoCfGuard (rest : ImpExpr) : ImpExpr → ImpExpr
+partial def inlineRestIntoCfGuard (rest : ImpExpr) : ImpExpr → ImpExpr
   | .cfBreak val => val
   | .cfContinue _ => rest
   | .unitVal => rest
@@ -926,7 +930,7 @@ private partial def inlineRestIntoCfGuard (rest : ImpExpr) : ImpExpr → ImpExpr
   | e => e
 
 /-- Check if an expression references a name as a function call (.app fname ...). -/
-private partial def exprContainsApp (fname : String) : ImpExpr → Bool
+partial def exprContainsApp (fname : String) : ImpExpr → Bool
   | .app f args => f == fname || args.any (exprContainsApp fname)
   | .letBind _ v body => exprContainsApp fname v || exprContainsApp fname body
   | .seq a b => exprContainsApp fname a || exprContainsApp fname b
@@ -974,7 +978,7 @@ partial def checkProjOnVar (varName projName : String) : ImpExpr → Bool
   | _ => false
 
 /-- Helper for hasGuardRecursion: walk through letBind/seq chains. -/
-private partial def hasGuardRecGo (fname : String) : ImpExpr → Bool
+partial def hasGuardRecGo (fname : String) : ImpExpr → Bool
   | .letBind _ _ body => hasGuardRecGo fname body
   | .seq e1 rest =>
     -- Check if e1 contains ControlFlow (cfBreak) and rest calls fname
@@ -989,7 +993,7 @@ def hasGuardRecursion (fname : String) (e : ImpExpr) : Bool :=
   hasGuardRecGo fname e
 
 /-- Is this expression simple enough to not need parentheses as an argument? -/
-private def isAtom : ImpExpr → Bool
+def isAtom : ImpExpr → Bool
   | .lit _ | .var _ | .unitVal => true
   | .tuple _ => true  -- tuples have their own parens
   -- Type ascription renders as `(e : T)` which already wraps itself
@@ -998,13 +1002,13 @@ private def isAtom : ImpExpr → Bool
   | _ => false
 
 /-- Wrap in parentheses if needed. -/
-private def parensIf (s : String) (needParens : Bool) : String :=
+def parensIf (s : String) (needParens : Bool) : String :=
   if needParens then s!"({s})" else s
 
 /-- Is this expression known to produce a Bool?
     Comparison operators, boolean literals, logical ops, and `Not` all return Bool.
     Unknown expressions (bare variables, arbitrary function calls) return false. -/
-private def isKnownBool : ImpExpr → Bool
+def isKnownBool : ImpExpr → Bool
   | .lit (.bool _) => true
   | .app f _ => match f with
     | "eq" | "Eq" | "ne" | "Ne" | "lt" | "Lt" | "le" | "Le"
@@ -1017,7 +1021,7 @@ private def isKnownBool : ImpExpr → Bool
 /-- Check if an expression is a "leaf" — renders without `{indent lvl}` prefix.
     Leaf expressions need explicit indentation when they appear at the start of a line
     (e.g., as the final expression of a let-chain or fold body). -/
-private def isLeafExpr : ImpExpr → Bool
+def isLeafExpr : ImpExpr → Bool
   | .var _ | .lit _ | .unitVal | .app _ _ | .tuple _ => true
   | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
   | .proj _ _ => true
@@ -1892,7 +1896,7 @@ where
 
 /-- Collect all projection names applied to a given variable (simple version for param inference).
     Looks for `.app ".field" [.var varName]` and `.app "Struct.field" [.var varName]` patterns. -/
-private partial def collectProjectionsOnVar' (varName : String) : ImpExpr → List String
+partial def collectProjectionsOnVar' (varName : String) : ImpExpr → List String
   | .app f [.var v] =>
     if v == varName && (f.startsWith "." || f.contains '.') then
       -- Extract the field name from ".field" or "Struct.field"
@@ -1927,7 +1931,7 @@ private partial def collectProjectionsOnVar' (varName : String) : ImpExpr → Li
 
 /-- Collect all function calls where a given variable is passed as an argument.
     Returns list of (calleeName, argIndex). -/
-private partial def collectCallsOnVar (varName : String) : ImpExpr → List (String × Nat)
+partial def collectCallsOnVar (varName : String) : ImpExpr → List (String × Nat)
   | .app f args =>
     let thisCall := (args.zip (List.range args.length)).findSome? fun (a, i) =>
       if a == .var varName then some (f, i) else none
@@ -1938,7 +1942,7 @@ private partial def collectCallsOnVar (varName : String) : ImpExpr → List (Str
   | .ifThenElse c t e => collectCallsOnVar varName c ++ collectCallsOnVar varName t ++ collectCallsOnVar varName e
   | _ => []
 
-private def inferParamStructType
+def inferParamStructType
     (structMeta : List (String × List (String × String × ImpType)))
     (structLookup : String → Option String)
     (paramName : String) (body : ImpExpr)
@@ -2007,7 +2011,7 @@ private def inferParamStructType
 
 /-- Extract leading identity let-bindings (let x := x) as function parameters.
     These are emitted by HaxAdapter for Rust function parameters. -/
-private def extractParams : ImpExpr → List String × ImpExpr
+def extractParams : ImpExpr → List String × ImpExpr
   | .letBind n (.var v) body =>
     if n == v then
       -- Include all parameters, including _-prefixed unused ones.
@@ -2019,7 +2023,7 @@ private def extractParams : ImpExpr → List String × ImpExpr
 
 /-- Collect variable names used as the first argument to `index` or `array_update`
     (i.e., used as arrays). These parameters need `Array Int` annotation. -/
-private partial def collectArrayParams (params : List String) : ImpExpr → List String
+partial def collectArrayParams (params : List String) : ImpExpr → List String
   | .app "index" ((.var n) :: _) =>
     if params.contains n then [n] else []
   | .app "array_update" ((.var n) :: _) =>
@@ -2155,6 +2159,7 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 import CatCrypt.Crypto.{ucModuleName}.Security
+
 -- import CatCrypt.Crypto.{ucModuleName}.Extraction.{protocolName}_hax
 
 /-!
@@ -2198,7 +2203,7 @@ Emits the post-pipeline ImpExpr as a Lean constructor term.
 Used together with the surface code to generate agreement proofs. -/
 
 /-- Emit an ImpLit as Lean constructor syntax. -/
-private def litToConstructor : ImpLit → String
+def litToConstructor : ImpLit → String
   | .bool b => s!"ImpLit.bool {b}"
   | .int n => if n < 0 then s!"ImpLit.int ({n})" else s!"ImpLit.int {n}"
   | .unit => "ImpLit.unit"
@@ -2206,7 +2211,7 @@ private def litToConstructor : ImpLit → String
   | .sintLit w n => s!"ImpLit.sintLit .{w.toSuffix} {n}"
 
 /-- Emit an ImpPat as Lean constructor syntax. -/
-private partial def patToConstructor : ImpPat → String
+partial def patToConstructor : ImpPat → String
   | .wildcard => ".wildcard"
   | .litPat l => s!".litPat ({litToConstructor l})"
   | .varPat n => s!".varPat \"{n}\""
@@ -2286,7 +2291,7 @@ hax JSON to generate struct definitions, projections, and a dependency
 type class for cross-crate function references. -/
 
 /-- Check if a name is a runtime/builtin function (mapped by runtimeName). -/
-private def isRuntimeName (f : String) : Bool :=
+def isRuntimeName (f : String) : Bool :=
   match f with
   | "add" | "sub" | "mul" | "div" | "rem" | "neg"
   | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg"
@@ -2458,7 +2463,7 @@ where
 /-- Detect the types of each component in a tuple-returning dep.
     When `let (a, b) := f x`, trace how `a` and `b` are used to determine
     if each is Int or Array Int. Returns a list of bools (true = Int). -/
-private partial def detectReturnComponentTypes (fname : String)
+partial def detectReturnComponentTypes (fname : String)
     (knownIntNames : List String) : ImpExpr → List (List Bool)
   | .letBind n (.app f _) body =>
     if f == fname then
@@ -2533,7 +2538,7 @@ where
     | _ => false
 
 /-- Check if an ImpExpr is known to have type Int (literal int, int operation, etc.). -/
-private def isIntExprBase : ImpExpr → Bool
+def isIntExprBase : ImpExpr → Bool
   | .lit (.int _) => true
   | .lit (.uintLit _ _) => true
   | .lit (.sintLit _ _) => true
@@ -2560,7 +2565,7 @@ private def isIntExprBase : ImpExpr → Bool
   | _ => false
 
 /-- Compute projection names that return Int from struct metadata. -/
-private def intProjNamesFromMeta
+def intProjNamesFromMeta
     (structMeta : List (String × List (String × String × ImpType))) : List String :=
   structMeta.foldl (fun acc (sname, fields) =>
     acc ++ (fields.filterMap fun (fname, ftag, _) =>
@@ -2569,7 +2574,7 @@ private def intProjNamesFromMeta
       if ftag == "int" then some s!"{sname}.{fname}" else none)) []
 
 /-- Check if an expression returns Int, including struct projection awareness. -/
-private def isIntExpr (intProjNames : List String := []) : ImpExpr → Bool
+def isIntExpr (intProjNames : List String := []) : ImpExpr → Bool
   | .app f args => intProjNames.contains f || isIntExprBase (.app f args)
   | e => isIntExprBase e
 
@@ -2645,7 +2650,7 @@ partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
 
 /-- Find the most recent binding for a variable name in an expression tree.
     Returns the RHS of the last `letBind varName rhs body` encountered. -/
-private partial def findVarBinding' (varName : String) : ImpExpr → Option ImpExpr
+partial def findVarBinding' (varName : String) : ImpExpr → Option ImpExpr
   | .letBind n v body =>
     if n == varName then some v
     else findVarBinding' varName body
@@ -2661,7 +2666,7 @@ private partial def findVarBinding' (varName : String) : ImpExpr → Option ImpE
 
 /-- Extended isIntExpr that also recognizes .var references to known Int names.
     Optionally resolves local variable bindings via `findVarBinding'`. -/
-private def isIntExprCtx (knownIntNames : List String)
+def isIntExprCtx (knownIntNames : List String)
     (intProjNames : List String := [])
     (ctx : Option ImpExpr := none) : ImpExpr → Bool
   | .var v =>
@@ -2693,14 +2698,14 @@ private def isIntExprCtx (knownIntNames : List String)
 /-- Check if an expression's terminal value (through let-chains and if-branches) is Int.
     This catches functions like `centered_mod_q` whose body is `let r := ...; if ... then Sub ... else cast ...`
     where the terminal values are Int-returning ops. -/
-private partial def isTerminalInt (intProjNames : List String := []) : ImpExpr → Bool
+partial def isTerminalInt (intProjNames : List String := []) : ImpExpr → Bool
   | .letBind _ _ body => isTerminalInt intProjNames body
   | .ifThenElse _ t e => isTerminalInt intProjNames t && isTerminalInt intProjNames e
   | e => isIntExpr intProjNames e
 
 /-- Detect argument types for a function by analyzing its call sites.
     Returns a list of arg types (per position): true = Int, false = Array Int. -/
-private partial def detectArgTypes (fname : String) (arity : Nat)
+partial def detectArgTypes (fname : String) (arity : Nat)
     (knownIntNames : List String := [])
     (intProjNames : List String := [])
     (fnCtx : Option ImpExpr := none) : ImpExpr → List (List Bool)
@@ -2728,7 +2733,7 @@ private partial def detectArgTypes (fname : String) (arity : Nat)
 
 /-- Find the binding expression for a variable name in a function body.
     Walks letBind nodes to find `let varName := expr` and returns `expr`. -/
-private partial def findVarBinding (varName : String) : ImpExpr → Option ImpExpr
+partial def findVarBinding (varName : String) : ImpExpr → Option ImpExpr
   | .letBind n v body =>
     if n == varName then some v
     else findVarBinding varName body
@@ -2746,7 +2751,7 @@ private partial def findVarBinding (varName : String) : ImpExpr → Option ImpEx
     This resolves types through `index`, `repeat_`, struct constructors, etc.
     `fnBody` is the current function body, used to resolve local variable bindings.
     `defsMap` maps mutual def names to their bodies for cross-def resolution. -/
-private partial def inferExprType (paramTypeMap : List (String × ImpType))
+partial def inferExprType (paramTypeMap : List (String × ImpType))
     (structMeta : List (String × List (String × String × ImpType)) := [])
     (fnBody : Option ImpExpr := none)
     (defsMap : List (String × ImpExpr) := [])
@@ -2826,7 +2831,7 @@ private partial def inferExprType (paramTypeMap : List (String × ImpType))
     nested arrays (index into Array (Array T)), struct constructors, etc.
     `fnBody` is the top-level function body for resolving local variable bindings.
     Returns list of (position → ImpType option) per call site. -/
-private partial def detectTypedArgs (fname : String) (arity : Nat)
+partial def detectTypedArgs (fname : String) (arity : Nat)
     (paramTypeMap : List (String × ImpType))
     (structMeta : List (String × List (String × String × ImpType)) := [])
     (fnBody : Option ImpExpr := none)
@@ -2875,7 +2880,7 @@ private partial def detectTypedArgs (fname : String) (arity : Nat)
 /-- Detect if a function's return value is ever passed to a non-builtin function
     (i.e., another cross-crate dep). If so, it can't safely be typed as Int
     because deps default to Array Int arguments. -/
-private partial def detectReturnUsedAsDep (fname : String) (depNames : List String) : ImpExpr → Bool
+partial def detectReturnUsedAsDep (fname : String) (depNames : List String) : ImpExpr → Bool
   | .app f args =>
     let inArgs := args.any (detectReturnUsedAsDep fname depNames)
     let directUse := depNames.contains f && f != fname &&
@@ -2929,7 +2934,7 @@ where
 
 /-- Detect if a function's return value is used as an argument to struct constructors.
     If so, it should be Array Int (not Int), since struct fields are typed as Array Int. -/
-private partial def detectReturnUsedAsStructArg (fname : String)
+partial def detectReturnUsedAsStructArg (fname : String)
     (structNames : List String) : ImpExpr → Bool
   | .app f args =>
     let usedHere := structNames.contains f &&
@@ -2982,7 +2987,7 @@ where
 /-- Detect if a function's return value is ever used in Int context.
     Checks if the result of `fname` is passed as an Int-typed argument to
     known runtime functions (array_update value position, push element, etc.). -/
-private partial def detectReturnIsInt (fname : String)
+partial def detectReturnIsInt (fname : String)
     (paramTypeMap : List (String × ImpType) := [])
     (structMeta : List (String × List (String × String × ImpType)) := [])
     (fnBody : Option ImpExpr := none)
@@ -3062,7 +3067,7 @@ private partial def detectReturnIsInt (fname : String)
     Checks if `fname(args...)` appears directly as the condition of `.ifThenElse`,
     or if a let-bound variable of `fname(args...)` is later used as a condition
     or as an argument to Bool operators (&&, ||, band, bor, Not, not). -/
-private partial def detectReturnIsBool (fname : String) : ImpExpr → Bool
+partial def detectReturnIsBool (fname : String) : ImpExpr → Bool
   | .ifThenElse c t e =>
     let condIsBool := match c with
       | .app f _ => f == fname
@@ -3121,7 +3126,7 @@ where
 
 /-- Detect if a dep's return value is used as a scrutinee of an Option/Result match
     (i.e., matched against somePat/nonePat/okPat/errPat). If so, it cannot be Int. -/
-private partial def detectReturnIsOptionMatch (fname : String) : ImpExpr → Bool
+partial def detectReturnIsOptionMatch (fname : String) : ImpExpr → Bool
   | .match_ scrut arms =>
     let scrutUsesF := match scrut with
       | .app f _ => f == fname
@@ -3176,7 +3181,7 @@ abbrev StructMeta' := List (String × List (String × String × ImpType))
 /-- Detect if a dep's return value is used with struct projections or as a
     struct constructor argument. If so, returns the struct name (or the expected
     field type name for struct constructor arguments). -/
-private partial def detectReturnStructType (depName : String)
+partial def detectReturnStructType (depName : String)
     (structMeta : StructMeta') : ImpExpr → Option String
   | .letBind varName (.app f _) body =>
     if f == depName then
@@ -3275,7 +3280,7 @@ abbrev StructMeta := StructMeta'
 /-- Recursively resolve a struct name to its Lean tuple type string.
     Handles nested structs: if struct A has a field of type struct B,
     resolves B's tuple type first. Requires acyclic struct definitions. -/
-private partial def resolveStructType (structMeta : StructMeta) (name : String)
+partial def resolveStructType (structMeta : StructMeta) (name : String)
     (clashSet : List String := []) : Option String :=
   match structMeta.find? (·.1 == name) with
   | some (_, fields) =>
@@ -3346,7 +3351,7 @@ def projPath (i n : Nat) : String :=
     This detects patterns like:
       let transcript := OekeTranscript a b c d
       pake_hash transcript shared   ← transcript passed to dep expecting Array Int -/
-private partial def checkStructPassedExternally
+partial def checkStructPassedExternally
     (structName : String) (fields : List (String × String × ImpType)) : ImpExpr → Bool
   | .letBind varName (.app ctor _) body =>
     if ctor == structName then
@@ -3896,12 +3901,12 @@ def findAmbiguousFields (structMeta : StructMeta) : List String :=
 /-! ### Pass T-B: Reconcile function types with call-site types -/
 
 /-- Unwrap ImpType.ref wrappers to get the inner type. -/
-private def unwrapRefT : ImpType → ImpType
+def unwrapRefT : ImpType → ImpType
   | .ref inner _ => unwrapRefT inner
   | ty => ty
 
 /-- Check if a type resolves to a struct tuple (not just Array Int or Int). -/
-private def isStructTupleType (ty : ImpType) (structLookup : String → Option String) : Bool :=
+def isStructTupleType (ty : ImpType) (structLookup : String → Option String) : Bool :=
   let ty := unwrapRefT ty
   match ty with
   | .adt name _ =>
@@ -3953,7 +3958,7 @@ def reconcileFnTypes
 /-! ### Pass T-C: Type-aware projection qualification from usage -/
 
 /-- Detect the struct constructor used with `Hax.push arr (StructName ...)` patterns. -/
-private partial def detectArrayElementTypes : ImpExpr → List (String × String)
+partial def detectArrayElementTypes : ImpExpr → List (String × String)
   | .app "push" [.var arr, .app ctor _] => [(arr, ctor)]
   | .letBind _ v body =>
     detectArrayElementTypes v ++ detectArrayElementTypes body
@@ -3974,7 +3979,7 @@ private partial def detectArrayElementTypes : ImpExpr → List (String × String
   | _ => []
 
 /-- Detect the struct type from `let x := StructName args` patterns. -/
-private partial def detectLetBindStructTypes : ImpExpr → List (String × String)
+partial def detectLetBindStructTypes : ImpExpr → List (String × String)
   | .letBind n (.app ctor _) body =>
     [(n, ctor)] ++ detectLetBindStructTypes body
   | .letBind _ v body =>
@@ -3995,7 +4000,7 @@ private partial def detectLetBindStructTypes : ImpExpr → List (String × Strin
 
 /-- Rewrite ambiguous projections on array elements or variables whose struct type
     can be inferred from constructor usage patterns. -/
-private partial def qualifyProjectionsFromUsageT
+partial def qualifyProjectionsFromUsageT
     (arrayElemTypes : List (String × String))
     (varStructTypes : List (String × String))
     (structMeta : StructMeta)
@@ -4096,7 +4101,7 @@ private partial def qualifyProjectionsFromUsageT
   | e => e
 
 /-- Propagate return element types through call chains. -/
-private partial def propagateReturnElemTypes
+partial def propagateReturnElemTypes
     (funcRetElemTypes : List (String × String)) : ImpExpr → List (String × String)
   | .letBind varName (.app fname _) body =>
     let fromCall := match funcRetElemTypes.find? (·.1 == fname) with
@@ -4130,7 +4135,7 @@ private partial def propagateReturnElemTypes
   | _ => []
 
 /-- Find field names that appear in multiple structs (ambiguous projections). -/
-private def findAmbiguousFieldsT (structMeta : StructMeta) : List String :=
+def findAmbiguousFieldsT (structMeta : StructMeta) : List String :=
   let allFields := structMeta.foldl (fun acc (_, fields) =>
     acc ++ fields.map (·.1)) []
   let dupes := allFields.filter fun f =>

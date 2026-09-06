@@ -4,8 +4,12 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Lexer
+module
 
+public import HaxLean.Json.Lexer
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!
@@ -61,11 +65,11 @@ punctuation, a quote, nor the head of a `true`/`false`/`null` keyword, so the
 `tokenizeAux` dispatch falls through to the numeric branch. -/
 
 /-- Digits are number characters. -/
-private theorem isNumChar_of_isDigit (c : Char) (h : isDigit c = true) :
+theorem isNumChar_of_isDigit (c : Char) (h : isDigit c = true) :
     isNumChar c = true := by simp [isNumChar, h]
 
 /-- A number character is never whitespace. -/
-private theorem isWs_of_numChar (c : Char) (h : isNumChar c = true) : isWs c = false := by
+theorem isWs_of_numChar (c : Char) (h : isNumChar c = true) : isWs c = false := by
   simp only [isNumChar, isDigit, Bool.or_eq_true, decide_eq_true_eq] at h
   cases hw : isWs c with
   | false => rfl
@@ -75,7 +79,7 @@ private theorem isWs_of_numChar (c : Char) (h : isNumChar c = true) : isWs c = f
     rcases hw with ((rfl | rfl) | rfl) | rfl <;> revert h <;> decide
 
 /-- A number character never starts a `true`/`false`/`null` keyword. -/
-private theorem takeKeyword_none_of_numChar (c : Char) (rest : List Char)
+theorem takeKeyword_none_of_numChar (c : Char) (rest : List Char)
     (h : isNumChar c = true) : takeKeyword (c :: rest) = none := by
   simp only [isNumChar, isDigit, Bool.or_eq_true, decide_eq_true_eq] at h
   have ht : c ≠ 't' := by rintro rfl; revert h; decide
@@ -85,7 +89,7 @@ private theorem takeKeyword_none_of_numChar (c : Char) (rest : List Char)
   split <;> simp_all
 
 /-- A number character is none of the structural / quote characters. -/
-private theorem punct_ne_of_numChar (c : Char) (h : isNumChar c = true) :
+theorem punct_ne_of_numChar (c : Char) (h : isNumChar c = true) :
     c ≠ '{' ∧ c ≠ '}' ∧ c ≠ '[' ∧ c ≠ ']' ∧ c ≠ ':' ∧ c ≠ ',' ∧ c ≠ '"' := by
   simp only [isNumChar, isDigit, Bool.or_eq_true, decide_eq_true_eq] at h
   refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;> (rintro rfl; revert h; decide)
@@ -125,7 +129,7 @@ theorem tokenizeAux_nil (n : Nat) (hn : 0 < n) : tokenizeAux n [] = .ok [] := by
 `validNumberLitL` only accepts strings consisting entirely of number-characters,
 so acceptance needs no separate `isNumChar` hypothesis. -/
 
-private theorem dropDigits_nil_all_digit (l : List Char) (h : dropDigits l = []) :
+theorem dropDigits_nil_all_digit (l : List Char) (h : dropDigits l = []) :
     ∀ c ∈ l, isDigit c = true := by
   induction l with
   | nil => intro c hc; simp at hc
@@ -138,7 +142,7 @@ private theorem dropDigits_nil_all_digit (l : List Char) (h : dropDigits l = [])
       · exact ih h c hc'
     · rw [if_neg hd] at h; simp at h
 
-private theorem dropDigits1_nil_all_digit (l : List Char) (h : dropDigits1 l = some []) :
+theorem dropDigits1_nil_all_digit (l : List Char) (h : dropDigits1 l = some []) :
     ∀ c ∈ l, isDigit c = true := by
   cases l with
   | nil => simp [dropDigits1] at h
@@ -152,7 +156,7 @@ private theorem dropDigits1_nil_all_digit (l : List Char) (h : dropDigits1 l = s
       · exact dropDigits_nil_all_digit rest hdrop c hc'
     · rw [if_neg hd] at h; simp at h
 
-private theorem dropDigits_split (l : List Char) :
+theorem dropDigits_split (l : List Char) :
     ∃ pre, l = pre ++ dropDigits l ∧ (∀ c ∈ pre, isDigit c = true) := by
   induction l with
   | nil => exact ⟨[], by simp [dropDigits], by simp⟩
@@ -167,7 +171,7 @@ private theorem dropDigits_split (l : List Char) :
       · exact hall c hc'
     · rw [if_neg hd]; exact ⟨[], by simp, by simp⟩
 
-private theorem dropDigits1_split (l tail : List Char) (h : dropDigits1 l = some tail) :
+theorem dropDigits1_split (l tail : List Char) (h : dropDigits1 l = some tail) :
     ∃ pre, l = pre ++ tail ∧ (∀ c ∈ pre, isDigit c = true) := by
   cases l with
   | nil => simp [dropDigits1] at h
@@ -183,17 +187,17 @@ private theorem dropDigits1_split (l tail : List Char) (h : dropDigits1 l = some
       · exact hall c hc'
     · rw [if_neg hd] at h; simp at h
 
-private theorem allNumChar_cons (d : Char) (rest : List Char)
+theorem allNumChar_cons (d : Char) (rest : List Char)
     (hd : isNumChar d = true) (hrest : ∀ c ∈ rest, isNumChar c = true) :
     ∀ c ∈ d :: rest, isNumChar c = true := by
   intro c hc; rcases List.mem_cons.1 hc with rfl | hc'
   · exact hd
   · exact hrest c hc'
 
-private theorem allDigit_imp_allNumChar (l : List Char) (h : ∀ c ∈ l, isDigit c = true) :
+theorem allDigit_imp_allNumChar (l : List Char) (h : ∀ c ∈ l, isDigit c = true) :
     ∀ c ∈ l, isNumChar c = true := fun c hc => isNumChar_of_isDigit c (h c hc)
 
-private theorem allNumChar_append (pre tail : List Char)
+theorem allNumChar_append (pre tail : List Char)
     (hp : ∀ c ∈ pre, isNumChar c = true) (ht : ∀ c ∈ tail, isNumChar c = true) :
     ∀ c ∈ pre ++ tail, isNumChar c = true := by
   intro c hc
@@ -201,7 +205,7 @@ private theorem allNumChar_append (pre tail : List Char)
   · exact hp c h
   · exact ht c h
 
-private theorem validExpAfter_all (l : List Char) (h : validExpAfter l = true) :
+theorem validExpAfter_all (l : List Char) (h : validExpAfter l = true) :
     ∀ c ∈ l, isNumChar c = true := by
   unfold validExpAfter at h
   split at h
@@ -228,7 +232,7 @@ private theorem validExpAfter_all (l : List Char) (h : validExpAfter l = true) :
       | cons _ _ => rw [hd] at h; simp at h
       | nil => exact allDigit_imp_allNumChar l (dropDigits1_nil_all_digit l hd)
 
-private theorem validExpOpt_all (l : List Char) (h : validExpOpt l = true) :
+theorem validExpOpt_all (l : List Char) (h : validExpOpt l = true) :
     ∀ c ∈ l, isNumChar c = true := by
   unfold validExpOpt at h
   split at h
@@ -241,7 +245,7 @@ private theorem validExpOpt_all (l : List Char) (h : validExpOpt l = true) :
     exact validExpAfter_all rest h
   · simp at h
 
-private theorem validFracExp_all (l : List Char) (h : validFracExp l = true) :
+theorem validFracExp_all (l : List Char) (h : validFracExp l = true) :
     ∀ c ∈ l, isNumChar c = true := by
   unfold validFracExp at h
   split at h
@@ -262,7 +266,7 @@ private theorem validFracExp_all (l : List Char) (h : validFracExp l = true) :
 -- non-zero-leading-digit arm of `validIntPart`; the unused-simp-arg linter
 -- misfires on the generated matcher, so it is disabled for this proof.
 set_option linter.unusedSimpArgs false in
-private theorem validIntPart_split (cs tail : List Char) (h : validIntPart cs = some tail) :
+theorem validIntPart_split (cs tail : List Char) (h : validIntPart cs = some tail) :
     ∃ pre, cs = pre ++ tail ∧ (∀ c ∈ pre, isNumChar c = true) := by
   cases cs with
   | nil => simp [validIntPart] at h

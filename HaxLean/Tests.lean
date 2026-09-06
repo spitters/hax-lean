@@ -3,17 +3,30 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Value
-import HaxLean.Features
-import HaxLean.Semantics
-import HaxLean.Phase.DropReferences
-import HaxLean.Phase.LocalMutation
-import HaxLean.Phase.FunctionalizeLoops
-import HaxLean.Phase.CfIntoMonads
-import HaxLean.Pipeline
-import HaxLean.ThreadMutations
-import HaxLean.PrettyPrint
+module
+
+public meta import HaxLean.AST
+public import HaxLean.AST
+public meta import HaxLean.Value
+public import HaxLean.Value
+public meta import HaxLean.Features
+public import HaxLean.Features
+public meta import HaxLean.Semantics
+public import HaxLean.Semantics
+public meta import HaxLean.Phase.DropReferences
+public import HaxLean.Phase.DropReferences
+public meta import HaxLean.Phase.LocalMutation
+public import HaxLean.Phase.LocalMutation
+public meta import HaxLean.Phase.FunctionalizeLoops
+public import HaxLean.Phase.FunctionalizeLoops
+public meta import HaxLean.Phase.CfIntoMonads
+public import HaxLean.Phase.CfIntoMonads
+public meta import HaxLean.Pipeline
+public import HaxLean.Pipeline
+public meta import HaxLean.ThreadMutations
+public import HaxLean.ThreadMutations
+public meta import HaxLean.PrettyPrint
+public import HaxLean.PrettyPrint
 
 /-!
 # Test Programs
@@ -37,6 +50,8 @@ compiler phase. Each test verifies:
 | `whileLoop` | `while cond { body; }` | whileLoop |
 | `combined` | mutation + loop + early return | all features |
 -/
+
+@[expose] public section
 
 namespace Hax.Tests
 

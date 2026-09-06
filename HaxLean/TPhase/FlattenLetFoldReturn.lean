@@ -3,9 +3,11 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Semantics
-import HaxLean.Phase.FlattenLetFoldReturn
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Semantics
+public import HaxLean.Phase.FlattenLetFoldReturn
 
 /-!
 # Typed phase: `tFlattenLetFoldReturn`
@@ -74,6 +76,8 @@ rotates to the right-leaning canonical fixpoint; C's sub-letBinds are
 strictly smaller). `tPipelineFull` supplies a generous quadratic-in-size
 fuel, so production output matches the previous `partial`-`def` fixpoint.
 -/
+
+@[expose] public section
 
 namespace Hax
 

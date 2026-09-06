@@ -3,7 +3,9 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.HaxAdapter
+module
+
+public import HaxLean.HaxAdapter
 
 /-!
 # Structural Refinement of `parseHaxFile`
@@ -49,6 +51,8 @@ why they are hard. In particular:
 
 These are the natural follow-ups; see the `TODO` markers.
 -/
+
+@[expose] public section
 
 namespace Hax.AdapterRefinement
 
@@ -1366,7 +1370,7 @@ discharges the strict-decrease obligation that any future
 /-- Auxiliary: the value returned by `Const.get?` is strictly smaller
     (in `sizeOf`) than the tree it was found in. Proved by induction on
     the underlying `Impl` tree. -/
-private theorem sizeOf_lt_of_const_get?_eq_some
+theorem sizeOf_lt_of_const_get?_eq_some
     {t : Std.DTreeMap.Internal.Impl String (fun _ => Json)}
     {k : String} {w : Json}
     (h : Std.DTreeMap.Internal.Impl.Const.get? t k = some w) :
@@ -2129,7 +2133,7 @@ once per tag (see "Estimated total lines" in the loop state file).
     When `j`'s contents is the bare string `.str "Todo"`,
     `parseExprKind`'s early-exit returns `.app "hax_unsupported_Todo" []`.
     Witnessed by `app_empty`. -/
-private theorem parseHaxExpr_step_for_Todo
+theorem parseHaxExpr_step_for_Todo
     {j : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok (.str "Todo"))
     (h : parseHaxExpr j = .ok e) :
@@ -2146,7 +2150,7 @@ private theorem parseHaxExpr_step_for_Todo
 
     When `j`'s contents has a `VarRef` payload, `parseExprKind`
     returns `.var <id-extracted-name>`. Witnessed by `var_any`. -/
-private theorem parseHaxExpr_step_for_VarRef
+theorem parseHaxExpr_step_for_VarRef
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_VarRef : contents.getObjVal? "VarRef" = .ok data)
@@ -2175,7 +2179,7 @@ private theorem parseHaxExpr_step_for_VarRef
     When `j`'s contents has a `GlobalName` payload (with `VarRef`
     extraction failing), `parseExprKind` returns `.var <item-extracted-name>`.
     Witnessed by `var_any`. -/
-private theorem parseHaxExpr_step_for_GlobalName
+theorem parseHaxExpr_step_for_GlobalName
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_VarRef_err : ∀ d, contents.getObjVal? "VarRef" ≠ .ok d)
@@ -2209,7 +2213,7 @@ private theorem parseHaxExpr_step_for_GlobalName
     When `j`'s contents has a `Continue` payload (with all 16
     earlier-cascade tag extractions failing), `parseExprKind`
     returns `.continue_`. Witnessed by `continue_any`. -/
-private theorem parseHaxExpr_step_for_Continue
+theorem parseHaxExpr_step_for_Continue
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2289,7 +2293,7 @@ private theorem parseHaxExpr_step_for_Continue
     LogicalOp, Unary, Field, TupleField, Index, Cast, Use, NeverToAny, Box,
     Adt, Closure, Repeat, PlaceTypeAscription, ValueTypeAscription,
     PointerCoercion, ConstBlock` (35 tags), then `NamedConst`. -/
-private theorem parseHaxExpr_step_for_NamedConst
+theorem parseHaxExpr_step_for_NamedConst
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2466,7 +2470,7 @@ because the rewrite targets are tag-specific.
 
     Used in per-tag step lemmas to discharge earlier-cascade prior
     tag failures. -/
-private theorem getObjVal_error_of_not_ok
+theorem getObjVal_error_of_not_ok
     {j : Json} {k : String}
     (h : ∀ d, j.getObjVal? k ≠ .ok d) :
     ∃ err, j.getObjVal? k = .error err := by
@@ -2480,7 +2484,7 @@ private theorem getObjVal_error_of_not_ok
     `Lean.Json.getObjVal?`); a successful lookup forces the
     `.obj`-shape. Used in per-tag step lemmas to recover `kvs`
     after `rw [h_contents]`. -/
-private theorem obj_of_getObjVal_ok
+theorem obj_of_getObjVal_ok
     {j d : Json} {k : String}
     (h : j.getObjVal? k = .ok d) :
     ∃ kvs, j = .obj kvs := by
@@ -2499,7 +2503,7 @@ private theorem obj_of_getObjVal_ok
     and `obj`-cast bodies present in the base-case lemmas are replaced
     by single applications of `getObjVal_error_of_not_ok` and
     `obj_of_getObjVal_ok`. -/
-private theorem parseHaxExpr_step_for_ConstBlock
+theorem parseHaxExpr_step_for_ConstBlock
     {j contents _data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2628,7 +2632,7 @@ takes the `pure none` arm and produces the parser output `.break_ none` /
     When `j`'s contents has a `Break` payload (with all 15 earlier-cascade
     tag extractions failing) AND the `value` slot is `.ok .null`,
     `parseExprKind` returns `.break_ none`. Witnessed by `break_unit_any`. -/
-private theorem parseHaxExpr_step_for_Break_unit
+theorem parseHaxExpr_step_for_Break_unit
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2689,7 +2693,7 @@ private theorem parseHaxExpr_step_for_Break_unit
     tag extractions failing) AND the `value` slot is `.ok .null`,
     `parseExprKind` returns `.earlyReturn .unitVal`. Witnessed by
     `earlyReturn_unit_any`. -/
-private theorem parseHaxExpr_step_for_Return_unit
+theorem parseHaxExpr_step_for_Return_unit
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2755,7 +2759,7 @@ private theorem parseHaxExpr_step_for_Return_unit
     When `j`'s contents has a `ConstParam` payload (with all 36
     earlier-cascade tag extractions failing), `parseExprKind` returns
     `.var "const_param"`. Witnessed by `var_any`. -/
-private theorem parseHaxExpr_step_for_ConstParam
+theorem parseHaxExpr_step_for_ConstParam
     {j contents _data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2860,7 +2864,7 @@ private theorem parseHaxExpr_step_for_ConstParam
     When `j`'s contents has a `ConstRef` payload (with all 37 earlier-cascade
     tag extractions failing), `parseExprKind` returns `.var <id-name>`.
     Witnessed by `var_any`. -/
-private theorem parseHaxExpr_step_for_ConstRef
+theorem parseHaxExpr_step_for_ConstRef
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -2967,7 +2971,7 @@ private theorem parseHaxExpr_step_for_ConstRef
     When `j`'s contents has a `StaticRef` payload (with all 38 earlier-cascade
     tag extractions failing), `parseExprKind` returns `.var <def_id-name>`.
     Witnessed by `var_any`. -/
-private theorem parseHaxExpr_step_for_StaticRef
+theorem parseHaxExpr_step_for_StaticRef
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3090,7 +3094,7 @@ walk + active-tag rewrite + inner-slot rewrite reduces `h` to
 
     Parser output: `parseHaxExpr srcJ` where `srcJ = data.source`.
     Witnessed by `transparent_wrap` applied to the inner refinement. -/
-private theorem parseHaxExpr_step_for_Use
+theorem parseHaxExpr_step_for_Use
     {j contents data srcJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3170,7 +3174,7 @@ private theorem parseHaxExpr_step_for_Use
 
     Parser output: `parseHaxExpr srcJ` where `srcJ = data.source`.
     Witnessed by `transparent_wrap`. -/
-private theorem parseHaxExpr_step_for_NeverToAny
+theorem parseHaxExpr_step_for_NeverToAny
     {j contents data srcJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3252,7 +3256,7 @@ private theorem parseHaxExpr_step_for_NeverToAny
 
     Parser output: `parseHaxExpr vJ` where `vJ = data.value`.
     Witnessed by `transparent_wrap`. -/
-private theorem parseHaxExpr_step_for_Box
+theorem parseHaxExpr_step_for_Box
     {j contents data vJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3336,7 +3340,7 @@ private theorem parseHaxExpr_step_for_Box
 
     Parser output: `parseHaxExpr bodyJ` where `bodyJ = data.body`.
     Witnessed by `transparent_wrap`. -/
-private theorem parseHaxExpr_step_for_Closure
+theorem parseHaxExpr_step_for_Closure
     {j contents data bodyJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3425,7 +3429,7 @@ private theorem parseHaxExpr_step_for_Closure
 
     Parser output: `parseHaxExpr srcJ` where `srcJ = data.source`.
     Witnessed by `transparent_wrap`. -/
-private theorem parseHaxExpr_step_for_PlaceTypeAscription
+theorem parseHaxExpr_step_for_PlaceTypeAscription
     {j contents data srcJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3518,7 +3522,7 @@ private theorem parseHaxExpr_step_for_PlaceTypeAscription
 
     Parser output: `parseHaxExpr srcJ` where `srcJ = data.source`.
     Witnessed by `transparent_wrap`. -/
-private theorem parseHaxExpr_step_for_ValueTypeAscription
+theorem parseHaxExpr_step_for_ValueTypeAscription
     {j contents data srcJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3614,7 +3618,7 @@ private theorem parseHaxExpr_step_for_ValueTypeAscription
 
     Parser output: `parseHaxExpr srcJ` where `srcJ = data.source`.
     Witnessed by `transparent_wrap`. -/
-private theorem parseHaxExpr_step_for_PointerCoercion
+theorem parseHaxExpr_step_for_PointerCoercion
     {j contents data srcJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3726,7 +3730,7 @@ contradiction, and use the strong-IH on the `.ok` branch. -/
 
     Parser output: `.borrow arg` where `arg = (parseHaxExpr argJ).get!`.
     Witnessed by `borrow_any` applied to the inner refinement. -/
-private theorem parseHaxExpr_step_for_Borrow
+theorem parseHaxExpr_step_for_Borrow
     {j contents data argJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3785,7 +3789,7 @@ private theorem parseHaxExpr_step_for_Borrow
 
     Parser output: `.deref arg` where `arg = (parseHaxExpr argJ).get!`.
     Witnessed by `deref_any` applied to the inner refinement. -/
-private theorem parseHaxExpr_step_for_Deref
+theorem parseHaxExpr_step_for_Deref
     {j contents data argJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3846,7 +3850,7 @@ private theorem parseHaxExpr_step_for_Deref
 
     Parser output: `.whileLoop (.lit (.bool true)) body` where
     `body = (parseHaxExpr bodyJ).get!`. Witnessed by `loop_any`. -/
-private theorem parseHaxExpr_step_for_Loop
+theorem parseHaxExpr_step_for_Loop
     {j contents data bodyJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3909,7 +3913,7 @@ private theorem parseHaxExpr_step_for_Loop
 
     Parser output: `.app ("." ++ name) [lhs]` where `lhs = (parseHaxExpr lhsJ).get!`
     and `name` is extracted from the `field` slot. Witnessed by `app_single`. -/
-private theorem parseHaxExpr_step_for_Field
+theorem parseHaxExpr_step_for_Field
     {j contents data lhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -3988,7 +3992,7 @@ private theorem parseHaxExpr_step_for_Field
 
     Parser output: `.proj lhs idx` where `lhs = (parseHaxExpr lhsJ).get!` and
     `idx` is extracted from the `field` slot. Witnessed by `proj`. -/
-private theorem parseHaxExpr_step_for_TupleField
+theorem parseHaxExpr_step_for_TupleField
     {j contents data lhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4069,7 +4073,7 @@ private theorem parseHaxExpr_step_for_TupleField
 
     Parser output: `.app f [source]` where `f` is `s!"cast#{w}"` if the target
     width is `some w` and `"cast"` otherwise. Witnessed by `app_single _`. -/
-private theorem parseHaxExpr_step_for_Cast
+theorem parseHaxExpr_step_for_Cast
     {j contents data srcJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4159,7 +4163,7 @@ private theorem parseHaxExpr_step_for_Cast
 
     Parser output: `.app "yield" [value]` where
     `value = (parseHaxExpr vJ).get!`. Witnessed by `app_single`. -/
-private theorem parseHaxExpr_step_for_Yield
+theorem parseHaxExpr_step_for_Yield
     {j contents data vJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4278,7 +4282,7 @@ private theorem parseHaxExpr_step_for_Yield
     When the inner `value` slot is `.ok vJ` (non-null), parser produces
     `.break_ (some inner)` where `inner = (parseHaxExpr vJ).get!`.
     Witnessed by `break_value`. -/
-private theorem parseHaxExpr_step_for_Break_value
+theorem parseHaxExpr_step_for_Break_value
     {j contents data vJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4386,7 +4390,7 @@ private theorem parseHaxExpr_step_for_Break_value
     When `data.getObjVal? "value" = .error _`, the parser's inner match falls
     through to the `_ => pure none` arm, so the output is `.break_ none`.
     Witnessed by `break_unit_any`. -/
-private theorem parseHaxExpr_step_for_Break_no_value
+theorem parseHaxExpr_step_for_Break_no_value
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4447,7 +4451,7 @@ private theorem parseHaxExpr_step_for_Break_no_value
     When the inner `value` slot is `.ok vJ` (non-null), parser produces
     `.earlyReturn inner` where `inner = (parseHaxExpr vJ).get!`.
     Witnessed by `earlyReturn_value_any`. -/
-private theorem parseHaxExpr_step_for_Return_value
+theorem parseHaxExpr_step_for_Return_value
     {j contents data vJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4559,7 +4563,7 @@ private theorem parseHaxExpr_step_for_Return_value
     When `data.getObjVal? "value" = .error _`, the parser's inner match falls
     through to the `_ => pure .unitVal` arm, so the output is
     `.earlyReturn .unitVal`. Witnessed by `earlyReturn_unit_any`. -/
-private theorem parseHaxExpr_step_for_Return_no_value
+theorem parseHaxExpr_step_for_Return_no_value
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4646,7 +4650,7 @@ lemmas mirroring the iter-9 Break-value/Return-value treatment of `value`. -/
     `opAnnotated = annotateOpWidth (unOpName op) (extractExprWidth argJ)` and
     `arg = (parseHaxExpr argJ).get!`. Witnessed by `app_single _` (the `_`
     lets Lean unify the parser-built `opAnnotated` string). -/
-private theorem parseHaxExpr_step_for_Unary
+theorem parseHaxExpr_step_for_Unary
     {j contents data argJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4725,7 +4729,7 @@ private theorem parseHaxExpr_step_for_Unary
     `lhs = (parseHaxExpr lhsJ).get!`, `rhs = (parseHaxExpr rhsJ).get!`.
     Witnessed by `app_pair _` (the `_` lets Lean unify the parser-built
     `opAnnotated` string). -/
-private theorem parseHaxExpr_step_for_Binary
+theorem parseHaxExpr_step_for_Binary
     {j contents data lhsJ rhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4806,7 +4810,7 @@ private theorem parseHaxExpr_step_for_Binary
     `"logical_op"` (string-typed match on the op JSON), and
     `lhs = (parseHaxExpr lhsJ).get!`, `rhs = (parseHaxExpr rhsJ).get!`.
     Witnessed by `app_pair _`. -/
-private theorem parseHaxExpr_step_for_LogicalOp
+theorem parseHaxExpr_step_for_LogicalOp
     {j contents data lhsJ rhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4889,7 +4893,7 @@ private theorem parseHaxExpr_step_for_LogicalOp
     Parser output: `.app "index" [lhs, idx]` where
     `lhs = (parseHaxExpr lhsJ).get!`, `idx = (parseHaxExpr indexJ).get!`.
     Witnessed by `app_pair "index"`. -/
-private theorem parseHaxExpr_step_for_Index
+theorem parseHaxExpr_step_for_Index
     {j contents data lhsJ indexJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -4983,7 +4987,7 @@ private theorem parseHaxExpr_step_for_Index
     isn't `.ok`, count defaults to `(.lit (.int 0))`); the lemma commits to
     the `.ok countJ` branch via the explicit `h_count` hypothesis.
     Witnessed by `app_pair "repeat"`. -/
-private theorem parseHaxExpr_step_for_Repeat
+theorem parseHaxExpr_step_for_Repeat
     {j contents data vJ countJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5092,7 +5096,7 @@ private theorem parseHaxExpr_step_for_Repeat
     `.ifThenElse cond thn .unitVal` where `cond = (parseHaxExpr condJ).get!` and
     `thn = (parseHaxExpr thnJ).get!`. Witnessed by `ifThenElse_any` with the
     third sub-refinement supplied by `unitVal_any`. -/
-private theorem parseHaxExpr_step_for_If_null_else
+theorem parseHaxExpr_step_for_If_null_else
     {j contents data condJ thnJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5148,7 +5152,7 @@ private theorem parseHaxExpr_step_for_If_null_else
     handled uniformly via `cases elsJ` followed by the standard
     `match h_pe : parseHaxExpr (.<shape> …)` template (mirrors iter-9
     Break-value/Return-value treatment). -/
-private theorem parseHaxExpr_step_for_If_value_else
+theorem parseHaxExpr_step_for_If_value_else
     {j contents data condJ thnJ elsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5251,7 +5255,7 @@ private theorem parseHaxExpr_step_for_If_value_else
     falls through to the `_ => pure .unitVal` arm, so the output is
     `.ifThenElse cond thn .unitVal`. Witnessed by `ifThenElse_any` with the
     third sub-refinement supplied by `unitVal_any`. -/
-private theorem parseHaxExpr_step_for_If_no_else
+theorem parseHaxExpr_step_for_If_no_else
     {j contents data condJ thnJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5319,7 +5323,7 @@ payload-constructor argument; the `.error` branch closes via `cases h`. -/
 
     Parser body: `parseAdtExpr data` (delegates entirely to the helper).
     Witnessed by `adt_payload data h_p`. -/
-private theorem parseHaxExpr_step_for_Adt
+theorem parseHaxExpr_step_for_Adt
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5405,7 +5409,7 @@ private theorem parseHaxExpr_step_for_Adt
     `argsJ.toList.attach.mapM (fun ⟨a, _⟩ => parseHaxExpr a)` to produce
     `args : List ImpExpr`, and emits `.app funName args`. Witnessed by
     `call_payload funName h_args_parse`. -/
-private theorem parseHaxExpr_step_for_Call
+theorem parseHaxExpr_step_for_Call
     {j contents data : Json} {argsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5447,7 +5451,7 @@ private theorem parseHaxExpr_step_for_Call
     `data.getObjValAs? (Array Json) "fields"`, threads it through
     `fieldsJ.toList.attach.mapM (fun ⟨f, _⟩ => parseHaxExpr f)`, and emits
     `.app "array_lit" fields`. Witnessed by `array_payload h_fields_parse`. -/
-private theorem parseHaxExpr_step_for_Array
+theorem parseHaxExpr_step_for_Array
     {j contents data : Json} {fieldsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5502,7 +5506,7 @@ private theorem parseHaxExpr_step_for_Array
     branches on `fields.isEmpty`: empty → `.unitVal`, non-empty →
     `.tuple fields`. The empty case is witnessed by `unitVal_any`; the
     non-empty case by `tuple_payload`. -/
-private theorem parseHaxExpr_step_for_Tuple
+theorem parseHaxExpr_step_for_Tuple
     {j contents data : Json} {fieldsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5565,7 +5569,7 @@ private theorem parseHaxExpr_step_for_Tuple
     * other → `.letBind "_let" rhs .unitVal`
     All three shapes are `.letBind _ rhs _`. Witnessed by `let_payload n h_p`
     with the strong-IH supplying the rhs parse-equation. -/
-private theorem parseHaxExpr_step_for_Let
+theorem parseHaxExpr_step_for_Let
     {j contents data rhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5611,7 +5615,7 @@ private theorem parseHaxExpr_step_for_Let
     `stmts : List ImpExpr`. Then extracts `tail` from `data.getObjVal? "expr"`
     (parser-derived: `.unitVal` if `null`/missing, otherwise recursive parse).
     Emits `stmtsToSeq stmts tail`. Witnessed by `block_payload h_p`. -/
-private theorem parseHaxExpr_step_for_Block
+theorem parseHaxExpr_step_for_Block
     {j contents data : Json} {stmtsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5668,7 +5672,7 @@ private theorem parseHaxExpr_step_for_Block
     `armsJ.toList.attach.mapM (fun ⟨a, _⟩ => parseArm a)` to produce
     `arms : List (ImpPat × ImpExpr)`. Emits `.match_ scrut arms`.
     Witnessed by `match_payload h_pscrut h_parms`. -/
-private theorem parseHaxExpr_step_for_Match
+theorem parseHaxExpr_step_for_Match
     {j contents data scrutJ : Json} {armsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5727,7 +5731,7 @@ private theorem parseHaxExpr_step_for_Match
     * other → `.assign "_assign" rhs`
     All branches produce `.assign _ _`. Witnessed by `assign_payload _ h_pr`
     with the strong-IH supplying the rhs parse-equation. -/
-private theorem parseHaxExpr_step_for_Assign
+theorem parseHaxExpr_step_for_Assign
     {j contents data lhsJ rhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5789,7 +5793,7 @@ private theorem parseHaxExpr_step_for_Assign
     [lhs, rhs]` per branch. All branches still produce `.assign _ _` shapes.
     Witnessed by `assign_payload _ h_pr` (the rhs parse-equation supplies
     the structural witness; the outer `.app op [lhs, rhs]` is parser-internal). -/
-private theorem parseHaxExpr_step_for_AssignOp
+theorem parseHaxExpr_step_for_AssignOp
     {j contents data lhsJ rhsJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -5856,7 +5860,7 @@ yield `parseHaxExpr_refines_unconditional`.
 -/
 
 /-- Convert `f = .error err` to `∀ d, f ≠ .ok d`. -/
-private theorem not_ok_of_error
+theorem not_ok_of_error
     {α β : Type _} {f : Except β α} {err : β}
     (h : f = .error err) : ∀ d, f ≠ .ok d := by
   intro d hd
@@ -5865,7 +5869,7 @@ private theorem not_ok_of_error
 
 /-- **Step lemma for `Literal`** (cascade position 2). Parser body:
     `return parseLiteral data`. Witnessed by `literal_payload data rfl`. -/
-private theorem parseHaxExpr_step_for_Literal
+theorem parseHaxExpr_step_for_Literal
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_VR_err : ∀ d, contents.getObjVal? "VarRef" ≠ .ok d)
@@ -5894,7 +5898,7 @@ private theorem parseHaxExpr_step_for_Literal
     When the cascade reaches the final `Todo` obj-key match (after all 40
     earlier obj-key tags fail), parser produces `.app ("todo:" ++ msg) []`
     where `msg` is extracted from the data. Witnessed by `app_empty`. -/
-private theorem parseHaxExpr_step_for_Todo_obj
+theorem parseHaxExpr_step_for_Todo_obj
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -6025,7 +6029,7 @@ private theorem parseHaxExpr_step_for_Todo_obj
 
     Witnesses via `block_payload` with empty-stmts `mapM` equation
     derived directly from `pure []` reducing. -/
-private theorem parseHaxExpr_step_for_Block_no_stmts
+theorem parseHaxExpr_step_for_Block_no_stmts
     {j contents data : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -6075,7 +6079,7 @@ private theorem parseHaxExpr_step_for_Block_no_stmts
 /-- **Step lemma for `Repeat` when `count` slot fails extraction**
     (Repeat parser fall-through case). Witness via `app_pair "repeat"` with
     `lit_any` for the count slot. -/
-private theorem parseHaxExpr_step_for_Repeat_no_count
+theorem parseHaxExpr_step_for_Repeat_no_count
     {j contents data vJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
     (h_prior_err :
@@ -6180,7 +6184,7 @@ private theorem parseHaxExpr_step_for_Repeat_no_count
 /-! ## The closed step lemma + headline -/
 
 /-- Helper: convert `∀ d, f ≠ .ok d` to `∃ err, f = .error err` for `getObjValAs?`. -/
-private theorem getObjValAs_error_of_not_ok {α : Type} [Lean.FromJson α]
+theorem getObjValAs_error_of_not_ok {α : Type} [Lean.FromJson α]
     {j : Json} {k : String}
     (h : ∀ d, j.getObjValAs? α k ≠ .ok d) :
     ∃ err, j.getObjValAs? α k = .error err := by

@@ -3,7 +3,9 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
+module
+
+public import HaxLean.AST
 
 /-!
 # Feature Predicates
@@ -14,6 +16,8 @@ one predicate as a post-condition and may require others as pre-conditions.
 
 Follows the `IsDeterministic` pattern from `Deep/Deterministic.lean`.
 -/
+
+@[expose] public section
 
 namespace Hax
 

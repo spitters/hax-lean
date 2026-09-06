@@ -3,10 +3,12 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Value
-import HaxLean.Features
-import HaxLean.Semantics
+module
+
+public import HaxLean.AST
+public import HaxLean.Value
+public import HaxLean.Features
+public import HaxLean.Semantics
 
 /-!
 # Phase 4: Control Flow into Monads
@@ -21,6 +23,8 @@ Convert `earlyReturn` and `questionMark` into monadic operations.
 * `cfIntoMonads_preserves_noMut` — preservation: `NoMutation`
 * `cfIntoMonads_preserves_noLoops` — preservation: `NoLoops`
 -/
+
+@[expose] public section
 
 namespace Hax
 

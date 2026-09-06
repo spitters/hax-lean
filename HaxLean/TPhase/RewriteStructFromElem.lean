@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.TPhase.StructMetaT
+module
+
+public import HaxLean.TExpr
+public import HaxLean.TPhase.StructMetaT
 
 /-!
 # Typed phase: `tRewriteStructFromElem`
@@ -40,6 +42,8 @@ body via five heuristics, none of which depend on a type annotation.
 A syntactic commuting equation does not hold on arbitrary inputs,
 only on well-typed ones — a `WellTyped` predicate is follow-up work.
 -/
+
+@[expose] public section
 
 namespace Hax
 

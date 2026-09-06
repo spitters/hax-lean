@@ -3,8 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.ImpType
+module
+
+public import HaxLean.AST
+public import HaxLean.ImpType
 
 /-!
 # Typed Expressions
@@ -23,6 +25,8 @@ The type erasure function `TExpr.erase : TExpr → ImpExpr` maps back
 to the untyped AST, enabling a commuting-diagram proof strategy:
 all existing untyped proofs are reused via erasure.
 -/
+
+@[expose] public section
 
 namespace Hax
 

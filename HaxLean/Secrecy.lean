@@ -1,4 +1,6 @@
-import HaxLean.ImpType
+module
+
+public import HaxLean.ImpType
 
 /-!
 # Source secret-value recognition (IF/CT transfer, phase 2)
@@ -26,6 +28,8 @@ Wiring point (`MainT.lean`): the per-function parameter types
 `[U8; n]`/`&[U8]` buffer, or a `Scalar`) as an `.adt`; `secrecyOfBindings` keeps
 those names and `MainT` emits them as an additive `<name>_secrecy` def.
 -/
+
+@[expose] public section
 
 namespace Hax
 

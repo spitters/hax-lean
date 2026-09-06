@@ -3,16 +3,18 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.Json.Lexer
-import HaxLean.Json.Parser
-import HaxLean.Json.ParserSound
-import HaxLean.Json.Conformance
-import HaxLean.Json.Roundtrip
-import HaxLean.Json.ParserComplete
-import HaxLean.Json.RoundtripNum
-import HaxLean.Json.RoundtripStr
-import HaxLean.Json.RoundtripObj
-import HaxLean.Json.OfficialVectors
+module
+
+public import HaxLean.Json.Lexer
+public import HaxLean.Json.Parser
+public import HaxLean.Json.ParserSound
+public import HaxLean.Json.Conformance
+public import HaxLean.Json.Roundtrip
+public import HaxLean.Json.ParserComplete
+public import HaxLean.Json.RoundtripNum
+public import HaxLean.Json.RoundtripStr
+public import HaxLean.Json.RoundtripObj
+public import HaxLean.Json.OfficialVectors
 
 /-!
 # JSON verified-parser suite — build aggregator
@@ -37,3 +39,5 @@ change to the lexer/parser substrate silently rots the proofs. CI builds
 * `OfficialVectors` — JSONTestSuite / RFC 8259 accept/reject vectors run through
   `parseJsonString`, asserting decoded string values and control-char rejection.
 -/
+
+@[expose] public section

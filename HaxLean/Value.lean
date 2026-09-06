@@ -3,7 +3,9 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
+module
+
+public import HaxLean.AST
 
 /-!
 # Values and Environments
@@ -12,6 +14,8 @@ Untyped runtime values and variable environments for the imperative
 expression semantics. Using a tagged union avoids formalizing the Rust
 type system while still being expressive enough for correctness proofs.
 -/
+
+@[expose] public section
 
 namespace Hax
 

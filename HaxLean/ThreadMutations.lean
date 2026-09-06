@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.InlineClosures
+module
+
+public import HaxLean.TExpr
+public import HaxLean.InlineClosures
 
 /-!
 # Pre-pipeline normalization: thread mutations across `if`- and `match`-statement joins
@@ -35,6 +37,8 @@ tail gains a continuation, so `functionalizeLoops`/the renderer emit its
 
 Run BEFORE the typed pipeline (parse-time normalization, not a verified phase).
 -/
+
+@[expose] public section
 
 namespace Hax
 

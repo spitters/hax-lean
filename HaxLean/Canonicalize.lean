@@ -3,7 +3,9 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
+module
+
+public import HaxLean.AST
 
 /-!
 # Canonicalization passes for the post-pipeline ImpExpr
@@ -35,6 +37,8 @@ The convenience entry point `canonicalize` runs all passes in order. It is
 intended to be applied to each post-pipeline function body **before** the
 unverified `toLean` is invoked.
 -/
+
+@[expose] public section
 
 namespace Hax.Canonicalize
 

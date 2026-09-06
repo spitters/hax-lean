@@ -1,9 +1,13 @@
-import HaxLean.Json
-import HaxLean.Json.Adapter
-import HaxLean.HaxAdapter
-import HaxLean.PrettyPrint
-import HaxLean.Pipeline
+module
 
+public import HaxLean.Json
+public import HaxLean.Json.Adapter
+public import HaxLean.HaxAdapter
+public import HaxLean.PrettyPrint
+public import HaxLean.Pipeline
+
+
+@[expose] public section
 open Hax
 open Lean (Json ToJson FromJson toJson fromJson?)
 

@@ -3,7 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.Runtime
+module
+
+public meta import HaxLean.Runtime
+public import HaxLean.Runtime
 
 /-!
 # Compilation Test for Generated Code
@@ -12,6 +15,8 @@ This file imports ONLY `Hax.Runtime` and contains definitions
 matching the output of `haxpipe --emit-lean --extended`. If this file
 compiles, the runtime is sufficient for generated code.
 -/
+
+@[expose] public section
 
 -- Simple let-binding (from: let x = 42; x)
 def simpleLet :=

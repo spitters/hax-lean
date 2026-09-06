@@ -3,14 +3,18 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Phase.CfIntoMonads
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Phase.CfIntoMonads
 
 /-!
 # Typed Phase 4: Control Flow into Monads
 
 Typed version of `cfIntoMonads` on `TExpr`, with a commuting lemma.
 -/
+
+@[expose] public section
 
 namespace Hax
 

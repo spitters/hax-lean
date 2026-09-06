@@ -3,9 +3,11 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Features
-import HaxLean.Semantics
+module
+
+public import HaxLean.AST
+public import HaxLean.Features
+public import HaxLean.Semantics
 
 /-!
 # Phase 1: Drop References
@@ -21,6 +23,8 @@ borrows are semantically transparent.
 * `dropReferences_noRefs` — output guarantee: `NoReferences`
 * `dropReferences_correct` — semantics preservation
 -/
+
+@[expose] public section
 
 namespace Hax
 

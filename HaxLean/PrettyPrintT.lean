@@ -3,16 +3,18 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.PrettyPrint
-import HaxLean.Pipeline
-import HaxLean.HaxAdapter
-import HaxLean.TPhase.AnnotateLets
-import HaxLean.TPhase.InitFoldAccums
-import HaxLean.TPhase.QualifyProjections
-import HaxLean.TPhase.RewriteNewToStructCtor
-import HaxLean.TPhase.RewriteStructFromElem
-import HaxLean.TPhase.FixProjectionPaths
+module
+
+public import HaxLean.TExpr
+public import HaxLean.PrettyPrint
+public import HaxLean.Pipeline
+public import HaxLean.HaxAdapter
+public import HaxLean.TPhase.AnnotateLets
+public import HaxLean.TPhase.InitFoldAccums
+public import HaxLean.TPhase.QualifyProjections
+public import HaxLean.TPhase.RewriteNewToStructCtor
+public import HaxLean.TPhase.RewriteStructFromElem
+public import HaxLean.TPhase.FixProjectionPaths
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -38,12 +40,14 @@ Only the _type decisions_ change: they come from `TExpr.ty` instead of
 heuristic analysis.
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-! ## TExpr Type Utilities -/
 
 /-- Collect all app calls in a TExpr: (functionName, argCount, argTypes, returnType). -/
-private partial def collectTAppCalls : TExpr → List (String × Nat × List ImpType × ImpType)
+partial def collectTAppCalls : TExpr → List (String × Nat × List ImpType × ImpType)
   | .mk (.app f args) ty =>
     let argTypes := args.map (·.ty)
     (f, args.length, argTypes, ty) :: args.foldl (fun acc a => acc ++ collectTAppCalls a) []
@@ -150,7 +154,7 @@ partial def collectTFreeVars (bound : List String := []) :
 
 /-- Extract leading identity let-bindings (let x := x) from a TExpr as parameters
     with their types. -/
-private def extractTParams : TExpr → List (String × ImpType) × TExpr
+def extractTParams : TExpr → List (String × ImpType) × TExpr
   | .mk (.letBind n (.mk (.var v) ty) body) outerTy =>
     if n == v then
       let (ps, rest) := extractTParams body
@@ -162,7 +166,7 @@ private def extractTParams : TExpr → List (String × ImpType) × TExpr
 
 /-- Best-effort merge of two ImpTypes: prefer non-unknown.
     When both are known, prefer the first. -/
-private def mergeType (a b : ImpType) : ImpType :=
+def mergeType (a b : ImpType) : ImpType :=
   if a.isUnknown then b else a
 
 /-- Convert an ImpType to Lean type string for the deps class.
@@ -174,7 +178,7 @@ private def mergeType (a b : ImpType) : ImpType :=
     function" Unit→ArrayInt mapping is only applied to RETURN types
     where `.unit` typically means hax-erased side-effects, not a
     semantic Unit. Callers pass `(isReturn := true)` for return types. -/
-private def depTypeStr (ty : ImpType) (sl : String → Option String)
+def depTypeStr (ty : ImpType) (sl : String → Option String)
     (isReturn : Bool := false) : String :=
   match ty with
   | .unknown => "Array Int"  -- no type info; match untyped default
@@ -725,7 +729,7 @@ from rawTdefs, then apply the rewrites to ImpExpr defs after erasure. -/
 
 /-- Resolve an ImpType to a struct in the metadata.
     Matches `.adt name _` against struct names (full path or short name). -/
-private def resolveStructFromType (ty : ImpType) (structMeta : StructMeta)
+def resolveStructFromType (ty : ImpType) (structMeta : StructMeta)
     : Option (String × List (String × String × ImpType)) :=
   match ty with
   | .adt name _ =>
@@ -739,7 +743,7 @@ private def resolveStructFromType (ty : ImpType) (structMeta : StructMeta)
   | _ => none
 
 /-- Collect struct names from `new()` calls in a raw TExpr (which has types from hax JSON). -/
-private partial def collectNewStructTypes (structMeta : StructMeta) : TExpr → List String
+partial def collectNewStructTypes (structMeta : StructMeta) : TExpr → List String
   | .mk (.app "new" []) ty =>
     match resolveStructFromType ty structMeta with
     | some (sname, _) => [sname]
@@ -778,7 +782,7 @@ def buildNewStructMap (rawTdefs : List (String × TExpr)) (structMeta : StructMe
 /-- Generate a default-value ImpExpr for a struct field.
     - "int" fields → literal 0
     - "array" fields → Hax.repeat_ 0 size (size from ImpType) -/
-private def defaultFieldImpExpr (tag : String) (fty : ImpType) : ImpExpr :=
+def defaultFieldImpExpr (tag : String) (fty : ImpType) : ImpExpr :=
   if tag == "int" then .lit (.int 0)
   else
     let size := match fty with

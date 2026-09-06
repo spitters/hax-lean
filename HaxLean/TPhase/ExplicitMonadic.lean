@@ -3,14 +3,18 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Phase.ExplicitMonadic
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Phase.ExplicitMonadic
 
 /-!
 # Typed Phase 5: Explicit Monadic Encoding
 
 Typed version of `explicitMonadic` on `TExpr`, with a commuting lemma.
 -/
+
+@[expose] public section
 
 namespace Hax
 

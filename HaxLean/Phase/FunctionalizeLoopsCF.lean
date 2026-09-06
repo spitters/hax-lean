@@ -3,8 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.SemanticsCF
-import HaxLean.Phase.FunctionalizeLoops
+module
+
+public import HaxLean.SemanticsCF
+public import HaxLean.Phase.FunctionalizeLoops
 
 /-!
 # Phase 3 Correctness: Functionalize Loops
@@ -60,6 +62,8 @@ The `nested` parameter could be eliminated by:
 Any of these would yield a simpler correctness proof at the cost of refactoring
 the AST constructors and `denote'` match arms.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -132,7 +136,7 @@ theorem NoCFConstructors.not_cfBreakContinue {e : ImpExpr} :
     The first 3 components (env, val deepNoControlFlow, broke deepNoControlFlow)
     are properties of `denote` and don't depend on the transformation. Only
     the simulation (part 4) depends on `nested`. -/
-private abbrev FLInvGen (nested : Bool) (bi : Builtins) (e : ImpExpr) : Prop :=
+abbrev FLInvGen (nested : Bool) (bi : Builtins) (e : ImpExpr) : Prop :=
   ∀ fuel env, Env.NoControlFlow env →
     (denote bi fuel e env).2.NoControlFlow ∧
     (∀ v, (denote bi fuel e env).1 = .val v → v.deepNoControlFlow = true) ∧
@@ -141,7 +145,7 @@ private abbrev FLInvGen (nested : Bool) (bi : Builtins) (e : ImpExpr) : Prop :=
       (Outcome.encodeCF3gen nested (denote bi fuel e env).1, (denote bi fuel e env).2)
 
 /-- The combined invariant (non-nested). -/
-private abbrev FLInv (bi : Builtins) (e : ImpExpr) : Prop :=
+abbrev FLInv (bi : Builtins) (e : ImpExpr) : Prop :=
   ∀ fuel env, Env.NoControlFlow env →
     (denote bi fuel e env).2.NoControlFlow ∧
     (∀ v, (denote bi fuel e env).1 = .val v → v.deepNoControlFlow = true) ∧
@@ -151,13 +155,13 @@ private abbrev FLInv (bi : Builtins) (e : ImpExpr) : Prop :=
 
 /-- `FLInvGen false` implies `FLInv` (and vice versa, since `encodeCF3gen false = encodeCF3`
     and `functionalizeLoopsAux false = functionalizeLoops`). -/
-private theorem FLInvGen_false_eq_FLInv (bi : Builtins) (e : ImpExpr) :
+theorem FLInvGen_false_eq_FLInv (bi : Builtins) (e : ImpExpr) :
     FLInvGen false bi e ↔ FLInv bi e := by
   simp only [FLInvGen, FLInv, functionalizeLoops, Outcome.encodeCF3gen_false_eq]
 
 /-! ### matchPat preserves NoControlFlow -/
 
-private def matchPat_preserves_ncf_impl :
+def matchPat_preserves_ncf_impl :
     (pat : ImpPat) → ∀ (v : Value) (env env' : Env),
       env.NoControlFlow → v.deepNoControlFlow = true →
       matchPat pat v env = some env' → env'.NoControlFlow :=
@@ -239,7 +243,7 @@ private def matchPat_preserves_ncf_impl :
           (ih_head v env env_mid henv (hvs v (.head _)) hm1)
           (fun w hw => hvs w (.tail _ hw)) hm2)
 
-private theorem matchPat_preserves_noControlFlow {pat : ImpPat} {v : Value}
+theorem matchPat_preserves_noControlFlow {pat : ImpPat} {v : Value}
     {env env' : Env} (henv : env.NoControlFlow)
     (hv : v.deepNoControlFlow = true)
     (hm : matchPat pat v env = some env') :
@@ -249,14 +253,14 @@ private theorem matchPat_preserves_noControlFlow {pat : ImpPat} {v : Value}
 /-! ### StateM bind congruence -/
 
 /-- If two state monads agree at a point, their binds with the same continuation agree. -/
-private theorem stateM_bind_congr {σ α β : Type} (ma mb : StateM σ α)
+theorem stateM_bind_congr {σ α β : Type} (ma mb : StateM σ α)
     (f : α → StateM σ β) (s : σ) (h : ma s = mb s) :
     StateT.bind ma f s = StateT.bind mb f s := by
   simp only [StateT.bind, h]
 
 /-! ### Helper: deepNoControlFlowList from pointwise -/
 
-private theorem deepNoControlFlowList_of_forall (vals : List Value)
+theorem deepNoControlFlowList_of_forall (vals : List Value)
     (h : ∀ v ∈ vals, v.deepNoControlFlow = true) :
     Value.deepNoControlFlow.deepNoControlFlowList vals = true := by
   induction vals with
@@ -297,7 +301,7 @@ macro "fl_broke_propagate_gen" henv:ident hbrk:ident nested:ident : tactic =>
 
 /-! ### denoteArgs combined -/
 
-private theorem denoteArgs_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteArgs_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (fuel : Nat) (es : List ImpExpr) (hih : ∀ e ∈ es, FLInv bi e) :
     ∀ env, Env.NoControlFlow env →
       (denoteArgs bi fuel es env).2.NoControlFlow ∧
@@ -360,7 +364,7 @@ private theorem denoteArgs_combined (bi : Builtins) (hbi : Builtins.DeepNoContro
 
 /-! ### denoteMatchArms combined -/
 
-private theorem denoteMatchArms_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteMatchArms_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (fuel : Nat) (v : Value) (hv : v.deepNoControlFlow = true)
     (arms : List (ImpPat × ImpExpr)) (hih : ∀ pa ∈ arms, FLInv bi pa.2) :
     ∀ env, Env.NoControlFlow env →
@@ -394,7 +398,7 @@ private theorem denoteMatchArms_combined (bi : Builtins) (hbi : Builtins.DeepNoC
 
 /-! ### Generalized denoteArgs/denoteMatchArms combined (parametric in nested) -/
 
-private theorem denoteArgs_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteArgs_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (nested : Bool)
     (fuel : Nat) (es : List ImpExpr) (hih : ∀ e ∈ es, FLInvGen nested bi e) :
     ∀ env, Env.NoControlFlow env →
@@ -456,7 +460,7 @@ private theorem denoteArgs_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoCo
       simp only [Outcome.encodeCF3gen_err]
       exact ⟨henv_e, fun vals h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
 
-private theorem denoteMatchArms_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteMatchArms_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (nested : Bool)
     (fuel : Nat) (v : Value) (hv : v.deepNoControlFlow = true)
     (arms : List (ImpPat × ImpExpr)) (hih : ∀ pa ∈ arms, FLInvGen nested bi pa.2) :
@@ -493,7 +497,7 @@ private theorem denoteMatchArms_combined_gen (bi : Builtins) (hbi : Builtins.Dee
 
 /-! ### denoteForLoop + denoteWhile combined correctness -/
 
-private theorem denoteForLoop_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteForLoop_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (body : ImpExpr) (hbody : FLInv bi body) :
     ∀ fuel var_name lo_val hi_val env, Env.NoControlFlow env →
       (denoteForLoop bi fuel var_name lo_val hi_val body env).2.NoControlFlow ∧
@@ -563,7 +567,7 @@ private theorem denoteForLoop_combined (bi : Builtins) (hbi : Builtins.DeepNoCon
 /-- Generalized while-loop simulation, parametric in `nested` for the condition encoding.
     Uses `FLInvGen nested bi cond` for the condition and `FLInv bi body` for the body.
     Concludes with `encodeCF3gen nested` for the overall result. -/
-private theorem denoteWhile_combined_gen (nested : Bool)
+theorem denoteWhile_combined_gen (nested : Bool)
     (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (cond body : ImpExpr)
     (hcond : FLInvGen nested bi cond) (hbody : FLInv bi body) :
@@ -640,7 +644,7 @@ private theorem denoteWhile_combined_gen (nested : Bool)
     | earlyRet | continued | err => fl_error_branch henvc
     | broke w => fl_broke_propagate_gen henvc hbrkc nested
 
-private theorem denoteWhile_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteWhile_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (cond body : ImpExpr)
     (hcond : FLInv bi cond) (hbody : FLInv bi body) :
     ∀ fuel env, Env.NoControlFlow env →
@@ -659,7 +663,7 @@ private theorem denoteWhile_combined (bi : Builtins) (hbi : Builtins.DeepNoContr
 
 /-! ### denoteForLoop never returns broke/continued -/
 
-private theorem denoteForLoop_never_broke (bi : Builtins) (fuel : Nat)
+theorem denoteForLoop_never_broke (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) (w : Value) :
     (denoteForLoop bi fuel var lo hi body env).1 ≠ .broke w := by
   induction fuel generalizing lo env with
@@ -683,7 +687,7 @@ private theorem denoteForLoop_never_broke (bi : Builtins) (fuel : Nat)
       | earlyRet _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
       | err _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
-private theorem denoteForLoop_never_continued (bi : Builtins) (fuel : Nat)
+theorem denoteForLoop_never_continued (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
     (denoteForLoop bi fuel var lo hi body env).1 ≠ .continued := by
   induction fuel generalizing lo env with
@@ -707,7 +711,7 @@ private theorem denoteForLoop_never_continued (bi : Builtins) (fuel : Nat)
       | earlyRet _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
       | err _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
-private theorem denoteForLoop_encodeCF3_id (bi : Builtins) (fuel : Nat)
+theorem denoteForLoop_encodeCF3_id (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
     Outcome.encodeCF3 (denoteForLoop bi fuel var lo hi body env).1 =
       (denoteForLoop bi fuel var lo hi body env).1 := by
@@ -721,7 +725,7 @@ private theorem denoteForLoop_encodeCF3_id (bi : Builtins) (fuel : Nat)
 /-! ### denoteForLoop + denoteWhile combined correctness for Return variants -/
 
 /-- Same as `denoteForLoop_encodeCF3_id` but for `encodeCF3gen nested`. -/
-private theorem denoteForLoop_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (nested : Bool)
+theorem denoteForLoop_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (nested : Bool)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
     Outcome.encodeCF3gen nested (denoteForLoop bi fuel var lo hi body env).1 =
       (denoteForLoop bi fuel var lo hi body env).1 := by
@@ -736,7 +740,7 @@ private theorem denoteForLoop_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (nest
     Relates `denoteForLoop` (original semantics) to `denoteForLoop'Return`
     (CF-aware semantics for loops with earlyReturn in body).
     The body uses `FLInvGen true` (nested encoding). -/
-private theorem denoteForLoop_combined_return (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteForLoop_combined_return (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (body : ImpExpr) (hbody : FLInvGen true bi body) :
     ∀ fuel var_name lo_val hi_val env, Env.NoControlFlow env →
       (denoteForLoop bi fuel var_name lo_val hi_val body env).2.NoControlFlow ∧
@@ -814,7 +818,7 @@ private theorem denoteForLoop_combined_return (bi : Builtins) (hbi : Builtins.De
 
 /-! ### denoteForLoopRev combined correctness -/
 
-private theorem denoteForLoopRev_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem denoteForLoopRev_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (body : ImpExpr) (hbody : FLInv bi body) :
     ∀ fuel var_name lo_val hi_val env, Env.NoControlFlow env →
       (denoteForLoopRev bi fuel var_name lo_val hi_val body env).2.NoControlFlow ∧
@@ -883,7 +887,7 @@ private theorem denoteForLoopRev_combined (bi : Builtins) (hbi : Builtins.DeepNo
 
 /-! ### denoteForLoopRev never returns broke/continued -/
 
-private theorem denoteForLoopRev_never_broke (bi : Builtins) (fuel : Nat)
+theorem denoteForLoopRev_never_broke (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) (w : Value) :
     (denoteForLoopRev bi fuel var lo hi body env).1 ≠ .broke w := by
   induction fuel generalizing hi env with
@@ -907,7 +911,7 @@ private theorem denoteForLoopRev_never_broke (bi : Builtins) (fuel : Nat)
       | earlyRet _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
       | err _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
-private theorem denoteForLoopRev_never_continued (bi : Builtins) (fuel : Nat)
+theorem denoteForLoopRev_never_continued (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
     (denoteForLoopRev bi fuel var lo hi body env).1 ≠ .continued := by
   induction fuel generalizing hi env with
@@ -931,7 +935,7 @@ private theorem denoteForLoopRev_never_continued (bi : Builtins) (fuel : Nat)
       | earlyRet _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
       | err _ => simp only [StateT.pure]; intro h; exact Outcome.noConfusion h
 
-private theorem denoteForLoopRev_encodeCF3_id (bi : Builtins) (fuel : Nat)
+theorem denoteForLoopRev_encodeCF3_id (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
     Outcome.encodeCF3 (denoteForLoopRev bi fuel var lo hi body env).1 =
       (denoteForLoopRev bi fuel var lo hi body env).1 := by
@@ -943,7 +947,7 @@ private theorem denoteForLoopRev_encodeCF3_id (bi : Builtins) (fuel : Nat)
   | continued => exact absurd h (denoteForLoopRev_never_continued bi fuel var lo hi body env)
 
 /-- Same as `denoteForLoopRev_encodeCF3_id` but for `encodeCF3gen nested`. -/
-private theorem denoteForLoopRev_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (nested : Bool)
+theorem denoteForLoopRev_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (nested : Bool)
     (var : String) (lo hi : Int) (body : ImpExpr) (env : Env) :
     Outcome.encodeCF3gen nested (denoteForLoopRev bi fuel var lo hi body env).1 =
       (denoteForLoopRev bi fuel var lo hi body env).1 := by
@@ -958,7 +962,7 @@ private theorem denoteForLoopRev_encodeCF3gen_id (bi : Builtins) (fuel : Nat) (n
     Relates `denoteForLoopRev` (original semantics) to `denoteForLoopRev'Return`
     (CF-aware semantics for loops with earlyReturn in body).
     The body uses `FLInvGen true` (nested encoding). -/
-private theorem denoteForLoopRev_combined_return (bi : Builtins)
+theorem denoteForLoopRev_combined_return (bi : Builtins)
     (hbi : Builtins.DeepNoControlFlow bi)
     (body : ImpExpr) (hbody : FLInvGen true bi body) :
     ∀ fuel var_name lo_val hi_val env, Env.NoControlFlow env →
@@ -1032,7 +1036,7 @@ private theorem denoteForLoopRev_combined_return (bi : Builtins)
 /-- Generalized while-loop simulation for the Return variant.
     Uses `FLInvGen nested bi cond` for the condition and `FLInvGen true bi body` for the body.
     Concludes with `encodeCF3gen nested` for the overall result. -/
-private theorem denoteWhile_combined_return (nested : Bool)
+theorem denoteWhile_combined_return (nested : Bool)
     (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (cond body : ImpExpr)
     (hcond : FLInvGen nested bi cond) (hbody : FLInvGen true bi body) :
@@ -1133,7 +1137,7 @@ for them, but `denote'` gives real semantics, making FLInv unprovable. -/
 
     When `nested = false`: this is the standard `FLInv` (broke → CF true v).
     When `nested = true`: broke → CF true (CF false v) (nested encoding for earlyReturn-in-loops). -/
-private theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
+theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
     (e : ImpExpr) (hncf : NoCFConstructors e) (nested : Bool) : FLInvGen nested bi e := by
   induction e using ImpExpr.ind generalizing nested with
   | lit v =>

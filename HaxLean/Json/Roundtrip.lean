@@ -4,9 +4,13 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Lexer
-import HaxLean.Json.Parser
+module
 
+public import HaxLean.Json.Lexer
+public import HaxLean.Json.Parser
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!
@@ -120,7 +124,7 @@ specialise. -/
 /-- Chars produced by serializing one token. -/
 def serTokChars (t : JsonToken) : List Char := (JsonToken.serialize t).toList
 
-private theorem join_toList_foldl (ss : List String) : ∀ acc : String,
+theorem join_toList_foldl (ss : List String) : ∀ acc : String,
     (List.foldl (fun r s => r ++ s) acc ss).toList = acc.toList ++ ss.flatMap String.toList := by
   induction ss with
   | nil => intro acc; simp

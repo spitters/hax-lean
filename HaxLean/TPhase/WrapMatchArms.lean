@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Phase.WrapMatchArms
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Phase.WrapMatchArms
 
 /-!
 # Typed Phase 4.5: Wrap Match Arms with cfContinue
@@ -12,6 +14,8 @@ import HaxLean.Phase.WrapMatchArms
 Typed version of `wrapMatchArmsCF` on `TExpr`, with a commuting lemma
 showing that type erasure commutes with the transformation.
 -/
+
+@[expose] public section
 
 namespace Hax
 

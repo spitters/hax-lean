@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Semantics
+module
+
+public import HaxLean.AST
+public import HaxLean.Semantics
 
 /-!
 # Untyped twin: `flattenLetFoldReturn` rewrite identities
@@ -62,6 +64,8 @@ is **proved**: a heterogeneous structural congruence (relating each
 rewrite identities through the `Rel` partial equivalence. See the report
 in `Hax/TPhase/FlattenLetFoldReturn.lean`.
 -/
+
+@[expose] public section
 
 namespace Hax
 

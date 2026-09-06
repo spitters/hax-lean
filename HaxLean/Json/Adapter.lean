@@ -4,8 +4,10 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Lexer
-import HaxLean.Json.Parser
+module
+
+public import HaxLean.Json.Lexer
+public import HaxLean.Json.Parser
 
 set_option autoImplicit false
 
@@ -61,7 +63,7 @@ the subject of follow-on tasks (B3 in
 To migrate a call site from Lean core to the verified parser, replace
 
 ```lean
-import Lean.Data.Json
+public import Lean.Data.Json
 …
 match Lean.Json.parse s with
 | .ok j    => …
@@ -71,7 +73,9 @@ match Lean.Json.parse s with
 with
 
 ```lean
-import HaxLean.Json.Adapter
+public import HaxLean.Json.Adapter
+
+@[expose] public section
 …
 match CatCrypt.Crypto.Tools.Json.parse s with
 | .ok j    => …

@@ -3,8 +3,12 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import Lean.Data.Json
-import Lean.Data.Json.FromToJson
+module
+
+public import Lean.Data.Json
+public import Lean.Data.Json.FromToJson
+import all Lean.Data.Json.Basic
+import all Lean.Data.Json.FromToJson.Basic
 
 /-!
 # Json structural-size measure (Path A foundation)
@@ -35,6 +39,8 @@ a circular import (`AdapterRefinement` already imports `HaxAdapter`).
   an `Array Json` retrieved via `j.getObjValAs? (Array Json) k`.
 -/
 
+@[expose] public section
+
 namespace Hax.JsonSize
 
 open Lean (Json)
@@ -58,7 +64,7 @@ theorem jsonSize_lt_of_mem_arr {xs : Array Json} {j : Json} (h : j ∈ xs) :
 /-- Auxiliary: the value returned by `Const.get?` is strictly smaller
     (in `sizeOf`) than the tree it was found in. Proved by induction on
     the underlying `Impl` tree. -/
-private theorem sizeOf_lt_of_const_get?_eq_some
+theorem sizeOf_lt_of_const_get?_eq_some
     {t : Std.DTreeMap.Internal.Impl String (fun _ => Json)}
     {k : String} {w : Json}
     (h : Std.DTreeMap.Internal.Impl.Const.get? t k = some w) :
@@ -180,7 +186,7 @@ theorem getObjVal?_chain_decreases {j data v : Json} {k1 k2 : String}
 /-- Auxiliary: `Array.fromJson?` at type `Array Json` is the identity on
     `Json.arr` payloads. The `FromJson` instance for `Json` is `Except.ok`,
     so `a.mapM Except.ok = Except.ok a`. -/
-private theorem array_fromJson?_arr_id (a : Array Json) :
+theorem array_fromJson?_arr_id (a : Array Json) :
     (Array.fromJson? (α := Json) (Json.arr a)) = .ok a := by
   -- `Array.fromJson?` on `.arr a` reduces to `a.mapM fromJson?`.
   -- The `FromJson Json` instance is `⟨Except.ok⟩`, so `fromJson? = Except.ok`.

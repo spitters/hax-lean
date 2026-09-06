@@ -3,11 +3,13 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.AST
-import HaxLean.Value
-import HaxLean.Features
-import HaxLean.FreeVars
-import HaxLean.Semantics
+module
+
+public import HaxLean.AST
+public import HaxLean.Value
+public import HaxLean.Features
+public import HaxLean.FreeVars
+public import HaxLean.Semantics
 
 /-!
 # Phase 2: Local Mutation Elimination
@@ -43,6 +45,8 @@ for forward compatibility with more sophisticated state-passing transforms,
 but the current implementation does not use it — it transforms all `assign`
 nodes unconditionally.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -228,7 +232,7 @@ theorem localMutation_preserves_noRefs (mvars : List String) (e : ImpExpr)
 
 /-- The `assign n rhs` ↦ `seq (letBind n rhs (var n)) unitVal` transformation
     preserves denotational semantics. -/
-private theorem denote_assign_eq (bi : Builtins) (fuel : Nat) (n : String) (rhs : ImpExpr) :
+theorem denote_assign_eq (bi : Builtins) (fuel : Nat) (n : String) (rhs : ImpExpr) :
     denote bi fuel (.seq (.letBind n rhs (.var n)) .unitVal) =
     denote bi fuel (.assign n rhs) := by
   funext env

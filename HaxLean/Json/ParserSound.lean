@@ -4,8 +4,12 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
-import HaxLean.Json.Parser
+module
 
+public import HaxLean.Json.Parser
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!
@@ -128,7 +132,7 @@ end
 
 /-- Soundness of `parseArrayBody`'s general arm: after parsing a value off
 `toks`, the parser dispatches on the following `]`/`,`. -/
-private theorem arrayStep {n : Nat} {toks : List JsonToken} {acc : Array Lean.Json}
+theorem arrayStep {n : Nat} {toks : List JsonToken} {acc : Array Lean.Json}
     {v : Lean.Json} {rest : List JsonToken}
     (ihV : ∀ t v r, parseValue n t = .ok (v, r) → ValueP t v r)
     (ihA : ∀ t a v r, parseArrayBody n t a = .ok (v, r) → ArrayP t a v r)
@@ -155,7 +159,7 @@ private theorem arrayStep {n : Nat} {toks : List JsonToken} {acc : Array Lean.Js
       | exact ArrayP.valComma (ihV toks v0 _ hpv) (ihA _ _ v rest h)
 
 /-- Soundness of `parseObjectBody`'s general (`key : value`) arm. -/
-private theorem objectStep {n : Nat} {k : String} {rest : List JsonToken}
+theorem objectStep {n : Nat} {k : String} {rest : List JsonToken}
     {acc : List (String × Lean.Json)} {v : Lean.Json} {rest_out : List JsonToken}
     (ihV : ∀ t v r, parseValue n t = .ok (v, r) → ValueP t v r)
     (ihO : ∀ t a v r, parseObjectBody n t a = .ok (v, r) → ObjectP t a v r)

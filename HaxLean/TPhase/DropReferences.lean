@@ -3,8 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Phase.DropReferences
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Phase.DropReferences
 
 /-!
 # Typed Phase 1: Drop References
@@ -12,6 +14,8 @@ import HaxLean.Phase.DropReferences
 Typed version of `dropReferences` on `TExpr`, with a commuting lemma
 showing that type erasure commutes with the transformation.
 -/
+
+@[expose] public section
 
 namespace Hax
 

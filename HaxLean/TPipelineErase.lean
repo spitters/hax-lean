@@ -3,9 +3,11 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TPipeline
-import HaxLean.InlineClosuresErase
-import HaxLean.ThreadMutationsErase
+module
+
+public import HaxLean.TPipeline
+public import HaxLean.InlineClosuresErase
+public import HaxLean.ThreadMutationsErase
 
 /-!
 # Pre-pipeline passes in the erase capstone
@@ -43,13 +45,15 @@ composed erase theorem therefore lands on `tPipelineFullInner` (everything in
 `tPipelineFull` except the final flatten).
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-! ## Erase commutation for the match-arm CF wrap -/
 
 /-- The `anyCF` decision (does any arm end in a control-flow marker?) commutes
     with erasure, given the per-arm erase IH. -/
-private theorem wrapAnyCF_erase (arms : List (ImpPat × TExpr))
+theorem wrapAnyCF_erase (arms : List (ImpPat × TExpr))
     (ih : ∀ pa ∈ arms, (tWrapMatchArmsCF pa.2).erase = wrapMatchArmsCF pa.2.erase) :
     (tWrapMatchArmsCF.mapArms arms).any (fun (_, b) => b.endsInCF)
       = (wrapMatchArmsCF.mapArms (TExpr.erase.eraseArms arms)).any (fun (_, b) => Hax.endsInCF b) := by
@@ -63,7 +67,7 @@ private theorem wrapAnyCF_erase (arms : List (ImpPat × TExpr))
       ihr (fun pa h => ih pa (List.mem_cons_of_mem _ h))]
 
 /-- The non-wrapping arm transformation commutes with erasure. -/
-private theorem wrapArmsId_erase (arms : List (ImpPat × TExpr))
+theorem wrapArmsId_erase (arms : List (ImpPat × TExpr))
     (ih : ∀ pa ∈ arms, (tWrapMatchArmsCF pa.2).erase = wrapMatchArmsCF pa.2.erase) :
     TExpr.erase.eraseArms (tWrapMatchArmsCF.mapArms arms)
       = wrapMatchArmsCF.mapArms (TExpr.erase.eraseArms arms) := by
@@ -76,7 +80,7 @@ private theorem wrapArmsId_erase (arms : List (ImpPat × TExpr))
 
 /-- The wrapping arm transformation (`maybeWrapContinue` on each arm body)
     commutes with erasure. -/
-private theorem wrapArmsWrap_erase (arms : List (ImpPat × TExpr))
+theorem wrapArmsWrap_erase (arms : List (ImpPat × TExpr))
     (ih : ∀ pa ∈ arms, (tWrapMatchArmsCF pa.2).erase = wrapMatchArmsCF pa.2.erase) :
     TExpr.erase.eraseArms (tWrapMatchArmsCF.mapArmsWrap (tWrapMatchArmsCF.mapArms arms))
       = wrapMatchArmsCF.mapArmsWrap (wrapMatchArmsCF.mapArms (TExpr.erase.eraseArms arms)) := by

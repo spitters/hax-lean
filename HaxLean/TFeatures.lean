@@ -3,8 +3,10 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Features
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Features
 
 /-!
 # Typed Feature Predicates
@@ -12,6 +14,8 @@ import HaxLean.Features
 Feature predicates on `TExpr`, defined via erasure to reuse all
 existing proofs on `ImpExpr` without any new proof obligations.
 -/
+
+@[expose] public section
 
 namespace Hax
 

@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.HaxAdapter
+module
+
+public import HaxLean.TExpr
+public import HaxLean.HaxAdapter
 
 /-!
 # Typed Phase: Elide Newtype Projections to `.namedProj`
@@ -32,10 +34,12 @@ builtins) is unaffected. The phase's own correctness theorem is
 trivial: `(tElideToNamedProj nt e).erase = e.erase`.
 -/
 
+public section
+
 namespace Hax
 
 /-- Unwrap a single layer of `.ref` (Rust receivers are `&self`-borrowed). -/
-private def unwrapRefImp : ImpType → ImpType
+def unwrapRefImp : ImpType → ImpType
   | .ref inner _ => inner
   | t => t
 
@@ -43,7 +47,7 @@ private def unwrapRefImp : ImpType → ImpType
     Otherwise return the original `.app f args`. Used inside
     `tElideToNamedProj` to keep the function definition flat and the
     erase proof tractable. -/
-private def rewriteAppHead
+def rewriteAppHead
     (newtypes : HaxAdapter.NewtypeMap) (f : String) (args : List TExpr) : TExprKind :=
   match f, args with
   | ".0", [x] =>
@@ -58,7 +62,7 @@ private def rewriteAppHead
 
 /-- `rewriteAppHead` is erase-identity at the ImpExpr level: a `.namedProj`
     erases to `.app ".0" [x.erase]`, which is what the original input was. -/
-private theorem rewriteAppHead_erase
+theorem rewriteAppHead_erase
     (newtypes : HaxAdapter.NewtypeMap) (f : String) (args : List TExpr) (ty : ImpType) :
     (TExpr.mk (rewriteAppHead newtypes f args) ty).erase =
       (TExpr.mk (.app f args) ty).erase := by
@@ -77,7 +81,7 @@ private theorem rewriteAppHead_erase
 
     We unwrap `.ref` once (Rust's `&T` for an inherent-receiver call)
     and accept either the raw ADT path or its sanitized short form. -/
-private def receiverNewtype? (newtypes : HaxAdapter.NewtypeMap) (ty : ImpType) : Option String :=
+def receiverNewtype? (newtypes : HaxAdapter.NewtypeMap) (ty : ImpType) : Option String :=
   let unwrap : ImpType → ImpType
     | .ref inner _ => inner
     | t => t
@@ -91,7 +95,7 @@ private def receiverNewtype? (newtypes : HaxAdapter.NewtypeMap) (ty : ImpType) :
 
 /-- Phase: rewrite `.app ".0" [x]` to `.namedProj T x` when `x` has a
     newtype receiver. Other constructors recurse structurally. -/
-def tElideToNamedProj (newtypes : HaxAdapter.NewtypeMap) : TExpr → TExpr
+@[expose] def tElideToNamedProj (newtypes : HaxAdapter.NewtypeMap) : TExpr → TExpr
   | .mk (.lit v) ty => .mk (.lit v) ty
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
@@ -183,7 +187,7 @@ where
 /-- Helper: when the pass rewrites a single-arg `.app ".0"` to a
     `.namedProj`, the erase result is unchanged because `.namedProj T e`
     erases to `.app ".0" [e.erase]`. -/
-private theorem app_dot0_erase_eq (e : TExpr) (tname : String) (ty : ImpType) :
+theorem app_dot0_erase_eq (e : TExpr) (tname : String) (ty : ImpType) :
     (TExpr.mk (.namedProj tname e) ty).erase =
       (TExpr.mk (.app ".0" [e]) ty).erase := by
   simp [TExpr.erase]

@@ -4,6 +4,10 @@ Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
 
+module
+
+
+@[expose] public section
 set_option autoImplicit false
 
 /-!
@@ -558,21 +562,21 @@ RFC 8259 lexical rule. We prove this by induction on the fuel of
 `tokenizeAux`. -/
 
 /-- Helper: if `validNumberLitL ns = true` then `validNumberLit (String.ofList ns) = true`. -/
-private theorem validNumberLitL_string (ns : List Char)
+theorem validNumberLitL_string (ns : List Char)
     (h : validNumberLitL ns = true) :
     validNumberLit (String.ofList ns) = true := by
   show validNumberLitL _ = true
   rw [String.toList_ofList]; exact h
 
 /-- Helper: if `validStringContentL bs = true` then `validStringContent (String.ofList bs) = true`. -/
-private theorem validStringContentL_string (bs : List Char)
+theorem validStringContentL_string (bs : List Char)
     (h : validStringContentL bs = true) :
     validStringContent (String.ofList bs) = true := by
   show validStringContentL _ = true
   rw [String.toList_ofList]; exact h
 
 /-- Predicate: this token's payload (if it is a `numT` / `strT`) is valid. -/
-@[reducible] private def TokenPayloadValid : JsonToken → Prop
+@[reducible] def TokenPayloadValid : JsonToken → Prop
   | .numT s => validNumberLit s = true
   | .strT s => validStringContent s = true
   | _ => True
@@ -580,7 +584,7 @@ private theorem validStringContentL_string (bs : List Char)
 /-- Helper: a `(tokenizeAux n tail).map (newTok :: ·) = .ok toks` branch
 forces every output token to be either `newTok` or come from the recursive
 call. -/
-private theorem map_cons_sound {n : Nat} {tail : List Char} {newTok : JsonToken}
+theorem map_cons_sound {n : Nat} {tail : List Char} {newTok : JsonToken}
     {toks : List JsonToken}
     (ih_tail : ∀ ts, tokenizeAux n tail = .ok ts → ∀ t ∈ ts, TokenPayloadValid t)
     (hnew : TokenPayloadValid newTok)
@@ -600,7 +604,7 @@ private theorem map_cons_sound {n : Nat} {tail : List Char} {newTok : JsonToken}
     | tail _ ht' => exact ih_tail ts hrec t ht'
 
 /-- Soundness for `tokenizeAux`: every emitted token has a valid payload. -/
-private theorem tokenizeAux_payload_valid :
+theorem tokenizeAux_payload_valid :
     ∀ (n : Nat) (cs : List Char) (toks : List JsonToken),
       tokenizeAux n cs = .ok toks → ∀ t ∈ toks, TokenPayloadValid t := by
   intro n

@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Phase.RewriteAppName
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Phase.RewriteAppName
 
 /-!
 # Typed phase: `tRewriteAppName`
@@ -27,6 +29,8 @@ untyped one: any caller that proves the untyped `rewriteAppName` correct
 under some runtime invariant (e.g. "oldName and newName denote the same
 function") gets the typed version's correctness for free.
 -/
+
+@[expose] public section
 
 namespace Hax
 

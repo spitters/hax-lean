@@ -3,9 +3,11 @@ Copyright (c) 2025 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.Runtime
-import HaxLean.Semantics
-import HaxLean.SemanticsCF
+module
+
+public import HaxLean.Runtime
+public import HaxLean.Semantics
+public import HaxLean.SemanticsCF
 
 /-!
 # Correctness Proofs for Width-Aware Runtime Operations
@@ -24,6 +26,8 @@ and satisfy standard algebraic properties used in crypto proofs.
 
 All proofs are completed with **0 sorries, 0 axioms**.
 -/
+
+@[expose] public section
 
 namespace Hax
 

@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Pipeline
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Pipeline
 
 /-!
 # Typed Phase 6 (post-pipeline): Annotate Let Bindings
@@ -31,13 +33,15 @@ This is proved by structural induction (`TExpr.ind`), using the fact that
 `.ann e ty` erases to `e.erase`.
 -/
 
+@[expose] public section
+
 namespace Hax
 
 /-- Is this an "Int-like" / trivial type for which we don't need an
     explicit annotation? Mirrors the renderer's surface-type collapse
     rules (`toLeanTypeStrSurface`) so we only wrap let-bindings whose
     rendering will produce a non-`Int` Lean type. -/
-private def isTrivialAnnotType (ty : ImpType) : Bool :=
+def isTrivialAnnotType (ty : ImpType) : Bool :=
   match ty with
   | .unknown => true
   -- All integer-like types collapse to `Int` in the untyped Runtime.
@@ -66,7 +70,7 @@ private def isTrivialAnnotType (ty : ImpType) : Bool :=
     - The RHS is `var v` and the bound name `n == v` (param-shadowing
       pattern from `extractParams`; an outer parameter annotation
       already pins the type). -/
-private def shouldAnnotate (n : String) (val : TExpr) : Bool :=
+def shouldAnnotate (n : String) (val : TExpr) : Bool :=
   if isTrivialAnnotType val.ty then false
   else match val with
     | .mk (.var v) _ => n != v  -- annotate non-param-shadow only
@@ -74,7 +78,7 @@ private def shouldAnnotate (n : String) (val : TExpr) : Bool :=
 
 /-- Wrap a `TExpr` with `.ann` (preserving its outer type) IF the
     annotation predicate fires; otherwise return unchanged. -/
-@[inline] private def maybeAnn (cond : Bool) (e : TExpr) : TExpr :=
+@[inline] def maybeAnn (cond : Bool) (e : TExpr) : TExpr :=
   if cond then .mk (.ann e) e.ty else e
 
 /-- Phase 6 transformation: annotate non-trivial let-binding RHSs with `.ann`.

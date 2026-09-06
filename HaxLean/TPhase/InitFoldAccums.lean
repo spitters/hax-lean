@@ -3,8 +3,10 @@ Copyright (c) 2026 CatCrypt Contributors. All rights reserved.
 Released under MIT license as described in the file LICENSE.
 Authors: CatCrypt Contributors
 -/
-import HaxLean.TExpr
-import HaxLean.Phase.InitFoldAccums
+module
+
+public import HaxLean.TExpr
+public import HaxLean.Phase.InitFoldAccums
 
 /-!
 # Typed phase: `tInitMissingFoldAccums`
@@ -34,6 +36,8 @@ Both passes recurse defensively into pre-pipeline constructors
 even though those constructors are eliminated by earlier phases in
 practice.
 -/
+
+@[expose] public section
 
 namespace Hax
 
@@ -161,7 +165,7 @@ where
     starting expression — each iteration wraps with `expr.ty`, which on
     the first step is `fold.ty`, and on every subsequent step is the
     previous wrapper's `ty` (also `fold.ty`). -/
-private theorem foldr_letBindLit_ty (names : List String) (fold : TExpr) :
+theorem foldr_letBindLit_ty (names : List String) (fold : TExpr) :
     (names.foldr
         (fun fv expr =>
           TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty)
@@ -204,7 +208,7 @@ theorem tInitMissingFoldAccums_ty (bound : List String) (e : TExpr) :
 
 /-- Erasing a `letBind`-prepending `foldr` commutes with applying the
     same `foldr` over erased nodes. -/
-private theorem foldr_letBindLit_erase (names : List String) (fold : TExpr) :
+theorem foldr_letBindLit_erase (names : List String) (fold : TExpr) :
     (names.foldr
         (fun fv expr =>
           TExpr.mk (.letBind fv (.mk (.lit (.int 0)) .int) expr) expr.ty)

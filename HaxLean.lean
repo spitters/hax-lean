@@ -1,33 +1,38 @@
-import HaxLean.AST
-import HaxLean.Value
-import HaxLean.Features
-import HaxLean.FreeVars
-import HaxLean.Semantics
-import HaxLean.Phase.DropReferences
-import HaxLean.Phase.LocalMutation
-import HaxLean.Phase.FunctionalizeLoops
-import HaxLean.Phase.CfIntoMonads
-import HaxLean.Phase.ExplicitMonadic
-import HaxLean.Phase.RewriteAppName
-import HaxLean.Phase.InitFoldAccums
-import HaxLean.Pipeline
-import HaxLean.PipelineCF
-import HaxLean.Phase.ExplicitMonadicCF
-import HaxLean.Tests
-import HaxLean.TestCompile
+module
+
+public import HaxLean.AST
+public import HaxLean.Value
+public import HaxLean.Features
+public import HaxLean.FreeVars
+public import HaxLean.Semantics
+public import HaxLean.Phase.DropReferences
+public import HaxLean.Phase.LocalMutation
+public import HaxLean.Phase.FunctionalizeLoops
+public import HaxLean.Phase.CfIntoMonads
+public import HaxLean.Phase.ExplicitMonadic
+public import HaxLean.Phase.RewriteAppName
+public import HaxLean.Phase.InitFoldAccums
+public import HaxLean.Pipeline
+public import HaxLean.PipelineCF
+public import HaxLean.Phase.ExplicitMonadicCF
+public import HaxLean.Tests
+public import HaxLean.TestCompile
 -- Typed layer
-import HaxLean.ImpType
-import HaxLean.TExpr
-import HaxLean.TFeatures
-import HaxLean.TPhase.DropReferences
-import HaxLean.TPhase.LocalMutation
-import HaxLean.TPhase.FunctionalizeLoops
-import HaxLean.TPhase.CfIntoMonads
-import HaxLean.TPhase.ExplicitMonadic
-import HaxLean.TPhase.RewriteAppName
-import HaxLean.TPhase.InitFoldAccums
-import HaxLean.TPhase.QualifyProjections
-import HaxLean.TPhase.RewriteNewToStructCtor
-import HaxLean.TPhase.RewriteStructFromElem
-import HaxLean.TPhase.FixProjectionPaths
-import HaxLean.TPipeline
+public import HaxLean.ImpType
+public import HaxLean.TExpr
+public import HaxLean.TFeatures
+public import HaxLean.TPhase.DropReferences
+public import HaxLean.TPhase.LocalMutation
+public import HaxLean.TPhase.FunctionalizeLoops
+public import HaxLean.TPhase.CfIntoMonads
+public import HaxLean.TPhase.ExplicitMonadic
+public import HaxLean.TPhase.RewriteAppName
+public import HaxLean.TPhase.InitFoldAccums
+public import HaxLean.TPhase.QualifyProjections
+public import HaxLean.TPhase.RewriteNewToStructCtor
+public import HaxLean.TPhase.RewriteStructFromElem
+public import HaxLean.TPhase.FixProjectionPaths
+public import HaxLean.TPipeline
+
+
+@[expose] public section
