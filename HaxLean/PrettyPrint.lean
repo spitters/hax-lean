@@ -772,6 +772,10 @@ partial def extractAccInit (accName : String) (allAccs : List String := [])
   -- accName OR any other accumulator, then it's a fresh init.
   -- (Mutating to the value of another accumulator is NOT a fresh init —
   --  e.g., `h = g` in SHA-256's compress rotation is true mutation, not init.)
+  -- A statement that reads `accName` before its first binding in the body
+  -- makes the value carried in from before the loop live, so there is no
+  -- fresh init to hoist: `result := f result carry; carry := g a[i]` reads
+  -- `carry` first.
   | .seq (.letBind n val (.var v)) rest =>
     let refsAnyAcc := allAccs.any fun a => exprContainsVar a val
     if n == accName && n == v then
@@ -780,17 +784,23 @@ partial def extractAccInit (accName : String) (allAccs : List String := [])
     else if n == accName then
       if refsAnyAcc then none
       else some val
+    else if exprContainsVar accName val then none
     else extractAccInit accName allAccs rest
   -- seq (letBind n val body) rest — local binding, recurse into rest
-  | .seq (.letBind _ _ _) rest => extractAccInit accName allAccs rest
+  | .seq (.letBind _ val body) rest =>
+    if exprContainsVar accName val || exprContainsVar accName body then none
+    else extractAccInit accName allAccs rest
   -- seq (non-letBind) rest — skip and recurse
-  | .seq _ rest => extractAccInit accName allAccs rest
+  | .seq head rest =>
+    if exprContainsVar accName head then none
+    else extractAccInit accName allAccs rest
   -- Direct letBind accName init body — check if it's fresh (not self-referencing)
   | .letBind n val body =>
     if n == accName then
       let refsAnyAcc := allAccs.any fun a => exprContainsVar a val
       if refsAnyAcc then none
       else some val
+    else if exprContainsVar accName val then none
     else extractAccInit accName allAccs body
   | _ => none
 
@@ -810,10 +820,11 @@ def accStrings (accs : List String) : String × String :=
     These need `let acc := init` emitted BEFORE the fold.
     Skips init expressions that reference variables only defined inside the fold body
     (local bindings like destructured results, loop-local temporaries). -/
-def accInitOverrides (accs : List String) (body : ImpExpr) :
-    List (String × ImpExpr) :=
-  -- Collect all locally-bound variable names inside the fold body
-  let locallyBound := collectLetBindVars body
+def accInitOverrides (accs : List String) (body : ImpExpr)
+    (loopVars : List String := []) : List (String × ImpExpr) :=
+  -- Collect all locally-bound variable names inside the fold body; the loop's
+  -- index variable is bound by the fold as well.
+  let locallyBound := collectLetBindVars body ++ loopVars
   accs.filterMap fun acc =>
     match extractAccInit acc accs body with
     | some initExpr =>
@@ -824,6 +835,12 @@ def accInitOverrides (accs : List String) (body : ImpExpr) :
       if usesLocal then none
       else some (acc, initExpr)
     | none => none
+
+/-- The index variable a fold binds for its body. -/
+def foldVars : ImpExpr → List String
+  | .forFold v _ _ _ | .forFoldRev v _ _ _
+  | .forFoldReturn v _ _ _ | .forFoldRevReturn v _ _ _ => [v]
+  | _ => []
 
 /-- Pull variable names out of a `cfContinue` / `cfBreak` argument that
     threads accumulator state back to the loop. Recognises `.var "n"`
@@ -876,6 +893,28 @@ def accTuple (accs : List String) : ImpExpr :=
 -- (Hax/TPhase/EncodeControlFlow.lean), proven correct against the runtime fold
 -- semantics.
 
+
+/-- Whether a fold body contains a loop-level `break` (`cfBreakContinue`), the
+    only construct that fixes the break type of the inner `ControlFlow` of a
+    `forFoldReturn` result. -/
+partial def hasCfBreakContinue : ImpExpr → Bool
+  | .cfBreakContinue _ => true
+  | .letBind _ v b => hasCfBreakContinue v || hasCfBreakContinue b
+  | .seq a b => hasCfBreakContinue a || hasCfBreakContinue b
+  | .ifThenElse _ t e => hasCfBreakContinue t || hasCfBreakContinue e
+  | .match_ _ arms => arms.any fun (_, b) => hasCfBreakContinue b
+  | _ => false
+
+/-- Whether an expression contains a doubly wrapped `cfBreak (cfBreak v)`, the
+    encoding of a function return from inside a return-fold's body. -/
+partial def hasDoubleCfBreak : ImpExpr → Bool
+  | .cfBreak (.cfBreak _) => true
+  | .cfBreak v => hasDoubleCfBreak v
+  | .letBind _ v b => hasDoubleCfBreak v || hasDoubleCfBreak b
+  | .seq a b => hasDoubleCfBreak a || hasDoubleCfBreak b
+  | .ifThenElse _ t e => hasDoubleCfBreak t || hasDoubleCfBreak e
+  | .match_ _ arms => arms.any fun (_, b) => hasDoubleCfBreak b
+  | _ => false
 
 /-- Check if a forFoldReturn body contains cfBreak (early return from function). -/
 partial def hasCfBreak : ImpExpr → Bool
@@ -1100,6 +1139,19 @@ def isLeafExpr : ImpExpr → Bool
   | .typeAscription _ _ => true
   | _ => false
 
+/-- The integer literal `0`, possibly under type ascriptions. -/
+partial def isZeroIntLit : ImpExpr → Bool
+  | .lit (.int 0) => true
+  | .lit (.uintLit _ 0) => true
+  | .lit (.sintLit _ 0) => true
+  | .typeAscription e _ => isZeroIntLit e
+  | _ => false
+
+/-- A rendered type that an integer literal inhabits. -/
+def isIntTypeStr (tyStr : String) : Bool :=
+  ["Int", "Nat", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128", "USize",
+   "Int8", "Int16", "Int32", "Int64", "Int128"].contains tyStr.trimAscii.toString
+
 /-- Pretty-print an ImpExpr as Lean 4 source code.
     `lvl` is the current indentation level.
     `boolNames` is a list of function names known to return Bool (from TExpr types). -/
@@ -1125,7 +1177,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       -- site (`PrettyPrintT.collectLetBindingTypes`) pre-renders the
       -- ascription type using `sl` (the struct-lookup), so we just
       -- splice the string in.
-      some s!"({toLean inner 0 boolNames} : {tyStr})"
+      --
+      -- hax binds a variable that is first assigned inside a loop to the
+      -- integer literal `0` before the loop; under a non-integer type that
+      -- placeholder is rendered as `default`, which the body's first
+      -- assignment overwrites.
+      if isZeroIntLit inner && !isIntTypeStr tyStr then some s!"(default : {tyStr})"
+      else some s!"({toLean inner 0 boolNames} : {tyStr})"
     | .app f [inner] =>
       if f.startsWith "::namedProj::" then
         -- Newtype `.0` projection marker, injected by PrettyPrintT from
@@ -1824,7 +1882,7 @@ where
     -- If so, the result is `ControlFlow β α` and needs `.merge` to extract the value.
     let isCf := hasSurfaceControlFlow body
     -- Emit init overrides for accumulators that need default initialization
-    let overrides := accInitOverrides accs body
+    let overrides := accInitOverrides accs body (foldVars foldExpr)
     let initPrefix := if overrides.isEmpty then ""
       else overrides.map (fun (n, e) =>
         s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
@@ -1862,7 +1920,7 @@ where
     let localVars := collectLetBindVars body
     let accs := accs.filter fun a => !localVars.contains a
     -- Emit init overrides for accumulators that need default initialization
-    let overrides := accInitOverrides accs body
+    let overrides := accInitOverrides accs body (foldVars foldExpr)
     let initPrefix := if overrides.isEmpty then ""
       else overrides.map (fun (n, e) =>
         s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
@@ -1890,7 +1948,7 @@ where
       let accs := extractAccumulators body
       let ind1 := indent (lvl + 1)
       -- Emit init overrides for accumulators that need default initialization
-      let overrides := accInitOverrides accs body
+      let overrides := accInitOverrides accs body (foldVars foldExpr)
       let initPrefix := if overrides.isEmpty then ""
         else overrides.map (fun (n, e) =>
           s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
@@ -1950,8 +2008,14 @@ where
         -- is a regular `forFold` (one ControlFlow level). For
         -- enclosure inside a `forFoldReturn` body (two levels), the
         -- accs-empty path above is the typical match.
+        -- The enclosing fold's kind is read off the tail: a function return
+        -- rendered there as `cfBreak (cfBreak v)` means the enclosing body is
+        -- a return-fold and `_v` needs both wraps; otherwise the enclosing
+        -- fold is a plain one and a single wrap propagates the return.
         let breakArm :=
-          if enclosedInFold then "Hax.cfBreak _v" else "_v"
+          if !enclosedInFold then "_v"
+          else if hasDoubleCfBreak tail then "Hax.cfBreak (Hax.cfBreak _v)"
+          else "Hax.cfBreak _v"
         -- `_fr : ControlFlow β (ControlFlow γ α)` (Return-fold result):
         --   `.Break _v`               → early function return (`_v : β`)
         --   `.Continue (.Continue a)` → loop completed normally (`a : α`, accumulator)
@@ -1959,7 +2023,12 @@ where
         --                               so `ControlFlow.merge _cf` would be ill-typed).
         -- Bind the accumulator only in the normal-completion arm; the loop-break
         -- arm has no accumulator (it was replaced by the break value).
-        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match _fr with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _cf =>\n{ind1}match _cf with\n{ind1}| .Continue {destr} =>\n{tailRendered}\n{ind1}| .Break _ =>\n{tailRendered}"
+        -- Without a loop-level `break` nothing in the body fixes γ, and the
+        -- accumulator pattern then carries a metavariable; the `show` pins
+        -- γ to `Unit` as the accumulator-free path does.
+        let scrut := if hasCfBreakContinue body then "_fr"
+          else "(show ControlFlow _ (ControlFlow Unit _) from _fr)"
+        s!"{initPrefix}{ind}let _fr := {foldStr}\n{ind}match {scrut} with\n{ind}| .Break _v => {breakArm}\n{ind}| .Continue _cf =>\n{ind1}match _cf with\n{ind1}| .Continue {destr} =>\n{tailRendered}\n{ind1}| .Break _ =>\n{tailRendered}"
     else
       seqFold lvl foldExpr body tail
 

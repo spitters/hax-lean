@@ -59,4 +59,40 @@ def freshLocal : ImpExpr :=
 
 #guard !(extractAccumulators freshLocal).contains "tmp"
 
+/-- A carry chain: `carry` is read by the first statement and rebound by the
+    second, from the loop index. Its pre-loop value is live, and the rebind
+    names the index, so no initializer is hoisted before the loop. -/
+def carryShift : ImpExpr :=
+  .seq (.letBind "result"
+      (.app "array_update" [(.var "result"), (.var "i"),
+        (.app "bitor" [(.app "shl" [(.app "index" [(.var "a"), (.var "i")]), (.lit (.int 1))]),
+          (.var "carry")])])
+      (.var "result"))
+    (.letBind "carry"
+      (.app "shr" [(.app "index" [(.var "a"), (.var "i")]), (.lit (.int 7))])
+      (.var "carry"))
+
+#guard extractAccumulators carryShift == ["result", "carry"]
+#guard accInitOverrides ["result", "carry"] carryShift ["i"] == []
+
+/-- A fresh assignment that names only the loop index is not hoisted either. -/
+def indexInit : ImpExpr :=
+  .seq (.letBind "x" (.app "index" [(.var "a"), (.var "i")]) (.var "x"))
+    (.letBind "y" (.app "f" [(.var "x"), (.var "y")]) (.var "y"))
+
+#guard accInitOverrides ["x", "y"] indexInit ["i"] == []
+
+/-- A `forFoldReturn` body with a `continue` and a function return, and no
+    loop-level `break`. -/
+def returnOnly : ImpExpr :=
+  .ifThenElse (.var "c") (.cfBreak (.cfBreak (.var "r")))
+    (.cfContinue (.tuple [(.var "a"), (.var "b")]))
+
+#guard !hasCfBreakContinue returnOnly
+#guard hasCfBreakContinue (.seq returnOnly (.cfBreakContinue .unitVal))
+
+-- hax's loop-state placeholder `0` under a struct type renders as `default`.
+#guard toLean (.typeAscription (.lit (.int 0)) "Array (Int) × Int") == "(default : Array (Int) × Int)"
+#guard !(toLean (.typeAscription (.lit (.int 0)) "Int")).startsWith "(default"
+
 end Hax.EmitterRegressions
