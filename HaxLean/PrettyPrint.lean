@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.AST
+public import HaxLean.FreeVars
 public import HaxLean.ImpType
 public import HaxLean.HaxAdapter
 public import HaxLean.ImpType
@@ -521,45 +522,52 @@ partial def wrapTailForFoldWithMerge : ImpExpr → ImpExpr
     which came from `assign n rhs`. Returns unique names in order.
     Filters out `_assign`-prefixed names which are intermediate mutation
     temporaries from nested field/index assignments (not real accumulators). -/
-partial def extractAccumulatorsAux (locals : List String) : ImpExpr → List String
-  | .seq (.seq a b) c => extractAccumulatorsAux locals (.seq a (.seq b c))
+partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr → List String
+  | .seq (.seq a b) c => extractAccumulatorsAux locals readBefore (.seq a (.seq b c))
   | .seq (.letBind n val (.var v)) rest =>
     if n == v && !n.startsWith "_assign" && !locals.contains n then
-      -- Discriminate between fresh init (`let n := init` where init is
-      -- independent of n) and true mutation (`let n := f(n) ...`).
-      -- A fresh init means `n` is loop-local, not an outer accumulator.
-      if exprContainsVar n val then
-        -- True mutation: n is an accumulator candidate.
-        let restAccs := extractAccumulatorsAux locals rest
+      -- `n` carries a value into the iteration when either its right-hand side
+      -- reads it (`n := f n`), or an earlier statement of the body read it. The
+      -- second case is the rotation `t := h; h := g; g := f`, where no
+      -- right-hand side names its own target and every target is still
+      -- loop-carried. A name first written and only then read is loop-local.
+      if exprContainsVar n val || readBefore.contains n then
+        let restAccs := extractAccumulatorsAux locals (readBefore ++ freeVars val) rest
         if restAccs.contains n then restAccs else n :: restAccs
       else
-        -- Fresh init: n is loop-local. Add to locals; don't promote.
-        extractAccumulatorsAux (n :: locals) rest
-    else extractAccumulatorsAux locals rest
+        extractAccumulatorsAux (n :: locals) (readBefore ++ freeVars val) rest
+    else extractAccumulatorsAux locals (readBefore ++ freeVars val) rest
   -- Look inside conditional mutations for hidden accumulators
-  | .seq (.ifThenElse _ thn _) rest =>
+  | .seq (.ifThenElse c thn els) rest =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
       |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
-    let restAccs := extractAccumulatorsAux locals rest
+    let restAccs :=
+      extractAccumulatorsAux locals
+        (readBefore ++ freeVars c ++ freeVars thn ++ freeVars els) rest
     let all := thnAccs ++ restAccs
     all.eraseDups
   -- Recurse into nested loops in seq position to find transitive accumulators
   | .seq (.forFold _ _ _ body) rest =>
-    (extractAccumulatorsAux locals body ++ extractAccumulatorsAux locals rest).eraseDups
+    (extractAccumulatorsAux locals readBefore body
+      ++ extractAccumulatorsAux locals (readBefore ++ freeVars body) rest).eraseDups
   | .seq (.forFoldRev _ _ _ body) rest =>
-    (extractAccumulatorsAux locals body ++ extractAccumulatorsAux locals rest).eraseDups
+    (extractAccumulatorsAux locals readBefore body
+      ++ extractAccumulatorsAux locals (readBefore ++ freeVars body) rest).eraseDups
   | .seq (.whileFold _ body) rest =>
-    (extractAccumulatorsAux locals body ++ extractAccumulatorsAux locals rest).eraseDups
-  | .seq _ rest => extractAccumulatorsAux locals rest
+    (extractAccumulatorsAux locals readBefore body
+      ++ extractAccumulatorsAux locals (readBefore ++ freeVars body) rest).eraseDups
+  | .seq head rest => extractAccumulatorsAux locals (readBefore ++ freeVars head) rest
   | .letBind n val (.var v) =>
     if n == v && !n.startsWith "_assign" && !locals.contains n then [n] else []
-  -- Non-mutation letBind: if `n` is freshly initialized (val doesn't reference n
-  -- and n isn't already an outer accumulator), then n is loop-local. Add to locals
-  -- before recursing so subsequent mutations don't promote it to an accumulator.
+  -- Non-mutation letBind: if `n` is freshly initialized (val doesn't reference n,
+  -- no earlier statement read it, and n isn't already an outer accumulator), then
+  -- n is loop-local. Add to locals before recursing so subsequent mutations do not
+  -- promote it to an accumulator.
   | .letBind n val body =>
-    let isFreshLocal := !exprContainsVar n val && !locals.contains n
+    let isFreshLocal :=
+      !exprContainsVar n val && !readBefore.contains n && !locals.contains n
     let newLocals := if isFreshLocal then n :: locals else locals
-    extractAccumulatorsAux newLocals body
+    extractAccumulatorsAux newLocals (readBefore ++ freeVars val) body
   | .ifThenElse _ thn els =>
     let thnAccs := extractCondMutations thn |>.map (·.1)
       |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
@@ -567,17 +575,17 @@ partial def extractAccumulatorsAux (locals : List String) : ImpExpr → List Str
       else extractCondMutations els |>.map (·.1)
         |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let elsDeep := if elsAccs.isEmpty && els != .unitVal then
-        extractAccumulatorsAux locals els
+        extractAccumulatorsAux locals readBefore els
       else elsAccs
     (thnAccs ++ elsDeep).eraseDups
-  | .forFold _ _ _ body => extractAccumulatorsAux locals body
-  | .forFoldRev _ _ _ body => extractAccumulatorsAux locals body
-  | .whileFold _ body => extractAccumulatorsAux locals body
+  | .forFold _ _ _ body => extractAccumulatorsAux locals readBefore body
+  | .forFoldRev _ _ _ body => extractAccumulatorsAux locals readBefore body
+  | .whileFold _ body => extractAccumulatorsAux locals readBefore body
   | _ => []
 
 /-- Top-level wrapper. -/
 partial def extractAccumulators (e : ImpExpr) : List String :=
-  extractAccumulatorsAux [] e
+  extractAccumulatorsAux [] [] e
 
 /-- Build a destructure-and-return wrapper for an inner fold whose
     accumulator shape doesn't match the outer fold's. Emits
