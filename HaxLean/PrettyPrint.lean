@@ -832,8 +832,11 @@ def cfArgAccNames : ImpExpr → List String
     The body may be wrapped in an `ifThenElse` (from `while true { if cond ... else break }`),
     so we look inside the `thn` branch for mutation patterns.
     Also skips non-mutation `letBind` wrappers (e.g., `let block := ...`). -/
-partial def extractWhileAccumulators : ImpExpr → List String
-  | .ifThenElse _ thn _ => extractWhileAccumulators thn
+partial def extractWhileAccumulatorsAux (readBefore : List String) : ImpExpr → List String
+  -- The guard reads variables before the body runs; a body rebind of one of
+  -- them is loop-carried, so the guard's reads seed the read-before set that
+  -- the general analysis consults at the fallback.
+  | .ifThenElse c thn _ => extractWhileAccumulatorsAux (readBefore ++ freeVars c) thn
   | .letBind n _ (.var v) => if n == v && !n.startsWith "_assign" then
       -- Mutation pattern at top level
       [n]
@@ -845,9 +848,13 @@ partial def extractWhileAccumulators : ImpExpr → List String
   -- (which only matched `.letBind n _ (.var n)` shapes).
   | .cfContinue arg => cfArgAccNames arg
   | .cfBreak arg => cfArgAccNames arg
-  | .letBind _ _ body => extractWhileAccumulators body
-  | .seq (.seq a b) c => extractWhileAccumulators (.seq a (.seq b c))
-  | e => extractAccumulators e
+  | .letBind _ v body => extractWhileAccumulatorsAux (readBefore ++ freeVars v) body
+  | .seq (.seq a b) c => extractWhileAccumulatorsAux readBefore (.seq a (.seq b c))
+  | e => extractAccumulatorsAux [] readBefore e
+
+/-- Accumulators of a `whileFold` body. -/
+partial def extractWhileAccumulators (e : ImpExpr) : List String :=
+  extractWhileAccumulatorsAux [] e
 
 /-- Make an accumulator tuple expression from a list of variable names. -/
 def accTuple (accs : List String) : ImpExpr :=
