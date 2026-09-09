@@ -144,7 +144,12 @@ partial def extractDefIdName (j : Json) (collisions : List String := []) : Strin
     | some n =>
       -- Suffix width-sensitive ops with bit width (e.g. wrapping_add → wrapping_add#32)
       let base :=
-        if widthSensitiveOps.contains n then
+        -- `1..=n` desugars to `RangeInclusive::new`; a bare `new` is
+        -- indistinguishable from `Range::new`, and the loop reconstruction
+        -- must add one to the upper bound for the inclusive form.
+        if n == "new" && names.getD (names.length - 2) "" == "RangeInclusive" then
+          "RangeInclusive::new"
+        else if widthSensitiveOps.contains n then
           match implWidth with
           | some w => s!"{n}#{w}"
           | none => n
@@ -1560,18 +1565,21 @@ def isRev (f : String) : Bool :=
 /-- Try to extract Range bounds from a constructor call.
     Hax represents `Range { start, end }` as `app "Range" [lo, hi]`
     or as `app "Range::new" [lo, hi]` or as `tuple [lo, hi]` wrapping. -/
-def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr) :=
+def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr × Bool) :=
   match e with
   | .app f [lo, hi] =>
-    if f == "Range" || f.endsWith "Range" || f == "new" || f == "Range::new"
-    then some (lo, hi)
+    -- The third component says whether the upper bound is inclusive
+    -- (`RangeInclusive`, from `lo..=hi`).
+    if f.startsWith "RangeInclusive" then some (lo, hi, true)
+    else if f == "Range" || f.endsWith "Range" || f == "new" || f == "Range::new"
+    then some (lo, hi, false)
     else none
-  | .tuple [lo, hi] => some (lo, hi)  -- Range as tuple
+  | .tuple [lo, hi] => some (lo, hi, false)  -- Range as tuple
   | _ => none
 
 /-- Information about a recognized iterator expression. -/
 inductive IterInfo where
-  | range (lo hi : ImpExpr) (reversed : Bool)
+  | range (lo hi : ImpExpr) (reversed inclusive : Bool)
   | collection (coll : ImpExpr)
 
 /-- Try to extract iterator info from the scrutinee of the outer match.
@@ -1582,14 +1590,14 @@ def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
     if isIntoIter f then
       -- Direct range: into_iter(Range(lo, hi))
       match tryExtractRange arg with
-      | some (lo, hi) => some (.range lo hi false)
+      | some (lo, hi, incl) => some (.range lo hi false incl)
       | none =>
         -- Reversed range: into_iter(rev(Range(lo, hi)))
         match arg with
         | .app g [inner] =>
           if isRev g then
             match tryExtractRange inner with
-            | some (lo, hi) => some (.range lo hi true)
+            | some (lo, hi, incl) => some (.range lo hi true incl)
             | none => none
           -- iter(collection) wrapped in into_iter
           else if g == "iter" || g.endsWith "iter" then
@@ -1606,7 +1614,7 @@ def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
       | .app _ [.app g [inner]] =>
         if isIntoIter g then
           match tryExtractRange inner with
-          | some (lo, hi) => some (.range lo hi true)
+          | some (lo, hi, incl) => some (.range lo hi true incl)
           | none => none
         else none
       | _ => none
@@ -1664,11 +1672,14 @@ def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
 partial def reconstructForLoops : ImpExpr → ImpExpr
   | .match_ scrut arms =>
     match tryExtractIterator scrut, arms with
-    | some (.range lo hi reversed),
+    | some (.range lo hi reversed inclusive),
       [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
       -- Found the pattern! Extract the loop var from the inner next() match
       let lo' := reconstructForLoops lo
-      let hi' := reconstructForLoops hi
+      -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`.
+      let hi' :=
+        let h := reconstructForLoops hi
+        if inclusive then .app "add" [h, .lit (.int 1)] else h
       match tryExtractNextMatch innerBody _iterVar with
       | some (loopVar, body) =>
         let body' := reconstructForLoops body
@@ -2931,6 +2942,18 @@ where
       | _ => pure []
     return .app name fields
 
+/-- Whether an iterator scrutinee ranges over a `RangeInclusive`. hax lowers
+    `lo..=hi` to a value whose only inclusive marker is its type, so the typed
+    tree is where the bound can be told apart from `lo..hi`; the argument of
+    `into_iter`, possibly under `rev`, is inspected. -/
+partial def scrutIsInclusiveRange : TExpr → Bool
+  | .mk (.app _ [arg]) _ =>
+    match arg with
+    | .mk _ (.adt n _) => n.endsWith "RangeInclusive" || scrutIsInclusiveRange arg
+    | .mk (.app _ [_]) _ => scrutIsInclusiveRange arg
+    | _ => false
+  | _ => false
+
 /-- Reconstruct for-loops in a TExpr, preserving type annotations.
     Walks the TExpr tree directly, using untyped helpers (`tryExtractIterator`,
     `tryExtractNextMatch`) only on erased sub-expressions for pattern recognition.
@@ -2939,7 +2962,7 @@ where
 partial def reconstructForLoopsTExpr : TExpr → TExpr
   | .mk (.match_ scrut arms) ty =>
     match tryExtractIterator scrut.erase, arms with
-    | some (.range _lo _hi reversed),
+    | some (.range _lo _hi reversed inclusive),
       [(.varPat _iterVar, .mk (.whileLoop (.mk (.lit (.bool true)) _) innerBody) _)] =>
       -- Found the iterator pattern! Extract loop var and body from the inner next() match
       match tryExtractNextMatch innerBody.erase _iterVar with
@@ -2952,9 +2975,13 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
           let bodyRec := reconstructForLoopsTExpr bodyTE
           -- lo and hi come from the scrut pattern; extract from erased and lift
           match tryExtractIterator scrut.erase with
-          | some (.range loImp hiImp _reversed) =>
+          | some (.range loImp hiImp _reversed _inclusive) =>
             let loTE := reconstructForLoopsTExpr (findSubTExprForImp scrut loImp)
             let hiTE := reconstructForLoopsTExpr (findSubTExprForImp scrut hiImp)
+            -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`.
+            let hiTE := if inclusive || scrutIsInclusiveRange scrut
+              then TExpr.mk (.app "add" [hiTE, TExpr.mk (.lit (.int 1)) .unknown]) .unknown
+              else hiTE
             if reversed then .mk (.forLoopRev loopVar loTE hiTE bodyRec) ty
             else .mk (.forLoop loopVar loTE hiTE bodyRec) ty
           | _ => -- shouldn't happen, but fall through
