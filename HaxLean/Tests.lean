@@ -29,6 +29,8 @@ public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
 public meta import HaxLean.Json.AdapterProbes
 public import HaxLean.Json.AdapterProbes
+public meta import HaxLean.EmitterRegressions
+public import HaxLean.EmitterRegressions
 
 /-!
 # Test Programs
