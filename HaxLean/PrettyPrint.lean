@@ -97,6 +97,15 @@ def widthAwareRuntime (f : String) : String :=
       | "bitxor" | "BitXor" => s!"Hax.bitxor_w {w}"
       | "bitnot" | "Not"    => s!"Hax.bitnot_w {w}"
       | "cast"               => s!"Hax.castVal_w {w}"
+      -- Inherent integer methods whose meaning depends on the width: the
+      -- adapter suffixes them (`to_be_bytes#32`) and the runtime carries a
+      -- width-indexed builtin for each, so they are not Deps fields.
+      | "to_be_bytes"        => s!"Hax.to_be_bytes_w {w}"
+      | "to_le_bytes"        => s!"Hax.to_le_bytes_w {w}"
+      | "from_be_bytes"      => s!"Hax.from_be_bytes_w {w}"
+      | "from_le_bytes"      => s!"Hax.from_le_bytes_w {w}"
+      | "overflowing_add"    => s!"Hax.overflowing_add_w {w}"
+      | "overflowing_sub"    => s!"Hax.overflowing_sub_w {w}"
       | _ => s!"Hax.{op}"
     | _ => f
   else sanitizeName f
@@ -376,51 +385,73 @@ partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr)
     Looks for the localMutation pattern: `seq (letBind n rhs (var n)) rest`
     which came from `assign n rhs`. Returns unique names in order.
     Also looks inside `ifThenElse` branches for conditional mutations. -/
-partial def extractCondMutationsAux (locals : List String) :
+partial def extractCondMutationsAux (locals readBefore : List String) :
     ImpExpr → List (String × ImpExpr)
-  | .seq (.seq a b) c => extractCondMutationsAux locals (.seq a (.seq b c))
+  | .seq (.seq a b) c => extractCondMutationsAux locals readBefore (.seq a (.seq b c))
   | .seq (.letBind n rhs (.var v)) rest =>
     -- Treat `let n := rhs; n` as a mutation pattern UNLESS `n` was
     -- previously introduced as a local in this same sub-tree (via a
     -- `letBind n init body` whose body contains us). Locals tracked
     -- via the `letBind n val body` arm below.
     if n == v && !locals.contains n then
-      (n, rhs) :: extractCondMutationsAux locals rest
-    else extractCondMutationsAux locals rest
-  | .seq .unitVal rest => extractCondMutationsAux locals rest
+      (n, rhs) :: extractCondMutationsAux locals (readBefore ++ freeVars rhs) rest
+    else extractCondMutationsAux locals (readBefore ++ freeVars rhs) rest
+  | .seq .unitVal rest => extractCondMutationsAux locals readBefore rest
   -- A nested conditional or loop in statement position mutates variables of
   -- the enclosing branch; both arms and the loop body are searched, so a
   -- variable assigned only under a nested `if` is still an accumulator.
-  | .seq (.ifThenElse _ t e) rest =>
-    extractCondMutationsAux locals t ++ extractCondMutationsAux locals e
-      ++ extractCondMutationsAux locals rest
+  | .seq (.ifThenElse c t e) rest =>
+    let rb := readBefore ++ freeVars c
+    extractCondMutationsAux locals rb t ++ extractCondMutationsAux locals rb e
+      ++ extractCondMutationsAux locals (rb ++ freeVars t ++ freeVars e) rest
   | .seq (.forFold _ _ _ body) rest | .seq (.forFoldRev _ _ _ body) rest
   | .seq (.whileFold _ body) rest =>
-    extractCondMutationsAux locals body ++ extractCondMutationsAux locals rest
-  | .seq _ rest => extractCondMutationsAux locals rest
+    extractCondMutationsAux locals readBefore body
+      ++ extractCondMutationsAux locals (readBefore ++ freeVars body) rest
+  -- A `letBind` in statement position whose continuation is not the bare
+  -- variable (`let r := s; continue ()` as one statement of a branch): classify
+  -- the binding as the standalone arm below does, then continue into both its
+  -- body and the rest.
+  | .seq (.letBind n val body) rest =>
+    if !locals.contains n && (exprContainsVar n val || readBefore.contains n) then
+      let rb := readBefore ++ freeVars val
+      (n, val) :: (extractCondMutationsAux locals rb body
+        ++ extractCondMutationsAux locals (rb ++ freeVars body) rest)
+    else
+      let isFreshLocal := !exprContainsVar n val && !locals.contains n
+      let newLocals := if isFreshLocal then n :: locals else locals
+      let rb := readBefore ++ freeVars val
+      extractCondMutationsAux newLocals rb body
+        ++ extractCondMutationsAux newLocals (rb ++ freeVars body) rest
+  | .seq head rest => extractCondMutationsAux locals (readBefore ++ freeVars head) rest
   | .letBind n rhs (.var v) =>
     if n == v && !locals.contains n then [(n, rhs)] else []
-  | .ifThenElse _ t e =>
-    extractCondMutationsAux locals t ++ extractCondMutationsAux locals e
+  | .ifThenElse c t e =>
+    let rb := readBefore ++ freeVars c
+    extractCondMutationsAux locals rb t ++ extractCondMutationsAux locals rb e
   | .forFold _ _ _ body | .forFoldRev _ _ _ body | .whileFold _ body =>
-    extractCondMutationsAux locals body
-  -- Recurse into non-mutation letBind. Track fresh-init locals so that
-  -- subsequent mutation-shaped `let n := X; n` patterns whose `n` is the
-  -- inner-introduced local are NOT mistaken for outer accumulators.
-  -- (This is the BLS fr_mul fix: inside the inner whileFold's then-branch,
-  -- `letBind "temp" (repeat_ 0 7) <body>` introduces `temp` locally; later
-  -- `letBind "temp" (array_update temp ti ...) (var "temp")` is a true
-  -- mutation but ONLY of the inner-local `temp`, not an outer accumulator.)
+    extractCondMutationsAux locals readBefore body
+  -- A `letBind` whose continuation is not the bare variable is a mutation when
+  -- the name's value entered the branch: its right-hand side reads it, or an
+  -- earlier statement did. The conditional-subtract shape
+  -- `if cmp r p ≥ 0 then let s := sub r p; let r := s; continue ()` rebinds
+  -- `r` after reading it, and the continuation is the loop control, not `r`.
+  -- Otherwise the name is a fresh local of this sub-tree, tracked so that a
+  -- later mutation-shaped `let n := X; n` on it is not taken for an outer
+  -- accumulator.
   | .letBind n val body =>
-    let isFreshLocal := !exprContainsVar n val && !locals.contains n
-    let newLocals := if isFreshLocal then n :: locals else locals
-    extractCondMutationsAux newLocals body
+    if !locals.contains n && (exprContainsVar n val || readBefore.contains n) then
+      (n, val) :: extractCondMutationsAux locals (readBefore ++ freeVars val) body
+    else
+      let isFreshLocal := !exprContainsVar n val && !locals.contains n
+      let newLocals := if isFreshLocal then n :: locals else locals
+      extractCondMutationsAux newLocals (readBefore ++ freeVars val) body
   | .unitVal => []
   | _ => []
 
 /-- Top-level wrapper. -/
 partial def extractCondMutations (e : ImpExpr) : List (String × ImpExpr) :=
-  extractCondMutationsAux [] e
+  extractCondMutationsAux [] [] e
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
     bindings. An `if` or `match` at the tail distributes `newTail` into its
@@ -539,7 +570,7 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
     else extractAccumulatorsAux locals (readBefore ++ freeVars val) rest
   -- Look inside conditional mutations for hidden accumulators
   | .seq (.ifThenElse c thn els) rest =>
-    let thnAccs := extractCondMutations thn |>.map (·.1)
+    let thnAccs := extractCondMutationsAux locals (readBefore ++ freeVars c) thn |>.map (·.1)
       |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let restAccs :=
       extractAccumulatorsAux locals
@@ -556,6 +587,21 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
   | .seq (.whileFold _ body) rest =>
     (extractAccumulatorsAux locals readBefore body
       ++ extractAccumulatorsAux locals (readBefore ++ freeVars body) rest).eraseDups
+  -- A `letBind` in statement position whose continuation is not the bare
+  -- variable: a loop-carried rebind when its value entered the iteration,
+  -- else a local; continue into both its body and the rest.
+  | .seq (.letBind n val body) rest =>
+    let rb := readBefore ++ freeVars val
+    if !n.startsWith "_assign" && !locals.contains n
+        && (exprContainsVar n val || readBefore.contains n) then
+      let inner := extractAccumulatorsAux locals rb body
+      let restAccs := extractAccumulatorsAux locals (rb ++ freeVars body) rest
+      (n :: (inner ++ restAccs)).eraseDups
+    else
+      let isFreshLocal := !exprContainsVar n val && !locals.contains n
+      let newLocals := if isFreshLocal then n :: locals else locals
+      (extractAccumulatorsAux newLocals rb body
+        ++ extractAccumulatorsAux newLocals (rb ++ freeVars body) rest).eraseDups
   | .seq head rest => extractAccumulatorsAux locals (readBefore ++ freeVars head) rest
   | .letBind n val (.var v) =>
     if n == v && !n.startsWith "_assign" && !locals.contains n then [n] else []
@@ -568,11 +614,12 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
       !exprContainsVar n val && !readBefore.contains n && !locals.contains n
     let newLocals := if isFreshLocal then n :: locals else locals
     extractAccumulatorsAux newLocals (readBefore ++ freeVars val) body
-  | .ifThenElse _ thn els =>
-    let thnAccs := extractCondMutations thn |>.map (·.1)
+  | .ifThenElse c thn els =>
+    let rb := readBefore ++ freeVars c
+    let thnAccs := extractCondMutationsAux locals rb thn |>.map (·.1)
       |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let elsAccs := if els == .unitVal then []
-      else extractCondMutations els |>.map (·.1)
+      else extractCondMutationsAux locals rb els |>.map (·.1)
         |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let elsDeep := if elsAccs.isEmpty && els != .unitVal then
         extractAccumulatorsAux locals readBefore els

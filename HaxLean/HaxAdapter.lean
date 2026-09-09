@@ -128,6 +128,13 @@ partial def extractDefIdName (j : Json) (collisions : List String := []) : Strin
     let widthSensitiveOps := ["wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
       "rotate_right", "rotate_left", "shr", "shl",
       "bitand", "bitor", "bitxor", "bitnot", "Not",
+      -- Byte (de)serialization and overflowing arithmetic are inherent methods
+      -- of each integer width. Without the suffix, `u32::to_be_bytes` on a
+      -- digest word and `u64::to_be_bytes` on a length field collapse to one
+      -- untyped Deps field that no single instance can implement: the SHA-256
+      -- digest loop reads four bytes of it and the padding reads eight.
+      "to_be_bytes", "to_le_bytes", "from_be_bytes", "from_le_bytes",
+      "overflowing_add", "overflowing_sub",
       -- Associated integer consts (`u32::MAX`, `i64::MIN`, …): without
       -- the width suffix they collapse to a bare `MAX`/`MIN` shared
       -- across all integer types and leak into the Deps class as an
