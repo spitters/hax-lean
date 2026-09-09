@@ -413,15 +413,16 @@ partial def extractCondMutationsAux (locals readBefore : List String) :
   -- the binding as the standalone arm below does, then continue into both its
   -- body and the rest.
   | .seq (.letBind n val body) rest =>
+    let inVal := extractCondMutationsAux locals readBefore val
     if !locals.contains n && (exprContainsVar n val || readBefore.contains n) then
       let rb := readBefore ++ freeVars val
-      (n, val) :: (extractCondMutationsAux locals rb body
+      (n, val) :: (inVal ++ extractCondMutationsAux locals rb body
         ++ extractCondMutationsAux locals (rb ++ freeVars body) rest)
     else
       let isFreshLocal := !exprContainsVar n val && !locals.contains n
       let newLocals := if isFreshLocal then n :: locals else locals
       let rb := readBefore ++ freeVars val
-      extractCondMutationsAux newLocals rb body
+      inVal ++ extractCondMutationsAux newLocals rb body
         ++ extractCondMutationsAux newLocals (rb ++ freeVars body) rest
   | .seq head rest => extractCondMutationsAux locals (readBefore ++ freeVars head) rest
   | .letBind n rhs (.var v) =>
@@ -440,12 +441,13 @@ partial def extractCondMutationsAux (locals readBefore : List String) :
   -- later mutation-shaped `let n := X; n` on it is not taken for an outer
   -- accumulator.
   | .letBind n val body =>
+    let inVal := extractCondMutationsAux locals readBefore val
     if !locals.contains n && (exprContainsVar n val || readBefore.contains n) then
-      (n, val) :: extractCondMutationsAux locals (readBefore ++ freeVars val) body
+      (n, val) :: (inVal ++ extractCondMutationsAux locals (readBefore ++ freeVars val) body)
     else
       let isFreshLocal := !exprContainsVar n val && !locals.contains n
       let newLocals := if isFreshLocal then n :: locals else locals
-      extractCondMutationsAux newLocals (readBefore ++ freeVars val) body
+      inVal ++ extractCondMutationsAux newLocals (readBefore ++ freeVars val) body
   | .unitVal => []
   | _ => []
 
@@ -592,15 +594,16 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr â
   -- else a local; continue into both its body and the rest.
   | .seq (.letBind n val body) rest =>
     let rb := readBefore ++ freeVars val
+    let inVal := extractAccumulatorsAux locals readBefore val
     if !n.startsWith "_assign" && !locals.contains n
         && (exprContainsVar n val || readBefore.contains n) then
       let inner := extractAccumulatorsAux locals rb body
       let restAccs := extractAccumulatorsAux locals (rb ++ freeVars body) rest
-      (n :: (inner ++ restAccs)).eraseDups
+      (n :: (inVal ++ inner ++ restAccs)).eraseDups
     else
       let isFreshLocal := !exprContainsVar n val && !locals.contains n
       let newLocals := if isFreshLocal then n :: locals else locals
-      (extractAccumulatorsAux newLocals rb body
+      (inVal ++ extractAccumulatorsAux newLocals rb body
         ++ extractAccumulatorsAux newLocals (rb ++ freeVars body) rest).eraseDups
   | .seq head rest => extractAccumulatorsAux locals (readBefore ++ freeVars head) rest
   | .letBind n val (.var v) =>
@@ -613,7 +616,11 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr â
     let isFreshLocal :=
       !exprContainsVar n val && !readBefore.contains n && !locals.contains n
     let newLocals := if isFreshLocal then n :: locals else locals
-    extractAccumulatorsAux newLocals (readBefore ++ freeVars val) body
+    -- A Rust block in statement position arrives as `let _ := <block>; ()`,
+    -- and the block's own statements may rebind outer names; the bound value
+    -- is scanned as well as the continuation.
+    (extractAccumulatorsAux locals readBefore val
+      ++ extractAccumulatorsAux newLocals (readBefore ++ freeVars val) body).eraseDups
   | .ifThenElse c thn els =>
     let rb := readBefore ++ freeVars c
     let thnAccs := extractCondMutationsAux locals rb thn |>.map (Â·.1)

@@ -41,6 +41,17 @@ def condSubtract : ImpExpr :=
 
 #guard extractWhileAccumulators condSubtract == ["r"]
 
+/-- A Rust block in statement position arrives as `let _ := <block>; ()`; a
+    rebind of an outer name inside the block is loop-carried. -/
+def statementBlock : ImpExpr :=
+  .letBind "_" (.letBind "coeffs" (.app "from_elem" [(.lit (.int 0)), (.var "n")])
+      (.seq (.seq (.letBind "result"
+          (.app "array_update" [(.var "result"), (.var "col"), (.var "coeffs")])
+          (.var "result")) .unitVal) .unitVal))
+    .unitVal
+
+#guard extractAccumulators statementBlock == ["result"]
+
 /-- A name written before it is ever read is local, not loop-carried. -/
 def freshLocal : ImpExpr :=
   .seq (.letBind "tmp" (.var "x") (.var "tmp"))
