@@ -27,6 +27,8 @@ public meta import HaxLean.ThreadMutations
 public import HaxLean.ThreadMutations
 public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
+public meta import HaxLean.Json.AdapterProbes
+public import HaxLean.Json.AdapterProbes
 
 /-!
 # Test Programs

@@ -85,6 +85,8 @@ match CatCrypt.Crypto.Tools.Json.parse s with
 Both functions have the same `String → Except String Lean.Json` signature.
 -/
 
+@[expose] public section
+
 namespace Hax.Json
 
 open Hax.Json.Lexer
@@ -152,14 +154,6 @@ def isParseStringEmptyArr : Bool :=
 
 theorem parseJsonString_empty_arr_ok : isParseStringEmptyArr = true := by decide
 
-/-- Probe: `parseJsonString "{}"` yields a `Json.obj` (empty object). -/
-def isParseStringEmptyObj : Bool :=
-  match parseJsonString "{}" with
-  | .ok (Lean.Json.obj _) => true
-  | _ => false
-
-theorem parseJsonString_empty_obj_ok : isParseStringEmptyObj = true := by decide
-
 /-- Probe: whitespace around a literal is skipped by the lexer; the value is
 still parsed correctly. -/
 def isParseStringTrueWithWs : Bool :=
@@ -187,27 +181,6 @@ def isParseStringTwoElemArr : Bool :=
 
 theorem parseJsonString_two_elem_arr_ok :
     isParseStringTwoElemArr = true := by decide
-
-/-- Probe: a string literal `"hi"` parses to `Json.str "hi"`. We close this
-via `native_decide` because the lexer's string-body construction goes through
-`String.ofList`, which reduces only under `native_decide`. -/
-def isParseStringHi : Bool :=
-  match parseJsonString "\"hi\"" with
-  | .ok (Lean.Json.str s) => s == "hi"
-  | _ => false
-
-theorem parseJsonString_hi_ok : isParseStringHi = true := by native_decide
-
-/-- Probe: an integer literal parses to a `Json.num`. We close this via
-`native_decide` because `String.toInt?` reduces through `String.Slice`
-operations that are blocked from kernel reduction (same reason as
-`JsonParser.parse_int_ok`). -/
-def isParseStringInt : Bool :=
-  match parseJsonString "42" with
-  | .ok (Lean.Json.num _) => true
-  | _ => false
-
-theorem parseJsonString_int_ok : isParseStringInt = true := by native_decide
 
 /-- Probe: trailing input after a top-level value is rejected. -/
 def isParseStringRejectTrailing : Bool :=
@@ -312,21 +285,6 @@ def roundtripEmptyArr : Bool :=
 `Json.arr`. -/
 theorem roundtrip_empty_arr : roundtripEmptyArr = true := by decide
 
-/-- Round-trip probe: `parseJsonString "{}"` produces an empty `Json.obj`.
-
-The empty object is represented as `Lean.Json.obj t` for some empty
-`Std.TreeMap.Raw`. We probe via `Lean.Json.getObj?` followed by `foldl`-based
-size, since `Std.TreeMap.Raw` constructors are not exposed for a direct
-constructor-level match. -/
-def roundtripEmptyObj : Bool :=
-  match parseJsonString "{}" with
-  | .ok (Lean.Json.obj t) => t.foldl (init := 0) (fun n _ _ => n + 1) == 0
-  | _ => false
-
-/-- Round-trip: the canonical print form `"{}"` parses back to an empty
-`Json.obj`. -/
-theorem roundtrip_empty_obj : roundtripEmptyObj = true := by decide
-
 /-- Round-trip probe: `parseJsonString "[true]"` produces
 `Json.arr #[Json.bool true]`. -/
 def roundtripSingletonArr : Bool :=
@@ -348,17 +306,5 @@ def roundtripTwoElemArr : Bool :=
 /-- Round-trip: the canonical print form `"[true,false]"` parses back to a
 two-element `Json.arr`. -/
 theorem roundtrip_two_elem_arr : roundtripTwoElemArr = true := by decide
-
-/-- Round-trip probe: `parseJsonString "\"hi\""` produces `Json.str "hi"`. -/
-def roundtripStrHi : Bool :=
-  match parseJsonString "\"hi\"" with
-  | .ok (Lean.Json.str s) => s == "hi"
-  | _ => false
-
-/-- Round-trip: the canonical print form `"\"hi\""` parses back to
-`Json.str "hi"`. Closed via `native_decide` because the lexer's string body is
-built via `String.ofList`, which is kernel-opaque (same situation as
-`parseJsonString_hi_ok`). -/
-theorem roundtrip_str_hi : roundtripStrHi = true := by native_decide
 
 end Hax.Json

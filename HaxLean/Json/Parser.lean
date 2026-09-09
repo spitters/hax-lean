@@ -288,7 +288,9 @@ def isParseEmptyObj : Bool :=
   | .ok (Lean.Json.obj _) => true
   | _ => false
 
-theorem parse_empty_obj_ok : isParseEmptyObj = true := by decide
+-- `Lean.Json.obj` carries a string-keyed map, which does not reduce inside a
+-- module, so this probe is checked by evaluation rather than by `decide`.
+#guard isParseEmptyObj
 
 /-- Probe: `parse [.lbracket, .rbracket]` yields an empty `Json.arr`. -/
 def isParseEmptyArr : Bool :=
@@ -320,7 +322,7 @@ def isParseSingletonObj : Bool :=
   | .ok (Lean.Json.obj _) => true
   | _ => false
 
-theorem parse_singleton_obj_ok : isParseSingletonObj = true := by decide
+#guard isParseSingletonObj
 
 /-- Probe: trailing input after a top-level value is rejected. -/
 def isRejectTrailing : Bool :=
