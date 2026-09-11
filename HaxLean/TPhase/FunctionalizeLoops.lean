@@ -177,15 +177,15 @@ theorem tFunctionalizeLoopsAux_erase (nested : Bool) (e : TExpr) :
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
   | questionMark _ _ ih =>
     simp [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux, ih]
-  | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
+  | forLoop _ _ _ _ _ _ _ _ =>
     simp only [tFunctionalizeLoopsAux, tCheckNoEarlyExit_eq, TExpr.erase, functionalizeLoopsAux]
-    split <;> simp [TExpr.erase, ih1, ih2, ih3]
-  | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
+    split <;> simp [TExpr.erase, *]
+  | forLoopRev _ _ _ _ _ _ _ _ =>
     simp only [tFunctionalizeLoopsAux, tCheckNoEarlyExit_eq, TExpr.erase, functionalizeLoopsAux]
-    split <;> simp [TExpr.erase, ih1, ih2, ih3]
-  | whileLoop _ _ _ ih1 ih2 =>
+    split <;> simp [TExpr.erase, *]
+  | whileLoop _ _ _ _ _ =>
     simp only [tFunctionalizeLoopsAux, tCheckNoEarlyExit_eq, TExpr.erase, functionalizeLoopsAux]
-    split <;> simp [TExpr.erase, ih1, ih2]
+    split <;> simp [TExpr.erase, *]
   | break_none =>
     simp only [tFunctionalizeLoopsAux, TExpr.erase, functionalizeLoopsAux]
     split <;> simp [TExpr.erase]

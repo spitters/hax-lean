@@ -187,7 +187,7 @@ theorem getObjVal?_chain_decreases {j data v : Json} {k1 k2 : String}
     `Json.arr` payloads. The `FromJson` instance for `Json` is `Except.ok`,
     so `a.mapM Except.ok = Except.ok a`. -/
 theorem array_fromJson?_arr_id (a : Array Json) :
-    (Array.fromJson? (α := Json) (Json.arr a)) = .ok a := by
+    (Lean.Array.fromJson? (α := Json) (Json.arr a)) = .ok a := by
   -- `Array.fromJson?` on `.arr a` reduces to `a.mapM fromJson?`.
   -- The `FromJson Json` instance is `⟨Except.ok⟩`, so `fromJson? = Except.ok`.
   -- `mapM (pure ∘ id)` on an array equals `pure (a.map id) = pure a`.
@@ -224,14 +224,14 @@ theorem getObjValAs?_arr_mem_decreases {j : Json} {k : String}
     -- The `FromJson (Array Json)` instance is `Array.fromJson?`, which
     -- throws on `.null`.
     exact (by
-      have : (Lean.fromJson? (α := Array Json) Json.null) = Array.fromJson? .null := rfl
+      have : (Lean.fromJson? (α := Array Json) Json.null) = Lean.Array.fromJson? .null := rfl
       rw [this] at hk
-      simp [Array.fromJson?] at hk)
+      simp [Lean.Array.fromJson?] at hk)
   | ok val =>
     rw [hg] at hk
     simp only [Except.toOption, Option.getD] at hk
     -- hk : Lean.fromJson? (α := Array Json) val = .ok arr
-    have hk' : Array.fromJson? (α := Json) val = .ok arr := hk
+    have hk' : Lean.Array.fromJson? (α := Json) val = .ok arr := hk
     -- Case on the shape of `val`: only `.arr a` succeeds.
     cases val with
     | arr a =>
@@ -242,10 +242,10 @@ theorem getObjValAs?_arr_mem_decreases {j : Json} {k : String}
       have h1 : jsonSize (Json.arr a) < jsonSize j := getObjVal?_decreases hg
       have h2 : jsonSize x < jsonSize (Json.arr a) := jsonSize_lt_of_mem_arr hx
       exact Nat.lt_trans h2 h1
-    | null => simp [Array.fromJson?] at hk'
-    | bool _ => simp [Array.fromJson?] at hk'
-    | num _ => simp [Array.fromJson?] at hk'
-    | str _ => simp [Array.fromJson?] at hk'
-    | obj _ => simp [Array.fromJson?] at hk'
+    | null => simp [Lean.Array.fromJson?] at hk'
+    | bool _ => simp [Lean.Array.fromJson?] at hk'
+    | num _ => simp [Lean.Array.fromJson?] at hk'
+    | str _ => simp [Lean.Array.fromJson?] at hk'
+    | obj _ => simp [Lean.Array.fromJson?] at hk'
 
 end Hax.JsonSize
