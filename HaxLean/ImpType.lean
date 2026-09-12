@@ -182,7 +182,7 @@ def sanitizeAdtShortName (name : String) : String :=
   -- Replace any non-alphanum/non-underscore char with underscore
   let chars := bareIdent.toList.map fun c =>
     if c.isAlphanum || c == '_' then c else '_'
-  let s := String.mk chars
+  let s := String.ofList chars
   -- Lean identifiers must start with a letter or underscore
   if s.isEmpty || (s.front.isDigit) then "T_" ++ s else s
 
