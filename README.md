@@ -207,9 +207,8 @@ CatCrypt's front `haxToLowCT : ImpExpr → Option LowCT` lowers an extracted
 requires). The two IRs play complementary roles:
 
 - **`ImpExpr`** is this pipeline's imperative *expression* AST — the working form
-  of the phases and the handoff format of the extraction. (CatCrypt mirrors it as
-  `CatCrypt.Hax.AST.ImpExpr`; the emitter's `ImpExpr` literals elaborate against
-  that copy.)
+  of the phases and the handoff format of the extraction. CatCrypt reads it from
+  `HaxLean.AST`, and the emitter's `ImpExpr` literals elaborate against it.
 - **`LowCT`** is CatCrypt's typed, low-level *constant-time command* IR over
   tower-field elements — branchless select, kernel-call ABIs, machine intrinsics,
   limb stores. It is the frontend IR of the CatCrypt compiler, whose verified
