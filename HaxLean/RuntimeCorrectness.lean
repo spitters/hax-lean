@@ -22,9 +22,9 @@ and satisfy standard algebraic properties used in crypto proofs.
 2. **Algebraic properties**: commutativity, associativity, self-cancellation, De Morgan
 3. **Identity/annihilator**: zero identities and annihilators for each operation
 4. **Cast correctness**: widening preserves value, narrowing truncates, roundtrip laws
-5. **Test vectors**: `native_decide` cross-validation against Rust
-
-All proofs are completed with **0 sorries, 0 axioms**.
+5. **Test vectors**: `decide` pins of values Rust computes
+6. **ControlFlow freedom of the builtin tables**: `NoControlFlow` for the width
+   tables, `DeepNoControlFlow` for `panicOps`, `widthOps` and `fullBuiltins`
 -/
 
 @[expose] public section
@@ -261,50 +261,50 @@ end Cast
 
 /-! ## 5. Concrete Test Vectors
 
-These `native_decide` theorems verify specific values, cross-validating
-against Rust semantics. -/
+These `decide` theorems pin specific values of the wrapping operations,
+as Rust computes them. -/
 
 section TestVectors
 
 -- XOR
 theorem test_xor_u64 : bitxor_u64 0xFF00FF00FF00FF00 0x0F0F0F0F0F0F0F0F =
-    (0xF00FF00FF00FF00F : UInt64) := by native_decide
+    (0xF00FF00FF00FF00F : UInt64) := by decide
 
 -- AND
 theorem test_and_u32 : bitand_u32 0xFF00FF00 0x0F0F0F0F =
-    (0x0F000F00 : UInt32) := by native_decide
+    (0x0F000F00 : UInt32) := by decide
 
 -- OR
 theorem test_or_u32 : bitor_u32 0xFF00FF00 0x0F0F0F0F =
-    (0xFF0FFF0F : UInt32) := by native_decide
+    (0xFF0FFF0F : UInt32) := by decide
 
 -- NOT
-theorem test_not_u8 : bitnot_u8 0x0F = (0xF0 : UInt8) := by native_decide
+theorem test_not_u8 : bitnot_u8 0x0F = (0xF0 : UInt8) := by decide
 
 -- Shift left (wraps at width boundary)
-theorem test_shl_u8_wrap : shl_u8 1 7 = (128 : UInt8) := by native_decide
+theorem test_shl_u8_wrap : shl_u8 1 7 = (128 : UInt8) := by decide
 -- Note: Lean's BitVec shift uses (shiftAmt % width), so 1 <<< 8 on u8 = 1 <<< 0 = 1
-theorem test_shl_u8_mod : shl_u8 1 8 = (1 : UInt8) := by native_decide
+theorem test_shl_u8_mod : shl_u8 1 8 = (1 : UInt8) := by decide
 
 -- Shift right
-theorem test_shr_u32 : shr_u32 0xFF000000 8 = (0x00FF0000 : UInt32) := by native_decide
+theorem test_shr_u32 : shr_u32 0xFF000000 8 = (0x00FF0000 : UInt32) := by decide
 
 -- Self-cancellation
 theorem test_xor_cancel_u64 :
     bitxor_u64 (bitxor_u64 0xDEADBEEFCAFEBABE 0x1234567890ABCDEF)
-               0x1234567890ABCDEF = (0xDEADBEEFCAFEBABE : UInt64) := by native_decide
+               0x1234567890ABCDEF = (0xDEADBEEFCAFEBABE : UInt64) := by decide
 
 -- Wrapping addition
-theorem test_add_u8_wrap : add_u8 200 100 = (44 : UInt8) := by native_decide
-theorem test_add_u32_wrap : add_u32 0xFFFFFFFF 1 = (0 : UInt32) := by native_decide
+theorem test_add_u8_wrap : add_u8 200 100 = (44 : UInt8) := by decide
+theorem test_add_u32_wrap : add_u32 0xFFFFFFFF 1 = (0 : UInt32) := by decide
 
 -- Cast roundtrip (widening then narrowing)
 theorem test_cast_roundtrip_u8_u32 :
-    cast_u32_u8 (cast_u8_u32 42) = (42 : UInt8) := by native_decide
+    cast_u32_u8 (cast_u8_u32 42) = (42 : UInt8) := by decide
 
 -- Cast truncation
 theorem test_cast_truncate_u32_u8 :
-    cast_u32_u8 300 = (44 : UInt8) := by native_decide
+    cast_u32_u8 300 = (44 : UInt8) := by decide
 
 end TestVectors
 
@@ -381,7 +381,7 @@ theorem widthArrayOps_noControlFlow :
       · rename_i val _
         cases val <;> simp at h
     · exact absurd h (by intro hc; cases hc)
-  all_goals (intro h; cases h)
+  all_goals (intro h; first | cases h | (split at h <;> cases h))
 
 theorem signedArithOps_noControlFlow :
     Hax.Builtins.NoControlFlow Hax.signedArithOps := by
@@ -454,31 +454,85 @@ theorem widthAwareBuiltins_noControlFlow :
     rw [hwo] at h
     exact Hax.Builtins.defaultBuiltins_noControlFlow f args _ h isBreak w rfl
 
-/-! ## 8. Panic/Unwrap Operations NoControlFlow -/
+/-! ## 8. Panic/Unwrap Operations DeepNoControlFlow
 
-theorem panicOps_noControlFlow :
-    Hax.Builtins.NoControlFlow Hax.panicOps := by
-  intro f args v h isBreak w heq; subst heq; revert h
+`panicOps` returns the payload of an `option` or `result` argument, which may
+itself be a ControlFlow value, so `panicOps` and `fullBuiltins` satisfy
+`DeepNoControlFlow` (no ControlFlow in the output when none is in the inputs)
+and not `NoControlFlow`. -/
+
+/-- A list is deep-ControlFlow-free exactly when each of its elements is. -/
+theorem deepNoControlFlowList_iff (vs : List Value) :
+    Value.deepNoControlFlow.deepNoControlFlowList vs = true ↔
+      ∀ v ∈ vs, v.deepNoControlFlow = true := by
+  induction vs with
+  | nil => simp
+  | cons v vs ih => simp [ih]
+
+/-- `panicOps` keeps its inputs' freedom from ControlFlow values. -/
+theorem panicOps_deepNoControlFlow :
+    Hax.Builtins.DeepNoControlFlow Hax.panicOps := by
+  intro f args v h hargs
+  revert h
   simp only [Hax.panicOps]
-  split <;> (intro h; cases h)
+  split <;> intro h <;> cases h <;> simp_all [Value.deepNoControlFlow]
 
-/-- `fullBuiltins` never produces ControlFlow values. -/
-theorem fullBuiltins_noControlFlow :
-    Hax.Builtins.NoControlFlow Hax.fullBuiltins := by
-  intro f args v h isBreak w heq; subst heq
+/-- `widthOps` keeps its inputs' freedom from ControlFlow values. -/
+theorem widthOps_deepNoControlFlow :
+    Hax.Builtins.DeepNoControlFlow Hax.widthOps := by
+  intro f args v h hargs
+  simp [Hax.widthOps] at h
+  rcases h with h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h⟩⟩⟩⟩⟩⟩ <;> revert h
+  · simp only [Hax.widthArithOps, Hax.wrapUint]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+  · simp only [Hax.widthBitwiseOps, Hax.wrapUint]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+  · simp only [Hax.widthCmpOps]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+  · simp only [Hax.widthCastOps]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+  · simp only [Hax.widthArrayOps]
+    split <;> intro h <;> (repeat' split at h)
+    all_goals first
+      | (cases h; done)
+      | (obtain rfl := Option.some.inj h
+         simp_all [Value.deepNoControlFlow, deepNoControlFlowList_iff, or_imp, forall_and]
+         try (intro x hx; rcases List.mem_or_eq_of_mem_set hx with hx | rfl <;> simp_all))
+      | (simp only [Option.bind_eq_some_iff] at h
+         obtain ⟨a, ha, hm⟩ := h
+         simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq,
+           Value.deepNoControlFlow, deepNoControlFlowList_iff] at hargs
+         have := hargs.1 a (List.mem_of_getElem? ha)
+         split at hm <;> cases hm
+         assumption)
+  · simp only [Hax.signedArithOps, Hax.wrapSint]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+  · simp only [Hax.signedCmpOps]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+
+/-- `fullBuiltins` keeps its inputs' freedom from ControlFlow values. -/
+theorem fullBuiltins_deepNoControlFlow :
+    Hax.Builtins.DeepNoControlFlow Hax.fullBuiltins := by
+  intro f args v h hargs
   delta Hax.fullBuiltins at h
   cases hwo : Hax.widthOps f args with
   | some v' =>
     simp [hwo] at h; subst h
-    exact widthOps_noControlFlow f args _ hwo isBreak w rfl
+    exact widthOps_deepNoControlFlow f args _ hwo hargs
   | none =>
     simp [hwo] at h
     cases hpo : Hax.panicOps f args with
     | some v' =>
       simp [hpo] at h; subst h
-      exact panicOps_noControlFlow f args _ hpo isBreak w rfl
+      exact panicOps_deepNoControlFlow f args _ hpo hargs
     | none =>
       simp [hpo] at h
-      exact Hax.Builtins.defaultBuiltins_noControlFlow f args _ h isBreak w rfl
+      exact Hax.Builtins.defaultBuiltins_deepNoControlFlow f args _ h hargs
 
 end Hax

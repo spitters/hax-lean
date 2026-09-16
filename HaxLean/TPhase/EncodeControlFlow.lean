@@ -349,17 +349,25 @@ final accumulator, for an *arbitrary* per-iteration step `f : Int → α →
 ControlFlow α α` (the shape the plain encoding produces, `β = α`). -/
 
 /-- Runtime `Hax.forFold` consumed by `.merge` equals the reference loop
-    `refFold`. Proved by the recursion's own induction principle. -/
+    `refFold`. Proved by induction on the trip count `(hi - lo).toNat`. -/
 theorem forFold_merge_eq_refFold {α : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow α α) :
     (Hax.forFold lo hi init f).merge = refFold lo hi init f := by
-  fun_induction Hax.forFold lo hi init f with
-  | case1 lo init h =>
-    rw [refFold, if_pos h]; simp [ControlFlow.merge]
-  | case2 lo init v h hbrk =>
-    rw [refFold, if_neg (by omega), hbrk]; simp [ControlFlow.merge]
-  | case3 lo init acc h hcont ih =>
-    rw [refFold, if_neg (by omega), hcont]; simpa [ControlFlow.merge] using ih
+  suffices H : ∀ (n : Nat) (lo : Int) (init : α), (hi - lo).toNat = n →
+      (Hax.forFold lo hi init f).merge = refFold lo hi init f from H _ lo init rfl
+  intro n
+  induction n with
+  | zero =>
+    intro lo init hn
+    have h : lo ≥ hi := by omega
+    rw [Hax.forFold_eq, if_pos h, refFold, if_pos h]; rfl
+  | succ n ih =>
+    intro lo init hn
+    have h : ¬ lo ≥ hi := by omega
+    rw [Hax.forFold_eq, if_neg h, refFold, if_neg h]
+    cases hf : f lo init with
+    | Break v => rfl
+    | Continue acc => exact ih (lo + 1) acc (by omega)
 
 /-! ### Encoding-shape lemmas (plain)
 
@@ -527,21 +535,21 @@ theorem forFoldReturn_loopBreak {α β γ : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) (v : γ)
     (hlt : lo < hi) (hf : f lo init = .Break (.Continue v)) :
     Hax.forFoldReturn lo hi init f = .Continue (.Break v) := by
-  rw [Hax.forFoldReturn]; simp [Int.not_le.mpr hlt, hf]
+  rw [Hax.forFoldReturn_eq]; simp [Int.not_le.mpr hlt, hf]
 
 /-- Early return: `Break (Break v)` propagates as `Break v` (function returns). -/
 theorem forFoldReturn_earlyReturn {α β γ : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) (v : β)
     (hlt : lo < hi) (hf : f lo init = .Break (.Break v)) :
     Hax.forFoldReturn lo hi init f = .Break v := by
-  rw [Hax.forFoldReturn]; simp [Int.not_le.mpr hlt, hf]
+  rw [Hax.forFoldReturn_eq]; simp [Int.not_le.mpr hlt, hf]
 
 /-- Normal completion of an empty/finished range yields `Continue (Continue init)`
     — the accumulator, in the consumer's normal-completion arm. -/
 theorem forFoldReturn_done {α β γ : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow (ControlFlow β γ) α) (h : lo ≥ hi) :
     Hax.forFoldReturn lo hi init f = .Continue (.Continue init) := by
-  rw [Hax.forFoldReturn]; simp [h]
+  rw [Hax.forFoldReturn_eq]; simp [h]
 
 /-! ## Two-level reconciliation (denote' shape lemma)
 
@@ -623,15 +631,22 @@ theorem forFoldReturn_consume_eq_refFoldReturn {α β γ : Type} (lo hi : Int)
     (init : α) (f : Int → α → ControlFlow (ControlFlow β γ) α) :
     consumeForFoldReturn (Hax.forFoldReturn lo hi init f)
       = refFoldReturn lo hi init f := by
-  fun_induction Hax.forFoldReturn lo hi init f with
-  | case1 lo init h =>
-    rw [refFoldReturn, if_pos h]; rfl
-  | case2 lo init v h hf =>
-    rw [refFoldReturn, if_neg (by omega), hf]; rfl
-  | case3 lo init v h hf =>
-    rw [refFoldReturn, if_neg (by omega), hf]; rfl
-  | case4 lo init acc h hf ih =>
-    rw [refFoldReturn, if_neg (by omega), hf]; exact ih
+  suffices H : ∀ (n : Nat) (lo : Int) (init : α), (hi - lo).toNat = n →
+      consumeForFoldReturn (Hax.forFoldReturn lo hi init f) = refFoldReturn lo hi init f
+    from H _ lo init rfl
+  intro n
+  induction n with
+  | zero =>
+    intro lo init hn
+    have h : lo ≥ hi := by omega
+    rw [Hax.forFoldReturn_eq, if_pos h, refFoldReturn, if_pos h]; rfl
+  | succ n ih =>
+    intro lo init hn
+    have h : ¬ lo ≥ hi := by omega
+    rw [Hax.forFoldReturn_eq, if_neg h, refFoldReturn, if_neg h]
+    cases hf : f lo init with
+    | Break br => cases br <;> rfl
+    | Continue acc => exact ih (lo + 1) acc (by omega)
 
 /-! ## Environment-threading loop induction (plain)
 
@@ -673,16 +688,16 @@ theorem denoteForLoop'_eq_forFold
     intro lo hi env aval ha hfuel
     have hge : lo ≥ hi := by omega
     refine ⟨env, ?_, ?_⟩
-    · rw [denoteForLoop', if_pos hge, Hax.forFold, if_pos hge]
+    · rw [denoteForLoop', if_pos hge, Hax.forFold_eq, if_pos hge]
       simp [ControlFlow.isBreak, ControlFlow.merge, StateT.run, pure, StateT.pure]
-    · rw [Hax.forFold, if_pos hge]; simpa [ControlFlow.merge] using ha
+    · rw [Hax.forFold_eq, if_pos hge]; simpa [ControlFlow.merge] using ha
   | succ n ih =>
     intro lo hi env aval ha hfuel
     by_cases hge : lo ≥ hi
     · refine ⟨env, ?_, ?_⟩
-      · rw [denoteForLoop', if_pos hge, Hax.forFold, if_pos hge]
+      · rw [denoteForLoop', if_pos hge, Hax.forFold_eq, if_pos hge]
         simp [ControlFlow.isBreak, ControlFlow.merge, StateT.run, pure, StateT.pure]
-      · rw [Hax.forFold, if_pos hge]; simpa [ControlFlow.merge] using ha
+      · rw [Hax.forFold_eq, if_pos hge]; simpa [ControlFlow.merge] using ha
     · obtain ⟨env', hrun, ha'⟩ := hstep (n + 1) lo env aval ha
       rw [denoteForLoop', if_neg hge, if_neg (Nat.succ_ne_zero n)]
       simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
@@ -691,13 +706,13 @@ theorem denoteForLoop'_eq_forFold
       cases hg : g lo aval with
       | Break w =>
         rw [hg] at ha'
-        rw [Hax.forFold, if_neg hge, hg]
+        rw [Hax.forFold_eq, if_neg hge, hg]
         simp only [ControlFlow.isBreak, ControlFlow.merge, if_true]
         exact ⟨env', rfl, ha'⟩
       | Continue w =>
         rw [hg] at ha'
         obtain ⟨env'', hrec, ha3⟩ := ih (lo + 1) hi env' w ha' (by omega)
-        rw [Hax.forFold, if_neg hge, hg]
+        rw [Hax.forFold_eq, if_neg hge, hg]
         simp only [ControlFlow.isBreak, ControlFlow.merge, Nat.add_sub_cancel]
         simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
           StateT.modifyGet, pure, StateT.pure] at hrec
@@ -758,20 +773,20 @@ theorem denoteForLoop'Return_eq_forFoldReturn
     intro lo hi env aval ha hfuel
     have hge : lo ≥ hi := by omega
     refine ⟨env, ?_⟩
-    rw [denoteForLoop'Return, if_pos hge, Hax.forFoldReturn, if_pos hge]
+    rw [denoteForLoop'Return, if_pos hge, Hax.forFoldReturn_eq, if_pos hge]
     simp [consumeForFoldReturn, retOutcome, StateT.run, pure, StateT.pure]
   | succ n ih =>
     intro lo hi env aval ha hfuel
     by_cases hge : lo ≥ hi
     · refine ⟨env, ?_⟩
-      rw [denoteForLoop'Return, if_pos hge, Hax.forFoldReturn, if_pos hge]
+      rw [denoteForLoop'Return, if_pos hge, Hax.forFoldReturn_eq, if_pos hge]
       simp [consumeForFoldReturn, retOutcome, StateT.run, pure, StateT.pure]
     · obtain ⟨env', hrun, hacc⟩ := hstep (n + 1) lo env aval ha
       rw [denoteForLoop'Return, if_neg hge, if_neg (Nat.succ_ne_zero n)]
       simp only [bind, StateT.bind, StateT.run, modify, modifyGet, MonadStateOf.modifyGet,
         StateT.modifyGet, pure, StateT.pure] at hrun ⊢
       rw [hrun]
-      rw [Hax.forFoldReturn, if_neg hge]
+      rw [Hax.forFoldReturn_eq, if_neg hge]
       cases hg : g lo aval with
       | Continue acc =>
         have hacc' : env' a = some acc := hacc acc hg

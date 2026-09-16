@@ -9,10 +9,10 @@ module
 /-!
 # Runtime Library for Generated Lean 4 Code
 
-Defines `ControlFlow`, `Hax.forFold`, `Hax.whileFold`, and their
-`Return` variants used by the pretty-printer output.
-
-Generated Lean 4 code from `haxpipe --emit-lean` imports this module.
+Defines `ControlFlow`, `Hax.forFold`, `Hax.whileFold`, their `Return`
+variants, and the builtin operations that the surface code printed by
+`haxpipeT --emit-certified` refers to. Every certified extraction imports this
+module (through `CatCrypt.Hax.Runtime`, which re-exports it).
 
 ## Design
 
@@ -20,6 +20,13 @@ The `ControlFlow` type mirrors Rust's `core::ops::ControlFlow<B, C>`.
 Fold operations thread an accumulator through a closure that returns
 `ControlFlow`: `Continue acc'` continues iteration with the new accumulator,
 `Break v` exits the loop with value `v`.
+
+The range folds recurse structurally on the trip count `(hi - lo).toNat`.
+`whileFold` and `whileFoldReturn` are total: their value is the result of the
+loop at the least number of trips after which it stops, and a fixed value when
+no number of trips stops it; `whileFoldFuel` is the fuel-bounded run they are
+characterised by. Their compiled code is the loop itself (`whileFoldImpl`,
+`whileFoldReturnImpl`).
 
 ### Correspondence with the AST
 
@@ -76,99 +83,405 @@ end ControlFlow
 
 namespace Hax
 
-/-- Simple fold over `[lo, hi)` — no ControlFlow, no break/continue.
-    Used for loops whose body only mutates accumulators without early exit. -/
-def foldRange {α : Type} (lo hi : Int) (init : α)
-    (f : Int → α → α) : α :=
-  if lo ≥ hi then init
-  else foldRange (lo + 1) hi (f lo init) f
-termination_by (hi - lo).toNat
+/-- Total fold over `[lo, hi)` — structurally recursive on `(hi - lo).toNat`. -/
+def foldRange {α : Type} (lo hi : Int) (init : α) (f : Int → α → α) : α :=
+  go (hi - lo).toNat lo init
+where
+  go : Nat → Int → α → α
+    | 0, _, acc => acc
+    | n + 1, i, acc => go n (i + 1) (f i acc)
 
-/-- Simple reverse fold over `(lo, hi]` — no ControlFlow. -/
-def foldRangeRev {α : Type} (lo hi : Int) (init : α)
-    (f : Int → α → α) : α :=
-  if lo ≥ hi then init
-  else foldRangeRev lo (hi - 1) (f (hi - 1) init) f
-termination_by (hi - lo).toNat
+/-- Total reverse fold over `(lo, hi]`. -/
+def foldRangeRev {α : Type} (lo hi : Int) (init : α) (f : Int → α → α) : α :=
+  go (hi - lo).toNat (hi - 1) init
+where
+  go : Nat → Int → α → α
+    | 0, _, acc => acc
+    | n + 1, i, acc => go n (i - 1) (f i acc)
 
-/-- Fold over `[lo, hi)` with accumulator.
-    The body returns `ControlFlow`:
-    - `Continue acc'` → continue with new accumulator
-    - `Break v` → exit loop with value `v` -/
-def forFold {α β : Type}
-    (lo hi : Int) (init : α)
+/-- Relational congruence for `foldRange`: a relation `R` between two accumulator
+    types that holds on the initial accumulators and is preserved by the two step
+    functions at every index carries over to the two fold results over the same
+    index range. Stated here, before `foldRange` is sealed `@[irreducible]`, so
+    the equational unfolding is available. -/
+theorem foldRange_rel {α β : Type} {R : α → β → Prop} {lo hi : Int}
+    {fa : Int → α → α} {fb : Int → β → β} {ia : α} {ib : β}
+    (h0 : R ia ib) (hstep : ∀ i a b, R a b → R (fa i a) (fb i b)) :
+    R (foldRange lo hi ia fa) (foldRange lo hi ib fb) := by
+  simp only [foldRange]
+  suffices H : ∀ (n : Nat) (lo : Int) (a : α) (b : β), R a b →
+      R (foldRange.go fa n lo a) (foldRange.go fb n lo b) from H _ _ _ _ h0
+  intro n
+  induction n with
+  | zero => intro lo a b hab; exact hab
+  | succ n ih =>
+    intro lo a b hab
+    simp only [foldRange.go]
+    exact ih (lo + 1) (fa lo a) (fb lo b) (hstep lo a b hab)
+
+-- Performance: keep whnf from unfolding iteration combinators inside
+-- the giant `mutual` blocks emitted by haxpipeT. Without this, elaborating
+-- a single foldRange-heavy def (e.g. FAEST's `compute_witness`) can blow
+-- past 6.4M heartbeats. The bodies are
+-- never relied on for definitional equality outside `Hax/Runtime.lean`.
+attribute [irreducible] foldRange foldRangeRev
+
+/-- Total fold over `[lo, hi)` with ControlFlow accumulator. -/
+def forFold {α β : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
-  if lo ≥ hi then .Continue init
-  else
-    match f lo init with
-    | .Break v => .Break v
-    | .Continue acc => forFold (lo + 1) hi acc f
-termination_by (hi - lo).toNat
+  go (hi - lo).toNat lo init
+where
+  go : Nat → Int → α → ControlFlow β α
+    | 0, _, acc => .Continue acc
+    | n + 1, i, acc =>
+      match f i acc with
+      | .Break v => .Break v
+      | .Continue acc' => go n (i + 1) acc'
 
-/-- Reverse fold over `(lo, hi]` (i.e., hi-1, hi-2, ..., lo) with accumulator.
-    The body receives indices in descending order. -/
-def forFoldRev {α β : Type}
-    (lo hi : Int) (init : α)
+/-- Total reverse fold over `(lo, hi]` with ControlFlow accumulator. -/
+def forFoldRev {α β : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
-  if lo ≥ hi then .Continue init
-  else
-    match f (hi - 1) init with
-    | .Break v => .Break v
-    | .Continue acc => forFoldRev lo (hi - 1) acc f
-termination_by (hi - lo).toNat
+  go (hi - lo).toNat (hi - 1) init
+where
+  go : Nat → Int → α → ControlFlow β α
+    | 0, _, acc => .Continue acc
+    | n + 1, i, acc =>
+      match f i acc with
+      | .Break v => .Break v
+      | .Continue acc' => go n (i - 1) acc'
 
-/-- While-fold with accumulator.
-    Iterates while the condition returns `true`. -/
-partial def whileFold {α β : Type}
+/-- Total for-fold with early return support (nested ControlFlow). -/
+def forFoldReturn {α β γ : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
+    ControlFlow β (ControlFlow γ α) :=
+  go (hi - lo).toNat lo init
+where
+  go : Nat → Int → α → ControlFlow β (ControlFlow γ α)
+    | 0, _, acc => .Continue (.Continue acc)
+    | n + 1, i, acc =>
+      match f i acc with
+      | .Break (.Continue v) => .Continue (.Break v)  -- loop break
+      | .Break (.Break v) => .Break v                  -- early return
+      | .Continue acc' => go n (i + 1) acc'
+
+/-- Total reverse for-fold with early return support. -/
+def forFoldRevReturn {α β γ : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
+    ControlFlow β (ControlFlow γ α) :=
+  go (hi - lo).toNat (hi - 1) init
+where
+  go : Nat → Int → α → ControlFlow β (ControlFlow γ α)
+    | 0, _, acc => .Continue (.Continue acc)
+    | n + 1, i, acc =>
+      match f (i) acc with
+      | .Break (.Continue v) => .Continue (.Break v)  -- loop break
+      | .Break (.Break v) => .Break v                  -- early return
+      | .Continue acc' => go n (i - 1) acc'
+
+/-! ### One-trip unfolding of the range folds -/
+
+/-- `forFold` on `[lo, hi)`: the accumulator when the range is empty, otherwise
+    one step at `lo` followed by the fold over `[lo + 1, hi)`. -/
+theorem forFold_eq {α β : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow β α) :
+    forFold lo hi init f =
+      if lo ≥ hi then .Continue init
+      else
+        match f lo init with
+        | .Break v => .Break v
+        | .Continue acc => forFold (lo + 1) hi acc f := by
+  unfold forFold
+  split
+  · rw [show (hi - lo).toNat = 0 by omega]; rfl
+  · rw [show (hi - lo).toNat = (hi - (lo + 1)).toNat + 1 by omega]; rfl
+
+/-- `forFoldRev` on `(lo, hi]`: the accumulator when the range is empty,
+    otherwise one step at `hi - 1` followed by the fold over `(lo, hi - 1]`. -/
+theorem forFoldRev_eq {α β : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow β α) :
+    forFoldRev lo hi init f =
+      if lo ≥ hi then .Continue init
+      else
+        match f (hi - 1) init with
+        | .Break v => .Break v
+        | .Continue acc => forFoldRev lo (hi - 1) acc f := by
+  unfold forFoldRev
+  split
+  · rw [show (hi - lo).toNat = 0 by omega]; rfl
+  · rw [show (hi - lo).toNat = (hi - 1 - lo).toNat + 1 by omega]; rfl
+
+/-- `forFoldReturn` on `[lo, hi)`: normal completion when the range is empty,
+    otherwise one classified step at `lo` followed by the fold over
+    `[lo + 1, hi)`. -/
+theorem forFoldReturn_eq {α β γ : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
+    forFoldReturn lo hi init f =
+      if lo ≥ hi then .Continue (.Continue init)
+      else
+        match f lo init with
+        | .Break (.Continue v) => .Continue (.Break v)
+        | .Break (.Break v) => .Break v
+        | .Continue acc => forFoldReturn (lo + 1) hi acc f := by
+  unfold forFoldReturn
+  split
+  · rw [show (hi - lo).toNat = 0 by omega]; rfl
+  · rw [show (hi - lo).toNat = (hi - (lo + 1)).toNat + 1 by omega]; rfl
+
+/-- `forFoldRevReturn` on `(lo, hi]`: normal completion when the range is
+    empty, otherwise one classified step at `hi - 1` followed by the fold over
+    `(lo, hi - 1]`. -/
+theorem forFoldRevReturn_eq {α β γ : Type} (lo hi : Int) (init : α)
+    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
+    forFoldRevReturn lo hi init f =
+      if lo ≥ hi then .Continue (.Continue init)
+      else
+        match f (hi - 1) init with
+        | .Break (.Continue v) => .Continue (.Break v)
+        | .Break (.Break v) => .Break v
+        | .Continue acc => forFoldRevReturn lo (hi - 1) acc f := by
+  unfold forFoldRevReturn
+  split
+  · rw [show (hi - lo).toNat = 0 by omega]; rfl
+  · rw [show (hi - lo).toNat = (hi - 1 - lo).toNat + 1 by omega]; rfl
+
+/-! ### While-folds
+
+A while-fold tests `cond` on the accumulator; on `false` it stops with
+`Continue acc`, on `true` it runs the body, stopping on `Break` and repeating on
+`Continue acc'`. `whileFoldFuel cond f n acc` runs at most `n` condition tests.
+It is `some r` exactly when the loop stops within them, with result `r`, and a
+larger budget returns the same `r` (`whileFoldFuel_mono`). `whileFold` is that
+`r` for any stopping budget, hence for the least one, and `Continue init` when
+no budget stops the loop. -/
+
+/-- The run of a while-fold from `acc` bounded by `n` condition tests: `some r`
+    when the loop stops within them with result `r`, `none` otherwise. -/
+def whileFoldFuel {α β : Type} (cond : α → Bool) (f : α → ControlFlow β α) :
+    Nat → α → Option (ControlFlow β α)
+  | 0, _ => none
+  | n + 1, acc =>
+    if cond acc then
+      match f acc with
+      | .Break v => some (.Break v)
+      | .Continue acc' => whileFoldFuel cond f n acc'
+    else some (.Continue acc)
+
+/-- A bounded run that stops keeps its result under a larger bound. -/
+theorem whileFoldFuel_mono {α β : Type} {cond : α → Bool} {f : α → ControlFlow β α}
+    {n m : Nat} {acc : α} {r : ControlFlow β α}
+    (h : whileFoldFuel cond f n acc = some r) (hnm : n ≤ m) :
+    whileFoldFuel cond f m acc = some r := by
+  induction n generalizing m acc with
+  | zero => simp [whileFoldFuel] at h
+  | succ n ih =>
+    obtain ⟨m, rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
+    simp only [whileFoldFuel] at h ⊢
+    split at h
+    · rw [if_pos ‹_›]
+      split at h
+      · exact h
+      · exact ih h (by omega)
+    · rw [if_neg ‹_›]; exact h
+
+/-- Two bounded runs of the same while-fold that both stop agree. -/
+theorem whileFoldFuel_agree {α β : Type} {cond : α → Bool} {f : α → ControlFlow β α}
+    {n m : Nat} {acc : α} {r s : ControlFlow β α}
+    (hr : whileFoldFuel cond f n acc = some r) (hs : whileFoldFuel cond f m acc = some s) :
+    r = s := by
+  have h1 := whileFoldFuel_mono hr (Nat.le_max_left n m)
+  have h2 := whileFoldFuel_mono hs (Nat.le_max_right n m)
+  rw [h1] at h2; exact Option.some.inj h2
+
+/-- The while-fold from `init` stops: some bounded run of it stops. -/
+def WhileFoldStops {α β : Type} (init : α) (cond : α → Bool)
+    (f : α → ControlFlow β α) : Prop :=
+  ∃ n, (whileFoldFuel cond f n init).isSome
+
+/-- The compiled code of `whileFold`: the loop itself, which returns the result
+    of a stopping run and does not return otherwise. -/
+partial def whileFoldImpl {α β : Type}
     (init : α) (cond : α → Bool) (f : α → ControlFlow β α) :
     ControlFlow β α :=
   if cond init then
     match f init with
     | .Break v => .Break v
-    | .Continue acc => whileFold acc cond f
+    | .Continue acc => whileFoldImpl acc cond f
   else .Continue init
 
-/-- For-fold with early return support (nested ControlFlow).
-    The body returns `ControlFlow (ControlFlow β γ) α`:
-    - `Continue acc'` → continue iteration
-    - `Break (Continue v)` → loop break, return `v`
-    - `Break (Break v)` → early return, propagate `Break v` -/
-def forFoldReturn {α β γ : Type}
-    (lo hi : Int) (init : α)
-    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
-    ControlFlow β (ControlFlow γ α) :=
-  if lo ≥ hi then .Continue (.Continue init)
-  else
-    match f lo init with
-    | .Break (.Continue v) => .Continue (.Break v)  -- loop break
-    | .Break (.Break v) => .Break v                  -- early return
-    | .Continue acc => forFoldReturn (lo + 1) hi acc f
-termination_by (hi - lo).toNat
+/-- While-fold with accumulator. Iterates while the condition returns `true`.
+    The result of the loop at the least number of trips after which it stops
+    (condition `false` or `Break`), and `Continue init` when it does not stop.
+    Evaluation runs `whileFoldImpl`, which agrees with this value on every run
+    that stops. -/
+@[implemented_by whileFoldImpl]
+def whileFold {α β : Type}
+    (init : α) (cond : α → Bool) (f : α → ControlFlow β α) :
+    ControlFlow β α :=
+  open Classical in
+  if h : WhileFoldStops init cond f then
+    (whileFoldFuel cond f (Classical.choose h) init).get (Classical.choose_spec h)
+  else .Continue init
 
-/-- Reverse for-fold with early return support (nested ControlFlow). -/
-def forFoldRevReturn {α β γ : Type}
-    (lo hi : Int) (init : α)
-    (f : Int → α → ControlFlow (ControlFlow β γ) α) :
-    ControlFlow β (ControlFlow γ α) :=
-  if lo ≥ hi then .Continue (.Continue init)
-  else
-    match f (hi - 1) init with
-    | .Break (.Continue v) => .Continue (.Break v)  -- loop break
-    | .Break (.Break v) => .Break v                  -- early return
-    | .Continue acc => forFoldRevReturn lo (hi - 1) acc f
-termination_by (hi - lo).toNat
+/-- Closed form: a bounded run that stops gives the value of `whileFold`. -/
+theorem whileFold_eq_of_fuel {α β : Type} {init : α} {cond : α → Bool}
+    {f : α → ControlFlow β α} {n : Nat} {r : ControlFlow β α}
+    (h : whileFoldFuel cond f n init = some r) : whileFold init cond f = r := by
+  have hs : WhileFoldStops init cond f := ⟨n, by simp [h]⟩
+  unfold whileFold
+  rw [dif_pos hs]
+  exact whileFoldFuel_agree (Option.eq_some_of_isSome (Classical.choose_spec hs)) h
 
-/-- While-fold with early return support (nested ControlFlow). -/
-partial def whileFoldReturn {α β γ : Type}
+/-- `whileFold` on a loop that does not stop is `Continue init`. -/
+theorem whileFold_of_not_stops {α β : Type} {init : α} {cond : α → Bool}
+    {f : α → ControlFlow β α} (h : ¬ WhileFoldStops init cond f) :
+    whileFold init cond f = .Continue init := by
+  unfold whileFold
+  rw [dif_neg h]
+
+/-- One-trip unfolding of a stopping `whileFold`. -/
+theorem whileFold_eq {α β : Type} {init : α} {cond : α → Bool}
+    {f : α → ControlFlow β α} (h : WhileFoldStops init cond f) :
+    whileFold init cond f =
+      if cond init then
+        match f init with
+        | .Break v => .Break v
+        | .Continue acc => whileFold acc cond f
+      else .Continue init := by
+  obtain ⟨n, hn⟩ := h
+  obtain ⟨r, hr⟩ := Option.isSome_iff_exists.mp hn
+  rw [whileFold_eq_of_fuel hr]
+  cases n with
+  | zero => simp [whileFoldFuel] at hr
+  | succ n =>
+    simp only [whileFoldFuel] at hr
+    split at hr
+    · rw [if_pos ‹_›]
+      split at hr
+      · exact (Option.some.inj hr).symm
+      · exact (whileFold_eq_of_fuel hr).symm
+    · rw [if_neg ‹_›]; exact (Option.some.inj hr).symm
+
+/-- The run of a while-fold with early return from `acc`, bounded by `n`
+    condition tests: `some r` when the loop stops within them with result `r`,
+    `none` otherwise. -/
+def whileFoldReturnFuel {α β γ : Type} (cond : α → Bool)
+    (f : α → ControlFlow (ControlFlow β γ) α) :
+    Nat → α → Option (ControlFlow β (ControlFlow γ α))
+  | 0, _ => none
+  | n + 1, acc =>
+    if cond acc then
+      match f acc with
+      | .Break (.Continue v) => some (.Continue (.Break v))
+      | .Break (.Break v) => some (.Break v)
+      | .Continue acc' => whileFoldReturnFuel cond f n acc'
+    else some (.Continue (.Continue acc))
+
+/-- A bounded run that stops keeps its result under a larger bound. -/
+theorem whileFoldReturnFuel_mono {α β γ : Type} {cond : α → Bool}
+    {f : α → ControlFlow (ControlFlow β γ) α}
+    {n m : Nat} {acc : α} {r : ControlFlow β (ControlFlow γ α)}
+    (h : whileFoldReturnFuel cond f n acc = some r) (hnm : n ≤ m) :
+    whileFoldReturnFuel cond f m acc = some r := by
+  induction n generalizing m acc with
+  | zero => simp [whileFoldReturnFuel] at h
+  | succ n ih =>
+    obtain ⟨m, rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
+    simp only [whileFoldReturnFuel] at h ⊢
+    split at h
+    · rw [if_pos ‹_›]
+      split at h
+      · exact h
+      · exact h
+      · exact ih h (by omega)
+    · rw [if_neg ‹_›]; exact h
+
+/-- Two bounded runs of the same while-fold with early return that both stop
+    agree. -/
+theorem whileFoldReturnFuel_agree {α β γ : Type} {cond : α → Bool}
+    {f : α → ControlFlow (ControlFlow β γ) α}
+    {n m : Nat} {acc : α} {r s : ControlFlow β (ControlFlow γ α)}
+    (hr : whileFoldReturnFuel cond f n acc = some r)
+    (hs : whileFoldReturnFuel cond f m acc = some s) : r = s := by
+  have h1 := whileFoldReturnFuel_mono hr (Nat.le_max_left n m)
+  have h2 := whileFoldReturnFuel_mono hs (Nat.le_max_right n m)
+  rw [h1] at h2; exact Option.some.inj h2
+
+/-- The while-fold with early return from `init` stops: some bounded run of it
+    stops. -/
+def WhileFoldReturnStops {α β γ : Type} (init : α) (cond : α → Bool)
+    (f : α → ControlFlow (ControlFlow β γ) α) : Prop :=
+  ∃ n, (whileFoldReturnFuel cond f n init).isSome
+
+/-- The compiled code of `whileFoldReturn`: the loop itself, which returns the
+    result of a stopping run and does not return otherwise. -/
+partial def whileFoldReturnImpl {α β γ : Type}
     (init : α) (cond : α → Bool)
     (f : α → ControlFlow (ControlFlow β γ) α) :
     ControlFlow β (ControlFlow γ α) :=
   if cond init then
     match f init with
-    | .Break (.Continue v) => .Continue (.Break v)  -- loop break
-    | .Break (.Break v) => .Break v                  -- early return
-    | .Continue acc => whileFoldReturn acc cond f
+    | .Break (.Continue v) => .Continue (.Break v)
+    | .Break (.Break v) => .Break v
+    | .Continue acc => whileFoldReturnImpl acc cond f
   else .Continue (.Continue init)
+
+/-- While-fold with early return support (nested ControlFlow). The result of
+    the loop at the least number of trips after which it stops (condition
+    `false`, loop break, or early return), and `Continue (Continue init)` when
+    it does not stop. Evaluation runs `whileFoldReturnImpl`, which agrees with
+    this value on every run that stops. -/
+@[implemented_by whileFoldReturnImpl]
+def whileFoldReturn {α β γ : Type}
+    (init : α) (cond : α → Bool)
+    (f : α → ControlFlow (ControlFlow β γ) α) :
+    ControlFlow β (ControlFlow γ α) :=
+  open Classical in
+  if h : WhileFoldReturnStops init cond f then
+    (whileFoldReturnFuel cond f (Classical.choose h) init).get (Classical.choose_spec h)
+  else .Continue (.Continue init)
+
+/-- Closed form: a bounded run that stops gives the value of `whileFoldReturn`. -/
+theorem whileFoldReturn_eq_of_fuel {α β γ : Type} {init : α} {cond : α → Bool}
+    {f : α → ControlFlow (ControlFlow β γ) α} {n : Nat}
+    {r : ControlFlow β (ControlFlow γ α)}
+    (h : whileFoldReturnFuel cond f n init = some r) :
+    whileFoldReturn init cond f = r := by
+  have hs : WhileFoldReturnStops init cond f := ⟨n, by simp [h]⟩
+  unfold whileFoldReturn
+  rw [dif_pos hs]
+  exact whileFoldReturnFuel_agree (Option.eq_some_of_isSome (Classical.choose_spec hs)) h
+
+/-- `whileFoldReturn` on a loop that does not stop is `Continue (Continue init)`. -/
+theorem whileFoldReturn_of_not_stops {α β γ : Type} {init : α} {cond : α → Bool}
+    {f : α → ControlFlow (ControlFlow β γ) α} (h : ¬ WhileFoldReturnStops init cond f) :
+    whileFoldReturn init cond f = .Continue (.Continue init) := by
+  unfold whileFoldReturn
+  rw [dif_neg h]
+
+/-- One-trip unfolding of a stopping `whileFoldReturn`. -/
+theorem whileFoldReturn_eq {α β γ : Type} {init : α} {cond : α → Bool}
+    {f : α → ControlFlow (ControlFlow β γ) α} (h : WhileFoldReturnStops init cond f) :
+    whileFoldReturn init cond f =
+      if cond init then
+        match f init with
+        | .Break (.Continue v) => .Continue (.Break v)
+        | .Break (.Break v) => .Break v
+        | .Continue acc => whileFoldReturn acc cond f
+      else .Continue (.Continue init) := by
+  obtain ⟨n, hn⟩ := h
+  obtain ⟨r, hr⟩ := Option.isSome_iff_exists.mp hn
+  rw [whileFoldReturn_eq_of_fuel hr]
+  cases n with
+  | zero => simp [whileFoldReturnFuel] at hr
+  | succ n =>
+    simp only [whileFoldReturnFuel] at hr
+    split at hr
+    · rw [if_pos ‹_›]
+      split at hr
+      · exact (Option.some.inj hr).symm
+      · exact (Option.some.inj hr).symm
+      · exact (whileFoldReturn_eq_of_fuel hr).symm
+    · rw [if_neg ‹_›]; exact (Option.some.inj hr).symm
 
 /-- Helper for code generation: wraps `ControlFlow.Break` with explicit type params. -/
 @[inline] def cfBreak {B C : Type} (v : B) : ControlFlow B C := ControlFlow.Break v
@@ -186,39 +499,46 @@ def unwrapContinue {B C : Type} [Inhabited C] : ControlFlow B C → C
 These definitions are referenced by generated Lean 4 code via `Hax.add`, `Hax.Sub`, etc.
 Capitalized variants match hax's Rust operator names. -/
 
--- Arithmetic
-@[inline] def add (a b : Int) : Int := a + b
-@[inline] def sub (a b : Int) : Int := a - b
-@[inline] def mul (a b : Int) : Int := a * b
-@[inline] def div (a b : Int) : Int := a / b
-@[inline] def rem (a b : Int) : Int := a % b
-@[inline] def neg (a : Int) : Int := -a
+-- OfNat instances for Bool and Array Int (needed for cross-type comparisons
+-- in extracted code where `bne x 0` has x : Bool or x : Array Int).
+instance : OfNat Bool 0 where ofNat := false
+instance (n : Nat) : OfNat Bool (n + 1) where ofNat := true
+instance : OfNat (Array Int) 0 where ofNat := #[]
 
--- Comparison (Int-specialized to avoid typeclass issues with untyped parameters)
--- Coercion `Bool → Int`: extracted code can produce `Hax.bne (x : Bool) (0 : Int)`
--- because the typed extraction widens Rust `bool` flags into `Int` comparisons
--- (see `crates/hash`'s `have_prev` flag in HKDF expansion). With this Coe,
--- `Hax.bne x 0` resolves with `x` coerced to `(if x then 1 else 0 : Int)`.
--- Keeping `beq`/`bne` Int-only avoids the Nat-vs-Int unification problem that
--- a polymorphic `[BEq α]` version triggers in other call sites.
-instance : Coe Bool Int where coe b := if b then 1 else 0
+-- Element-wise instances for Array Int (needed when Rust trait arithmetic
+-- operates on ADT types like FieldElement that are extracted as Array Int).
+instance : Add (Array Int) where add a b := Array.zipWith (· + ·) a b
+instance : Sub (Array Int) where sub a b := Array.zipWith (· - ·) a b
+instance : Mul (Array Int) where mul a b := Array.zipWith (· * ·) a b
+instance : Div (Array Int) where div a b := Array.zipWith (· / ·) a b
+instance : Mod (Array Int) where mod a b := Array.zipWith (· % ·) a b
+instance : Neg (Array Int) where neg a := a.map (- ·)
 
-@[inline] def beq (a b : Int) : Bool := a == b
-@[inline] def bne (a b : Int) : Bool := !(a == b)
--- Polymorphic versions for typed extraction
-@[inline] def beq_ {α : Type} [BEq α] (a b : α) : Bool := a == b
-@[inline] def bne_ {α : Type} [BEq α] (a b : α) : Bool := !(a == b)
-@[inline] def lt (a b : Int) : Bool := a < b
-@[inline] def le (a b : Int) : Bool := a ≤ b
-@[inline] def gt (a b : Int) : Bool := a > b
-@[inline] def ge (a b : Int) : Bool := a ≥ b
+-- Arithmetic (polymorphic: works for Int, Array Int, etc.)
+@[inline] def add {α : Type} [Add α] (a b : α) : α := a + b
+@[inline] def sub {α : Type} [Sub α] (a b : α) : α := a - b
+@[inline] def mul {α : Type} [Mul α] (a b : α) : α := a * b
+@[inline] def div {α : Type} [Div α] (a b : α) : α := a / b
+@[inline] def rem {α : Type} [Mod α] (a b : α) : α := a % b
+@[inline] def neg {α : Type} [Neg α] (a : α) : α := -a
+
+-- Comparison (polymorphic: works for Int, Array Int, Array (Array Int), etc.)
+@[inline] def beq {α : Type} [BEq α] (a b : α) : Bool := a == b
+@[inline] def bne {α : Type} [BEq α] (a b : α) : Bool := !(a == b)
+-- Aliases of `beq` / `bne`
+abbrev beq_ := @beq
+abbrev bne_ := @bne
+@[inline] def lt {α : Type} [LT α] [DecidableRel (α := α) (· < ·)] (a b : α) : Bool := a < b
+@[inline] def le {α : Type} [LE α] [DecidableRel (α := α) (· ≤ ·)] (a b : α) : Bool := a ≤ b
+@[inline] def gt {α : Type} [LT α] [DecidableRel (α := α) (· < ·)] (a b : α) : Bool := b < a
+@[inline] def ge {α : Type} [LE α] [DecidableRel (α := α) (· ≤ ·)] (a b : α) : Bool := b ≤ a
 
 -- Boolean
 @[inline] def bnot (b : Bool) : Bool := !b
 @[inline] def band (a b : Bool) : Bool := a && b
 @[inline] def bor (a b : Bool) : Bool := a || b
 
--- Bitwise (untyped, operates on magnitude — backward compat)
+-- Bitwise on `Int`, operating on the magnitude (`toNat`)
 @[inline] def shl (a b : Int) : Int := ↑(a.toNat <<< b.toNat)
 @[inline] def shr (a b : Int) : Int := ↑(a.toNat >>> b.toNat)
 @[inline] def bitand (a b : Int) : Int := ↑(a.toNat &&& b.toNat)
@@ -226,7 +546,61 @@ instance : Coe Bool Int where coe b := if b then 1 else 0
 @[inline] def bitxor (a b : Int) : Int := ↑(a.toNat ^^^ b.toNat)
 @[inline] def bitnot (a : Int) : Int := -(a + 1)
 
--- Indexing — returns `default` for empty array fallback (never reached in extracted code)
+/-! ### Width-aware operations for typed extraction
+
+These operate on `Int` (matching the typed pipeline's representation) but
+truncate results to `w` bits, modeling Rust's fixed-width semantics.
+haxpipeT emits these when it knows the Rust type width from the TExpr. -/
+
+/-- Truncate `n` to `w` bits (mod 2^w). -/
+@[inline] def mod2w (w : Nat) (n : Int) : Int := ↑(n.toNat % (2 ^ w))
+
+/-- Width-aware wrapping add: `(a + b) mod 2^w`. -/
+@[inline] def wrapping_add_w (w : Nat) (a b : Int) : Int := mod2w w (a + b)
+
+/-- Width-aware wrapping sub: `(a - b + 2^w) mod 2^w`. -/
+@[inline] def wrapping_sub_w (w : Nat) (a b : Int) : Int := mod2w w (a - b + ↑(2 ^ w))
+
+/-- Width-aware wrapping mul: `(a * b) mod 2^w`. -/
+@[inline] def wrapping_mul_w (w : Nat) (a b : Int) : Int := mod2w w (a * b)
+
+/-- Width-aware wrapping neg: `(2^w - a) mod 2^w`. -/
+@[inline] def wrapping_neg_w (w : Nat) (a : Int) : Int := mod2w w (↑(2 ^ w) - a)
+
+/-- Width-aware right shift: `(a mod 2^w) >>> b`. -/
+@[inline] def shr_w (w : Nat) (a b : Int) : Int := ↑((a.toNat % (2 ^ w)) >>> b.toNat)
+
+/-- Width-aware left shift: `((a mod 2^w) <<< b) mod 2^w`. -/
+@[inline] def shl_w (w : Nat) (a b : Int) : Int := mod2w w ↑(a.toNat <<< b.toNat)
+
+/-- Width-aware bitwise AND: `(a mod 2^w) &&& (b mod 2^w)`. -/
+@[inline] def bitand_w (w : Nat) (a b : Int) : Int := ↑((a.toNat % (2 ^ w)) &&& (b.toNat % (2 ^ w)))
+
+/-- Width-aware bitwise OR. -/
+@[inline] def bitor_w (w : Nat) (a b : Int) : Int := ↑((a.toNat % (2 ^ w)) ||| (b.toNat % (2 ^ w)))
+
+/-- Width-aware bitwise XOR. -/
+@[inline] def bitxor_w (w : Nat) (a b : Int) : Int := ↑((a.toNat % (2 ^ w)) ^^^ (b.toNat % (2 ^ w)))
+
+/-- Width-aware bitwise NOT: flip `w` bits. -/
+@[inline] def bitnot_w (w : Nat) (a : Int) : Int := ↑((2 ^ w - 1) - (a.toNat % (2 ^ w)))
+
+/-- Width-aware rotate right by `n` bits within `w`-bit word. -/
+@[inline] def rotate_right_w (w : Nat) (x n : Int) : Int :=
+  let xn := x.toNat % (2 ^ w)
+  let shift := n.toNat % w
+  mod2w w ↑((xn >>> shift) ||| (xn <<< (w - shift)))
+
+/-- Width-aware rotate left by `n` bits within `w`-bit word. -/
+@[inline] def rotate_left_w (w : Nat) (x n : Int) : Int :=
+  let xn := x.toNat % (2 ^ w)
+  let shift := n.toNat % w
+  mod2w w ↑((xn <<< shift) ||| (xn >>> (w - shift)))
+
+/-- Width-aware cast: truncate to `dstWidth` bits. -/
+@[inline] def castVal_w (dstWidth : Nat) (a : Int) : Int := mod2w dstWidth a
+
+-- Indexing — out-of-bounds returns a[0] or a dummy value (never reached in extracted code)
 @[inline] def index {α : Type} [Inhabited α] (a : Array α) (i : Int) : α :=
   if h : i.toNat < a.size then a[i.toNat]
   else if h2 : 0 < a.size then a[0]
@@ -255,7 +629,7 @@ abbrev Ne := @bne
 class HaxNot (α : Type) where
   not : α → α
 instance : HaxNot Bool where not := fun b => !b
-instance : HaxNot Int where not := fun a => -(a + 1)  -- bitwise complement
+instance : HaxNot Int where not := fun a => -(a + 1)  -- two's complement; width-specific NOT uses bitnot_w
 instance : HaxNot UInt8 where not := fun a => ~~~a
 instance : HaxNot UInt16 where not := fun a => ~~~a
 instance : HaxNot UInt32 where not := fun a => ~~~a
@@ -280,7 +654,11 @@ instance : HaxCond Int where toBool := fun n => n != 0
 /-- Generic cast (identity in untyped mode).
     Named `castVal` to avoid conflict with Lean's kernel `cast`.
     For width-specific casts, use `cast_u8_u64` etc. -/
-@[inline] def castVal {α : Type} (a : α) : α := a
+@[inline] def castVal (a : Int) : Int := a  -- identity; width-specific casts use castVal_w
+
+/-- Bool → Int cast: `true → 1`, `false → 0`.
+    Used for Rust's `b as u64` when `b : Bool`. -/
+@[inline] def boolToInt (b : Bool) : Int := if b then 1 else 0
 
 /-! ## Width-Aware Operations
 
@@ -370,7 +748,7 @@ bit width (e.g., `shl_u32`, `bitxor_u64`). -/
 /-! ### Cast operations
 
 Widening casts preserve the value; narrowing casts truncate (mod 2^target_bits),
-exactly matching Rust's `as` semantics for unsigned integers. -/
+matching Rust's `as` semantics for unsigned integers. -/
 
 -- Widening: u8 → larger
 @[inline] def cast_u8_u16  (x : UInt8) : UInt16 := x.toUInt16
@@ -398,7 +776,7 @@ exactly matching Rust's `as` semantics for unsigned integers. -/
 
 /-! ### Signed Integer Operations
 
-Rust signed integers use two's complement wrapping. We represent them as `Int`
+Rust signed integers use two's complement wrapping. They are represented as `Int`
 with explicit modular reduction (so the wrapping is explicit rather than relying
 on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
 
@@ -495,7 +873,7 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
   (List.replicate n.toNat val).toArray
 
 /-- Array length. -/
-@[inline] def array_len {α : Type} (arr : Array α) : Nat := arr.size
+@[inline] def array_len {α : Type} (arr : Array α) : Int := arr.size
 
 /-- Rotate a UInt64 right by `n` bits. -/
 @[inline] def rotate_right_u64 (x : UInt64) (n : UInt32) : UInt64 :=
@@ -532,10 +910,10 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def wrapping_mul_u32 (a b : UInt32) : UInt32 := a * b
 @[inline] def wrapping_mul_u64 (a b : UInt64) : UInt64 := a * b
 
-/-- Wrapping add (Int version for untyped mode). -/
-@[inline] def wrapping_add (a b : Int) : Int := a + b
-@[inline] def wrapping_sub (a b : Int) : Int := a - b
-@[inline] def wrapping_mul (a b : Int) : Int := a * b
+/-- Wrapping arithmetic (polymorphic for untyped mode). -/
+@[inline] def wrapping_add {α : Type} [_root_.Add α] (a b : α) : α := a + b
+@[inline] def wrapping_sub {α : Type} [_root_.Sub α] (a b : α) : α := a - b
+@[inline] def wrapping_mul {α : Type} [_root_.Mul α] (a b : α) : α := a * b
 
 /-- Update array element at index `i` with value `v`. Out-of-bounds is a no-op. -/
 @[inline] def array_update {α : Type} (arr : Array α) (i : Int) (v : α) : Array α :=
@@ -559,11 +937,7 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 -- Array literal — surface code uses `#[...]` syntax instead.
 -- Not called directly; `array_lit` in ImpExpr maps to `#[...]` in surface Lean.
 
-/-- String / byte-literal placeholder. Polymorphic with `Inhabited`
-    constraint so it can stand in for `String`, `Array Int`, or any
-    other literal type the bridge expects — Lean's bidirectional
-    elaboration picks the type from context. Used by hax's panic
-    message machinery (`assert_failed`, format args). -/
+/-- Byte string literal: the default value of the expected type. -/
 @[inline] def literal {α : Type} [Inhabited α] : α := default
 
 /-- Copy from slice — identity in untyped extraction. -/
@@ -578,21 +952,8 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 /-- Into vec — identity in untyped extraction. -/
 @[inline] def into_vec {α : Type} (x : α) : α := x
 
-/-- Next (iterator) — returns `Option α` modeling Rust's `Iterator::next`
-    which produces `Option<Item>` (the *element* type, not the iterator
-    type). Polymorphic over both the iterator type (for `into_iter`
-    wrappers) and the element type. Without two separate type params,
-    `match next iter with | some (v, g) => ...` would force the iter's
-    element type to equal the iter's own type. The extracted body
-    pattern-matches `none`/`some`. Returns `none` in the untyped
-    extraction since we don't model iterator state. -/
-@[inline] def next {ι α : Type} (_iter : ι) : Option α := none
-
-/-- Zip — pairs two iterables element-wise. Polymorphic in both element
-    types so that `Hax.zip (xs : Array A) (ys : Array B) : Array (A × B)`
-    typechecks for any A, B. Returns the empty array in the untyped
-    extraction (semantics provided by the bridge for verification). -/
-@[inline] def zip {α β : Type} (_xs : Array α) (_ys : Array β) : Array (α × β) := #[]
+/-- Next (iterator) — identity in untyped extraction. -/
+@[inline] def next {α : Type} (x : α) : α := x
 
 /-- Enumerate — identity in untyped extraction. -/
 @[inline] def enumerate {α : Type} (x : α) : α := x
@@ -610,8 +971,11 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 /-- Truncate — identity in untyped extraction. -/
 @[inline] def truncate {α : Type} (arr : Array α) (_n : Int) : Array α := arr
 
-/-- Mutable index — identity in untyped extraction (slice access pattern). -/
-@[inline] def index_mut {α : Type} (arr : α) (_i : Int) : α := arr
+/-- Mutable index — element access in untyped extraction.
+    Same as `index` (returns element at position). The mutation tracking
+    is handled separately by the pipeline's local mutation phase. -/
+@[inline] def index_mut {α : Type} [Inhabited α] (a : Array α) (i : Int) : α :=
+  index a i
 
 /-- Range-to constructor (0..hi). -/
 @[inline] def RangeTo (hi : Int) : Int := hi
@@ -619,17 +983,37 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 /-- Range-from constructor (lo..). -/
 @[inline] def RangeFrom (lo : Int) : Int := lo
 
-/-- Slice to: arr[..hi] — take first hi elements. -/
-@[inline] def slice_to {α : Type} (arr : Array α) (hi : Int) : Array α :=
-  arr.toList.take hi.toNat |>.toArray
+/-- Deref — identity in untyped extraction. -/
+@[inline] def deref {α : Type} (x : α) : α := x
 
-/-- Slice from: arr[lo..] — drop first lo elements. -/
-@[inline] def slice_from {α : Type} (arr : Array α) (lo : Int) : Array α :=
-  arr.toList.drop lo.toNat |>.toArray
+/-- Clone — identity in untyped extraction (Rust Clone::clone). -/
+@[inline] def clone {α : Type} (x : α) : α := x
 
-/-- Slice range: arr[lo..hi] — subarray from lo to hi. -/
+/-- to_vec — identity in untyped extraction (Rust [T]::to_vec / clone). -/
+@[inline] def to_vec {α : Type} (x : α) : α := x
+
+/-- Assignment: the identity. -/
+@[inline] def assign {α : Type} (x : α) : α := x
+
+
+/-- `From::from`: the identity. -/
+@[inline] def from_val {α : Type} (x : α) : α := x
+
+-- USize casts
+@[inline] def cast_usize_u64 (x : USize) : UInt64 := UInt64.ofNat x.toNat
+@[inline] def cast_u64_usize (x : UInt64) : USize := USize.ofNat x.toBitVec.toNat
+
+/-- Slice: take first n elements (arr[..n]). -/
+@[inline] def slice_to {α : Type} (arr : Array α) (n : Int) : Array α :=
+  arr.extract 0 n.toNat
+
+/-- Slice: drop first n elements (arr[n..]). -/
+@[inline] def slice_from {α : Type} (arr : Array α) (n : Int) : Array α :=
+  arr.extract n.toNat arr.size
+
+/-- Slice: range (arr[lo..hi]). -/
 @[inline] def slice_range {α : Type} (arr : Array α) (lo hi : Int) : Array α :=
-  (arr.toList.drop lo.toNat).take (hi.toNat - lo.toNat) |>.toArray
+  arr.extract lo.toNat hi.toNat
 
 /-- Range update: `arr` with position `lo + k` set to `src[k]` for every `k`
     below both `hi - lo` and `src.size`. Positions outside `lo ..< hi`, and
@@ -646,124 +1030,140 @@ def slice_update {α : Type} (arr : Array α) (lo hi : Int) (src : Array α) : A
       | some v => acc.setIfInBounds (l + k) v
       | none => acc) arr
 
-/-- Collect range into array. -/
+/-- The integers `lo, lo + 1, …` below `hi`, as an array (for `collect(0..n)`). -/
 @[inline] def range (lo hi : Int) : Array Int :=
-  (List.range (hi.toNat - lo.toNat)).map (· + lo.toNat) |>.map (Int.ofNat) |>.toArray
+  (List.range (hi - lo).toNat |>.map (· + lo.toNat) |>.map Int.ofNat).toArray
 
-/-- Convert Bool to Int (true → 1, false → 0). -/
-@[inline] def boolToInt (b : Bool) : Int := if b then 1 else 0
+/-- Range constructor (lo..hi) — returns Array of values for into_iter. -/
+@[inline] def Range (lo hi : Int) : Array Int := range lo hi
 
-/-- Deref — identity in untyped extraction. -/
-@[inline] def deref {α : Type} (x : α) : α := x
+/-- iter — identity (iterator representation = array in untyped mode). -/
+@[inline] def iter {α : Type} (arr : Array α) : Array α := arr
 
-/-- Assignment placeholder (identity). -/
-@[inline] def assign {α : Type} (x : α) : α := x
+/-- map — apply a function to each element of an array. -/
+@[inline] def map_arr {α β : Type} (arr : Array α) (f : α → β) : Array β := arr.map f
 
-/-- From constructor placeholder (identity). -/
-@[inline] def from_val {α : Type} (x : α) : α := x
+/-- concatMap — flat_map equivalent: apply f to each element and concatenate results. -/
+@[inline] def concatMap {α β : Type} (arr : Array α) (f : α → Array β) : Array β :=
+  arr.foldl (fun acc x => acc ++ f x) #[]
 
--- USize casts
-@[inline] def cast_usize_u64 (x : USize) : UInt64 := UInt64.ofNat x.toNat
-@[inline] def cast_u64_usize (x : UInt64) : USize := USize.ofNat x.toBitVec.toNat
+/-- collect — identity for arrays, range for integers. -/
+@[inline] def collect {α : Type} (arr : Array α) : Array α := arr
 
-/-! ## Width-tagged shims for untyped emission
+/-- assert_failed — Rust's assertion-failure panic, as the unit value. -/
+@[inline] def assert_failed {α β γ δ : Type} (_kind : α) (_left : β) (_right : γ) (_msg : δ) : Unit := ()
 
-The `--emit-certified` emitter produces width-tagged operator forms like
-`Hax.castVal_w 8 x`, `Hax.bitxor_w 64 a b`, etc., where the first argument is
-the (compile-time) bit width and the rest are operands. The intent is that
-these widths are *informational* — at the `Hax.*` surface, every integer
-collapses to `Int` and the wrapping semantics live in the dedicated
-`add_u8`/`bitxor_u64`/etc. families above.
+/-- one — numeric literal 1. -/
+@[inline] def one : Int := 1
 
-These shims provide that collapse: the width argument is discarded and the
-operation runs on `Int`. Anything that needs wrap-on-overflow at
-the `UInt{w}` level can call the named variants directly. -/
+/-- Number of `1` bits in the binary representation of a natural number. -/
+def bitCount (n : Nat) : Nat :=
+  if h : n = 0 then 0 else n % 2 + bitCount (n / 2)
+decreasing_by omega
 
-/-- Width-tagged cast: collapses to identity on `Int`. The width argument is
-    informational only; see file docstring above. -/
-@[inline] def castVal_w (_w : Nat) (n : Int) : Int := n
+/-- count_ones — Rust's population count.
 
-/-- Width-tagged bitwise xor on `Int`. -/
-@[inline] def bitxor_w (_w : Nat) (a b : Int) : Int := bitxor a b
+    Defined on non-negative arguments, which is the range of every
+    width-aware bit operation in this runtime (`bitand_w`, `bitxor_w`,
+    `mod2w` all return `Int.ofNat`). A negative argument has no finite
+    binary representation and yields `-1`, a value outside the range of a
+    population count. -/
+@[inline] def count_ones (x : Int) : Int :=
+  if 0 ≤ x then (bitCount x.toNat : Int) else -1
 
-/-- Width-tagged bitwise and on `Int`. -/
-@[inline] def bitand_w (_w : Nat) (a b : Int) : Int := bitand a b
+/-- assert_failed' — Rust's `assert!` macro failure, as the unit value. -/
+@[inline] def assert_failed' {α β γ δ : Type} (_ : α) (_ : β) (_ : γ) (_ : δ) : Unit := ()
 
-/-- Width-tagged bitwise or on `Int`. -/
-@[inline] def bitor_w (_w : Nat) (a b : Int) : Int := bitor a b
+/-- Re-wrap a nested forFoldReturn result for use in an outer forFoldReturn body.
+    Converts `ControlFlow β (ControlFlow γ α)` → `ControlFlow (ControlFlow β γ) α`.
+    This is needed when one `forFoldReturn` is directly nested inside another. -/
+def rewrapForFoldReturn {α β γ : Type}
+    (x : ControlFlow β (ControlFlow γ α)) : ControlFlow (ControlFlow β γ) α :=
+  match x with
+  | .Break v => .Break (.Break v)
+  | .Continue (.Break v) => .Break (.Continue v)
+  | .Continue (.Continue a) => .Continue a
 
-/-- Width-tagged bitwise not on `Int`. Unary, mirroring the binary
-    `bitxor_w`/`bitand_w`/`bitor_w` shims: the width argument is
-    informational only (see file docstring above). -/
-@[inline] def bitnot_w (_w : Nat) (a : Int) : Int := bitnot a
+/-! ### Width-indexed byte (de)serialization and overflowing arithmetic
 
-/-- Width-tagged right shift on `Int`. -/
-@[inline] def shr_w (_w : Nat) (a b : Int) : Int := shr a b
+The inherent integer methods `uN::to_be_bytes`, `uN::from_le_bytes`,
+`uN::overflowing_add`, … depend on the width `N`. The adapter suffixes each
+call with its width (`to_be_bytes#32`), and the printer renders it as the
+builtin of that width below, so the extraction carries no untyped dependency
+field for them. -/
 
-/-- Width-tagged left shift on `Int`. -/
-@[inline] def shl_w (_w : Nat) (a b : Int) : Int := shl a b
+/-- The `w / 8` big-endian bytes of `a mod 2^w`, most significant first. -/
+@[inline] def to_be_bytes_w (w : Nat) (a : Int) : Array Int :=
+  let n := w / 8
+  let v := mod2w w a
+  (Array.range n).map fun k => v / (256 : Int) ^ (n - 1 - k) % 256
 
-/-- Width-tagged wrapping add on `Int` (no actual wrapping at this layer). -/
-@[inline] def wrapping_add_w (_w : Nat) (a b : Int) : Int := a + b
+/-- The `w / 8` little-endian bytes of `a mod 2^w`, least significant first. -/
+@[inline] def to_le_bytes_w (w : Nat) (a : Int) : Array Int :=
+  let v := mod2w w a
+  (Array.range (w / 8)).map fun k => v / (256 : Int) ^ k % 256
 
-/-- Width-tagged wrapping sub on `Int` (no actual wrapping at this layer). -/
-@[inline] def wrapping_sub_w (_w : Nat) (a b : Int) : Int := a - b
+/-- The big-endian integer of a byte array, reduced to width `w`; the first
+    element is the most significant byte. -/
+@[inline] def from_be_bytes_w (w : Nat) (a : Array Int) : Int :=
+  mod2w w (a.foldl (fun acc b => acc * 256 + b % 256) 0)
 
-/-- Width-tagged wrapping mul on `Int` (no actual wrapping at this layer). -/
-@[inline] def wrapping_mul_w (_w : Nat) (a b : Int) : Int := a * b
+/-- The little-endian integer of a byte array, reduced to width `w`; the first
+    element is the least significant byte. -/
+@[inline] def from_le_bytes_w (w : Nat) (a : Array Int) : Int :=
+  mod2w w (a.foldr (fun b acc => acc * 256 + b % 256) 0)
 
-/-- `Vec::to_vec` placeholder: identity on `Array`. -/
-@[inline] def to_vec {α : Type} (xs : Array α) : Array α := xs
+/-- `(a + b) mod 2^w`, with the carry-out. -/
+@[inline] def overflowing_add_w (w : Nat) (a b : Int) : Int × Bool :=
+  let s := a + b
+  (mod2w w s, decide (s ≥ (2 : Int) ^ w))
 
-/-- `Into::into` placeholder: identity. The typed extraction emits
+/-- `(a - b) mod 2^w`, with the borrow-out. -/
+@[inline] def overflowing_sub_w (w : Nat) (a b : Int) : Int × Bool :=
+  let d := a - b
+  (mod2w w d, decide (d < 0))
+
+/-! ### Uninterpreted conversions -/
+
+/-- Zip — pairs two iterables element-wise. Polymorphic in both element
+    types so that `Hax.zip (xs : Array A) (ys : Array B) : Array (A × B)`
+    typechecks for any A, B. Returns the empty array in the untyped
+    extraction. -/
+@[inline] def zip {α β : Type} (_xs : Array α) (_ys : Array β) : Array (α × β) := #[]
+
+/-- `Into::into`: identity. The typed extraction emits
     `Hax.into x` for Rust `x.into()` calls where the target type is
-    deduced from context; we collapse this to identity since the
-    emitted Lean code is already typed at the target. -/
+    deduced from context; the emitted Lean code is already typed at the
+    target, so the conversion is the identity. -/
 @[inline] def into {α : Type} (x : α) : α := x
 
-/-- Bridge cast: heterogeneous-polymorphic uninterpreted constant used
-    to model Rust constructors and trait conversions at the type level
-    without committing to a concrete implementation. The CatCrypt-side
-    bridge provides the actual semantics (e.g. via a `Coe` instance or
-    a concrete `instance : <CipherDeps>` that interprets the type). -/
-axiom bridgeCast : {α β : Type} → α → β
+/-- Bridge cast: an uninterpreted conversion from `α` to a nonempty type `β`,
+    modelling Rust constructors and trait conversions whose semantics a
+    CatCrypt-side bridge supplies. The `Nonempty β` argument makes the
+    declaration a consistent opaque constant. -/
+noncomputable opaque bridgeCast {α β : Type} [Nonempty β] : α → β
 
 /-- Tuple-newtype positional projection: `Commitment(inner).0` style access.
     The Rust source has `struct Commitment(Vec<u8>)` and bodies use `c.0`
-    to unwrap. Identity at the surface — the bridge adapter materializes
-    the actual unwrap. -/
+    to unwrap. Identity at the surface; the bridge adapter materializes
+    the unwrap. -/
 @[inline] def «.0» {α : Type} (x : α) : α := x
 
-/-- SHA-256 placeholder: opaque axiomatic hash. Cross-crate `hash::sha256`
-    references in the typed extraction resolve here rather than as a
-    `<Crate>Deps` field. Replaced by the protocol's concrete instance via
-    the standard bridge-adapter pattern at the CatCrypt surface. -/
-axiom sha256 : Array Int → Array Int
+/-- SHA-256 as an uninterpreted hash on byte arrays. The protocol's
+    concrete instance supplies the function through the bridge-adapter pattern
+    at the CatCrypt surface. -/
+noncomputable opaque sha256 : Array Int → Array Int
 
-/-- Constructor placeholder for tuple-struct / wrapper constructors
+/-- Uninterpreted constructor for tuple-struct / wrapper constructors
     (`T::new(arg)`). Heterogeneous-polymorphic so the typed-pipeline
     pattern `(new (into key) : Aes256)` typechecks: the outer
     ascription pins β to `Aes256`, the inner `into key : α` keeps
-    `α = Array Int`. Without this, `new` would force its arg type
-    to equal its return type, breaking opaque-type construction. -/
-@[no_expose] noncomputable def «new» {α β : Type} (x : α) : β := bridgeCast x
-
-/-- Rust `assert!` / `assert_eq!` / `assert_ne!` failure placeholder.
-
-    hax desugars `assert_eq!(left, right)` to a 4-arg call:
-      `assert_failed(kind, left_val, right_val, msg)`
-    where `kind : AssertKind`, `left_val`/`right_val` are the values
-    being compared, and `msg : Option<Arguments>`. We make the inputs
-    fully polymorphic (regardless of how each arg got emitted), but
-    pin the return type to `Unit` — assert failures in Rust have type
-    `!` (never), and at the Lean surface they appear only in
-    `let _ := assert_failed ... ; ()` discard positions, so `Unit`
-    is the natural concrete type and avoids the Inhabited-resolution
-    metavariable problem that polymorphic ε would produce. -/
-@[inline] def assert_failed {α β γ δ : Type}
-    (_kind : α) (_left : β) (_right : γ) (_msg : δ) : Unit := ()
-
-/-- `assert_failed'` variant accepting any-shape descriptor. -/
-@[inline] def assert_failed' {α : Type} [Inhabited α] (_msg : String) : α := default
+    `α = Array Int`. -/
+@[no_expose] noncomputable def «new» {α β : Type} [Nonempty β] (x : α) : β := bridgeCast x
 
 end Hax
+
+/-- Default value for unbound mutation accumulators.
+    When the code generator emits `_assign` as a fold accumulator initial value
+    before it has been bound, this top-level definition provides a default. -/
+@[inline] def _assign {α : Type} [Inhabited α] : α := default
