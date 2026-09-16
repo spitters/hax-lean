@@ -866,7 +866,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
           cases vhi <;>
             (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
       | earlyRet w' =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+        simp only [pure, Pure.pure, StateT.pure]; intro h
+        have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
       | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
       | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
       | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -899,7 +900,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
           cases vhi <;>
             (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
       | earlyRet w' =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+        simp only [pure, Pure.pure, StateT.pure]; intro h
+        have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
       | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
       | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
       | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -959,7 +961,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             exact denoteForLoop'_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -971,7 +974,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1036,7 +1040,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             exact denoteForLoopRev'_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1048,7 +1053,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1116,7 +1122,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             exact denoteForLoop'Return_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1128,7 +1135,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1193,7 +1201,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             exact denoteForLoopRev'Return_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1205,7 +1214,8 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
             simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
           | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+          simp only [pure, Pure.pure, StateT.pure]; intro h
+          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
         | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
         | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
@@ -1919,27 +1929,8 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
       | continued =>
         dsimp only [Outcome.encodeCF4]
         cases vlo <;> dsimp only [] <;> rfl
-    | earlyRet w =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi =>
-        cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only [] ; rfl
-    | err =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | broke =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | continued =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
+    | earlyRet w => rfl
+    | err | broke | continued => rfl
   | forFoldRev v lo hi body ih_lo ih_hi ih_body =>
     cases hnl with | forFoldRev hllo hlhi hlbody =>
     cases hnq with | forFoldRev hqlo hqhi hqbody =>
@@ -2002,27 +1993,8 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
       | continued =>
         dsimp only [Outcome.encodeCF4]
         cases vlo <;> dsimp only [] <;> rfl
-    | earlyRet w =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi =>
-        cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only [] ; rfl
-    | err =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | broke =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | continued =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
+    | earlyRet w => rfl
+    | err | broke | continued => rfl
   | whileFold c body ih_c ih_body =>
     cases hnl with | whileFold hlc hlbody =>
     cases hnq with | whileFold hqc hqbody =>
@@ -2091,27 +2063,8 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
       | continued =>
         dsimp only [Outcome.encodeCF4]
         cases vlo <;> dsimp only [] <;> rfl
-    | earlyRet w =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi =>
-        cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | err =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | broke =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | continued =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
+    | earlyRet w => rfl
+    | err | broke | continued => rfl
   | forFoldRevReturn v lo hi body ih_lo ih_hi ih_body =>
     cases hnl with | forFoldRevReturn hllo hlhi hlbody =>
     cases hnq with | forFoldRevReturn hqlo hqhi hqbody =>
@@ -2166,27 +2119,8 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
       | continued =>
         dsimp only [Outcome.encodeCF4]
         cases vlo <;> dsimp only [] <;> rfl
-    | earlyRet w =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi =>
-        cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | err =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | broke =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
-    | continued =>
-      dsimp only [Outcome.encodeCF4]
-      cases rhi with
-      | val vhi => cases vhi <;> dsimp only [] <;> rfl
-      | _ => dsimp only []; rfl
+    | earlyRet w => rfl
+    | err | broke | continued => rfl
   | whileFoldReturn c body ih_c ih_body =>
     cases hnl with | whileFoldReturn hlc hlbody =>
     cases hnq with | whileFoldReturn hqc hqbody =>

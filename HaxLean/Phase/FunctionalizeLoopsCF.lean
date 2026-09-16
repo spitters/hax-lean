@@ -1487,33 +1487,12 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
-            -- rlo = val (int lo_val), rhi = broke w
-            -- denote returns pure rlo = val (int lo_val), denote' sees CF value from encodeCF3gen
-            simp only [Outcome.encodeCF3gen_val]
-            dsimp only [pure, Pure.pure, StateT.pure]
+          | _ =>
+            -- rhi is not a value: both sides return the upper bound's outcome
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · simp only [Outcome.val.injEq] at hw; subst hw; exact hvlo
-            · exact Outcome.noConfusion hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
         | _ =>
           -- lo = val (non-int, non-CF): case split on rhi
           simp only [Outcome.encodeCF3gen_val]
@@ -1529,34 +1508,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp at hw,
                 fun w hw => by simp at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
-            -- rlo = val (non-int, non-CF), rhi = broke w
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw <;> subst hw <;> exact hvlo
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_val, Outcome.encodeCF3_broke,
-                  Outcome.encodeCF3nested_val, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-                Outcome.encodeCF3gen_err]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
       | earlyRet | err =>
         -- rlo = earlyRet/err: denote returns rlo, denote' returns rlo
         refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
@@ -1641,31 +1597,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
-            simp only [Outcome.encodeCF3gen_val]
-            dsimp only [pure, Pure.pure, StateT.pure]
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · simp only [Outcome.val.injEq] at hw; subst hw; exact hvlo
-            · exact Outcome.noConfusion hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
         | _ =>
           simp only [Outcome.encodeCF3gen_val]
           cases rhi with
@@ -1680,33 +1616,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp at hw,
                 fun w hw => by simp at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw <;> subst hw <;> exact hvlo
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_val, Outcome.encodeCF3_broke,
-                  Outcome.encodeCF3nested_val, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-                Outcome.encodeCF3gen_err]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
       | earlyRet | err =>
         refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
           fun w hw => Outcome.noConfusion hw, ?_⟩
@@ -1796,32 +1710,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
-            -- rlo = val (int lo_val), rhi = broke w
-            simp only [Outcome.encodeCF3gen_val]
-            dsimp only [pure, Pure.pure, StateT.pure]
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · simp only [Outcome.val.injEq] at hw; subst hw; exact hvlo
-            · exact Outcome.noConfusion hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
         | _ =>
           -- lo = val (non-int, non-CF): case split on rhi
           simp only [Outcome.encodeCF3gen_val]
@@ -1837,34 +1730,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp at hw,
                 fun w hw => by simp at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
-            -- rlo = val (non-int, non-CF), rhi = broke w
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw <;> subst hw <;> exact hvlo
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_val, Outcome.encodeCF3_broke,
-                  Outcome.encodeCF3nested_val, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-                Outcome.encodeCF3gen_err]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
       | earlyRet | err =>
         -- rlo = earlyRet/err: denote returns rlo, denote' returns rlo
         refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
@@ -1949,31 +1819,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 fun w hw => by simp [Outcome.val.injEq] at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
-            simp only [Outcome.encodeCF3gen_val]
-            dsimp only [pure, Pure.pure, StateT.pure]
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · simp only [Outcome.val.injEq] at hw; subst hw; exact hvlo
-            · exact Outcome.noConfusion hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => by simp only [Outcome.val.injEq] at hw; subst hw; rfl,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
         | _ =>
           simp only [Outcome.encodeCF3gen_val]
           cases rhi with
@@ -1988,33 +1838,11 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
                 fun w hw => by simp at hw,
                 fun w hw => by simp at hw,
                 by simp [Outcome.encodeCF3gen_val]⟩
-          | broke w =>
+          | _ =>
             refine ⟨henv_hi, fun w' hw => ?_, fun w' hw => ?_, ?_⟩
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw <;> subst hw <;> exact hvlo
-            · cases nested <;> simp [Outcome.encodeCF3_broke, Outcome.encodeCF3nested_broke,
-                StateT.pure, pure, Pure.pure] at hw
-            · cases nested <;>
-                simp [Outcome.encodeCF3_val, Outcome.encodeCF3_broke,
-                  Outcome.encodeCF3nested_val, Outcome.encodeCF3nested_broke,
-                  Outcome.encodeCF3gen_broke_false, Outcome.encodeCF3gen_broke_true,
-                  StateT.pure, pure, Pure.pure, Outcome.encodeCF3gen_val]
-          | continued =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_continued]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val]⟩
-          | earlyRet | err =>
-            simp only [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-              Outcome.encodeCF3gen_err]
-            dsimp only [StateT.pure, pure, Pure.pure]
-            exact ⟨henv_hi,
-              fun w' hw => Outcome.val.inj hw ▸ hvlo,
-              fun w' hw => Outcome.noConfusion hw,
-              by simp [Outcome.encodeCF3gen_val, Outcome.encodeCF3gen_earlyRet,
-                Outcome.encodeCF3gen_err]⟩
+            · simp [StateT.pure, pure, Pure.pure] at hw
+            · simp [StateT.pure, pure, Pure.pure] at hw <;> (subst hw; exact hbrk_hi _ rfl)
+            · cases nested <;> simp [StateT.pure, pure, Pure.pure]
       | earlyRet | err =>
         refine ⟨henv_hi, fun w hw => Outcome.noConfusion hw,
           fun w hw => Outcome.noConfusion hw, ?_⟩

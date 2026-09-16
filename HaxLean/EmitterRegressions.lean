@@ -9,10 +9,11 @@ public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
 
 /-!
-# Emitter regressions: loop-carried variables
+# Emitter regressions
 
-Each check pins an accumulator-analysis verdict on a body shape that once
-rendered with a `Unit` accumulator, discarding the loop's state.
+Pins on the emitter's analyses and rendering: the accumulators the analysis
+reports for loop body shapes whose state must be carried, and the projection
+paths of tuple destructuring chains, which follow the tuple's arity.
 -/
 
 @[expose] public section
@@ -94,5 +95,38 @@ def returnOnly : ImpExpr :=
 -- hax's loop-state placeholder `0` under a struct type renders as `default`.
 #guard toLean (.typeAscription (.lit (.int 0)) "Array (Int) × Int") == "(default : Array (Int) × Int)"
 #guard !(toLean (.typeAscription (.lit (.int 0)) "Int")).startsWith "(default"
+
+/-- The adapter's lowering of `let (a, _, c) = f(); ...` followed by a read of
+    `c`: a destructuring chain over a three-component tuple, in statement
+    position. -/
+def tripleDestr : ImpExpr :=
+  .seq
+    (.letBind "_tup" (.app "f" [])
+      (.letBind "a" (.proj (.var "_tup") 0)
+        (.letBind "_" (.proj (.var "_tup") 1)
+          (.letBind "c" (.proj (.var "_tup") 2) .unitVal))))
+    (.var "c")
+
+/-- The same chain over a pair. -/
+def pairDestr : ImpExpr :=
+  .seq
+    (.letBind "_tup" (.app "f" [])
+      (.letBind "a" (.proj (.var "_tup") 0)
+        (.letBind "_" (.proj (.var "_tup") 1) .unitVal)))
+    (.var "a")
+
+-- Components of a right-nested triple are `.1`, `.2.1` and `.2.2`.
+#guard toLean tripleDestr 1 ==
+  "  let _tup := f\n  let a := _tup.1\n  let _ := _tup.2.1\n  let c := _tup.2.2\n  c"
+#guard toLean pairDestr 1 == "  let _tup := f\n  let a := _tup.1\n  let _ := _tup.2\n  a"
+-- A chain in tail position renders as a tuple pattern.
+#guard toLean (.letBind "_tup" (.app "f" [])
+    (.letBind "a" (.proj (.var "_tup") 0) (.letBind "b" (.proj (.var "_tup") 1)
+      (.letBind "c" (.proj (.var "_tup") 2) (.var "c"))))) 1 ==
+  "  let (a, b, c) := f\n  c"
+-- A projection with no destructuring chain: component `0` renders, a later
+-- component is refused.
+#guard toLean (.proj (.var "t") 0) == "t.1"
+#guard toLean (.proj (.var "t") 1) == "(hax_unsupported_tuple_projection t 1)"
 
 end Hax.EmitterRegressions

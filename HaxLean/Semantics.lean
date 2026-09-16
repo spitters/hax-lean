@@ -164,6 +164,7 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoop bi fuel var lo_val hi_val body
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .forLoopRev var lo hi body => do
     let rlo ← denote bi fuel lo
@@ -172,6 +173,7 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoopRev bi fuel var lo_val hi_val body
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .whileLoop cond body =>
     denoteWhile bi fuel cond body

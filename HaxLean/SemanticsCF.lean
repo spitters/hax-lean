@@ -318,6 +318,7 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoopOrig' bi fuel var lo_val hi_val body
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .forLoopRev var lo hi body => do
     let rlo ← denote' bi fuel lo
@@ -326,6 +327,7 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoopRevOrig' bi fuel var lo_val hi_val body
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .whileLoop cond body =>
     denoteWhileOrig' bi fuel cond body
@@ -359,8 +361,9 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoop' bi fuel var lo_val hi_val body
     | .val (.controlFlow _ _), _ => pure rlo
-    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val (.controlFlow _ _) => pure rhi
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .forFoldRev var lo hi body => do
     let rlo ← denote' bi fuel lo
@@ -369,8 +372,9 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoopRev' bi fuel var lo_val hi_val body
     | .val (.controlFlow _ _), _ => pure rlo
-    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val (.controlFlow _ _) => pure rhi
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .whileFold cond body =>
     denoteWhile' bi fuel cond body
@@ -381,8 +385,9 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoop'Return bi fuel var lo_val hi_val body
     | .val (.controlFlow _ _), _ => pure rlo
-    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val (.controlFlow _ _) => pure rhi
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .forFoldRevReturn var lo hi body => do
     let rlo ← denote' bi fuel lo
@@ -391,8 +396,9 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val (.int lo_val), .val (.int hi_val) =>
       denoteForLoopRev'Return bi fuel var lo_val hi_val body
     | .val (.controlFlow _ _), _ => pure rlo
-    | _, .val (.controlFlow _ _) => pure rlo
+    | .val _, .val (.controlFlow _ _) => pure rhi
     | .val _, .val _ => pure (.err "for loop bounds must be integers")
+    | .val _, other => pure other
     | other, _ => pure other
   | .whileFoldReturn cond body =>
     denoteWhile'Return bi fuel cond body

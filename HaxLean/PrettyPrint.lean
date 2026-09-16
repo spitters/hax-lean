@@ -341,7 +341,52 @@ def extractTupleDestr (tmpName : String) : ImpExpr → Option (List String × Im
       | some (names, body) => some (n :: names, body)
       | none => some ([n], rest)
     else none
+  | .letBind n (.app f [.var v]) rest =>
+    if v == tmpName && f.startsWith "::proj::" then
+      match extractTupleDestr tmpName rest with
+      | some (names, body) => some (n :: names, body)
+      | none => some ([n], rest)
+    else none
   | _ => none
+
+/-- Generate the projection path for field index i out of N fields.
+    0-indexed. Right-associated tuples: (A × B × C) = (A × (B × C)). -/
+def projPath (i n : Nat) : String :=
+  if n <= 1 then ""
+  else if i == 0 then ".1"
+  else if n == 2 then ".2"
+  else ".2" ++ projPath (i - 1) (n - 1)
+
+/-- The component count of the tuple bound to `tmpName`, read from the
+    destructuring chain at the head of the expression: one more than the largest
+    index projected from `tmpName` in the chain, and at least `2`. `none` when the
+    expression does not start with such a binding. The adapter lowers a tuple
+    pattern to a chain with one binding per component, so the count is the arity
+    of the pattern. -/
+def projChainArity (tmpName : String) : ImpExpr → Option Nat
+  | .letBind _ (.proj (.var v) i) rest =>
+    if v == tmpName then
+      some (max (max 2 (i + 1)) ((projChainArity tmpName rest).getD 2))
+    else none
+  | _ => none
+
+/-- Rewrite the projections of the destructuring chain of `tmpName` at the head of
+    the expression to `::proj::<path>` application markers, with `path` the
+    projection path of each component in a right-nested tuple of `n` components.
+    `toLean` renders a marker as its argument followed by `path`. -/
+def markProjChainWith (tmpName : String) (n : Nat) : ImpExpr → ImpExpr
+  | .letBind x (.proj (.var v) i) rest =>
+    if v == tmpName then
+      .letBind x (.app s!"::proj::{projPath i n}" [.var v]) (markProjChainWith tmpName n rest)
+    else .letBind x (.proj (.var v) i) rest
+  | e => e
+
+/-- `markProjChainWith` at the arity given by `projChainArity`; the expression is
+    unchanged when it does not start with a destructuring chain of `tmpName`. -/
+def markProjChain (tmpName : String) (body : ImpExpr) : ImpExpr :=
+  match projChainArity tmpName body with
+  | some n => markProjChainWith tmpName n body
+  | none => body
 
 /-- Simplify a fold body by removing trivial let-return patterns.
     `letBind n rhs (var n)` → `rhs` when `n` is the only accumulator.
@@ -1191,6 +1236,10 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
         -- `«T.0» x` (a definitional identity emitted in the preamble).
         let tname := f.drop "::namedProj::".length
         some s!"«{tname}.0» {parensIf (toLean inner 0 boolNames) (!isAtom inner)}"
+      else if f.startsWith "::proj::" then
+        -- Tuple projection marker from `markProjChain`: the argument
+        -- followed by the projection path the marker carries.
+        some s!"{parensIf (toLean inner 0) (!isAtom inner)}{f.drop "::proj::".length}"
       else none
     | _ => none
   if let some s := annot then s else
@@ -1213,12 +1262,12 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- Dead ControlFlow let-bindings: discarded `_` results from a cfBreak /
   -- cfContinue / cfBreakContinue are dropped (just render body).
   | .letBind n (.cfBreak _) body | .letBind n (.cfBreakContinue _) body =>
+    let body := markProjChain n body
     if n.startsWith "_" then atLine body lvl
     else
-      -- A non-discarded letBind whose RHS is a cfBreak doesn't have a
-      -- sensible Lean form (cfBreak short-circuits the surrounding
-      -- block; nothing flows out). Emit an `unreachable!` placeholder
-      -- with the right unit type. (Was previously `(sorry : Unit)`.)
+      -- A non-discarded letBind whose RHS is a cfBreak has no Lean form
+      -- (cfBreak short-circuits the surrounding block; nothing flows out).
+      -- The binding is emitted with the value `(sorry : Unit)`.
       let ind := indent lvl
       s!"{ind}let {sanitizeName n} := (sorry : Unit)\n{atLine body lvl}"
   -- `letBind n (cfContinue v) body` — bind `n := v` (the continue payload)
@@ -1231,6 +1280,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     -- lowering of `let pat = match { Some v => v | None => return None }`,
     -- the body uses `_tup.0`, `_tup.1`, ... so we must emit the binding
     -- with `v` as its value.
+    let body := markProjChain n body
     if n.startsWith "_" && !exprContainsVar n body then atLine body lvl
     else
       let ind := indent lvl
@@ -1240,6 +1290,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- → let (a, b) := rhs
   | .lam ps body => s!"(fun {" ".intercalate ps} => {toLean body 0 boolNames})"
   | .letBind n val body =>
+    let body := markProjChain n body
     -- Mutation-discard pattern: let _assign := val; _assign → let _ := val; ()
     -- Prevents non-Unit _assign values from leaking as the block return value.
     if n.startsWith "_assign" && body == .var n then
@@ -1441,9 +1492,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   | .tuple elems =>
     s!"({", ".intercalate (elems.map fun e => toLean e 0)})"
 
-  -- Projection (Lean tuples use 1-indexed: .1, .2, etc.)
+  -- Projection outside a destructuring chain: the node carries no arity. Lean
+  -- tuples nest to the right, so component `0` is `.1` at every arity; a later
+  -- component is emitted as the unknown identifier
+  -- `hax_unsupported_tuple_projection`, so the generated file fails to elaborate.
   | .proj e i =>
-    s!"{parensIf (toLean e 0) (!isAtom e)}.{i + 1}"
+    if i == 0 then s!"{parensIf (toLean e 0) (!isAtom e)}.1"
+    else s!"(hax_unsupported_tuple_projection {parensIf (toLean e 0) (!isAtom e)} {i})"
 
   -- Conditional
   | .ifThenElse c t e =>
@@ -1667,6 +1722,7 @@ where
     | .seq a b, _ => seqToLean lvl a (.seq b e2)
     -- Skip dead code: seq (letBind "_" (cfBreak ...) body) e2
     | .letBind n (.cfBreak _) body, _ =>
+      let body := markProjChain n body
       if n.startsWith "_" then seqToLean lvl body e2
       else s!"{ind}let {sanitizeName n} := {toLean (.cfBreak (.cfBreak .unitVal)) 0}\n{seqToLean lvl body e2}"
     -- Conditional _assign with self-reference in seq context
@@ -1687,7 +1743,7 @@ where
         s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl (.var vn) e2}"
     -- Lift letBind out of seq: seq (letBind n v body) e2 → let n := v; seq body e2
     | .letBind n v body, _ =>
-      s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl body e2}"
+      s!"{ind}let {sanitizeName n} := {toLean v 0}\n{seqToLean lvl (markProjChain n body) e2}"
     -- Fold followed by reading an accumulator: bind fold result
     | .forFold _ _ _ body, _ => seqFold lvl e1 body e2
     | .forFoldRev _ _ _ body, _ => seqFold lvl e1 body e2
@@ -3475,14 +3531,6 @@ def structTupleType (structs : StructMeta)
       -- Wrap composite types in parens to preserve tuple associativity
       if (s.splitOn " × ").length > 1 then s!"({s})" else s
     " × ".intercalate fieldTypes
-
-/-- Generate the projection path for field index i out of N fields.
-    0-indexed. Right-associated tuples: (A × B × C) = (A × (B × C)). -/
-def projPath (i n : Nat) : String :=
-  if n <= 1 then ""
-  else if i == 0 then ".1"
-  else if n == 2 then ".2"
-  else ".2" ++ projPath (i - 1) (n - 1)
 
 /-- Check if a variable bound to a struct constructor call is ever passed
     to a non-projection function (i.e., used externally where Array Int is expected).

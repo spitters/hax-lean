@@ -12,7 +12,7 @@ module
 Defines `ControlFlow`, `Hax.forFold`, `Hax.whileFold`, their `Return`
 variants, and the builtin operations that the surface code printed by
 `haxpipeT --emit-certified` refers to. Every certified extraction imports this
-module (through `CatCrypt.Hax.Runtime`, which re-exports it).
+module, directly or through `CatCrypt.Hax.Runtime`, which re-exports it.
 
 ## Design
 
