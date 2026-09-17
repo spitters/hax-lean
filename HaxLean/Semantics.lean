@@ -93,7 +93,9 @@ mutual
 /-- Big-step denotational semantics with fuel for termination.
 
     The `fuel` parameter bounds loop iterations. Non-loop constructs
-    do not consume fuel. `bi` provides builtin function implementations. -/
+    do not consume fuel. `bi` provides builtin function implementations.
+    A counted loop evaluates its upper bound only when its lower bound is a value;
+    otherwise it returns the lower bound's outcome. -/
 def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
   | .lit v => pure (.val (Value.ofLit v))
   | .var name => do
@@ -159,22 +161,26 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | other => pure other
   | .forLoop var lo hi body => do
     let rlo ← denote bi fuel lo
-    let rhi ← denote bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoop bi fuel var lo_val hi_val body
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val vlo => do
+      let rhi ← denote bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoop bi fuel var lo_val hi_val body
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .forLoopRev var lo hi body => do
     let rlo ← denote bi fuel lo
-    let rhi ← denote bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoopRev bi fuel var lo_val hi_val body
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val vlo => do
+      let rhi ← denote bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRev bi fuel var lo_val hi_val body
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .whileLoop cond body =>
     denoteWhile bi fuel cond body
   | .break_ (some e) => do

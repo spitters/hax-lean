@@ -520,6 +520,9 @@ theorem denote_agreeExcept (bi : Builtins) (n : String) (e : ImpExpr) :
     obtain ⟨⟨hlo, hhi⟩, hbody⟩ := h
     simp only [denote]
     apply Rel.bind (ih1 fuel hlo); intro rlo
+    split
+    rotate_left
+    · exact Rel.pure _
     apply Rel.bind (ih2 fuel hhi); intro rhi
     split <;>
       first
@@ -531,6 +534,9 @@ theorem denote_agreeExcept (bi : Builtins) (n : String) (e : ImpExpr) :
     obtain ⟨⟨hlo, hhi⟩, hbody⟩ := h
     simp only [denote]
     apply Rel.bind (ih1 fuel hlo); intro rlo
+    split
+    rotate_left
+    · exact Rel.pure _
     apply Rel.bind (ih2 fuel hhi); intro rhi
     split <;>
       first
@@ -1192,6 +1198,9 @@ theorem flattenLetFoldReturn_denote (bi : Builtins) :
       intro he df; simp only [noVarRef, Bool.and_eq_true] at he
       simp only [flattenLetFoldReturn, denote]
       apply Rel.bind (ih lo he.1.1 df); intro rlo
+      split
+      rotate_left
+      · exact Rel.pure _
       apply Rel.bind (ih hi he.1.2 df); intro rhi
       split <;>
         first
@@ -1201,6 +1210,9 @@ theorem flattenLetFoldReturn_denote (bi : Builtins) :
       intro he df; simp only [noVarRef, Bool.and_eq_true] at he
       simp only [flattenLetFoldReturn, denote]
       apply Rel.bind (ih lo he.1.1 df); intro rlo
+      split
+      rotate_left
+      · exact Rel.pure _
       apply Rel.bind (ih hi he.1.2 df); intro rhi
       split <;>
         first

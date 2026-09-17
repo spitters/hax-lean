@@ -225,7 +225,7 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
     intro fuel
     simp only [dropReferences]
     unfold denote
-    rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext rhi
+    rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext vlo; congr 1; funext rhi
     split
     · exact denoteForLoop_congr bi fuel v _ _ body (dropReferences body) ih3
     all_goals rfl
@@ -233,7 +233,7 @@ theorem dropReferences_correct (bi : Builtins) (fuel : Nat) (e : ImpExpr) :
     intro fuel
     simp only [dropReferences]
     unfold denote
-    rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext rhi
+    rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext vlo; congr 1; funext rhi
     split
     · exact denoteForLoopRev_congr bi fuel v _ _ body (dropReferences body) ih3
     all_goals rfl

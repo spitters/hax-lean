@@ -642,6 +642,51 @@ theorem denoteMatchArms'_earlyRet_not_cf (bi : Builtins) (fuel : Nat)
       simp only [hm]
       exact ih_rest (fun pa' hpa' => ih pa' (.tail _ hpa')) env w
 
+set_option hygiene false in
+/-- A counted-loop case of `denote'_earlyRet_not_cf`: the lower bound, then, when it is
+    a value that is not a control-flow value, the upper bound, then the loop helper
+    through the lemma `lem`. -/
+local macro "er_counted_loop" lem:ident : tactic => `(tactic| (
+  intro fuel env w; unfold denote'
+  simp only [bind, StateT.bind]
+  generalize heqlo : denote' bi fuel lo env = plo
+  obtain ⟨rlo, envlo⟩ := plo
+  cases rlo with
+  | val vlo =>
+    cases vlo with
+    | controlFlow =>
+      simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    | int lo_val =>
+      try simp only [bind, StateT.bind]
+      generalize heqhi : denote' bi fuel hi envlo = phi
+      obtain ⟨rhi, envhi⟩ := phi
+      try dsimp only
+      cases rhi with
+      | val vhi =>
+        cases vhi with
+        | int hi_val => exact $lem bi body ih_body fuel var lo_val hi_val envhi w
+        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+      | earlyRet w' =>
+        simp only [pure, Pure.pure, StateT.pure]; intro h
+        have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
+      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    | _ =>
+      try simp only [bind, StateT.bind]
+      generalize heqhi : denote' bi fuel hi envlo = phi
+      obtain ⟨rhi, envhi⟩ := phi
+      try dsimp only
+      cases rhi with
+      | val vhi =>
+        cases vhi <;> (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
+      | earlyRet w' =>
+        simp only [pure, Pure.pure, StateT.pure]; intro h
+        have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
+      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+  | earlyRet w' =>
+    simp only [pure, Pure.pure, StateT.pure]; intro h
+    have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
+  | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h))
+
 /-- Main invariant: if `denote'` produces `earlyRet v`, then `v.isControlFlow = false`.
     This is because `earlyReturn e` only wraps non-CF values as earlyRet,
     and `questionMark e` wraps `result false v` which is non-CF. -/
@@ -844,73 +889,9 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
     | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
     | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
   | forLoop var lo hi body ih_lo ih_hi ih_body =>
-    intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind]
-    generalize heqlo : denote' bi fuel lo env = plo
-    obtain ⟨rlo, envlo⟩ := plo
-    dsimp only []
-    generalize heqhi : denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
-    cases rlo with
-    | val vlo =>
-      cases rhi with
-      | val vhi =>
-        cases vlo with
-        | int lo_val =>
-          cases vhi with
-          | int hi_val =>
-            exact denoteForLoopOrig'_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ =>
-          cases vhi <;>
-            (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
-      | earlyRet w' =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h
-        have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-      | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | earlyRet w' =>
-      simp only [pure, Pure.pure, StateT.pure]; intro h
-      have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-    | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    er_counted_loop denoteForLoopOrig'_earlyRet_not_cf
   | forLoopRev var lo hi body ih_lo ih_hi ih_body =>
-    intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind]
-    generalize heqlo : denote' bi fuel lo env = plo
-    obtain ⟨rlo, envlo⟩ := plo
-    dsimp only []
-    generalize heqhi : denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
-    cases rlo with
-    | val vlo =>
-      cases rhi with
-      | val vhi =>
-        cases vlo with
-        | int lo_val =>
-          cases vhi with
-          | int hi_val =>
-            exact denoteForLoopRevOrig'_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ =>
-          cases vhi <;>
-            (simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h)
-      | earlyRet w' =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h
-        have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-      | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | earlyRet w' =>
-      simp only [pure, Pure.pure, StateT.pure]; intro h
-      have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-    | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    er_counted_loop denoteForLoopRevOrig'_earlyRet_not_cf
   | whileLoop c body ih_c ih_body =>
     intro fuel env w; unfold denote'
     exact denoteWhileOrig'_earlyRet_not_cf bi c body ih_c ih_body fuel env w
@@ -938,324 +919,16 @@ theorem denote'_earlyRet_not_cf (bi : Builtins) (e : ImpExpr) :
     intro fuel env w; unfold denote'
     simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
   | forFold var lo hi body ih_lo ih_hi ih_body =>
-    intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind]
-    generalize heqlo : denote' bi fuel lo env = plo
-    obtain ⟨rlo, envlo⟩ := plo
-    dsimp only []
-    generalize heqhi : denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
-    cases rlo with
-    | val vlo =>
-      cases vlo with
-      | controlFlow =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | int lo_val =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | int hi_val =>
-            exact denoteForLoop'_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | earlyRet w' =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-        | _ =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-      | _ =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h
-        have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-    | err =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | broke =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | continued =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    er_counted_loop denoteForLoop'_earlyRet_not_cf
   | forFoldRev var lo hi body ih_lo ih_hi ih_body =>
-    intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind]
-    generalize heqlo : denote' bi fuel lo env = plo
-    obtain ⟨rlo, envlo⟩ := plo
-    dsimp only []
-    generalize heqhi : denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
-    cases rlo with
-    | val vlo =>
-      cases vlo with
-      | controlFlow =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | int lo_val =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | int hi_val =>
-            exact denoteForLoopRev'_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | earlyRet w' =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-        | _ =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-      | _ =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h
-        have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-    | err =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | broke =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | continued =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    er_counted_loop denoteForLoopRev'_earlyRet_not_cf
   | whileFold c body ih_c ih_body =>
     intro fuel env w; unfold denote'
     exact denoteWhile'_earlyRet_not_cf bi c body ih_c ih_body fuel env w
   | forFoldReturn var lo hi body ih_lo ih_hi ih_body =>
-    intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind]
-    generalize heqlo : denote' bi fuel lo env = plo
-    obtain ⟨rlo, envlo⟩ := plo
-    dsimp only []
-    generalize heqhi : denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
-    cases rlo with
-    | val vlo =>
-      cases vlo with
-      | controlFlow =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | int lo_val =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | int hi_val =>
-            exact denoteForLoop'Return_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | earlyRet w' =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-        | _ =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-      | _ =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h
-        have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-    | err =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | broke =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | continued =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    er_counted_loop denoteForLoop'Return_earlyRet_not_cf
   | forFoldRevReturn var lo hi body ih_lo ih_hi ih_body =>
-    intro fuel env w; unfold denote'
-    simp only [bind, StateT.bind]
-    generalize heqlo : denote' bi fuel lo env = plo
-    obtain ⟨rlo, envlo⟩ := plo
-    dsimp only []
-    generalize heqhi : denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
-    cases rlo with
-    | val vlo =>
-      cases vlo with
-      | controlFlow =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | int lo_val =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | int hi_val =>
-            exact denoteForLoopRev'Return_earlyRet_not_cf bi body ih_body fuel var lo_val hi_val envhi w
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ =>
-        cases rhi with
-        | val vhi =>
-          cases vhi with
-          | controlFlow =>
-            simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-          | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | earlyRet w' =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_hi fuel envlo _ (by rw [heqhi])
-        | err => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | broke => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | continued => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | earlyRet w' =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-        | _ =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h
-          have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-      | _ =>
-        simp only [pure, Pure.pure, StateT.pure]; intro h
-        have := Outcome.earlyRet.inj h; subst this; exact ih_lo fuel env _ (by rw [heqlo])
-    | err =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | broke =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | continued =>
-      cases rhi with
-      | val vhi =>
-        cases vhi with
-        | controlFlow =>
-          simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-        | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-      | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    er_counted_loop denoteForLoopRev'Return_earlyRet_not_cf
   | whileFoldReturn c body ih_c ih_body =>
     intro fuel env w; unfold denote'
     exact denoteWhile'Return_earlyRet_not_cf bi c body ih_c ih_body fuel env w
@@ -1631,6 +1304,17 @@ theorem denoteWhile'Return_sim (bi : Builtins) (c body : ImpExpr)
 
 /-! ### Main theorem -/
 
+set_option hygiene false in
+/-- The upper-bound step of a counted-loop case of `CF4_combined`, once the lower bound
+    is a value that is not a control-flow value: reduce the bound match, rewrite the
+    transformed upper bound through `ih_hi`, and name its run `(rhi, envhi)`. -/
+local macro "cf4_eval_hi" : tactic => `(tactic| (
+  try simp only [bind, StateT.bind]
+  rw [ih_hi hlhi hqhi hwhi fuel envlo]
+  generalize denote' bi fuel hi envlo = phi
+  obtain ⟨rhi, envhi⟩ := phi
+  try dsimp only []))
+
 /-- Phase 4 simulation: `cfIntoMonads` preserves `denote'` semantics
     up to `Outcome.encodeCF4` on the result, with identical env.
 
@@ -1877,10 +1561,6 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hlhi hqhi hwhi fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     -- Body never produces earlyRet (from IH + cfIntoMonads identity)
     have hbody_no_er : ∀ fuel env v, (denote' bi fuel body env).1 ≠ .earlyRet v := by
       intro f e v heq
@@ -1892,11 +1572,13 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     -- Use dsimp to reduce match expressions and encodeCF4
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        simp only [Outcome.encodeCF4]
-        cases vlo with
-        | int lo_val =>
+      simp only [Outcome.encodeCF4]
+      cases vlo with
+      | int lo_val =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi =>
+          simp only [Outcome.encodeCF4]
           cases vhi with
           | int hi_val =>
             -- Reduce match on LHS (both sides now use denoteForLoop' directly)
@@ -1908,27 +1590,14 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
             cases rfl_out with
             | earlyRet w => exact absurd (congrArg Prod.fst heqfl) (hfl w)
             | _ => rfl
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ =>
-          cases vhi with
-          | controlFlow => rfl
-          | _ => rfl
-      | earlyRet w =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo with
-        | controlFlow => dsimp only []; rfl
-        | _ => dsimp only []; rfl
-      | err =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | broke =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | continued =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
     | earlyRet w => rfl
     | err | broke | continued => rfl
   | forFoldRev v lo hi body ih_lo ih_hi ih_body =>
@@ -1944,10 +1613,6 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hlhi hqhi hwhi fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     -- Body never produces earlyRet (from IH + cfIntoMonads identity)
     have hbody_no_er : ∀ fuel env v, (denote' bi fuel body env).1 ≠ .earlyRet v := by
       intro f e v heq
@@ -1957,11 +1622,13 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
       rw [heq] at h1; simp [Outcome.encodeCF4] at h1
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        simp only [Outcome.encodeCF4]
-        cases vlo with
-        | int lo_val =>
+      simp only [Outcome.encodeCF4]
+      cases vlo with
+      | int lo_val =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi =>
+          simp only [Outcome.encodeCF4]
           cases vhi with
           | int hi_val =>
             dsimp only []
@@ -1972,27 +1639,14 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
             cases rfl_out with
             | earlyRet w => exact absurd (congrArg Prod.fst heqfl) (hfl w)
             | _ => rfl
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ =>
-          cases vhi with
-          | controlFlow => rfl
-          | _ => rfl
-      | earlyRet w =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo with
-        | controlFlow => dsimp only []; rfl
-        | _ => dsimp only []; rfl
-      | err =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | broke =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | continued =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
     | earlyRet w => rfl
     | err | broke | continued => rfl
   | whileFold c body ih_c ih_body =>
@@ -2021,10 +1675,6 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hlhi hqhi hwhi fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     -- Derive earlyRet-not-CF for body
     have hbody_er_not_cf : ∀ fuel env w, (denote' bi fuel body env).1 = .earlyRet w →
         w.isControlFlow = false :=
@@ -2032,37 +1682,26 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     -- Case split on rlo
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        simp only [Outcome.encodeCF4]
-        cases vlo with
-        | int lo_val =>
+      simp only [Outcome.encodeCF4]
+      cases vlo with
+      | int lo_val =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi =>
+          simp only [Outcome.encodeCF4]
           cases vhi with
           | int hi_val =>
             dsimp only []
             exact denoteForLoop'Return_sim bi v body
               (ih_body hlbody hqbody hwbody) hbody_er_not_cf fuel lo_val hi_val envhi
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ =>
-          cases vhi with
-          | controlFlow => rfl
-          | _ => rfl
-      | earlyRet w =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo with
-        | controlFlow => dsimp only []; rfl
-        | _ => dsimp only []; rfl
-      | err =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | broke =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | continued =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
     | earlyRet w => rfl
     | err | broke | continued => rfl
   | forFoldRevReturn v lo hi body ih_lo ih_hi ih_body =>
@@ -2077,10 +1716,6 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hlhi hqhi hwhi fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     -- Derive earlyRet-not-CF for body
     have hbody_er_not_cf : ∀ fuel env w, (denote' bi fuel body env).1 = .earlyRet w →
         w.isControlFlow = false :=
@@ -2088,37 +1723,26 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     -- Case split on rlo
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        simp only [Outcome.encodeCF4]
-        cases vlo with
-        | int lo_val =>
+      simp only [Outcome.encodeCF4]
+      cases vlo with
+      | int lo_val =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi =>
+          simp only [Outcome.encodeCF4]
           cases vhi with
           | int hi_val =>
             dsimp only []
             exact denoteForLoopRev'Return_sim bi v body
               (ih_body hlbody hqbody hwbody) hbody_er_not_cf fuel lo_val hi_val envhi
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ =>
-          cases vhi with
-          | controlFlow => rfl
-          | _ => rfl
-      | earlyRet w =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo with
-        | controlFlow => dsimp only []; rfl
-        | _ => dsimp only []; rfl
-      | err =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | broke =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
-      | continued =>
-        dsimp only [Outcome.encodeCF4]
-        cases vlo <;> dsimp only [] <;> rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        cf4_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
     | earlyRet w => rfl
     | err | broke | continued => rfl
   | whileFoldReturn c body ih_c ih_body =>

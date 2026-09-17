@@ -248,7 +248,9 @@ theorem string_sizeOf_pos (s : String) : 0 < sizeOf s := by
 
 mutual
 
-/-- ControlFlow-aware big-step semantics. -/
+/-- ControlFlow-aware big-step semantics. A counted loop evaluates its upper bound only
+    when its lower bound is a value that is not a control-flow value; otherwise it
+    returns the lower bound's outcome. -/
 def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
   | .lit v => pure (.val (Value.ofLit v))
   | .var name => do
@@ -313,22 +315,28 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | other => pure other
   | .forLoop var lo hi body => do
     let rlo ← denote' bi fuel lo
-    let rhi ← denote' bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoopOrig' bi fuel var lo_val hi_val body
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val (.controlFlow _ _) => pure rlo
+    | .val vlo => do
+      let rhi ← denote' bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopOrig' bi fuel var lo_val hi_val body
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .forLoopRev var lo hi body => do
     let rlo ← denote' bi fuel lo
-    let rhi ← denote' bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoopRevOrig' bi fuel var lo_val hi_val body
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val (.controlFlow _ _) => pure rlo
+    | .val vlo => do
+      let rhi ← denote' bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRevOrig' bi fuel var lo_val hi_val body
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .whileLoop cond body =>
     denoteWhileOrig' bi fuel cond body
   | .break_ (some e) => do
@@ -356,50 +364,58 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
   -- Dedicated constructors for Phase 3/4 output
   | .forFold var lo hi body => do
     let rlo ← denote' bi fuel lo
-    let rhi ← denote' bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoop' bi fuel var lo_val hi_val body
-    | .val (.controlFlow _ _), _ => pure rlo
-    | .val _, .val (.controlFlow _ _) => pure rhi
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val (.controlFlow _ _) => pure rlo
+    | .val vlo => do
+      let rhi ← denote' bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoop' bi fuel var lo_val hi_val body
+      | _, .val (.controlFlow _ _) => pure rhi
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .forFoldRev var lo hi body => do
     let rlo ← denote' bi fuel lo
-    let rhi ← denote' bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoopRev' bi fuel var lo_val hi_val body
-    | .val (.controlFlow _ _), _ => pure rlo
-    | .val _, .val (.controlFlow _ _) => pure rhi
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val (.controlFlow _ _) => pure rlo
+    | .val vlo => do
+      let rhi ← denote' bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRev' bi fuel var lo_val hi_val body
+      | _, .val (.controlFlow _ _) => pure rhi
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .whileFold cond body =>
     denoteWhile' bi fuel cond body
   | .forFoldReturn var lo hi body => do
     let rlo ← denote' bi fuel lo
-    let rhi ← denote' bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoop'Return bi fuel var lo_val hi_val body
-    | .val (.controlFlow _ _), _ => pure rlo
-    | .val _, .val (.controlFlow _ _) => pure rhi
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val (.controlFlow _ _) => pure rlo
+    | .val vlo => do
+      let rhi ← denote' bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoop'Return bi fuel var lo_val hi_val body
+      | _, .val (.controlFlow _ _) => pure rhi
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .forFoldRevReturn var lo hi body => do
     let rlo ← denote' bi fuel lo
-    let rhi ← denote' bi fuel hi
-    match rlo, rhi with
-    | .val (.int lo_val), .val (.int hi_val) =>
-      denoteForLoopRev'Return bi fuel var lo_val hi_val body
-    | .val (.controlFlow _ _), _ => pure rlo
-    | .val _, .val (.controlFlow _ _) => pure rhi
-    | .val _, .val _ => pure (.err "for loop bounds must be integers")
-    | .val _, other => pure other
-    | other, _ => pure other
+    match rlo with
+    | .val (.controlFlow _ _) => pure rlo
+    | .val vlo => do
+      let rhi ← denote' bi fuel hi
+      match vlo, rhi with
+      | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRev'Return bi fuel var lo_val hi_val body
+      | _, .val (.controlFlow _ _) => pure rhi
+      | _, .val _ => pure (.err "for loop bounds must be integers")
+      | _, other => pure other
+    | other => pure other
   | .whileFoldReturn cond body =>
     denoteWhile'Return bi fuel cond body
   | .cfBreak e => do

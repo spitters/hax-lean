@@ -892,6 +892,17 @@ theorem denoteMatchArms'_explicitMonadic (bi : Builtins) (fuel : Nat)
 
 /-! ## Main theorem -/
 
+set_option hygiene false in
+/-- The upper-bound step of a counted-loop case of `explicitMonadic_correct`, once the
+    lower bound is a value that is not a control-flow value: reduce the bound match,
+    rewrite the transformed upper bound through `ih_hi`, and name its run. -/
+local macro "em_eval_hi" : tactic => `(tactic| (
+  try simp only [bind, StateT.bind]
+  rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
+  generalize denote' bi fuel hi envlo = phi
+  obtain ⟨rhi, envhi⟩ := phi
+  try dsimp only []))
+
 /-- `explicitMonadic` preserves `denote'` semantics for `FullyFunctional`
     expressions. -/
 theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
@@ -1039,16 +1050,13 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        cases vlo with
-        | int lo_val =>
+      cases vlo with
+      | int lo_val =>
+        em_eval_hi
+        cases rhi with
+        | val vhi =>
           cases vhi with
           | int hi_val =>
             dsimp only []
@@ -1056,30 +1064,15 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
             exact denoteForLoop'_body_congr bi v (explicitMonadic body) body
               (fun fuel env => ih_body hr3 hm3 hl3 he3 fuel env)
               fuel lo_val hi_val envhi
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ => cases vhi with | controlFlow => rfl | _ => rfl
-      | err => cases vlo with | controlFlow => rfl | _ => rfl
-      | earlyRet => cases vlo with | controlFlow => rfl | _ => rfl
-      | broke => cases vlo with | controlFlow => rfl | _ => rfl
-      | continued => cases vlo with | controlFlow => rfl | _ => rfl
-    | err =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | earlyRet =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | broke =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | continued =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        em_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
+    | _ => rfl
   | whileFold c body ih_c ih_body =>
     cases hnr with | whileFold hr1 hr2 =>
     cases hnm with | whileFold hm1 hm2 =>
@@ -1105,16 +1098,13 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        cases vlo with
-        | int lo_val =>
+      cases vlo with
+      | int lo_val =>
+        em_eval_hi
+        cases rhi with
+        | val vhi =>
           cases vhi with
           | int hi_val =>
             dsimp only []
@@ -1122,30 +1112,15 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
             exact denoteForLoop'Return_body_congr bi v (explicitMonadic body) body
               (fun fuel env => ih_body hr3 hm3 hl3 he3 fuel env)
               fuel lo_val hi_val envhi
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ => cases vhi with | controlFlow => rfl | _ => rfl
-      | err => cases vlo with | controlFlow => rfl | _ => rfl
-      | earlyRet => cases vlo with | controlFlow => rfl | _ => rfl
-      | broke => cases vlo with | controlFlow => rfl | _ => rfl
-      | continued => cases vlo with | controlFlow => rfl | _ => rfl
-    | err =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | earlyRet =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | broke =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | continued =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        em_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
+    | _ => rfl
   | forFoldRev v lo hi body ih_lo ih_hi ih_body =>
     cases hnr with | forFoldRev hr1 hr2 hr3 =>
     cases hnm with | forFoldRev hm1 hm2 hm3 =>
@@ -1158,16 +1133,13 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        cases vlo with
-        | int lo_val =>
+      cases vlo with
+      | int lo_val =>
+        em_eval_hi
+        cases rhi with
+        | val vhi =>
           cases vhi with
           | int hi_val =>
             dsimp only []
@@ -1175,30 +1147,15 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
             exact denoteForLoopRev'_body_congr bi v (explicitMonadic body) body
               (fun fuel env => ih_body hr3 hm3 hl3 he3 fuel env)
               fuel lo_val hi_val envhi
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ => cases vhi with | controlFlow => rfl | _ => rfl
-      | err => cases vlo with | controlFlow => rfl | _ => rfl
-      | earlyRet => cases vlo with | controlFlow => rfl | _ => rfl
-      | broke => cases vlo with | controlFlow => rfl | _ => rfl
-      | continued => cases vlo with | controlFlow => rfl | _ => rfl
-    | err =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | earlyRet =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | broke =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | continued =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        em_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
+    | _ => rfl
   | forFoldRevReturn v lo hi body ih_lo ih_hi ih_body =>
     cases hnr with | forFoldRevReturn hr1 hr2 hr3 =>
     cases hnm with | forFoldRevReturn hm1 hm2 hm3 =>
@@ -1211,16 +1168,13 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     generalize denote' bi fuel lo env = plo
     obtain ⟨rlo, envlo⟩ := plo
     dsimp only []
-    rw [ih_hi hr2 hm2 hl2 he2 fuel envlo]
-    generalize denote' bi fuel hi envlo = phi
-    obtain ⟨rhi, envhi⟩ := phi
-    dsimp only []
     cases rlo with
     | val vlo =>
-      cases rhi with
-      | val vhi =>
-        cases vlo with
-        | int lo_val =>
+      cases vlo with
+      | int lo_val =>
+        em_eval_hi
+        cases rhi with
+        | val vhi =>
           cases vhi with
           | int hi_val =>
             dsimp only []
@@ -1228,30 +1182,15 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
             exact denoteForLoopRev'Return_body_congr bi v (explicitMonadic body) body
               (fun fuel env => ih_body hr3 hm3 hl3 he3 fuel env)
               fuel lo_val hi_val envhi
-          | controlFlow => rfl
           | _ => rfl
-        | controlFlow => rfl
-        | _ => cases vhi with | controlFlow => rfl | _ => rfl
-      | err => cases vlo with | controlFlow => rfl | _ => rfl
-      | earlyRet => cases vlo with | controlFlow => rfl | _ => rfl
-      | broke => cases vlo with | controlFlow => rfl | _ => rfl
-      | continued => cases vlo with | controlFlow => rfl | _ => rfl
-    | err =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | earlyRet =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | broke =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
-    | continued =>
-      cases rhi with
-      | val v => cases v with | controlFlow => rfl | _ => rfl
-      | _ => rfl
+        | _ => rfl
+      | controlFlow => rfl
+      | _ =>
+        em_eval_hi
+        cases rhi with
+        | val vhi => cases vhi <;> rfl
+        | _ => rfl
+    | _ => rfl
   | whileFoldReturn c body ih_c ih_body =>
     cases hnr with | whileFoldReturn hr1 hr2 =>
     cases hnm with | whileFoldReturn hm1 hm2 =>
