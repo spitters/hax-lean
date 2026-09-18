@@ -552,7 +552,9 @@ These operate on `Int` (matching the typed pipeline's representation) but
 truncate results to `w` bits, modeling Rust's fixed-width semantics.
 haxpipeT emits these when it knows the Rust type width from the TExpr. -/
 
-/-- Truncate `n` to `w` bits (mod 2^w). -/
+/-- Truncate `n` to `w` bits: `n mod 2^w` for `n ≥ 0`, and `0` for `n < 0`. The
+    unsigned operations below apply it to values of unsigned types, which are
+    non-negative; `cast_uw` is the residue modulo `2^w` of every integer. -/
 @[inline] def mod2w (w : Nat) (n : Int) : Int := ↑(n.toNat % (2 ^ w))
 
 /-- Width-aware wrapping add: `(a + b) mod 2^w`. -/
@@ -597,8 +599,82 @@ haxpipeT emits these when it knows the Rust type width from the TExpr. -/
   let shift := n.toNat % w
   mod2w w ↑((xn <<< shift) ||| (xn >>> (w - shift)))
 
-/-- Width-aware cast: truncate to `dstWidth` bits. -/
+/-- Width-aware cast: truncate to `dstWidth` bits. Exact on non-negative arguments,
+    the values of an unsigned source; a signed source is cast with `cast_uw`. -/
 @[inline] def castVal_w (dstWidth : Nat) (a : Int) : Int := mod2w dstWidth a
+
+/-- The bit width of `usize` and `isize`: the platform word size, 32 or 64. -/
+abbrev usizeBits : Nat := System.Platform.numBits
+
+/-! ### Signed width-aware operations
+
+A value of a signed Rust type of width `w` is represented by its two's-complement
+value, an integer in `[-2^(w-1), 2^(w-1))`. `smod2w w` reduces an integer to that
+range, and `cast_uw w` to the unsigned range `[0, 2^w)`; both are congruences modulo
+`2^w`. The bitwise operations on a signed value act on its unsigned representative
+and read the result back as a signed value; the arithmetic operations reduce the
+exact integer result. The printer emits these for an operation tagged `op#iw`, the
+tag of a signed operand of width `w`. -/
+
+/-- Two's-complement reduction of `n` to `w` bits: the integer congruent to `n`
+    modulo `2^w` in `[-2^(w-1), 2^(w-1))`. -/
+@[inline] def smod2w (w : Nat) (n : Int) : Int := n.bmod (2 ^ w)
+
+/-- Cast to the signed type of width `w` from any integer type: two's-complement
+    truncation (Rust's `as iN`). -/
+@[inline] def cast_iw (w : Nat) (a : Int) : Int := smod2w w a
+
+/-- Cast to the unsigned type of width `w` from any integer type: the residue
+    modulo `2^w` (Rust's `as uN`, sign extension followed by truncation). -/
+@[inline] def cast_uw (w : Nat) (a : Int) : Int := a % ((2 ^ w : Nat) : Int)
+
+/-- Signed division of width `w`, rounding towards zero (Rust's `/` on `iN`). -/
+@[inline] def div_iw (w : Nat) (a b : Int) : Int := smod2w w (a.tdiv b)
+
+/-- Signed remainder of width `w`, with the sign of the dividend (Rust's `%` on
+    `iN`). -/
+@[inline] def rem_iw (w : Nat) (a b : Int) : Int := smod2w w (a.tmod b)
+
+/-- Arithmetic right shift of a signed value of width `w`. -/
+@[inline] def shr_iw (w : Nat) (a b : Int) : Int := smod2w w (a >>> b.toNat)
+
+/-- Left shift of a signed value of width `w`, truncated to `w` bits. -/
+@[inline] def shl_iw (w : Nat) (a b : Int) : Int := smod2w w (shl_w w (cast_uw w a) b)
+
+/-- Bitwise AND of two signed values of width `w`. -/
+@[inline] def bitand_iw (w : Nat) (a b : Int) : Int :=
+  smod2w w (bitand_w w (cast_uw w a) (cast_uw w b))
+
+/-- Bitwise OR of two signed values of width `w`. -/
+@[inline] def bitor_iw (w : Nat) (a b : Int) : Int :=
+  smod2w w (bitor_w w (cast_uw w a) (cast_uw w b))
+
+/-- Bitwise XOR of two signed values of width `w`. -/
+@[inline] def bitxor_iw (w : Nat) (a b : Int) : Int :=
+  smod2w w (bitxor_w w (cast_uw w a) (cast_uw w b))
+
+/-- Bitwise NOT of a signed value of width `w`. -/
+@[inline] def bitnot_iw (w : Nat) (a : Int) : Int := smod2w w (bitnot_w w (cast_uw w a))
+
+/-- Rotate right by `n` bits of a signed value of width `w`. -/
+@[inline] def rotate_right_iw (w : Nat) (x n : Int) : Int :=
+  smod2w w (rotate_right_w w (cast_uw w x) n)
+
+/-- Rotate left by `n` bits of a signed value of width `w`. -/
+@[inline] def rotate_left_iw (w : Nat) (x n : Int) : Int :=
+  smod2w w (rotate_left_w w (cast_uw w x) n)
+
+/-- Wrapping addition of signed values of width `w`. -/
+@[inline] def wrapping_add_iw (w : Nat) (a b : Int) : Int := smod2w w (a + b)
+
+/-- Wrapping subtraction of signed values of width `w`. -/
+@[inline] def wrapping_sub_iw (w : Nat) (a b : Int) : Int := smod2w w (a - b)
+
+/-- Wrapping multiplication of signed values of width `w`. -/
+@[inline] def wrapping_mul_iw (w : Nat) (a b : Int) : Int := smod2w w (a * b)
+
+/-- Wrapping negation of a signed value of width `w`. -/
+@[inline] def wrapping_neg_iw (w : Nat) (a : Int) : Int := smod2w w (-a)
 
 -- Indexing — out-of-bounds returns a[0] or a dummy value (never reached in extracted code)
 @[inline] def index {α : Type} [Inhabited α] (a : Array α) (i : Int) : α :=
@@ -790,8 +866,8 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def add_i8  (a b : Int) : Int := bmod_signed 8 (a + b)
 @[inline] def sub_i8  (a b : Int) : Int := bmod_signed 8 (a - b)
 @[inline] def mul_i8  (a b : Int) : Int := bmod_signed 8 (a * b)
-@[inline] def div_i8  (a b : Int) : Int := if b = 0 then 0 else bmod_signed 8 (a / b)
-@[inline] def rem_i8  (a b : Int) : Int := if b = 0 then 0 else bmod_signed 8 (a % b)
+@[inline] def div_i8  (a b : Int) : Int := if b = 0 then 0 else bmod_signed 8 (a.tdiv b)
+@[inline] def rem_i8  (a b : Int) : Int := if b = 0 then 0 else bmod_signed 8 (a.tmod b)
 @[inline] def neg_i8  (a : Int) : Int := bmod_signed 8 (-a)
 @[inline] def eq_i8   (a b : Int) : Bool := a == b
 @[inline] def ne_i8   (a b : Int) : Bool := a != b
@@ -804,8 +880,8 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def add_i16 (a b : Int) : Int := bmod_signed 16 (a + b)
 @[inline] def sub_i16 (a b : Int) : Int := bmod_signed 16 (a - b)
 @[inline] def mul_i16 (a b : Int) : Int := bmod_signed 16 (a * b)
-@[inline] def div_i16 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 16 (a / b)
-@[inline] def rem_i16 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 16 (a % b)
+@[inline] def div_i16 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 16 (a.tdiv b)
+@[inline] def rem_i16 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 16 (a.tmod b)
 @[inline] def neg_i16 (a : Int) : Int := bmod_signed 16 (-a)
 @[inline] def eq_i16  (a b : Int) : Bool := a == b
 @[inline] def ne_i16  (a b : Int) : Bool := a != b
@@ -818,8 +894,8 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def add_i32 (a b : Int) : Int := bmod_signed 32 (a + b)
 @[inline] def sub_i32 (a b : Int) : Int := bmod_signed 32 (a - b)
 @[inline] def mul_i32 (a b : Int) : Int := bmod_signed 32 (a * b)
-@[inline] def div_i32 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 32 (a / b)
-@[inline] def rem_i32 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 32 (a % b)
+@[inline] def div_i32 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 32 (a.tdiv b)
+@[inline] def rem_i32 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 32 (a.tmod b)
 @[inline] def neg_i32 (a : Int) : Int := bmod_signed 32 (-a)
 @[inline] def eq_i32  (a b : Int) : Bool := a == b
 @[inline] def ne_i32  (a b : Int) : Bool := a != b
@@ -832,8 +908,8 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def add_i64 (a b : Int) : Int := bmod_signed 64 (a + b)
 @[inline] def sub_i64 (a b : Int) : Int := bmod_signed 64 (a - b)
 @[inline] def mul_i64 (a b : Int) : Int := bmod_signed 64 (a * b)
-@[inline] def div_i64 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 64 (a / b)
-@[inline] def rem_i64 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 64 (a % b)
+@[inline] def div_i64 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 64 (a.tdiv b)
+@[inline] def rem_i64 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 64 (a.tmod b)
 @[inline] def neg_i64 (a : Int) : Int := bmod_signed 64 (-a)
 @[inline] def eq_i64  (a b : Int) : Bool := a == b
 @[inline] def ne_i64  (a b : Int) : Bool := a != b
@@ -861,10 +937,10 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def cast_u8_i16  (x : UInt8)  : Int := bmod_signed 16 (x.toBitVec.toNat : Int)
 @[inline] def cast_u16_i32 (x : UInt16) : Int := bmod_signed 32 (x.toBitVec.toNat : Int)
 @[inline] def cast_u32_i64 (x : UInt32) : Int := bmod_signed 64 (x.toBitVec.toNat : Int)
-@[inline] def cast_i8_u8   (x : Int) : UInt8  := UInt8.ofNat x.toNat
-@[inline] def cast_i16_u16 (x : Int) : UInt16 := UInt16.ofNat x.toNat
-@[inline] def cast_i32_u32 (x : Int) : UInt32 := UInt32.ofNat x.toNat
-@[inline] def cast_i64_u64 (x : Int) : UInt64 := UInt64.ofNat x.toNat
+@[inline] def cast_i8_u8   (x : Int) : UInt8  := UInt8.ofNat (x % 2 ^ 8).toNat
+@[inline] def cast_i16_u16 (x : Int) : UInt16 := UInt16.ofNat (x % 2 ^ 16).toNat
+@[inline] def cast_i32_u32 (x : Int) : UInt32 := UInt32.ofNat (x % 2 ^ 32).toNat
+@[inline] def cast_i64_u64 (x : Int) : UInt64 := UInt64.ofNat (x % 2 ^ 64).toNat
 
 /-! ### Collection operations -/
 
@@ -1118,10 +1194,30 @@ field for them. -/
   let s := a + b
   (mod2w w s, decide (s ≥ (2 : Int) ^ w))
 
-/-- `(a - b) mod 2^w`, with the borrow-out. -/
+/-- `(a - b) mod 2^w`, with the borrow-out, for `a` and `b` in `[0, 2^w)`. -/
 @[inline] def overflowing_sub_w (w : Nat) (a b : Int) : Int × Bool :=
   let d := a - b
-  (mod2w w d, decide (d < 0))
+  (mod2w w (d + ↑(2 ^ w)), decide (d < 0))
+
+/-- The `w / 8` big-endian bytes of a signed value of width `w`. -/
+@[inline] def to_be_bytes_iw (w : Nat) (a : Int) : Array Int := to_be_bytes_w w (cast_uw w a)
+
+/-- The `w / 8` little-endian bytes of a signed value of width `w`. -/
+@[inline] def to_le_bytes_iw (w : Nat) (a : Int) : Array Int := to_le_bytes_w w (cast_uw w a)
+
+/-- The signed value of width `w` whose big-endian bytes are `a`. -/
+@[inline] def from_be_bytes_iw (w : Nat) (a : Array Int) : Int := smod2w w (from_be_bytes_w w a)
+
+/-- The signed value of width `w` whose little-endian bytes are `a`. -/
+@[inline] def from_le_bytes_iw (w : Nat) (a : Array Int) : Int := smod2w w (from_le_bytes_w w a)
+
+/-- Wrapping addition of signed values of width `w`, with the overflow flag. -/
+@[inline] def overflowing_add_iw (w : Nat) (a b : Int) : Int × Bool :=
+  (smod2w w (a + b), decide (smod2w w (a + b) ≠ a + b))
+
+/-- Wrapping subtraction of signed values of width `w`, with the overflow flag. -/
+@[inline] def overflowing_sub_iw (w : Nat) (a b : Int) : Int × Bool :=
+  (smod2w w (a - b), decide (smod2w w (a - b) ≠ a - b))
 
 /-! ### Uninterpreted conversions -/
 

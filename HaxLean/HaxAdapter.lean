@@ -79,6 +79,32 @@ def firstObjKey (j : Json) : Option String :=
 
 /-! ## Helper: extract name from hax identifiers -/
 
+/-- The width part of an integer width tag: the bit width in decimal, and `size`
+    for `usize`/`isize`, whose width is the platform word size. -/
+def widthDigits : IntWidth → String
+  | .w8 => "8" | .w16 => "16" | .w32 => "32" | .w64 => "64" | .w128 => "128"
+  | .wsize => "size"
+
+/-- The width tag of an integer type: `widthDigits` of its width for an unsigned
+    type, the same prefixed with `i` for a signed type, and `none` for every
+    other type. A width-sensitive operation `op` on an operand of the type is
+    named `op#<tag>`. -/
+def intTypeTag? : ImpType → Option String
+  | .uint w => some (widthDigits w)
+  | .sint w => some ("i" ++ widthDigits w)
+  | _ => none
+
+/-- The tag of a cast from `srcTy` to `dstTy`: `i<w>` for a signed target (any
+    source), `<w>` for an unsigned target from an unsigned or non-integer source,
+    and `u<w>` for an unsigned target from a signed source, where `<w>` is
+    `widthDigits` of the target width. `none` for a non-integer target. -/
+def castTag? (srcTy dstTy : ImpType) : Option String :=
+  match dstTy, srcTy with
+  | .sint w, _ => some ("i" ++ widthDigits w)
+  | .uint w, .sint _ => some ("u" ++ widthDigits w)
+  | .uint w, _ => some (widthDigits w)
+  | _, _ => none
+
 /-- Extract the last meaningful name from a hax `DefId` path.
     DefId JSON: `{"krate": "...", "path": [{"data": {"TypeNs": "..."}, "disambiguator": 0}, ...]}` -/
 partial def extractDefIdName (j : Json) (collisions : List String := []) : String :=
@@ -112,9 +138,12 @@ partial def extractDefIdName (j : Json) (collisions : List String := []) : Strin
     -- unsigned widths sit at 6–11; measured on the exports: `u8::overflowing_add`
     -- is Impl 6, `u32::wrapping_add` Impl 8, `u64::to_be_bytes` Impl 9.
     -- Width-sensitive operations (wrapping_add, rotate_right, shr, shl, the
-    -- byte conversions) are suffixed with the bit-width so the runtime can
-    -- truncate correctly.
-    let implWidth : Option Nat := do
+    -- byte conversions) are suffixed with the width tag of the type
+    -- (`intTypeTag?`) so the runtime can truncate correctly. The signed impls
+    -- 0–5 are read only in the `core` crate; the typed parser replaces the tag
+    -- by the one of the call's operand type where that type is an integer.
+    let isCore := (inner.getObjValAs? String "krate").toOption == some "core"
+    let implWidth : Option String := do
       let segs := segments.toList
       let implSeg ← segs.find? fun seg =>
         match seg.getObjVal? "data" with
@@ -122,12 +151,18 @@ partial def extractDefIdName (j : Json) (collisions : List String := []) : Strin
         | _ => false
       let disambiguator ← (implSeg.getObjValAs? Nat "disambiguator").toOption
       match disambiguator with
-      | 6 => some 8    -- u8
-      | 7 => some 16   -- u16
-      | 8 => some 32   -- u32
-      | 9 => some 64   -- u64
-      | 10 => some 128 -- u128
-      | 11 => some 64  -- usize
+      | 0 => if isCore then some "i8" else none
+      | 1 => if isCore then some "i16" else none
+      | 2 => if isCore then some "i32" else none
+      | 3 => if isCore then some "i64" else none
+      | 4 => if isCore then some "i128" else none
+      | 5 => if isCore then some "isize" else none
+      | 6 => some "8"
+      | 7 => some "16"
+      | 8 => some "32"
+      | 9 => some "64"
+      | 10 => some "128"
+      | 11 => some "size"
       | _ => none
     let widthSensitiveOps := ["wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
       "rotate_right", "rotate_left", "shr", "shl",
@@ -728,33 +763,40 @@ partial def parseHaxType (j : Json) : ImpType :=
     else if let .ok _ := tyKind.getObjVal? "Arrow" then .unknown
     else .unknown
 
-/-- Extract integer bit width from a hax expression's `ty` field.
-    Returns `some w` for `uN`/`iN` types (where w ∈ {8, 16, 32, 64, 128}),
-    or `none` for non-integer types. Used by `Binary`/`Unary` parsers to
-    annotate trait-based operators (>>, ^, &, |, !) with their bit width
-    so the runtime can truncate correctly. -/
-def extractExprWidth (j : Json) : Option Nat :=
+/-- The hax type of an expression's `ty` field, `.unknown` when absent. -/
+def extractExprType (j : Json) : ImpType :=
   match j.getObjVal? "ty" with
-  | .ok tyJ =>
-    match parseHaxType tyJ with
-    | .uint .w8 | .sint .w8 => some 8
-    | .uint .w16 | .sint .w16 => some 16
-    | .uint .w32 | .sint .w32 => some 32
-    | .uint .w64 | .sint .w64 => some 64
-    | .uint .w128 | .sint .w128 => some 128
-    | .uint .wsize | .sint .wsize => some 64  -- usize/isize: assume 64-bit
-    | _ => none
-  | _ => none
+  | .ok tyJ => parseHaxType tyJ
+  | _ => .unknown
 
-/-- Suffix a width-sensitive operator name with its bit width if known. -/
-def annotateOpWidth (op : String) (width : Option Nat) : String :=
+/-- The width tag (`intTypeTag?`) of a hax expression's `ty` field: `some t` for an
+    integer type, `none` otherwise. Used by the `Binary`, `AssignOp` and `Unary`
+    parsers to annotate width-sensitive operators (`>>`, `^`, `&`, `|`, `!`) and the
+    sign-sensitive `/` and `%` with the width and signedness of their operand. -/
+def extractExprWidth (j : Json) : Option String :=
+  intTypeTag? (extractExprType j)
+
+/-- The tag (`castTag?`) of a hax `Cast` node, from the `ty` of its source and the
+    `ty` of the enclosing decorated node (the target type). -/
+def extractCastTag (srcJ outerJ : Json) : Option String :=
+  castTag? (extractExprType srcJ) (extractExprType outerJ)
+
+/-- Suffix an operator name with the width tag of its operand: every
+    width-sensitive operator when the tag is known, and `/`, `%` when the operand
+    is signed (the unsigned and untyped `/`, `%` agree with Rust). -/
+def annotateOpWidth (op : String) (width : Option String) : String :=
   let widthSensitive := ["BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Not",
                          "bitand", "bitor", "bitxor", "shl", "shr", "bitnot",
                          "wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
                          "rotate_right", "rotate_left"]
+  let signSensitive := ["Div", "Rem", "div", "rem"]
   if widthSensitive.contains op then
     match width with
     | some w => s!"{op}#{w}"
+    | none => op
+  else if signSensitive.contains op then
+    match width with
+    | some w => if w.startsWith "i" then s!"{op}#{w}" else op
     | none => op
   else op
 
@@ -1315,12 +1357,13 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
   | .error _ =>
   match h_Cast : j.getObjVal? "Cast" with
   | .ok data =>
-    -- Cast: annotate with target bit width from the outer expression's ty.
-    -- e.g., `x as u8` → app "cast#8" [x], `x as u32` → app "cast#32" [x]
+    -- Cast: annotate with the cast tag of the source type and the outer
+    -- expression's ty (the target type), e.g. `x as u8` → app "cast#8" [x],
+    -- `x as i32` → app "cast#i32" [x], `(x : i64) as u64` → app "cast#u64" [x].
     match h_Cast_src : data.getObjVal? "source" with
     | .ok srcJ =>
       let source ← parseHaxExpr srcJ
-      let targetWidth := extractExprWidth outerJ  -- outer ty = target type
+      let targetWidth := extractCastTag srcJ outerJ
       match targetWidth with
       | some w => return .app s!"cast#{w}" [source]
       | none => return .app "cast" [source]
@@ -2477,7 +2520,18 @@ where
       -- (e.g., to `core::slice::Impl::len`), the lookup returns
       -- `none` and we use the bare name.
       let funName' := disambiguateMethodCallWithImplMap funJ funName implMap
-      return .app funName' args
+      -- A width-tagged inherent integer method (`wrapping_add#32`) carries the
+      -- tag of its integer type: the result type where that is an integer
+      -- (`wrapping_*`, `rotate_*`, `from_*_bytes`), else the first argument's
+      -- (`to_*_bytes`, `overflowing_*`).
+      let funName'' := match funName'.splitOn "#" with
+        | [op, _] =>
+          match intTypeTag? (extractNodeType _parentJ) <|>
+              (args.head?.bind fun a => intTypeTag? a.ty) with
+          | some t => s!"{op}#{t}"
+          | none => funName'
+        | _ => funName'
+      return .app funName'' args
 
     else if let .ok data := j.getObjVal? "Let" then
       let exprJ ← data.getObjVal? "expr"
@@ -2605,8 +2659,11 @@ where
       let rawOp := match data.getObjVal? "op" with
         | .ok opJ => binOpName opJ
         | _ => "op"
-      let op := if rawOp.endsWith "Assign" then (rawOp.dropEnd 6).toString else rawOp
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
+      let baseOp := if rawOp.endsWith "Assign" then (rawOp.dropEnd 6).toString else rawOp
+      let lhsJ ← data.getObjVal? "lhs"
+      -- `x op= y` is `x = x op y`: the operator carries the tag of `x`, as in `Binary`.
+      let op := annotateOpWidth baseOp (extractExprWidth lhsJ)
+      let lhs ← parseHaxTExpr lhsJ implMap
       let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let rec stripD2 : TExpr → TExpr
         | .mk (.deref e) _ => stripD2 e
@@ -2718,7 +2775,8 @@ where
       match source.ty with
       | .bool => return .app "boolToInt" [source]
       | _ =>
-        let targetWidth := extractExprWidth _parentJ  -- outer decorated node has target ty
+        -- The outer decorated node has the target type.
+        let targetWidth := castTag? source.ty (extractExprType _parentJ)
         match targetWidth with
         | some w => return .app s!"cast#{w}" [source]
         | none => return .app "cast" [source]
