@@ -77,13 +77,46 @@ def sanitizeName (n : String) : String :=
     | _ => n
 
 /-- Handle width-annotated operation names (e.g. "wrapping_add#32").
-    The HaxAdapter annotates width-sensitive Rust ops with `#bitwidth` when
-    it can infer the type from the Impl discriminator. -/
+    The HaxAdapter annotates width-sensitive Rust ops with `#<tag>` when it can
+    infer the operand type: `<w>` for an unsigned operand, `i<w>` for a signed
+    one, and (`cast` only) `u<w>` for an unsigned target cast from a signed
+    source. A signed tag routes to the `_iw` runtime family (the width digits
+    after the `i`); a `cast` with a `u`-tag routes to `Hax.cast_uw`, a
+    truncation with no sign extension; everything else keeps the unsigned
+    `_w` family. -/
 def widthAwareRuntime (f : String) : String :=
   if f.any (· == '#') then
     let parts := f.splitOn "#"
     match parts with
-    | [op, w] => match op with
+    | [op, w] =>
+      if w.length > 0 && w.get 0 == 'i' then
+        let iw := w.drop 1
+        match op with
+        | "wrapping_add" => s!"Hax.wrapping_add_iw {iw}"
+        | "wrapping_sub" => s!"Hax.wrapping_sub_iw {iw}"
+        | "wrapping_mul" => s!"Hax.wrapping_mul_iw {iw}"
+        | "wrapping_neg" => s!"Hax.wrapping_neg_iw {iw}"
+        | "rotate_right" => s!"Hax.rotate_right_iw {iw}"
+        | "rotate_left"  => s!"Hax.rotate_left_iw {iw}"
+        | "shr" | "Shr"  => s!"Hax.shr_iw {iw}"
+        | "shl" | "Shl"  => s!"Hax.shl_iw {iw}"
+        | "bitand" | "BitAnd" => s!"Hax.bitand_iw {iw}"
+        | "bitor"  | "BitOr"  => s!"Hax.bitor_iw {iw}"
+        | "bitxor" | "BitXor" => s!"Hax.bitxor_iw {iw}"
+        | "bitnot" | "Not"    => s!"Hax.bitnot_iw {iw}"
+        | "cast"              => s!"Hax.cast_iw {iw}"
+        | "div" | "Div"       => s!"Hax.div_iw {iw}"
+        | "rem" | "Rem"       => s!"Hax.rem_iw {iw}"
+        | "to_be_bytes"        => s!"Hax.to_be_bytes_iw {iw}"
+        | "to_le_bytes"        => s!"Hax.to_le_bytes_iw {iw}"
+        | "from_be_bytes"      => s!"Hax.from_be_bytes_iw {iw}"
+        | "from_le_bytes"      => s!"Hax.from_le_bytes_iw {iw}"
+        | "overflowing_add"    => s!"Hax.overflowing_add_iw {iw}"
+        | "overflowing_sub"    => s!"Hax.overflowing_sub_iw {iw}"
+        | _ => s!"Hax.{op}"
+      else if op == "cast" && w.length > 0 && w.get 0 == 'u' then
+        s!"Hax.cast_uw {w.drop 1}"
+      else match op with
       | "wrapping_add" => s!"Hax.wrapping_add_w {w}"
       | "wrapping_sub" => s!"Hax.wrapping_sub_w {w}"
       | "wrapping_mul" => s!"Hax.wrapping_mul_w {w}"

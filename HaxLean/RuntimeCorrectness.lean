@@ -396,6 +396,13 @@ theorem signedCmpOps_noControlFlow :
   simp only [Hax.signedCmpOps]
   split <;> (intro h; cases h)
 
+theorem signedBitwiseOps_noControlFlow :
+    Hax.Builtins.NoControlFlow Hax.signedBitwiseOps := by
+  intro f args v h isBreak w heq; subst heq; revert h
+  simp only [Hax.signedBitwiseOps, Hax.wrapSint]
+  split <;> intro h
+  all_goals (first | cases h | (split at h <;> cases h))
+
 /-- `widthOps` never produces ControlFlow values.
     Proved via composition of NoControlFlow for each sub-helper. -/
 theorem widthOps_noControlFlow :
@@ -439,7 +446,13 @@ theorem widthOps_noControlFlow :
               exact signedArithOps_noControlFlow f args _ hf isBreak w rfl
             | none =>
               simp [hf] at h
-              exact signedCmpOps_noControlFlow f args _ h isBreak w rfl
+              cases hg : Hax.signedCmpOps f args with
+              | some vg =>
+                simp [hg] at h; subst h
+                exact signedCmpOps_noControlFlow f args _ hg isBreak w rfl
+              | none =>
+                simp [hg] at h
+                exact signedBitwiseOps_noControlFlow f args _ h isBreak w rfl
 
 /-- `widthAwareBuiltins` never produces ControlFlow values. -/
 theorem widthAwareBuiltins_noControlFlow :
@@ -482,7 +495,7 @@ theorem widthOps_deepNoControlFlow :
     Hax.Builtins.DeepNoControlFlow Hax.widthOps := by
   intro f args v h hargs
   simp [Hax.widthOps] at h
-  rcases h with h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h⟩⟩⟩⟩⟩⟩ <;> revert h
+  rcases h with h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h | ⟨-, h⟩⟩⟩⟩⟩⟩⟩ <;> revert h
   · simp only [Hax.widthArithOps, Hax.wrapUint]
     split <;> intro h <;> (repeat' split at h) <;> cases h <;>
       simp_all [Value.deepNoControlFlow]
@@ -513,6 +526,9 @@ theorem widthOps_deepNoControlFlow :
     split <;> intro h <;> (repeat' split at h) <;> cases h <;>
       simp_all [Value.deepNoControlFlow]
   · simp only [Hax.signedCmpOps]
+    split <;> intro h <;> (repeat' split at h) <;> cases h <;>
+      simp_all [Value.deepNoControlFlow]
+  · simp only [Hax.signedBitwiseOps, Hax.wrapSint]
     split <;> intro h <;> (repeat' split at h) <;> cases h <;>
       simp_all [Value.deepNoControlFlow]
 
