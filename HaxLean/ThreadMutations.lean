@@ -185,15 +185,22 @@ def tVarTuple : List String → TExpr
 
 /-- Rebind `vars` from the right-nested tuple `tup`, then continue with `cont`.
     A Lean n-tuple `(v₁,…,vₙ)` is `(v₁, (v₂, … vₙ))`, so the head is `tup.1`
-    (`proj 0`) and the rest live in `tup.2` (`proj 1`) — recurse there. The last
-    variable binds the remaining tail directly. (A flat `tup.i` would be invalid:
-    `(a,b,c).3` doesn't exist.) -/
+    (`proj 0`, which the renderer's untyped `.proj` fallback already prints
+    correctly at any arity) and the rest live in `tup.2` — recurse there. The
+    tail is built with the `::proj::.2` marker (`Hax.PrettyPrint.projPath`'s
+    convention, consumed by the `::proj::` arm of `toLean`) rather than a bare
+    `.proj tup 1`, because a bare `.proj _ i` node is read by the untyped
+    fallback as a FLAT index into an n-ary tuple and only `i = 0` is safe there;
+    the marker instead says directly "the second component of this pair",
+    which is what the right-nested encoding always means for index `1`. The
+    last variable binds the remaining tail directly (a flat `tup.i` would be
+    invalid: `(a,b,c).3` doesn't exist). -/
 def tDestructure : List String → TExpr → TExpr → TExpr
   | [], _, cont => cont
   | [v], tup, cont => .mk (.letBind v tup cont) cont.ty
   | v :: vs, tup, cont =>
     .mk (.letBind v (.mk (.proj tup 0) .unknown)
-      (tDestructure vs (.mk (.proj tup 1) .unknown) cont)) cont.ty
+      (tDestructure vs (.mk (.app "::proj::.2" [tup]) .unknown) cont)) cont.ty
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
     bindings.

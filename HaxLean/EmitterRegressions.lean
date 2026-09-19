@@ -9,6 +9,8 @@ public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
 public meta import HaxLean.PrettyPrintT
 public import HaxLean.PrettyPrintT
+public meta import HaxLean.ThreadMutations
+public import HaxLean.ThreadMutations
 
 /-!
 # Emitter regressions
@@ -170,5 +172,68 @@ def nestedProjTyped : TExpr :=
   .mk (.proj inner 1) .unknown
 
 #guard toLean (markNamedProj nestedProjTyped).erase == "(t.2.1).2"
+
+/-! ## `tDestructure`'s tail projection, marker-based
+
+`tDestructure` (`HaxLean/ThreadMutations.lean`) rebinds the variables of a
+branch-mutation join from the right-nested tuple `_mtup`. Its recursion
+threads the tail (`_mtup.2`, `(_mtup.2).2`, …) into the next call as a
+`::proj::.2` marker rather than a bare `TExpr.proj _ 1`: a bare `.proj e i`
+node is read by the untyped `.proj` fallback as a flat index into an
+n-ary tuple, valid only at `i = 0`, whereas the marker states directly
+"the second component of this pair" — the meaning index `1` always has in
+the right-nested encoding, at any depth. -/
+
+/-- Two mutated variables: `_mtup = (h, block)`, `h` at the head (renders via
+    the untyped `.proj` fallback's `i = 0` case) and `block` at the tail
+    (renders via the `::proj::.2` marker). -/
+def destr2 : TExpr :=
+  tDestructure ["h", "block"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)
+
+#guard toLean (markNamedProj destr2).erase 1 == "  let h := _mtup.1\n  let block := _mtup.2\n  cont"
+
+/-- Three mutated variables: the second and third both go through the
+    marker, one recursion level apart, so `c`'s marker wraps `b`'s. -/
+def destr3 : TExpr :=
+  tDestructure ["a", "b", "c"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)
+
+#guard toLean (markNamedProj destr3).erase 1 ==
+  "  let a := _mtup.1\n  let b := (_mtup.2).1\n  let c := (_mtup.2).2\n  cont"
+
+/-! ## `tDestructure` behind its own `_mtup` binding
+
+`destr2`/`destr3` above destructure a free `_mtup`; the branch-mutation
+rewrite (`ThreadMutations.tThreadMut`) always destructures a `_mtup` it
+just bound to the joined branches' value (`ThreadMutations.lean`, the
+`.letBind "_mtup" ifE (tDestructure m …)` construction). That extra
+binding is what `extractTupleDestr` (`PrettyPrint.lean`) inspects to
+decide whether the whole chain collapses to a tuple pattern
+`let (a, b) := ifE`: at two components the chain's tail binds directly to
+a `::proj::.2`-marked `_mtup`, which `extractTupleDestr` still recognises
+component-by-component, so it collapses. At three or more components the
+middle components project a marker that is itself wrapped in another
+marker, which `extractTupleDestr` does not follow; it refuses the
+collapse and each binding renders on its own line through the markers
+`destr3` already pins, with `_mtup` itself bound to `ifE`. -/
+
+/-- Two components behind a `_mtup` binding collapse to a tuple pattern. -/
+def destr2Wrapped : TExpr :=
+  .mk (.letBind "_mtup" (.mk (.var "ifE") .unknown)
+    (tDestructure ["h", "block"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)))
+    .unknown
+
+#guard toLean (markNamedProj destr2Wrapped).erase 1 ==
+  "  let (h, block) := ifE\n  cont"
+
+/-- Three components behind a `_mtup` binding do not collapse: `_mtup` is
+    bound to `ifE` and each component projects it, rather than the first
+    component aliasing to the whole of `ifE`. -/
+def destr3Wrapped : TExpr :=
+  .mk (.letBind "_mtup" (.mk (.var "ifE") .unknown)
+    (tDestructure ["a", "b", "c"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)))
+    .unknown
+
+#guard toLean (markNamedProj destr3Wrapped).erase 1 ==
+  "  let _mtup := ifE\n  let a := _mtup.1\n  let b := (_mtup.2).1\n  let c := (_mtup.2).2\n  cont"
 
 end Hax.EmitterRegressions

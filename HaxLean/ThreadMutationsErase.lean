@@ -181,7 +181,7 @@ def destructure : List String → ImpExpr → ImpExpr → ImpExpr
   | [], _, cont => cont
   | [v], tup, cont => .letBind v tup cont
   | v :: vs, tup, cont =>
-    .letBind v (.proj tup 0) (destructure vs (.proj tup 1) cont)
+    .letBind v (.proj tup 0) (destructure vs (.app "::proj::.2" [tup]) cont)
 
 /-! ## Erase commutation for the helpers -/
 
@@ -291,7 +291,8 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
   | cons v vs ih =>
     cases vs with
     | nil => simp [tDestructure, destructure, TExpr.erase]
-    | cons v₂ vs => simp [tDestructure, destructure, TExpr.erase, ih]
+    | cons v₂ vs =>
+      simp [tDestructure, destructure, TExpr.erase, TExpr.eraseList_eq, ih]
 
 /-! ## Untyped twins of the `&mut` write-back rewrites
 

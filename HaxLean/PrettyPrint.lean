@@ -366,19 +366,37 @@ partial def exprContainsVar (name : String) : ImpExpr → Bool
 
 /-- Detect tuple destructuring pattern in letBind body.
     Pattern: letBind "a" (proj (var tmpName) 0) (letBind "b" (proj (var tmpName) 1) rest)
-    Returns (field names, remaining body) or none. -/
+    Returns (field names, remaining body) or none.
+
+    Every recognised step projects `tmpName` itself (a bare variable, or a
+    `::proj::`-marked application of it). A chain over three or more
+    components, as the branch-mutation rewrite (`ThreadMutations.tDestructure`)
+    produces, right-nests: only the first component projects the bare
+    variable this way, and every later component projects a
+    `::proj::.2`-wrapped receiver that is itself not `tmpName` — this
+    matcher does not follow that receiver. Reaching such a component ends
+    the recognised prefix; whether that end is the legitimate tail of the
+    chain (nothing further down still reads `tmpName`) or an unrecognised
+    middle (something further down still does) decides the result: a
+    legitimate tail returns one more field name and the chain is done, an
+    unrecognised middle refuses the whole match instead of returning a
+    prefix silently truncated to whatever it happened to consume — a
+    truncated prefix elsewhere aliased the tuple pattern's first name to
+    the entire tuple value. A refusal here is not a print failure: the
+    caller falls back to `markProjChain`'s rendering of each binding as its
+    own individually correct projection. -/
 def extractTupleDestr (tmpName : String) : ImpExpr → Option (List String × ImpExpr)
   | .letBind n (.proj (.var v) _) rest =>
     if v == tmpName then
       match extractTupleDestr tmpName rest with
       | some (names, body) => some (n :: names, body)
-      | none => some ([n], rest)
+      | none => if exprContainsVar tmpName rest then none else some ([n], rest)
     else none
   | .letBind n (.app f [.var v]) rest =>
     if v == tmpName && f.startsWith "::proj::" then
       match extractTupleDestr tmpName rest with
       | some (names, body) => some (n :: names, body)
-      | none => some ([n], rest)
+      | none => if exprContainsVar tmpName rest then none else some ([n], rest)
     else none
   | _ => none
 
