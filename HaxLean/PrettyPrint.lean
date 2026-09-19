@@ -83,11 +83,14 @@ def sanitizeName (n : String) : String :=
     source. A signed tag routes to the `_iw` runtime family (the width digits
     after the `i`); a `cast` with a `u`-tag routes to `Hax.cast_uw`, a
     truncation with no sign extension; everything else keeps the unsigned
-    `_w` family. -/
+    `_w` family. The tag `dep` marks an operator-named call whose operand is
+    not an integer (`PrettyPrintT.markDepOperators`); it renders as the bare
+    sanitized name, a field of the generated `Deps` class. -/
 def widthAwareRuntime (f : String) : String :=
   if f.any (· == '#') then
     let parts := f.splitOn "#"
     match parts with
+    | [op, "dep"] => sanitizeName op
     | [op, w₀] =>
       -- `usize` and `isize` carry the tag `size`, whose width is the platform
       -- word size; the runtime names it `Hax.usizeBits`.

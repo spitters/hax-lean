@@ -185,6 +185,108 @@ def depTypeStr (ty : ImpType) (sl : String → Option String)
   | .unit => if isReturn then "Array Int" else "Unit"
   | _ => ty.toLeanTypeStrSurface sl
 
+/-! ## Operator calls on a type parameter
+
+A Rust trait method with an operator name (`Mul::mul`, `Add::add`, `Neg::neg`,
+`PartialEq::eq`, …) arrives as the same app head as the integer operator. On an
+integer or `Bool` operand the head is a runtime builtin (`Hax.mul`, `Hax.beq`);
+on a type-parameter operand it is an external function of the extraction and
+belongs to the generated `Deps` class, like any other unresolved trait method.
+The adapter parses a generic type parameter as `.slice .int` (an erased `F`
+prints as `Array (Int)`), and no Rust operator is defined on a slice of
+integers, so that type at the operand identifies the call. -/
+
+/-- The app heads that name a Rust operator method, in the lowercase form of a
+    trait-method call and the capitalized form of the binary-op node. -/
+def depOperatorNames : List String :=
+  ["add", "sub", "mul", "div", "rem", "neg",
+   "eq", "ne", "lt", "le", "gt", "ge",
+   "not", "and", "or",
+   "shl", "shr", "bitand", "bitor", "bitxor", "bitnot",
+   "Add", "Sub", "Mul", "Div", "Rem", "Neg",
+   "Eq", "Ne", "Lt", "Le", "Gt", "Ge",
+   "Not", "And", "Or",
+   "Shl", "Shr", "BitAnd", "BitOr", "BitXor"]
+
+/-- The tag appended to an operator head whose operand is a type parameter:
+    `mul#dep`. `widthAwareRuntime` renders the tagged head as the bare name. -/
+def depOpTag : String := "dep"
+
+/-- Whether an app head is a tagged operator call (`mul#dep`). -/
+def isDepOpHead (f : String) : Bool :=
+  match f.splitOn "#" with
+  | [op, tag] => tag == depOpTag && depOperatorNames.contains op
+  | _ => false
+
+/-- The operator name under a `#dep` tag; other heads are returned unchanged. -/
+def depOpBaseName (f : String) : String :=
+  if isDepOpHead f then (f.splitOn "#").head! else f
+
+/-- Whether a type is the adapter's encoding of a generic type parameter,
+    `.slice .int`, under any number of references. -/
+def isErasedTypeParam : ImpType → Bool
+  | .ref inner _ => isErasedTypeParam inner
+  | .slice .int => true
+  | _ => false
+
+/-- Tag every operator-named app whose operand is a type parameter with
+    `#dep`. The operand type is the first argument's; when that is unknown
+    the result type stands in (the operand and result types of an arithmetic
+    operator coincide, and a comparison's `Bool` result never qualifies). An
+    integer, `Bool` or unknown operand leaves the head unchanged. -/
+partial def markDepOperators : TExpr → TExpr
+  | .mk (.app f args) ty =>
+    let args' := args.map markDepOperators
+    let operandTy := match args.head? with
+      | some a => if a.ty.isUnknown then ty else a.ty
+      | none => ty
+    let f' := if depOperatorNames.contains f && isErasedTypeParam operandTy
+      then s!"{f}#{depOpTag}" else f
+    .mk (.app f' args') ty
+  | .mk (.letBind n v b) ty => .mk (.letBind n (markDepOperators v) (markDepOperators b)) ty
+  | .mk (.lam ps b) ty => .mk (.lam ps (markDepOperators b)) ty
+  | .mk (.tuple es) ty => .mk (.tuple (es.map markDepOperators)) ty
+  | .mk (.proj e i) ty => .mk (.proj (markDepOperators e) i) ty
+  | .mk (.ifThenElse c t e) ty =>
+    .mk (.ifThenElse (markDepOperators c) (markDepOperators t) (markDepOperators e)) ty
+  | .mk (.match_ s arms) ty =>
+    .mk (.match_ (markDepOperators s) (arms.map fun (p, e) => (p, markDepOperators e))) ty
+  | .mk (.seq a b) ty => .mk (.seq (markDepOperators a) (markDepOperators b)) ty
+  | .mk (.borrow e) ty => .mk (.borrow (markDepOperators e)) ty
+  | .mk (.deref e) ty => .mk (.deref (markDepOperators e)) ty
+  | .mk (.assign n r) ty => .mk (.assign n (markDepOperators r)) ty
+  | .mk (.forLoop v l h b) ty =>
+    .mk (.forLoop v (markDepOperators l) (markDepOperators h) (markDepOperators b)) ty
+  | .mk (.forLoopRev v l h b) ty =>
+    .mk (.forLoopRev v (markDepOperators l) (markDepOperators h) (markDepOperators b)) ty
+  | .mk (.whileLoop c b) ty => .mk (.whileLoop (markDepOperators c) (markDepOperators b)) ty
+  | .mk (.break_ (some e)) ty => .mk (.break_ (some (markDepOperators e))) ty
+  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (markDepOperators e)) ty
+  | .mk (.questionMark e) ty => .mk (.questionMark (markDepOperators e)) ty
+  | .mk (.forFold v l h b) ty =>
+    .mk (.forFold v (markDepOperators l) (markDepOperators h) (markDepOperators b)) ty
+  | .mk (.forFoldRev v l h b) ty =>
+    .mk (.forFoldRev v (markDepOperators l) (markDepOperators h) (markDepOperators b)) ty
+  | .mk (.whileFold c b) ty => .mk (.whileFold (markDepOperators c) (markDepOperators b)) ty
+  | .mk (.forFoldReturn v l h b) ty =>
+    .mk (.forFoldReturn v (markDepOperators l) (markDepOperators h) (markDepOperators b)) ty
+  | .mk (.forFoldRevReturn v l h b) ty =>
+    .mk (.forFoldRevReturn v (markDepOperators l) (markDepOperators h) (markDepOperators b)) ty
+  | .mk (.whileFoldReturn c b) ty =>
+    .mk (.whileFoldReturn (markDepOperators c) (markDepOperators b)) ty
+  | .mk (.cfBreak e) ty => .mk (.cfBreak (markDepOperators e)) ty
+  | .mk (.cfContinue e) ty => .mk (.cfContinue (markDepOperators e)) ty
+  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (markDepOperators e)) ty
+  | .mk (.ann e) ty => .mk (.ann (markDepOperators e)) ty
+  | .mk (.namedProj t e) ty => .mk (.namedProj t (markDepOperators e)) ty
+  | e => e
+
+/-- Remove the `#dep` tags of `markDepOperators` from an erased body: the
+    `ImpExpr` literal emitted for the agreement proof carries the untagged
+    heads. -/
+def unmarkDepOperators (e : ImpExpr) : ImpExpr :=
+  depOperatorNames.foldl (fun acc op => rewriteAppName s!"{op}#{depOpTag}" op acc) e
+
 set_option linter.unusedVariables false in
 /-- Walk a (post-pipeline) `TExpr` and collect `(varName, annType)` pairs
     from every `.ann (.var v) ty` pattern. These are the type ascriptions
@@ -343,7 +445,9 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     -- Erased newtype constructors are defined by the newtype preamble
     -- (see `newtypeCtorNames` above), not opaque Deps methods.
     !newtypeCtorNames.contains f &&
-    (!isAlwaysBuiltin f || freeVarDeps.contains f)
+    -- A `#dep`-tagged operator call is an external trait method
+    -- (`markDepOperators`); its field is named by the bare operator.
+    (!isAlwaysBuiltin f || freeVarDeps.contains f || isDepOpHead f)
 
   -- === Generate struct definitions ===
   -- Reuse existing PrettyPrint struct generation (it's structural, not heuristic)
@@ -518,7 +622,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
                 else "Array Int"
               else if retStr == "Int" && !usedAsInt then retStr  -- trust TExpr type
               else retStr
-          s!"  {sanitizeName d} : {retStr}"
+          s!"  {sanitizeName (depOpBaseName d)} : {retStr}"
         else
           -- Default arg type: match untyped pipeline's logic
           let hasArrayArg := argTypes.any fun ty =>
@@ -531,8 +635,9 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
               | some impTy => if impTy.isUnknown then defaultArgType else depTypeStr impTy structLookup
               | none => defaultArgType
             s!"({letter} : {ty})") |> " ".intercalate
-          s!"  {sanitizeName d} {paramStr} : {retStr}"
-      let exportList := depInfo.map (fun (d, _, _, _) => sanitizeName d) |> " ".intercalate
+          s!"  {sanitizeName (depOpBaseName d)} {paramStr} : {retStr}"
+      let exportList := depInfo.map (fun (d, _, _, _) => sanitizeName (depOpBaseName d))
+        |> " ".intercalate
       s!"/-- External dependencies for {moduleName} extraction (auto-generated from typed TExpr). -/\nclass {depsClassName} where\n{"\n".intercalate fields}\n\nexport {depsClassName} ({exportList})\n\nvariable [{depsClassName}]\n"
 
   -- Assemble preamble
@@ -931,6 +1036,11 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
   let procTdefs := procTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
+  -- Operator calls on a type parameter are tagged `#dep` in both TExpr
+  -- families: the raw one supplies the `Deps` signature, the processed one
+  -- the rendered body. The literal below is emitted untagged.
+  let rawTdefs := rawTdefs.map fun (n, te) => (n, markDepOperators te)
+  let procTdefs := procTdefs.map fun (n, te) => (n, markDepOperators te)
   -- Build struct-new mapping from rawTdefs (which have types from hax JSON)
   let newStructMap := buildNewStructMap rawTdefs structMeta
   -- TCB pre-process: rewrite `.namedProj T x` in the post-pipeline TExpr
@@ -1198,7 +1308,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let surfaceDef := if needsPartial then surfaceDef.replace "def " "partial def " else surfaceDef
     s!"{surfaceDef}")
   let impExprs := "\n".intercalate (defs.map fun (n, e) =>
-    let impExprDef := toLeanImpExprDef n e
+    let impExprDef := toLeanImpExprDef n (unmarkDepOperators e)
     let impExprDef := if needsPartial then impExprDef.replace "def " "partial def " else impExprDef
     s!"{impExprDef}")
   let footer := s!"\n{impExprs}\nend\n\nend  -- noncomputable section\n\nend {moduleName}\n"
