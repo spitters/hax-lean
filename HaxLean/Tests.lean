@@ -447,6 +447,16 @@ def writebackTable : List (String × Nat) :=
         == ImpExpr.seq (.assign "st" (.var "q")) (.var "st")            -- true
 #eval (tReturnMutParam none writebackBody).erase == writebackBody.erase  -- true
 
+/-- `k(&mut st, &mut o)` — two `&mut` parameters, outside the write-back fragment. -/
+def twoMutCall : TExpr :=
+  .mk (.app "k" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true),
+    .mk (.borrow (.mk (.var "o") mutBlockTy)) (.ref mutBlockTy true)]) .unit
+
+#eval tDroppedMutCalls writebackFns sFields writebackTable writebackStmt    -- []
+#eval tDroppedMutCalls writebackFns sFields writebackTable twoMutCall       -- [("k", [0, 1])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable valueCall        -- [("h", [0])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable writebackIndexed -- [("f", [0])]
+
 /-! ## Struct-field writes
 
 A write through a struct-field place lowers to an assignment of the root

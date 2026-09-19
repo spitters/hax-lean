@@ -75,6 +75,10 @@ structure Options where
   help : Bool := false
   name : String := "result"
   filterFns : Option (List String) := none  -- only include these functions
+  /-- Emit even when a call through `&mut` is left outside the write-back
+      rewrite, so that its effect does not reach the caller. Off by default:
+      such an extraction misdescribes the source. -/
+  allowDroppedWriteback : Bool := false
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -95,6 +99,8 @@ where
     | "--name" :: n :: rest, opts => go rest { opts with name := n }
     | "--filter" :: fns :: rest, opts =>
       go rest { opts with filterFns := some (fns.splitOn ",") }
+    | "--allow-dropped-writeback" :: rest, opts =>
+      go rest { opts with allowDroppedWriteback := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }

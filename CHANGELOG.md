@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `haxpipeT` refuses to emit when a call through `&mut` falls outside the
+  write-back rewrite (a callee with two `&mut` parameters or a value result,
+  or an argument that is not a variable, field place or slice range): the
+  emitted function would keep the argument's initial value and ignore the
+  callee's effect. Each such call is reported as `ERROR dropped-writeback`,
+  with `INFO dropped-writeback-calls=<n>`; `--allow-dropped-writeback` emits
+  anyway. (`tDroppedMutCalls` in `ThreadMutations`.)
 - The renderer's accumulator extraction reads a statement-`if` branch's
   mutations through nested `if`s, `match`es and loops, and a branch that
   mutates a variable under nested control is joined by a tuple rebinding

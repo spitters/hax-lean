@@ -552,6 +552,122 @@ def mutWriteFns (sf : StructFieldNames) (fns : List (String × FnTypeInfo))
   let r1 := mutWriteStep sf defs [] cands
   mutWriteStep sf defs (mutWriteTable r1) cands
 
+/-! ### Calls through `&mut` outside the write-back fragment
+
+`tRebindCall` rewrites a call into an assignment only when the callee is a
+write-back function and the argument in write-back position is a variable, a
+single-level field place or a slice-range place. Every other call whose callee
+takes a `&mut` parameter keeps its value, and in statement position the
+renderer drops that value: the effect the Rust performs through the reference
+never reaches the caller. `tDroppedMutCalls` lists those calls, so the driver
+can refuse to emit a surface that misdescribes the source. -/
+
+/-- The positions of the `&mut` parameters of `f`: from its signature when the
+    export carries one, else from `builtinWriteTable`. -/
+def tMutParamPositions (sigs : List (String × FnTypeInfo)) (f : String) : List Nat :=
+  match sigs.lookup f with
+  | some info =>
+    info.paramTypes.zipIdx.filterMap fun pi =>
+      match pi.1.2 with
+      | .ref _ true => some pi.2
+      | _ => none
+  | none =>
+    match builtinWriteTable.lookup f with
+    | some i => [i]
+    | none => []
+
+/-- The positions of the arguments of a call that are typed as mutable
+    references. A trait method or a stdlib receiver has no signature in the
+    export; its `&mut` arguments are visible only here. -/
+def tMutArgPositions (args : List TExpr) : List Nat :=
+  args.zipIdx.filterMap fun ai =>
+    match ai.1 with
+    | .mk _ (.ref _ true) => some ai.2
+    | _ => none
+
+/-- Heads that denote a place or a functional update rather than a call with an
+    effect: the struct/array/slice update forms the parse arms produce for a
+    write, the `index_mut` place of a slice-range argument (handled at the
+    enclosing call by `tMutArgSlice`), and the projection heads `.f`. -/
+def tPlaceHead (f : String) : Bool :=
+  f.startsWith "." || f.startsWith "struct_update#" || f == "array_update"
+    || f == "slice_update" || f == "index_mut" || f == "index"
+
+/-- Whether `tRebindCall` turns the call `f args` into an assignment. -/
+def tCallRebound (sf : StructFieldNames) (writers : List (String × Nat)) (f : String)
+    (args : List TExpr) (ty : ImpType) : Bool :=
+  match tRebindCall sf writers f args ty with
+  | .mk (.assign _ _) _ => true
+  | _ => false
+
+/-- The calls in `e` that pass a `&mut` argument — by the callee's signature
+    or by the argument's type — and that `tRebindMutCalls` leaves as plain
+    calls, as `(callee, &mut positions)`. A place or update head
+    (`tPlaceHead`) is not a call. -/
+def tDroppedMutCalls (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
+    (writers : List (String × Nat)) : TExpr → List (String × List Nat)
+  | .mk (.app f args) ty =>
+      let here :=
+        if tPlaceHead f then []
+        else
+          let ps := (tMutParamPositions sigs f ++ tMutArgPositions args).eraseDups
+          if ps.isEmpty || tCallRebound sf writers f args ty then [] else [(f, ps)]
+      here ++ goE args
+  | .mk (.letBind _ v b) _ => tDroppedMutCalls sigs sf writers v ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.lam _ b) _ => tDroppedMutCalls sigs sf writers b
+  | .mk (.tuple es) _ => goE es
+  | .mk (.proj e _) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.ifThenElse c t e) _ =>
+      tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers t
+        ++ tDroppedMutCalls sigs sf writers e
+  | .mk (.match_ s arms) _ => tDroppedMutCalls sigs sf writers s ++ goA arms
+  | .mk (.seq a b) _ => tDroppedMutCalls sigs sf writers a ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.borrow e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.deref e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.assign _ rhs) _ => tDroppedMutCalls sigs sf writers rhs
+  | .mk (.forLoop _ lo hi b) _ =>
+      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
+        ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.forLoopRev _ lo hi b) _ =>
+      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
+        ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.whileLoop c b) _ => tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.earlyReturn e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.questionMark e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.forFold _ lo hi b) _ =>
+      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
+        ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.forFoldRev _ lo hi b) _ =>
+      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
+        ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.whileFold c b) _ => tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.forFoldReturn _ lo hi b) _ =>
+      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
+        ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.forFoldRevReturn _ lo hi b) _ =>
+      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
+        ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.whileFoldReturn c b) _ =>
+      tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers b
+  | .mk (.cfBreak e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.cfContinue e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.cfBreakContinue e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.ann e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.namedProj _ e) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.break_ (some e)) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.lit _) _ => []
+  | .mk (.var _) _ => []
+  | .mk .unitVal _ => []
+  | .mk (.break_ none) _ => []
+  | .mk .continue_ _ => []
+where
+  goE : List TExpr → List (String × List Nat)
+    | [] => []
+    | e :: es => tDroppedMutCalls sigs sf writers e ++ goE es
+  goA : List (ImpPat × TExpr) → List (String × List Nat)
+    | [] => []
+    | (_, e) :: rest => tDroppedMutCalls sigs sf writers e ++ goA rest
+
 /-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
     `if`-statement detection in `tThreadMut` looks through `.ann` and thus
     commutes with type erasure. No `.ann` nodes exist at this pre-pipeline
