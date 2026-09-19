@@ -29,6 +29,8 @@ public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
 public meta import HaxLean.Json.AdapterProbes
 public import HaxLean.Json.AdapterProbes
+public meta import HaxLean.PrettyPrintT
+public import HaxLean.PrettyPrintT
 public meta import HaxLean.EmitterRegressions
 public import HaxLean.EmitterRegressions
 
@@ -833,5 +835,43 @@ def rendersOnce (e : ImpExpr) (s : String) : Bool :=
 #guard rendersOnce nestedIfLoop
   "let in_idx := if Hax.lt in_idx (Hax.array_len input) then Hax.add in_idx (1 : Int) else in_idx"
 #guard rendersOnce nestedIfLoop "Hax.cfContinue (total, in_idx, bits, result, out_idx)"
+
+/-! ## Typed literals
+
+The `_texpr` literal of a generated definition: `retypeWith` rebuilds the
+emitted `ImpExpr` as a `TExpr` carrying the node types of the typed term,
+`toLeanTExpr` prints it, and `TExpr.erase` maps it back. -/
+
+/-- `fn f(x: u32) -> u32 { x + 1 }`, in the adapter's parameter encoding. -/
+def addOneT : TExpr :=
+  .mk (.letBind "x" (.mk (.var "x") (.uint .w32))
+    (.mk (.app "add" [.mk (.var "x") (.uint .w32), .mk (.lit (.int 1)) (.uint .w32)])
+      (.uint .w32))) (.uint .w32)
+
+/-- The `ImpExpr` literal of `addOneT`. -/
+def addOneImp : ImpExpr := addOneT.erase
+
+#eval toLeanImpExpr addOneImp ==
+  "(.letBind \"x\" (.var \"x\") (.app \"add\" [(.var \"x\"), (.lit (ImpLit.int 1))]))"  -- true
+
+-- The rebuilt term prints every node with its type.
+#eval toLeanTExpr (fun _ => none) (retypeWith addOneImp addOneT) ==
+  "(.mk (.letBind \"x\" (.mk (.var \"x\") (.uint .w32)) (.mk (.app \"add\" [(.mk (.var \"x\") (.uint .w32)), (.mk (.lit (ImpLit.int 1)) (.uint .w32))]) (.uint .w32))) (.uint .w32))"  -- true
+
+-- The erase round trip: the rebuilt term erases to the literal it was built
+-- from, which is what the emitted `example ... := rfl` states.
+#eval toLeanImpExpr (retypeWith addOneImp addOneT).erase == toLeanImpExpr addOneImp  -- true
+
+-- A repeated type is shared by an abbreviation, which the printer uses in
+-- place of the rendering.
+#eval mkTyAbbrevs "ty_" (collectTyStrs addOneT) == [("(.uint .w32)", "ty_0")]  -- true
+#eval toLeanTExpr (fun s => if s == "(.uint .w32)" then some "ty_0" else none)
+    (retypeWith addOneImp addOneT) ==
+  "(.mk (.letBind \"x\" (.mk (.var \"x\") ty_0) (.mk (.app \"add\" [(.mk (.var \"x\") ty_0), (.mk (.lit (ImpLit.int 1)) ty_0)]) ty_0)) ty_0)"  -- true
+
+-- Types come from the typed term: rebuilt against a term with none, every
+-- node is `.unknown`.
+#eval toLeanTExpr (fun _ => none) (retypeWith addOneImp unknownTExpr) ==
+  "(.mk (.letBind \"x\" (.mk (.var \"x\") .unknown) (.mk (.app \"add\" [(.mk (.var \"x\") .unknown), (.mk (.lit (ImpLit.int 1)) .unknown)]) .unknown)) .unknown)"  -- true
 
 end Hax.Tests

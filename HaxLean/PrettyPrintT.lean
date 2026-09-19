@@ -1041,6 +1041,243 @@ partial def markNamedProj : TExpr → TExpr
   | .mk (.ann e) ty => .mk (.ann (markNamedProj e)) ty
   | e => e
 
+/-! ## Certified Extraction: TExpr Literal Emitter
+
+Emits the typed term of a generated definition as a Lean constructor term,
+beside the `ImpExpr` literal that `TExpr.erase` maps it to. The types of the
+nodes come from the pipelined `TExpr`; the tree comes from the emitted
+`ImpExpr`, so the two literals agree by `rfl`. -/
+
+/-- An `IntWidth` as Lean constructor syntax. -/
+def widthToConstructor : IntWidth → String
+  | .w8 => ".w8" | .w16 => ".w16" | .w32 => ".w32"
+  | .w64 => ".w64" | .w128 => ".w128" | .wsize => ".wsize"
+
+/-- An `ImpType` as Lean constructor syntax. -/
+partial def impTypeToConstructor : ImpType → String
+  | .bool => ".bool"
+  | .int => ".int"
+  | .uint w => s!"(.uint {widthToConstructor w})"
+  | .sint w => s!"(.sint {widthToConstructor w})"
+  | .unit => ".unit"
+  | .str => ".str"
+  | .tuple elems =>
+    s!"(.tuple [{", ".intercalate (elems.map impTypeToConstructor)}])"
+  | .option inner => s!"(.option {impTypeToConstructor inner})"
+  | .result ok err =>
+    s!"(.result {impTypeToConstructor ok} {impTypeToConstructor err})"
+  | .controlFlow brk cont =>
+    s!"(.controlFlow {impTypeToConstructor brk} {impTypeToConstructor cont})"
+  | .adt name args =>
+    s!"(.adt \"{name}\" [{", ".intercalate (args.map impTypeToConstructor)}])"
+  | .fn params ret =>
+    s!"(.fn [{", ".intercalate (params.map impTypeToConstructor)}] {impTypeToConstructor ret})"
+  | .ref inner isMut => s!"(.ref {impTypeToConstructor inner} {isMut})"
+  | .slice inner => s!"(.slice {impTypeToConstructor inner})"
+  | .array inner len => s!"(.array {impTypeToConstructor inner} {len})"
+  | .typeVar name => s!"(.typeVar \"{name}\")"
+  | .unknown => ".unknown"
+
+/-- The `TExpr` carrying no type information. -/
+def unknownTExpr : TExpr := .mk .unitVal .unknown
+
+/-- Drop the `.ann` markers at the root of a `TExpr`. -/
+partial def stripTAnn : TExpr → TExpr
+  | .mk (.ann e) _ => stripTAnn e
+  | t => t
+
+/-- Whether an `ImpExpr` and a `TExprKind` have the same head constructor.
+    `.namedProj` heads the `.0` projection it erases to, and `.ann` heads a
+    type ascription. -/
+def sameHead : ImpExpr → TExprKind → Bool
+  | .lit _, .lit _ => true
+  | .var _, .var _ => true
+  | .letBind _ _ _, .letBind _ _ _ => true
+  | .lam _ _, .lam _ _ => true
+  | .app f _, .namedProj _ _ => f == ".0"
+  | .app _ _, .app _ _ => true
+  | .tuple _, .tuple _ => true
+  | .proj _ _, .proj _ _ => true
+  | .ifThenElse _ _ _, .ifThenElse _ _ _ => true
+  | .match_ _ _, .match_ _ _ => true
+  | .unitVal, .unitVal => true
+  | .seq _ _, .seq _ _ => true
+  | .borrow _, .borrow _ => true
+  | .deref _, .deref _ => true
+  | .assign _ _, .assign _ _ => true
+  | .forLoop _ _ _ _, .forLoop _ _ _ _ => true
+  | .forLoopRev _ _ _ _, .forLoopRev _ _ _ _ => true
+  | .whileLoop _ _, .whileLoop _ _ => true
+  | .break_ _, .break_ _ => true
+  | .continue_, .continue_ => true
+  | .earlyReturn _, .earlyReturn _ => true
+  | .questionMark _, .questionMark _ => true
+  | .forFold _ _ _ _, .forFold _ _ _ _ => true
+  | .forFoldRev _ _ _ _, .forFoldRev _ _ _ _ => true
+  | .whileFold _ _, .whileFold _ _ => true
+  | .forFoldReturn _ _ _ _, .forFoldReturn _ _ _ _ => true
+  | .forFoldRevReturn _ _ _ _, .forFoldRevReturn _ _ _ _ => true
+  | .whileFoldReturn _ _, .whileFoldReturn _ _ => true
+  | .cfBreak _, .cfBreak _ => true
+  | .cfContinue _, .cfContinue _ => true
+  | .cfBreakContinue _, .cfBreakContinue _ => true
+  | .typeAscription _ _, .ann _ => true
+  | _, _ => false
+
+/-- The immediate sub-expressions of a `TExpr`, in constructor order; a
+    `match_`'s scrutinee comes first, followed by the arm bodies. -/
+def tChildren : TExpr → List TExpr
+  | .mk (.letBind _ v b) _ => [v, b]
+  | .mk (.lam _ b) _ => [b]
+  | .mk (.app _ args) _ => args
+  | .mk (.tuple elems) _ => elems
+  | .mk (.proj e _) _ => [e]
+  | .mk (.ifThenElse c t e) _ => [c, t, e]
+  | .mk (.match_ scrut arms) _ => scrut :: arms.map (·.2)
+  | .mk (.seq a b) _ => [a, b]
+  | .mk (.borrow e) _ => [e]
+  | .mk (.deref e) _ => [e]
+  | .mk (.assign _ r) _ => [r]
+  | .mk (.forLoop _ l h b) _ => [l, h, b]
+  | .mk (.forLoopRev _ l h b) _ => [l, h, b]
+  | .mk (.whileLoop c b) _ => [c, b]
+  | .mk (.break_ (some e)) _ => [e]
+  | .mk (.earlyReturn e) _ => [e]
+  | .mk (.questionMark e) _ => [e]
+  | .mk (.forFold _ l h b) _ => [l, h, b]
+  | .mk (.forFoldRev _ l h b) _ => [l, h, b]
+  | .mk (.whileFold c b) _ => [c, b]
+  | .mk (.forFoldReturn _ l h b) _ => [l, h, b]
+  | .mk (.forFoldRevReturn _ l h b) _ => [l, h, b]
+  | .mk (.whileFoldReturn c b) _ => [c, b]
+  | .mk (.cfBreak e) _ => [e]
+  | .mk (.cfContinue e) _ => [e]
+  | .mk (.cfBreakContinue e) _ => [e]
+  | .mk (.ann e) _ => [e]
+  | .mk (.namedProj _ e) _ => [e]
+  | _ => []
+
+/-- Rebuild `e` as a `TExpr`, taking each node's type from the node of `t` at
+    the same position when the two have the same head constructor and
+    `.unknown` otherwise. The tree is `e`'s, so `TExpr.erase` maps the result
+    back to `e` for every `e` without a `.typeAscription` node. -/
+partial def retypeWith (e : ImpExpr) (t : TExpr) : TExpr :=
+  let t := stripTAnn t
+  let ok := sameHead e t.kind
+  let ty := if ok then t.ty else .unknown
+  let cs := if ok then tChildren t else []
+  let sub (i : Nat) (x : ImpExpr) : TExpr := retypeWith x (cs.getD i unknownTExpr)
+  match e with
+  | .lit v => .mk (.lit v) ty
+  | .var n => .mk (.var n) ty
+  | .unitVal => .mk .unitVal ty
+  | .continue_ => .mk .continue_ ty
+  | .letBind n v b => .mk (.letBind n (sub 0 v) (sub 1 b)) ty
+  | .lam ps b => .mk (.lam ps (sub 0 b)) ty
+  | .app f args => .mk (.app f (args.mapIdx fun i a => sub i a)) ty
+  | .tuple elems => .mk (.tuple (elems.mapIdx fun i a => sub i a)) ty
+  | .proj x i => .mk (.proj (sub 0 x) i) ty
+  | .ifThenElse c th el => .mk (.ifThenElse (sub 0 c) (sub 1 th) (sub 2 el)) ty
+  | .match_ scrut arms =>
+    .mk (.match_ (sub 0 scrut) (arms.mapIdx fun i (p, b) => (p, sub (i + 1) b))) ty
+  | .seq a b => .mk (.seq (sub 0 a) (sub 1 b)) ty
+  | .borrow x => .mk (.borrow (sub 0 x)) ty
+  | .deref x => .mk (.deref (sub 0 x)) ty
+  | .assign n r => .mk (.assign n (sub 0 r)) ty
+  | .forLoop v l h b => .mk (.forLoop v (sub 0 l) (sub 1 h) (sub 2 b)) ty
+  | .forLoopRev v l h b => .mk (.forLoopRev v (sub 0 l) (sub 1 h) (sub 2 b)) ty
+  | .whileLoop c b => .mk (.whileLoop (sub 0 c) (sub 1 b)) ty
+  | .break_ (some x) => .mk (.break_ (some (sub 0 x))) ty
+  | .break_ none => .mk (.break_ none) ty
+  | .earlyReturn x => .mk (.earlyReturn (sub 0 x)) ty
+  | .questionMark x => .mk (.questionMark (sub 0 x)) ty
+  | .forFold v l h b => .mk (.forFold v (sub 0 l) (sub 1 h) (sub 2 b)) ty
+  | .forFoldRev v l h b => .mk (.forFoldRev v (sub 0 l) (sub 1 h) (sub 2 b)) ty
+  | .whileFold c b => .mk (.whileFold (sub 0 c) (sub 1 b)) ty
+  | .forFoldReturn v l h b => .mk (.forFoldReturn v (sub 0 l) (sub 1 h) (sub 2 b)) ty
+  | .forFoldRevReturn v l h b =>
+    .mk (.forFoldRevReturn v (sub 0 l) (sub 1 h) (sub 2 b)) ty
+  | .whileFoldReturn c b => .mk (.whileFoldReturn (sub 0 c) (sub 1 b)) ty
+  | .cfBreak x => .mk (.cfBreak (sub 0 x)) ty
+  | .cfContinue x => .mk (.cfContinue (sub 0 x)) ty
+  | .cfBreakContinue x => .mk (.cfBreakContinue (sub 0 x)) ty
+  | .typeAscription x _ => .mk (.ann (sub 0 x)) ty
+
+/-- Emit a `TExpr` as Lean constructor syntax. `tyName` supplies the
+    abbreviation a file shares for a rendered type. -/
+partial def toLeanTExpr (tyName : String → Option String) (t : TExpr) : String :=
+  let rec' := toLeanTExpr tyName
+  let kindStr :=
+    match t.kind with
+    | .lit l => s!"(.lit ({litToConstructor l}))"
+    | .var n => s!"(.var \"{n}\")"
+    | .unitVal => ".unitVal"
+    | .continue_ => ".continue_"
+    | .letBind n v b => s!"(.letBind \"{n}\" {rec' v} {rec' b})"
+    | .lam ps b =>
+      s!"(.lam [{", ".intercalate (ps.map (fun p => s!"\"{p}\""))}] {rec' b})"
+    | .app f args => s!"(.app \"{f}\" [{", ".intercalate (args.map rec')}])"
+    | .tuple elems => s!"(.tuple [{", ".intercalate (elems.map rec')}])"
+    | .proj e i => s!"(.proj {rec' e} {i})"
+    | .ifThenElse c th el => s!"(.ifThenElse {rec' c} {rec' th} {rec' el})"
+    | .match_ scrut arms =>
+      let armStrs := arms.map fun (p, body) =>
+        s!"({patToConstructor p}, {rec' body})"
+      s!"(.match_ {rec' scrut} [{", ".intercalate armStrs}])"
+    | .seq a b => s!"(.seq {rec' a} {rec' b})"
+    | .borrow e => s!"(.borrow {rec' e})"
+    | .deref e => s!"(.deref {rec' e})"
+    | .assign n r => s!"(.assign \"{n}\" {rec' r})"
+    | .forLoop v l h b => s!"(.forLoop \"{v}\" {rec' l} {rec' h} {rec' b})"
+    | .forLoopRev v l h b => s!"(.forLoopRev \"{v}\" {rec' l} {rec' h} {rec' b})"
+    | .whileLoop c b => s!"(.whileLoop {rec' c} {rec' b})"
+    | .break_ (some e) => s!"(.break_ (some {rec' e}))"
+    | .break_ none => "(.break_ none)"
+    | .earlyReturn e => s!"(.earlyReturn {rec' e})"
+    | .questionMark e => s!"(.questionMark {rec' e})"
+    | .forFold v l h b => s!"(.forFold \"{v}\" {rec' l} {rec' h} {rec' b})"
+    | .forFoldRev v l h b => s!"(.forFoldRev \"{v}\" {rec' l} {rec' h} {rec' b})"
+    | .whileFold c b => s!"(.whileFold {rec' c} {rec' b})"
+    | .forFoldReturn v l h b =>
+      s!"(.forFoldReturn \"{v}\" {rec' l} {rec' h} {rec' b})"
+    | .forFoldRevReturn v l h b =>
+      s!"(.forFoldRevReturn \"{v}\" {rec' l} {rec' h} {rec' b})"
+    | .whileFoldReturn c b => s!"(.whileFoldReturn {rec' c} {rec' b})"
+    | .cfBreak e => s!"(.cfBreak {rec' e})"
+    | .cfContinue e => s!"(.cfContinue {rec' e})"
+    | .cfBreakContinue e => s!"(.cfBreakContinue {rec' e})"
+    | .ann e => s!"(.ann {rec' e})"
+    | .namedProj n e => s!"(.namedProj \"{n}\" {rec' e})"
+  let tyStr :=
+    let s := impTypeToConstructor t.ty
+    (tyName s).getD s
+  s!"(.mk {kindStr} {tyStr})"
+
+/-- The rendered type of every node of a `TExpr`, with multiplicity. -/
+partial def collectTyStrs (t : TExpr) : List String :=
+  impTypeToConstructor t.ty :: (tChildren t).foldl (fun acc c => acc ++ collectTyStrs c) []
+
+/-- Abbreviation names, keyed by rendered type, for the types a file's `TExpr`
+    literals repeat: those occurring at least twice whose rendering is longer
+    than the name replacing it. -/
+def mkTyAbbrevs (pfx : String) (tyStrs : List String) : List (String × String) :=
+  let sorted := tyStrs.mergeSort (fun a b => a ≤ b)
+  let grouped := sorted.foldl (fun acc s =>
+    match acc with
+    | (k, n) :: tl => if k == s then (k, n + 1) :: tl else (s, 1) :: acc
+    | [] => [(s, 1)]) ([] : List (String × Nat))
+  let shared := grouped.reverse.filter fun (s, n) => n ≥ 2 && s.length ≥ pfx.length + 3
+  shared.mapIdx fun i (s, _) => (s, s!"{pfx}{i}")
+
+/-- The `TExpr` literal of a generated definition. -/
+def toLeanTExprDef (tyName : String → Option String) (name : String) (t : TExpr) : String :=
+  s!"def {sanitizeName (name ++ "_texpr")} : TExpr :=\n  {toLeanTExpr tyName t}\n"
+
+/-- The erasure identity between a definition's `TExpr` and `ImpExpr`
+    literals. -/
+def toLeanEraseExample (name : String) : String :=
+  s!"example : {sanitizeName (name ++ "_texpr")}.erase = {sanitizeName (name ++ "_impExpr")} := rfl"
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
@@ -1101,6 +1338,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         | none => []
       (n, tRewriteStructFromElem structMeta fnRetTypes procTdefs te)
   let procTdefs := procTdefs.map fun (n, te) => (n, tFixProjectionPaths te)
+  -- The typed terms the `TExpr` literals take their node types from: the
+  -- pipelined ones when present, the raw ones otherwise.
+  let srcTdefs : List (String × TExpr) :=
+    if procTdefs.isEmpty then rawTdefs else procTdefs
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
   let defs : List (String × ImpExpr) :=
     if procTdefs.isEmpty then
@@ -1195,6 +1436,25 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       | .letBind _ (.var _) b => stripParams b
       | e => e
     hasGuardRecursion n (stripParams e)
+  -- `TExpr` literals: the emitted `ImpExpr` tree carrying the node types of
+  -- the typed term. A definition whose rebuilt term does not print the same
+  -- `ImpExpr` as its literal — a `.typeAscription` node, which no `TExpr`
+  -- constructor erases to — is left without one.
+  let texprs : List (String × TExpr) := defs.filterMap fun (n, e0) =>
+    let e := unmarkDepOperators e0
+    let src := (srcTdefs.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
+    let t := retypeWith e src
+    if toLeanImpExpr t.erase == toLeanImpExpr e then some (n, t) else none
+  let tyPfx :=
+    if (definedNames ++ structNames ++ allAppNames).any (·.startsWith "ty_")
+      then "impTy_" else "ty_"
+  let tyAbbrevs := mkTyAbbrevs tyPfx (texprs.foldl (fun acc (_, t) => acc ++ collectTyStrs t) [])
+  let tyName : String → Option String := fun s =>
+    (tyAbbrevs.find? (·.1 == s)).map (·.2)
+  let texprTyBlock := if tyAbbrevs.isEmpty then "" else
+    "/-- Type annotations shared by the `TExpr` literals. -/\n"
+      ++ "\n".intercalate (tyAbbrevs.map fun (s, n) => s!"abbrev {n} : ImpType := {s}")
+      ++ "\n\n"
   -- Compute Bool-returning function names from TExpr types (for condToLean type-directed rendering)
   -- Compute Bool-returning function names from TExpr types
   let boolNames := fnTypes.filterMap fun (n, ti) =>
@@ -1323,7 +1583,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- upstream `Hax` Rust repo when it is a Lake dependency, whose
   -- `proof-libs/lean/Hax/` has no `Runtime.lean`. The untyped path's
   -- standalone preamble (`PrettyPrint.lean`) is separate.
-  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.Semantics\n\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\nset_option maxHeartbeats 6400000\n\nnamespace {moduleName}\n\nopen Hax\n\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{inductiveBlock}{newtypeBlock}{preamble}\n{typeAliasBlock}mutual\n\n"
+  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\n\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\nset_option maxHeartbeats 6400000\n\nnamespace {moduleName}\n\nopen Hax\n\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{inductiveBlock}{newtypeBlock}{preamble}\n{typeAliasBlock}{texprTyBlock}mutual\n\n"
   let body := "\n".intercalate (defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
@@ -1336,7 +1596,17 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let impExprDef := toLeanImpExprDef n (unmarkDepOperators e)
     let impExprDef := if needsPartial then impExprDef.replace "def " "partial def " else impExprDef
     s!"{impExprDef}")
-  let footer := s!"\n{impExprs}\nend\n\nend  -- noncomputable section\n\nend {moduleName}\n"
+  -- A `partial def` is opaque, so the erasure identity is emitted only for a
+  -- file whose literals are ordinary definitions.
+  let texprBlock := if texprs.isEmpty then "" else
+    let ds := "\n".intercalate (texprs.map fun (n, t) =>
+      let d := toLeanTExprDef tyName n t
+      if needsPartial then d.replace "def " "partial def " else d)
+    s!"{ds}\n"
+  let exampleBlock := if texprs.isEmpty || needsPartial then "" else
+    "\n".intercalate (texprs.map fun (n, _) => toLeanEraseExample n) ++ "\n\n"
+  let footer :=
+    s!"\n{impExprs}\n{texprBlock}end\n\n{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax

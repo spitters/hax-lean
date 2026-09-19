@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `--emit-certified` emits the typed literal of each function beside its
+  `ImpExpr` literal: `def f_texpr : TExpr` carrying the node types of the
+  pipelined `TExpr`, and `example : f_texpr.erase = f_impExpr := rfl`. The
+  literal's tree is the emitted `ImpExpr` re-typed node by node
+  (`retypeWith`), so a node the untyped post-erase passes rewrote is typed
+  `.unknown` rather than mistyped. The types a file repeats are shared as
+  `abbrev ty_<i> : ImpType` above the definitions. A function whose rebuilt
+  term does not erase to its literal — one with an `ImpExpr.typeAscription`
+  node, which no `TExpr` constructor erases to — gets neither, and a file
+  emitted `partial` gets the literals without the identity.
+  (`impTypeToConstructor`, `retypeWith`, `toLeanTExpr`, `mkTyAbbrevs` in
+  `PrettyPrintT`.)
 - The `&mut` write-back rewrite covers a callee with several `&mut`
   parameters and a callee whose Rust result carries a value. Such a callee
   returns the tuple of its result and its written parameters, and a call to it
