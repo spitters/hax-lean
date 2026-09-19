@@ -234,11 +234,17 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (processedDefs : List (String × ImpExpr) := [])
     (procTdefs : List (String × TExpr) := [])
+    (newtypes : HaxAdapter.NewtypeMap := [])
     : String × List (String × String) × List String :=
   -- Use processed defs for structural analysis (qualified projections etc.)
   let defs := if processedDefs.isEmpty then tdefs.map fun (n, te) => (n, te.erase) else processedDefs
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
+  -- Erased newtype constructors (`struct T(Inner)`, called as `T(x)`) are
+  -- rendered as an identity function defined by the newtype preamble
+  -- (`toLeanCertifiedFileTyped`'s `newtypeBlock`), not as an unknown call —
+  -- they must not surface as a `Deps` field.
+  let newtypeCtorNames := newtypes.map (·.1)
   let structIsPassthrough := computeStructPassthrough structMeta defs
   let baseStructLookup := mkStructLookup structMeta structIsPassthrough
   -- Compute opaque-ADT-vs-Deps-method clashes: when a type used in a Deps
@@ -334,6 +340,9 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     -- Qualified enum-variant heads (`E::V`) are constructors of the emitted
     -- inductive, not Deps methods.
     (f.splitOn "::").length == 1 &&
+    -- Erased newtype constructors are defined by the newtype preamble
+    -- (see `newtypeCtorNames` above), not opaque Deps methods.
+    !newtypeCtorNames.contains f &&
     (!isAlwaysBuiltin f || freeVarDeps.contains f)
 
   -- === Generate struct definitions ===
@@ -1001,7 +1010,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       | _ => (fname, e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
-  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs)
+  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs) (newtypes := newtypes)
   -- Keep the BASE structLookup (no clash augment) for opaque-ADT
   -- collection — augmenting it would make collectOpaqueAdtNames treat
   -- clashing names as known structs and skip them, leaving `Commitment_T`
@@ -1157,16 +1166,22 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         s!"inductive {ei.name} : Type where\n{variants}{derivingClause}"
       "/-- Rust enum definitions extracted from hax JSON. -/\n"
         ++ "\n\n".intercalate lines ++ "\n\n"
-  -- Newtype preamble: emit `abbrev <T>_T := <Inner>` and the
-  -- definitional unwrap `def «<T>.0» x := x` per newtype.
+  -- Newtype preamble: emit `abbrev <T>_T := <Inner>`, the definitional
+  -- unwrap `def «<T>.0» x := x`, and the definitional constructor wrap
+  -- `def <T> x := x` (the inverse of `«<T>.0»`) per newtype. Hax erases the
+  -- newtype at the type level, so a source call `T(x)` is the identity on
+  -- `x`; without this definition the call's head `T` would be an unknown
+  -- function and fall into the `Deps` class (see `newtypeCtorNames` in
+  -- `generatePreambleTyped`, which excludes it from that computation).
   let newtypeBlock : String :=
     if newtypeRenamed.isEmpty then ""
     else
       let lines := newtypeRenamed.map fun (aliasName, innerStr) =>
         -- Original short name (without `_T`): used for the projection name
+        -- and the constructor name.
         let bareName := if aliasName.endsWith "_T" then aliasName.dropRight 2 else aliasName
-        s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x"
-      "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps. Inner types may themselves be\n    axiomatized (see the axiom block above). -/\n"
+        s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def {bareName} (x : {innerStr}) : {aliasName} := x"
+      "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps and definitional constructors. Inner\n    types may themselves be axiomatized (see the axiom block above). -/\n"
         ++ "\n".intercalate lines ++ "\n\n"
   -- The runtime, the AST and the reference semantics are imported under their
   -- `HaxLean.*` names. A bare `Hax.*` module name would resolve against the
