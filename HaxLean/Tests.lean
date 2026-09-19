@@ -431,31 +431,33 @@ def writebackTable : List (String × Nat) :=
   mutWriteTable (mutWriteFns sFields writebackFns writebackDefs)
 
 #eval mutWriteCandidates writebackFns
-  -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
-#eval mutWriteStep sFields writebackDefs [] (mutWriteCandidates writebackFns)
-  -- [("f", 0, "st"), ("m", 0, "self")]
+  -- [("f", [0], ["st"], false), ("h", [0], ["st"], true), ("k", [0, 1], ["st", "o"], false),
+  --  ("m", [0], ["self"], false), ("n", [0], ["v"], false)]
+#eval mutWriteStep sFields writebackDefs [] [] (mutWriteCandidates writebackFns)
+  -- [("f", [0], ["st"], false), ("m", [0], ["self"], false)]
 #eval mutWriteFns sFields writebackFns writebackDefs
-  -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
-#eval mutWriteParams (mutWriteFns sFields writebackFns writebackDefs)
-  -- [("f", "st"), ("m", "self"), ("n", "v")]
-#eval tAssignedVars (tRebindMutCalls sFields writebackTable writebackStmt)      -- ["st"]
-#eval tAssignedVars (tRebindMutCalls sFields writebackTable writebackIndexed)   -- []
-#eval (tRebindMutCalls sFields writebackTable valueCall).erase == valueCall.erase  -- true
+  -- [("f", [0], ["st"], false), ("m", [0], ["self"], false), ("n", [0], ["v"], false)]
+#eval mutWriteReturns (mutWriteFns sFields writebackFns writebackDefs)
+  -- [("f", ["st"], false), ("m", ["self"], false), ("n", ["v"], false)]
+#eval mutWriteTupleTable (mutWriteFns sFields writebackFns writebackDefs)  -- []
+#eval tAssignedVars (tRebindMutCalls sFields writebackTable [] writebackStmt)      -- ["st"]
+#eval tAssignedVars (tRebindMutCalls sFields writebackTable [] writebackIndexed)   -- []
+#eval (tRebindMutCalls sFields writebackTable [] valueCall).erase == valueCall.erase  -- true
 #eval tAssignedVars
-  (tThreadMut true (tRebindMutCalls sFields writebackTable writebackStmt))  -- ["st"]
-#eval (tReturnMutParam (some "st") writebackBody).erase
+  (tThreadMut true (tRebindMutCalls sFields writebackTable [] writebackStmt))  -- ["st"]
+#eval (tReturnMutParams ["st"] false writebackBody).erase
         == ImpExpr.seq (.assign "st" (.var "q")) (.var "st")            -- true
-#eval (tReturnMutParam none writebackBody).erase == writebackBody.erase  -- true
+#eval (tReturnMutParams [] false writebackBody).erase == writebackBody.erase  -- true
 
 /-- `k(&mut st, &mut o)` — two `&mut` parameters, outside the write-back fragment. -/
 def twoMutCall : TExpr :=
   .mk (.app "k" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true),
     .mk (.borrow (.mk (.var "o") mutBlockTy)) (.ref mutBlockTy true)]) .unit
 
-#eval tDroppedMutCalls writebackFns sFields writebackTable writebackStmt    -- []
-#eval tDroppedMutCalls writebackFns sFields writebackTable twoMutCall       -- [("k", [0, 1])]
-#eval tDroppedMutCalls writebackFns sFields writebackTable valueCall        -- [("h", [0])]
-#eval tDroppedMutCalls writebackFns sFields writebackTable writebackIndexed -- [("f", [0])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] writebackStmt    -- []
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] twoMutCall       -- [("k", [0, 1])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] valueCall        -- [("h", [0])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] writebackIndexed -- [("f", [0])]
 
 /-! ## Struct-field writes
 
@@ -501,7 +503,7 @@ def writebackFieldCall : TExpr :=
   .mk (.app "f" [.mk (.borrow fieldWriteLhs) (.ref mutStateTy true),
     .mk (.var "blk") (.ref mutBlockTy false)]) .unit
 
-#eval (tRebindMutCalls sFields writebackTable writebackFieldCall).erase
+#eval (tRebindMutCalls sFields writebackTable [] writebackFieldCall).erase
   == ImpExpr.assign "self" (.app "struct_update#S#1#2" [.var "self",
        .app "f" [.borrow (.app ".buf" [.var "self"]), .var "blk"]])  -- true
 
@@ -552,31 +554,156 @@ def sliceFromCall : TExpr :=
 
 def sliceWriteTable : List (String × Nat) := writebackTable ++ builtinWriteTable
 
-#eval (tRebindMutCalls sFields sliceWriteTable sliceRangeCall).erase
+#eval (tRebindMutCalls sFields sliceWriteTable [] sliceRangeCall).erase
   == ImpExpr.assign "header" (.app "slice_update"
        [.var "header", .lit (.int 16), .lit (.int 48),
         .app "copy_from_slice"
           [.app "index_mut" [.var "header", .app "Range" [.lit (.int 16), .lit (.int 48)]],
            .var "sig"]])  -- true
-#eval (tRebindMutCalls sFields sliceWriteTable sliceToCall).erase
+#eval (tRebindMutCalls sFields sliceWriteTable [] sliceToCall).erase
   == ImpExpr.assign "header" (.app "slice_update"
        [.var "header", .lit (.int 0), .lit (.int 16),
         .app "copy_from_slice"
           [.app "index_mut" [.var "header", .app "RangeTo" [.lit (.int 16)]],
            .var "nonce"]])  -- true
-#eval (tRebindMutCalls sFields sliceWriteTable sliceFromCall).erase
+#eval (tRebindMutCalls sFields sliceWriteTable [] sliceFromCall).erase
   == ImpExpr.assign "header" (.app "slice_update"
        [.var "header", .lit (.int 16), .app "len" [.var "header"],
         .app "copy_from_slice"
           [.app "index_mut" [.var "header", .app "RangeFrom" [.lit (.int 16)]],
            .var "tail"]])  -- true
-#eval tAssignedVars (tRebindMutCalls sFields sliceWriteTable sliceRangeCall)  -- ["header"]
+#eval tAssignedVars (tRebindMutCalls sFields sliceWriteTable [] sliceRangeCall)  -- ["header"]
 -- Declined: a full range carries no bounds.
 #eval (tMutArgSlice (.mk (.app "index_mut" [.mk (.var "header") mutBlockTy,
     .mk (.app "RangeFull" []) .unknown]) mutBlockTy)).isNone  -- true
 #eval toLean (.app "slice_update"
     [.var "header", .lit (.int 0), .lit (.int 16), .var "nonce"])
   == "Hax.slice_update header (0 : Int) (16 : Int) nonce"  -- true
+
+/-! ## Tuple-form `&mut` write-back
+
+A callee with a value result, or with several `&mut` parameters, returns the
+tuple of its result and its written parameters. A call site binds that tuple to
+`_wb` and assigns each component: from a `let`, from an assignment, and from a
+statement. A call in any other position keeps its value and is reported by
+`tDroppedMutCalls`.
+
+The three signatures are the three shapes: a value result with one written
+parameter (`p`, `rej`) and a `()` result with two (`w`). -/
+
+/-- `fn p(dst: &mut [u8; 64], pos: Int) -> Int`. -/
+def pushSig : FnTypeInfo := ⟨[("dst", .ref mutBlockTy true), ("pos", .int)], .int⟩
+/-- `fn rej(f: &mut [u32; 8], idx: Int) -> Int`. -/
+def rejSig : FnTypeInfo := ⟨[("f", .ref mutStateTy true), ("idx", .int)], .int⟩
+/-- `fn w(st: &mut [u32; 8], o: &mut [u8; 64])`. -/
+def twoWriteSig : FnTypeInfo :=
+  ⟨[("st", .ref mutStateTy true), ("o", .ref mutBlockTy true)], .unit⟩
+
+def tupleFns : List (String × FnTypeInfo) :=
+  [("p", pushSig), ("rej", rejSig), ("w", twoWriteSig)]
+
+/-- `dst = q; pos + 1` — `p`'s body: it writes its parameter and ends in a
+    value. -/
+def pushBody : TExpr :=
+  .mk (.seq (.mk (.assign "dst" (.mk (.var "q") mutBlockTy)) .unit)
+    (.mk (.app "add" [.mk (.var "pos") .int, .mk (.lit (.int 1)) .int]) .int)) .int
+/-- `f = q; idx + 1` — `rej`'s body. -/
+def rejBody : TExpr :=
+  .mk (.seq (.mk (.assign "f" (.mk (.var "q") mutStateTy)) .unit)
+    (.mk (.app "add" [.mk (.var "idx") .int, .mk (.lit (.int 1)) .int]) .int)) .int
+/-- `st = q; o = r;` — `w`'s body: it writes both of its parameters. -/
+def twoWriteBody : TExpr :=
+  .mk (.seq (.mk (.assign "st" (.mk (.var "q") mutStateTy)) .unit)
+    (.mk (.seq (.mk (.assign "o" (.mk (.var "r") mutBlockTy)) .unit)
+      (.mk .unitVal .unit)) .unit)) .unit
+
+def tupleDefs : List (String × TExpr) :=
+  [("p", pushBody), ("rej", rejBody), ("w", twoWriteBody)]
+
+def tupleResolved : List (String × List Nat × List String × Bool) :=
+  mutWriteFns sFields tupleFns tupleDefs
+def tupleWriters : List (String × Nat) := mutWriteTable tupleResolved
+def tupleTup : List (String × List Nat × Bool) := mutWriteTupleTable tupleResolved
+
+#eval tupleResolved
+  -- [("p", [0], ["dst"], true), ("rej", [0], ["f"], true), ("w", [0, 1], ["st", "o"], false)]
+#eval tupleWriters  -- []
+#eval tupleTup      -- [("p", [0], true), ("rej", [0], true), ("w", [0, 1], false)]
+
+-- The callee's tail: the value paired with the written parameter, and the pair
+-- of the two written parameters.
+#eval (tReturnMutParams ["dst"] true pushBody).erase
+  == ImpExpr.seq (.assign "dst" (.var "q"))
+       (.tuple [.app "add" [.var "pos", .lit (.int 1)], .var "dst"])  -- true
+#eval (tReturnMutParams ["st", "o"] false twoWriteBody).erase
+  == ImpExpr.seq (.assign "st" (.var "q"))
+       (.seq (.assign "o" (.var "r")) (.tuple [.var "st", .var "o"]))  -- true
+
+/-- `let p0 = p(&mut dst, pos); use(p0, dst)` — the call in `let` position with
+    its result used. -/
+def pushLetCall : TExpr :=
+  .mk (.letBind "p0"
+    (.mk (.app "p" [.mk (.borrow (.mk (.var "dst") mutBlockTy)) (.ref mutBlockTy true),
+      .mk (.var "pos") .int]) .int)
+    (.mk (.app "use" [.mk (.var "p0") .int, .mk (.var "dst") mutBlockTy]) .int)) .int
+
+/-- `while c { idx = rej(&mut f, idx) }` — the call in assignment position
+    inside a loop body. -/
+def rejLoopCall : TExpr :=
+  .mk (.whileLoop (.mk (.var "c") .bool)
+    (.mk (.assign "idx"
+      (.mk (.app "rej" [.mk (.borrow (.mk (.var "f") mutStateTy)) (.ref mutStateTy true),
+        .mk (.var "idx") .int]) .int)) .unit)) .unit
+
+/-- `w(&mut st, &mut o); digest(st)` — the two-parameter call in statement
+    position. -/
+def twoWriteStmt : TExpr :=
+  .mk (.seq
+    (.mk (.app "w" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true),
+      .mk (.borrow (.mk (.var "o") mutBlockTy)) (.ref mutBlockTy true)]) .unit)
+    (.mk (.app "digest" [.mk (.var "st") mutStateTy]) mutBlockTy)) mutBlockTy
+
+/-- `outer(p(&mut dst, pos))` — a tuple-form call as the argument of another
+    call, which the rewrite does not reach. -/
+def tupleArgCall : TExpr :=
+  .mk (.app "outer"
+    [.mk (.app "p" [.mk (.borrow (.mk (.var "dst") mutBlockTy)) (.ref mutBlockTy true),
+      .mk (.var "pos") .int]) .int]) .int
+
+#eval (tRebindMutCalls sFields tupleWriters tupleTup pushLetCall).erase
+  == ImpExpr.letBind "_wb" (.app "p" [.borrow (.var "dst"), .var "pos"])
+       (.seq (.assign "dst" (.app "::proj::.2" [.var "_wb"]))
+         (.letBind "p0" (.proj (.var "_wb") 0)
+           (.app "use" [.var "p0", .var "dst"])))  -- true
+#eval (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall).erase
+  == ImpExpr.whileLoop (.var "c")
+       (.letBind "_wb" (.app "rej" [.borrow (.var "f"), .var "idx"])
+         (.seq (.assign "f" (.app "::proj::.2" [.var "_wb"]))
+           (.assign "idx" (.proj (.var "_wb") 0))))  -- true
+#eval (tRebindMutCalls sFields tupleWriters tupleTup twoWriteStmt).erase
+  == ImpExpr.letBind "_wb" (.app "w" [.borrow (.var "st"), .borrow (.var "o")])
+       (.seq (.assign "st" (.proj (.var "_wb") 0))
+         (.seq (.assign "o" (.app "::proj::.2" [.var "_wb"]))
+           (.app "digest" [.var "st"])))  -- true
+#eval (tRebindMutCalls sFields tupleWriters tupleTup tupleArgCall).erase
+  == tupleArgCall.erase  -- true
+
+-- The written variables reach the mutation analyses, so the loop threads them.
+#eval tAssignedVars (tRebindMutCalls sFields tupleWriters tupleTup pushLetCall)  -- ["dst"]
+#eval tAssignedVars (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall)  -- ["f", "idx"]
+#eval tAssignedVars
+  (tThreadMut true (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall))  -- ["f", "idx"]
+#eval tAssignedVars (tRebindMutCalls sFields tupleWriters tupleTup twoWriteStmt) -- ["st", "o"]
+
+-- Rewritten and reported are complements: the three rewritten sites report
+-- nothing, the call in argument position is reported.
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup pushLetCall    -- []
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup rejLoopCall    -- []
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup twoWriteStmt   -- []
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup tupleArgCall   -- [("p", [0])]
+-- Without the tuple table the same sites are reported, and nothing is rewritten.
+#eval tDroppedMutCalls tupleFns sFields tupleWriters [] pushLetCall          -- [("p", [0])]
+#eval (tRebindMutCalls sFields tupleWriters [] pushLetCall).erase == pushLetCall.erase  -- true
 
 /-! ## Fold-body tails that carry mutations
 

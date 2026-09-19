@@ -149,24 +149,27 @@ def main (args : List String) : IO UInt32 := do
     -- pure value.
     let writeFns := mutWriteFns structFields fnTypes procTdefs
     -- The builtin table is appended to the call-site rebind table only, not to
-    -- `writeParams`: `tReturnMutParam` rewrites a callee to return its written
-    -- parameter, and these four have no body in the export to rewrite.
+    -- `writeReturns`: `tReturnMutParams` rewrites a callee to return its
+    -- written parameters, and these four have no body in the export to rewrite.
     let writers := mutWriteTable writeFns ++ builtinWriteTable
-    let writeParams := mutWriteParams writeFns
-    IO.eprintln s!"INFO mut-writeback-fns={writers.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
+    let tupWriters := mutWriteTupleTable writeFns
+    let writeReturns := mutWriteReturns writeFns
+    IO.eprintln s!"INFO mut-writeback-fns={writers.length + tupWriters.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
     -- A call through `&mut` that the rewrite leaves as a plain call keeps its
     -- effect inside the callee: the emitted surface would ignore the
     -- computation. Refuse to emit unless asked to.
     let dropped := procTdefs.flatMap fun (n, te) =>
-      (tDroppedMutCalls fnTypes structFields writers te).map fun d => (n, d)
+      (tDroppedMutCalls fnTypes structFields writers tupWriters te).map fun d => (n, d)
     for (n, (f, ps)) in dropped do
-      IO.eprintln s!"ERROR dropped-writeback: `{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the write-back rewrite; the effect of the call does not reach the caller. The rewrite covers a callee with one `&mut` parameter and result `()`, applied to a variable, a field place or a slice range."
+      IO.eprintln s!"ERROR dropped-writeback: `{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the write-back rewrite; the effect of the call does not reach the caller. The rewrite covers a callee with one `&mut` parameter and result `()` applied to a variable, a field place or a slice range, and a callee with several `&mut` parameters or a value result applied to variables, called in `let`, assignment or statement position."
     IO.eprintln s!"INFO dropped-writeback-calls={dropped.length}"
     if !dropped.isEmpty && !opts.allowDroppedWriteback then
       IO.eprintln "haxpipeT: no output; pass --allow-dropped-writeback to emit anyway"
       return 1
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      let te := tReturnMutParam (writeParams.lookup n) (tRebindMutCalls structFields writers te)
+      let ret := (writeReturns.lookup n).getD ([], false)
+      let te := tReturnMutParams ret.1 ret.2
+        (tRebindMutCalls structFields writers tupWriters te)
       (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
     let t ← phaseTick "tPipelineFull" t

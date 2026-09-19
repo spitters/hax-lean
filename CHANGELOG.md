@@ -2,11 +2,23 @@
 
 ## Unreleased
 
+- The `&mut` write-back rewrite covers a callee with several `&mut`
+  parameters and a callee whose Rust result carries a value. Such a callee
+  returns the tuple of its result and its written parameters, and a call to it
+  in `let`, assignment or statement position binds that tuple to `_wb` and
+  assigns each written variable from a component of that binder. A table entry
+  is `(function, positions, parameters, hasResult)`, resolved to a fixpoint,
+  and splits into a single-parameter call table and a tuple-parameter one, so
+  the call sites and the definition read one table. A callee that carries its
+  value out of tail position through a `return` or a `?` keeps its original
+  form. (`mutWriteFns`, `tTupleBind`, `tReturnMutParams` in `ThreadMutations`,
+  with the erasure twins and commuting squares in `ThreadMutationsErase`.)
 - `haxpipeT` refuses to emit when a call through `&mut` falls outside the
-  write-back rewrite (a callee with two `&mut` parameters or a value result,
-  or an argument that is not a variable, field place or slice range): the
-  emitted function would keep the argument's initial value and ignore the
-  callee's effect. Each such call is reported as `ERROR dropped-writeback`,
+  write-back rewrite (a tuple-form call in an expression position the rewrite
+  does not reach, or an argument that is not a variable, field place or slice
+  range): the emitted function would keep the argument's initial value and
+  ignore the callee's effect. Each such call is reported as
+  `ERROR dropped-writeback`,
   with `INFO dropped-writeback-calls=<n>`; `--allow-dropped-writeback` emits
   anyway. (`tDroppedMutCalls` in `ThreadMutations`.)
 - The renderer's accumulator extraction reads a statement-`if` branch's

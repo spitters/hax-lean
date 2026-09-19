@@ -261,62 +261,88 @@ where
 
 /-! ## `&mut` write-back
 
-A Rust `fn f(v: &mut T, …)` writes through the reference and yields `()`. The
-extraction has no references, so `f` returns `v`'s final value and every caller
-rebinds its own variable from that result:
+A Rust `fn f(v: &mut T, …)` writes through the reference. The extraction has no
+references, so `f` returns `v`'s final value and every caller rebinds its own
+variable from that result:
 
     f(&mut x, y)  ↦  x = f(x, y)
 
-Both halves read one table, `mutWriteFns`: the parameter position a function
-writes back through. A signature admits a candidate (`mutWriteCandidates`) and
-the body decides it (`mutWriteStep`) — a field write counts, since the parse
-arms lower it to a `struct_update` assignment of the parameter itself, while a
-parameter written only through an element of itself assigns nothing and such a
-function keeps its `()` result. `tReturnMutParam` puts the parameter at the end
-of the callee's body and `tRebindMutCalls` turns each call into an assignment —
-a call whose `&mut` argument is a single-level field place `&mut x.f` becomes a
-functional field update of `x` from the call's result. Both read that one
-table, so the two sides agree on which functions return a value by
-construction. A call whose `&mut` argument is a slice-range place
-`&mut x[lo..hi]` becomes a functional range update of `x` in the same way.
-The result is an ordinary `.assign`, which `tThreadMut`,
+Both halves read one table, `mutWriteFns`, whose entry is
+`(function, positions, parameters, hasResult)`: the `&mut` parameter positions
+a function writes back through, their names, and whether its Rust result
+carries a value. A signature admits a candidate (`mutWriteCandidates`) and the
+body decides it per parameter (`mutWriteStep`) — a field write counts, since
+the parse arms lower it to a `struct_update` assignment of the parameter
+itself, while a parameter written only through an element of itself assigns
+nothing and is not written back.
+
+An entry with one parameter and result `()` is the *single* form: the callee's
+tail becomes that parameter (`tReturnMutParams` through `tReplaceTail`) and a
+call becomes an assignment (`tRebindMutCalls` through `tRebindCall`). A call
+whose `&mut` argument is a single-level field place `&mut x.f` becomes a
+functional field update of `x` from the call's result, and a slice-range place
+`&mut x[lo..hi]` a functional range update of `x`.
+
+Every other entry is the *tuple* form: the callee's tail becomes
+`(v₁, …, v_k)`, or `(t, v₁, …, v_k)` when the result carries a value `t`, and a
+call site binds that tuple to `_wb` and assigns each component
+(`tTupleBind`). The two tables `mutWriteTable` (single) and
+`mutWriteTupleTable` (tuple) partition the resolved table, so a function is
+read in one form only and the call sites and the definition agree on the
+callee's result by construction.
+
+Either form produces ordinary `.assign` nodes, which `tThreadMut`,
 `localMutation` and the renderer's accumulator extraction already carry.
 
-`tRebindMutCalls` runs before `tReturnMutParam`: a body whose own tail is a
+`tRebindMutCalls` runs before `tReturnMutParams`: a body whose own tail is a
 write-back call has to become an assignment first, or `tReplaceTail` drops it
 as a pure value. -/
 
-/-- The position and name of the parameter a function writes back through: the
-    single `&mut` parameter of a function whose Rust result is `()`. Several
-    `&mut` parameters, or a result that carries a value, leave the function
-    with no write-back parameter. -/
-def mutWriteParam (retTy : ImpType) (params : List (String × ImpType)) :
-    Option (Nat × String) :=
-  match retTy with
-  | .unit =>
-      match params.zipIdx.filterMap (fun pi =>
-          match pi.1.2 with
-          | .ref _ true => some (pi.2, pi.1.1)
-          | _ => none) with
-      | [ip] => some ip
-      | _ => none
-  | _ => none
+/-- The write-back shape a signature admits: the positions and names of its
+    `&mut` parameters, and whether its Rust result carries a value. `none` for
+    a function with no `&mut` parameter. -/
+def mutWriteSig (retTy : ImpType) (params : List (String × ImpType)) :
+    Option (List Nat × List String × Bool) :=
+  let ps := params.zipIdx.filterMap (fun pi =>
+    match pi.1.2 with
+    | .ref _ true => some (pi.2, pi.1.1)
+    | _ => none)
+  if ps.isEmpty then none
+  else some (ps.map (·.1), ps.map (·.2),
+    match retTy with | .unit => false | _ => true)
 
-/-- Each function whose signature admits a write-back parameter, as
-    `(function, position, parameter)`. -/
-def mutWriteCandidates (fns : List (String × FnTypeInfo)) : List (String × Nat × String) :=
+/-- Each function whose signature admits write-back parameters, as
+    `(function, positions, parameters, hasResult)`. -/
+def mutWriteCandidates (fns : List (String × FnTypeInfo)) :
+    List (String × List Nat × List String × Bool) :=
   fns.filterMap fun ni =>
-    (mutWriteParam ni.2.retType ni.2.paramTypes).map (fun ip => (ni.1, ip.1, ip.2))
+    (mutWriteSig ni.2.retType ni.2.paramTypes).map (fun s => (ni.1, s.1, s.2.1, s.2.2))
 
-/-- Write-back positions of a resolved table, read at call sites by
-    `tRebindMutCalls`. -/
-def mutWriteTable (ws : List (String × Nat × String)) : List (String × Nat) :=
-  ws.map (fun c => (c.1, c.2.1))
+/-- The single-form entries of a resolved table — one write-back parameter and
+    result `()` — as `(function, position)`, read at call sites by
+    `tRebindCall`. -/
+def mutWriteTable (ws : List (String × List Nat × List String × Bool)) :
+    List (String × Nat) :=
+  ws.filterMap fun c =>
+    match c.2.1, c.2.2.2 with
+    | [i], false => some (c.1, i)
+    | _, _ => none
 
-/-- Write-back parameter names of a resolved table, read at the definition by
-    `tReturnMutParam`. -/
-def mutWriteParams (ws : List (String × Nat × String)) : List (String × String) :=
-  ws.map (fun c => (c.1, c.2.2))
+/-- The tuple-form entries of a resolved table — several write-back parameters,
+    or a result that carries a value — as `(function, positions, hasResult)`,
+    read at call sites by `tTupleSite`. -/
+def mutWriteTupleTable (ws : List (String × List Nat × List String × Bool)) :
+    List (String × List Nat × Bool) :=
+  ws.filterMap fun c =>
+    match c.2.1, c.2.2.2 with
+    | [_], false => none
+    | ps, hasRes => some (c.1, ps, hasRes)
+
+/-- Write-back parameter names and result flag of a resolved table, read at the
+    definition by `tReturnMutParams`. -/
+def mutWriteReturns (ws : List (String × List Nat × List String × Bool)) :
+    List (String × List String × Bool) :=
+  ws.map (fun c => (c.1, c.2.2.1, c.2.2.2))
 
 /-- Standard-library methods that write through their receiver, with the
     receiver's argument position.
@@ -429,6 +455,77 @@ def tCallWritebackSlice (writers : List (String × Nat)) (f : String) (args : Li
     | some i => (args[i]?).bind tMutArgSlice
     | none => none
 
+/-! ### The tuple form
+
+A tuple-form callee returns `(v₁, …, v_k)`, or `(t, v₁, …, v_k)` when its Rust
+result carries a value `t`. A call site binds that tuple to `_wb` and assigns
+each written variable from its component; the value component stays where the
+call's own result was. Every component is projected from the *variable* `_wb`,
+never from the call, because a projection of a call does not lower. -/
+
+/-- The binder a tuple-form call site holds its callee's result in. -/
+def tWbTmp : String := "_wb"
+
+/-- The `i`-th component of the right-nested `n`-tuple `tup`. A Lean `n`-tuple
+    `(c₀, …, c_{n-1})` is `(c₀, (c₁, … c_{n-1}))`, so the head is `.proj _ 0`
+    and the rest live in the `::proj::.2`-marked tail (`PrettyPrint.projPath`'s
+    convention), which is where the recursion descends; the last component is
+    that tail itself. -/
+def tTupleComp (tup : TExpr) : Nat → Nat → TExpr
+  | _, 0 => tup
+  | _, 1 => tup
+  | 0, _ => .mk (.proj tup 0) .unknown
+  | i + 1, n + 1 => tTupleComp (.mk (.app "::proj::.2" [tup]) .unknown) i n
+
+/-- The variables the arguments at `positions` write to, when every one of them
+    is a plain place (`tMutArgRoot`). `none` as soon as one is not. -/
+def tMutArgRoots (args : List TExpr) : List Nat → Option (List String)
+  | [] => some []
+  | i :: is =>
+    ((args[i]?).bind tMutArgRoot).bind fun r =>
+      (tMutArgRoots args is).map (fun rs => r :: rs)
+
+/-- The tuple-form write-back of a call to `f` under the tuple table: the
+    variables to rebind and whether the callee's result carries a value. The
+    newtype-projection head `.0` is excluded, as in `tCallWriteback`. -/
+def tTupleWriteback (tup : List (String × List Nat × Bool)) (f : String)
+    (args : List TExpr) : Option (List String × Bool) :=
+  if f == ".0" then none
+  else
+    match tup.lookup f with
+    | some (ps, hasRes) => (tMutArgRoots args ps).map (fun rs => (rs, hasRes))
+    | none => none
+
+/-- The tuple-form write-back a node performs: `tTupleWriteback` of a call
+    node, `none` for any other node. The erase-deleted `.ann` marker is looked
+    through, so the rewrite commutes with erasure. -/
+def tTupleSite (tup : List (String × List Nat × Bool)) : TExpr → Option (List String × Bool)
+  | .mk (.app f args) _ => tTupleWriteback tup f args
+  | .mk (.ann e) _ => tTupleSite tup e
+  | _ => none
+
+/-- The assignments `vᵢ := _wb.<offset+i>` of a tuple-form call site, in order,
+    in front of `cont`. `n` is the callee's tuple arity. -/
+def tTupleAssigns : List String → Nat → Nat → TExpr → TExpr
+  | [], _, _, cont => cont
+  | v :: vs, offset, n, cont =>
+    .mk (.seq (.mk (.assign v (tTupleComp (.mk (.var tWbTmp) .unknown) offset n)) .unit)
+      (tTupleAssigns vs (offset + 1) n cont)) cont.ty
+
+/-- A tuple-form call site: the call bound to `_wb`, the write-back assignments
+    of `roots` from its components, then `tail`. -/
+def tTupleBind (call : TExpr) (roots : List String) (hasRes : Bool) (tail : TExpr) : TExpr :=
+  .mk (.letBind tWbTmp call
+    (tTupleAssigns roots (if hasRes then 1 else 0)
+      (roots.length + (if hasRes then 1 else 0)) tail)) tail.ty
+
+/-- The component of a tuple-form callee's result that carries the call's own
+    value: the head of the tuple when the callee has a Rust result, the unit
+    value when it has none. -/
+def tTupleResult (roots : List String) (hasRes : Bool) : TExpr :=
+  if hasRes then tTupleComp (.mk (.var tWbTmp) .unknown) 0 (roots.length + 1)
+  else .mk .unitVal .unit
+
 /-- The node a call becomes under the write-back table: an assignment binding
     the write-back variable — or, for a field-place argument, a functional
     field update of its root variable, and for a slice-range argument, a
@@ -450,107 +547,246 @@ def tRebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : St
           [.mk (.var root) .unknown, lo, hi, .mk (.app f args) ty]) .unknown)) ty
       | none => .mk (.app f args) ty
 
-/-- Bind the write-back variable of every call to a write-back function from
-    that call's result. A call to any other function, and a call whose
-    write-back argument is an index or a field rather than a variable, keeps
-    its own value. -/
-def tRebindMutCalls (sf : StructFieldNames) (writers : List (String × Nat)) : TExpr → TExpr
-  | .mk (.app f args) ty => tRebindCall sf writers f (mapE sf writers args) ty
+/-- Bind the write-back variables of every call to a write-back function from
+    that call's result: a single-form call becomes an assignment in place, and
+    a tuple-form call in `let`, assignment or statement position becomes the
+    `_wb` binding, the component assignments and the call's own result. A call
+    to any other function, a call whose write-back argument is an index or a
+    field rather than a variable, and a tuple-form call in any other position
+    keep their own value. -/
+def tRebindMutCalls (sf : StructFieldNames) (writers : List (String × Nat))
+    (tup : List (String × List Nat × Bool)) : TExpr → TExpr
+  | .mk (.app f args) ty => tRebindCall sf writers f (mapE sf writers tup args) ty
   | .mk (.lit v) ty => .mk (.lit v) ty
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
-      .mk (.letBind n (tRebindMutCalls sf writers val) (tRebindMutCalls sf writers body)) ty
-  | .mk (.lam ps body) ty => .mk (.lam ps (tRebindMutCalls sf writers body)) ty
-  | .mk (.tuple elems) ty => .mk (.tuple (mapE sf writers elems)) ty
-  | .mk (.proj e i) ty => .mk (.proj (tRebindMutCalls sf writers e) i) ty
+      let val' := tRebindMutCalls sf writers tup val
+      let body' := tRebindMutCalls sf writers tup body
+      match tTupleSite tup val' with
+      | some (roots, hasRes) =>
+          tTupleBind val' roots hasRes
+            (.mk (.letBind n (tTupleResult roots hasRes) body') ty)
+      | none => .mk (.letBind n val' body') ty
+  | .mk (.lam ps body) ty => .mk (.lam ps (tRebindMutCalls sf writers tup body)) ty
+  | .mk (.tuple elems) ty => .mk (.tuple (mapE sf writers tup elems)) ty
+  | .mk (.proj e i) ty => .mk (.proj (tRebindMutCalls sf writers tup e) i) ty
   | .mk (.ifThenElse c t e) ty =>
-      .mk (.ifThenElse (tRebindMutCalls sf writers c) (tRebindMutCalls sf writers t)
-        (tRebindMutCalls sf writers e)) ty
+      .mk (.ifThenElse (tRebindMutCalls sf writers tup c) (tRebindMutCalls sf writers tup t)
+        (tRebindMutCalls sf writers tup e)) ty
   | .mk (.match_ scrut arms) ty =>
-      .mk (.match_ (tRebindMutCalls sf writers scrut) (mapA sf writers arms)) ty
+      .mk (.match_ (tRebindMutCalls sf writers tup scrut) (mapA sf writers tup arms)) ty
   | .mk .unitVal ty => .mk .unitVal ty
   | .mk (.seq a b) ty =>
-      .mk (.seq (tRebindMutCalls sf writers a) (tRebindMutCalls sf writers b)) ty
-  | .mk (.borrow e) ty => .mk (.borrow (tRebindMutCalls sf writers e)) ty
-  | .mk (.deref e) ty => .mk (.deref (tRebindMutCalls sf writers e)) ty
-  | .mk (.assign n rhs) ty => .mk (.assign n (tRebindMutCalls sf writers rhs)) ty
+      let a' := tRebindMutCalls sf writers tup a
+      let b' := tRebindMutCalls sf writers tup b
+      match tTupleSite tup a' with
+      | some (roots, hasRes) => tTupleBind a' roots hasRes b'
+      | none => .mk (.seq a' b') ty
+  | .mk (.borrow e) ty => .mk (.borrow (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.assign n rhs) ty =>
+      let rhs' := tRebindMutCalls sf writers tup rhs
+      match tTupleSite tup rhs' with
+      | some (roots, hasRes) =>
+          tTupleBind rhs' roots hasRes (.mk (.assign n (tTupleResult roots hasRes)) ty)
+      | none => .mk (.assign n rhs') ty
   | .mk (.forLoop v lo hi b) ty =>
-      .mk (.forLoop v (tRebindMutCalls sf writers lo) (tRebindMutCalls sf writers hi)
-        (tRebindMutCalls sf writers b)) ty
+      .mk (.forLoop v (tRebindMutCalls sf writers tup lo) (tRebindMutCalls sf writers tup hi)
+        (tRebindMutCalls sf writers tup b)) ty
   | .mk (.forLoopRev v lo hi b) ty =>
-      .mk (.forLoopRev v (tRebindMutCalls sf writers lo) (tRebindMutCalls sf writers hi)
-        (tRebindMutCalls sf writers b)) ty
+      .mk (.forLoopRev v (tRebindMutCalls sf writers tup lo) (tRebindMutCalls sf writers tup hi)
+        (tRebindMutCalls sf writers tup b)) ty
   | .mk (.whileLoop c b) ty =>
-      .mk (.whileLoop (tRebindMutCalls sf writers c) (tRebindMutCalls sf writers b)) ty
+      .mk (.whileLoop (tRebindMutCalls sf writers tup c) (tRebindMutCalls sf writers tup b)) ty
   | .mk (.break_ none) ty => .mk (.break_ none) ty
-  | .mk (.break_ (some e)) ty => .mk (.break_ (some (tRebindMutCalls sf writers e))) ty
+  | .mk (.break_ (some e)) ty => .mk (.break_ (some (tRebindMutCalls sf writers tup e))) ty
   | .mk .continue_ ty => .mk .continue_ ty
-  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tRebindMutCalls sf writers e)) ty
-  | .mk (.questionMark e) ty => .mk (.questionMark (tRebindMutCalls sf writers e)) ty
+  | .mk (.earlyReturn e) ty => .mk (.earlyReturn (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.questionMark e) ty => .mk (.questionMark (tRebindMutCalls sf writers tup e)) ty
   | .mk (.forFold v lo hi b) ty =>
-      .mk (.forFold v (tRebindMutCalls sf writers lo) (tRebindMutCalls sf writers hi)
-        (tRebindMutCalls sf writers b)) ty
+      .mk (.forFold v (tRebindMutCalls sf writers tup lo) (tRebindMutCalls sf writers tup hi)
+        (tRebindMutCalls sf writers tup b)) ty
   | .mk (.forFoldRev v lo hi b) ty =>
-      .mk (.forFoldRev v (tRebindMutCalls sf writers lo) (tRebindMutCalls sf writers hi)
-        (tRebindMutCalls sf writers b)) ty
+      .mk (.forFoldRev v (tRebindMutCalls sf writers tup lo) (tRebindMutCalls sf writers tup hi)
+        (tRebindMutCalls sf writers tup b)) ty
   | .mk (.whileFold c b) ty =>
-      .mk (.whileFold (tRebindMutCalls sf writers c) (tRebindMutCalls sf writers b)) ty
+      .mk (.whileFold (tRebindMutCalls sf writers tup c) (tRebindMutCalls sf writers tup b)) ty
   | .mk (.forFoldReturn v lo hi b) ty =>
-      .mk (.forFoldReturn v (tRebindMutCalls sf writers lo) (tRebindMutCalls sf writers hi)
-        (tRebindMutCalls sf writers b)) ty
+      .mk (.forFoldReturn v (tRebindMutCalls sf writers tup lo) (tRebindMutCalls sf writers tup hi)
+        (tRebindMutCalls sf writers tup b)) ty
   | .mk (.forFoldRevReturn v lo hi b) ty =>
-      .mk (.forFoldRevReturn v (tRebindMutCalls sf writers lo) (tRebindMutCalls sf writers hi)
-        (tRebindMutCalls sf writers b)) ty
+      .mk (.forFoldRevReturn v (tRebindMutCalls sf writers tup lo)
+        (tRebindMutCalls sf writers tup hi) (tRebindMutCalls sf writers tup b)) ty
   | .mk (.whileFoldReturn c b) ty =>
-      .mk (.whileFoldReturn (tRebindMutCalls sf writers c) (tRebindMutCalls sf writers b)) ty
-  | .mk (.cfBreak e) ty => .mk (.cfBreak (tRebindMutCalls sf writers e)) ty
-  | .mk (.cfContinue e) ty => .mk (.cfContinue (tRebindMutCalls sf writers e)) ty
-  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tRebindMutCalls sf writers e)) ty
-  | .mk (.ann e) ty => .mk (.ann (tRebindMutCalls sf writers e)) ty
-  | .mk (.namedProj n e) ty => .mk (.namedProj n (tRebindMutCalls sf writers e)) ty
+      .mk (.whileFoldReturn (tRebindMutCalls sf writers tup c)
+        (tRebindMutCalls sf writers tup b)) ty
+  | .mk (.cfBreak e) ty => .mk (.cfBreak (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.cfContinue e) ty => .mk (.cfContinue (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.cfBreakContinue e) ty => .mk (.cfBreakContinue (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tRebindMutCalls sf writers tup e)) ty
+  | .mk (.namedProj n e) ty => .mk (.namedProj n (tRebindMutCalls sf writers tup e)) ty
 where
-  mapE (sf : StructFieldNames) (writers : List (String × Nat)) : List TExpr → List TExpr
+  mapE (sf : StructFieldNames) (writers : List (String × Nat))
+      (tup : List (String × List Nat × Bool)) : List TExpr → List TExpr
     | [] => []
-    | e :: es => tRebindMutCalls sf writers e :: mapE sf writers es
-  mapA (sf : StructFieldNames) (writers : List (String × Nat)) :
+    | e :: es => tRebindMutCalls sf writers tup e :: mapE sf writers tup es
+  mapA (sf : StructFieldNames) (writers : List (String × Nat))
+      (tup : List (String × List Nat × Bool)) :
       List (ImpPat × TExpr) → List (ImpPat × TExpr)
     | [] => []
-    | (p, e) :: rest => (p, tRebindMutCalls sf writers e) :: mapA sf writers rest
+    | (p, e) :: rest => (p, tRebindMutCalls sf writers tup e) :: mapA sf writers tup rest
 
-/-- End a write-back function's body with its write-back parameter, keeping
-    every statement of the body ahead of it. The body's own tail is the Rust
-    `()` result and carries no information, so replacing it loses nothing. A
-    function with no write-back parameter is unchanged. -/
-def tReturnMutParam (param : Option String) (body : TExpr) : TExpr :=
-  match param with
-  | some v => tReplaceTail body (.mk (.var v) .unknown)
-  | none => body
+/-- Wrap the tail value `t` of a body in the tuple `(t, v₁, …, v_k)`, keeping
+    every statement of the body ahead of it and distributing into the branches
+    of an `if` and the arms of a `match`, as `tReplaceTail` does. `none` for a
+    tail that is a statement rather than a value — an assignment, a loop, a
+    `return` or a jump — since such a tail carries no value to pair the
+    written parameters with. -/
+def tTupleTail (vars : List String) : TExpr → Option TExpr
+  | .mk (.letBind n v body) ty => (tTupleTail vars body).map fun b => .mk (.letBind n v b) ty
+  | .mk (.seq a b) ty => (tTupleTail vars b).map fun b' => .mk (.seq a b') ty
+  | .mk (.ifThenElse c t f) ty =>
+      (tTupleTail vars t).bind fun t' =>
+        (tTupleTail vars f).map fun f' => .mk (.ifThenElse c t' f') ty
+  | .mk (.match_ s arms) ty => (goA vars arms).map fun arms' => .mk (.match_ s arms') ty
+  | .mk (.ann e) ty => (tTupleTail vars e).map fun e' => .mk (.ann e') ty
+  | .mk (.assign _ _) _ => none
+  | .mk (.forLoop ..) _ => none
+  | .mk (.forLoopRev ..) _ => none
+  | .mk (.whileLoop ..) _ => none
+  | .mk (.forFold ..) _ => none
+  | .mk (.forFoldRev ..) _ => none
+  | .mk (.whileFold ..) _ => none
+  | .mk (.forFoldReturn ..) _ => none
+  | .mk (.forFoldRevReturn ..) _ => none
+  | .mk (.whileFoldReturn ..) _ => none
+  | .mk (.earlyReturn _) _ => none
+  | .mk (.questionMark _) _ => none
+  | .mk (.break_ _) _ => none
+  | .mk .continue_ _ => none
+  | .mk (.cfBreak _) _ => none
+  | .mk (.cfContinue _) _ => none
+  | .mk (.cfBreakContinue _) _ => none
+  | e => some (.mk (.tuple (e :: vars.map (fun v => .mk (.var v) .unknown))) .unknown)
+where
+  goA (vars : List String) :
+      List (ImpPat × TExpr) → Option (List (ImpPat × TExpr))
+    | [] => some []
+    | (p, e) :: rest =>
+      (tTupleTail vars e).bind fun e' => (goA vars rest).map fun rest' => (p, e') :: rest'
 
-/-- Keep the candidates whose body assigns their write-back parameter once the
-    calls inside it are rebound under `prev`. A struct-field write is an
-    assignment of its root variable (the parse arms lower `self.f = v` to a
-    `struct_update` assignment of `self` under `sf`), so a parameter written
-    through its own fields qualifies. A parameter written only through an
-    element of itself is assigned nothing, and such a function keeps its `()`
-    result, so its callers keep discarding it and its emitted form is
+/-- Whether `e` contains a `return` or a `?`. A body that does carries its
+    value out of tail position, which `tTupleTail` does not reach. -/
+def tContainsEarlyReturn : TExpr → Bool
+  | .mk (.earlyReturn _) _ => true
+  | .mk (.questionMark _) _ => true
+  | .mk (.letBind _ v b) _ => tContainsEarlyReturn v || tContainsEarlyReturn b
+  | .mk (.lam _ b) _ => tContainsEarlyReturn b
+  | .mk (.app _ args) _ => goE args
+  | .mk (.tuple es) _ => goE es
+  | .mk (.proj e _) _ => tContainsEarlyReturn e
+  | .mk (.ifThenElse c t e) _ =>
+      tContainsEarlyReturn c || tContainsEarlyReturn t || tContainsEarlyReturn e
+  | .mk (.match_ s arms) _ => tContainsEarlyReturn s || goA arms
+  | .mk (.seq a b) _ => tContainsEarlyReturn a || tContainsEarlyReturn b
+  | .mk (.borrow e) _ => tContainsEarlyReturn e
+  | .mk (.deref e) _ => tContainsEarlyReturn e
+  | .mk (.assign _ rhs) _ => tContainsEarlyReturn rhs
+  | .mk (.forLoop _ lo hi b) _ =>
+      tContainsEarlyReturn lo || tContainsEarlyReturn hi || tContainsEarlyReturn b
+  | .mk (.forLoopRev _ lo hi b) _ =>
+      tContainsEarlyReturn lo || tContainsEarlyReturn hi || tContainsEarlyReturn b
+  | .mk (.whileLoop c b) _ => tContainsEarlyReturn c || tContainsEarlyReturn b
+  | .mk (.forFold _ lo hi b) _ =>
+      tContainsEarlyReturn lo || tContainsEarlyReturn hi || tContainsEarlyReturn b
+  | .mk (.forFoldRev _ lo hi b) _ =>
+      tContainsEarlyReturn lo || tContainsEarlyReturn hi || tContainsEarlyReturn b
+  | .mk (.whileFold c b) _ => tContainsEarlyReturn c || tContainsEarlyReturn b
+  | .mk (.forFoldReturn _ lo hi b) _ =>
+      tContainsEarlyReturn lo || tContainsEarlyReturn hi || tContainsEarlyReturn b
+  | .mk (.forFoldRevReturn _ lo hi b) _ =>
+      tContainsEarlyReturn lo || tContainsEarlyReturn hi || tContainsEarlyReturn b
+  | .mk (.whileFoldReturn c b) _ => tContainsEarlyReturn c || tContainsEarlyReturn b
+  | .mk (.cfBreak e) _ => tContainsEarlyReturn e
+  | .mk (.cfContinue e) _ => tContainsEarlyReturn e
+  | .mk (.cfBreakContinue e) _ => tContainsEarlyReturn e
+  | .mk (.ann e) _ => tContainsEarlyReturn e
+  | .mk (.namedProj _ e) _ => tContainsEarlyReturn e
+  | .mk (.break_ (some e)) _ => tContainsEarlyReturn e
+  | _ => false
+where
+  goE : List TExpr → Bool
+    | [] => false
+    | e :: es => tContainsEarlyReturn e || goE es
+  goA : List (ImpPat × TExpr) → Bool
+    | [] => false
+    | (_, e) :: rest => tContainsEarlyReturn e || goA rest
+
+/-- End a write-back function's body with its write-back parameters, keeping
+    every statement of the body ahead of them: the single parameter, the tuple
+    of several, or the tuple of the body's own value and the parameters when
+    the Rust result carries a value. A function with no write-back parameter,
+    and a value-returning one whose tail `tTupleTail` does not reach, is
     unchanged. -/
-def mutWriteStep (sf : StructFieldNames) (defs : List (String × TExpr))
-    (prev : List (String × Nat))
-    (cands : List (String × Nat × String)) : List (String × Nat × String) :=
-  cands.filter fun c =>
-    match defs.lookup c.1 with
-    | some body => (tAssignedVars (tRebindMutCalls sf prev body)).contains c.2.2
-    | none => false
+def tReturnMutParams (names : List String) (hasRes : Bool) (body : TExpr) : TExpr :=
+  match names with
+  | [] => body
+  | _ =>
+    if hasRes then (tTupleTail names body).getD body
+    else tReplaceTail body (tVarTuple names)
 
-/-- The write-back functions of an export. Two rounds, so a parameter written
-    only by a nested write-back call is reached; the same table drives the call
-    sites and the definitions, so the two sides cannot disagree about which
-    functions return a value. -/
+/-- Keep the write-back parameters a candidate's body assigns once the calls
+    inside it are rebound under `prev`/`prevTup`, and drop a candidate that
+    assigns none. A struct-field write is an assignment of its root variable
+    (the parse arms lower `self.f = v` to a `struct_update` assignment of
+    `self` under `sf`), so a parameter written through its own fields
+    qualifies. A parameter written only through an element of itself is
+    assigned nothing.
+
+    A candidate whose Rust result carries a value is kept only when the tuple
+    its body must end in is reachable: no `return` or `?` anywhere, and a tail
+    `tTupleTail` accepts. The calls to a dropped candidate are then reported by
+    `tDroppedMutCalls` rather than rewritten. -/
+def mutWriteStep (sf : StructFieldNames) (defs : List (String × TExpr))
+    (prev : List (String × Nat)) (prevTup : List (String × List Nat × Bool))
+    (cands : List (String × List Nat × List String × Bool)) :
+    List (String × List Nat × List String × Bool) :=
+  cands.filterMap fun c =>
+    match defs.lookup c.1 with
+    | none => none
+    | some body =>
+      let rebound := tRebindMutCalls sf prev prevTup body
+      let assigned := tAssignedVars rebound
+      let kept := (c.2.1.zip c.2.2.1).filter fun pv => assigned.contains pv.2
+      let names := kept.map (·.2)
+      if kept.isEmpty then none
+      else if c.2.2.2 && (tContainsEarlyReturn body || (tTupleTail names rebound).isNone) then none
+      else some (c.1, kept.map (·.1), names, c.2.2.2)
+
+/-- Iterate `mutWriteStep` from `cur` until it is stationary or `fuel` runs
+    out. -/
+def mutWriteIter (sf : StructFieldNames) (defs : List (String × TExpr))
+    (cands : List (String × List Nat × List String × Bool)) :
+    Nat → List (String × List Nat × List String × Bool) →
+    List (String × List Nat × List String × Bool)
+  | 0, cur => cur
+  | fuel + 1, cur =>
+    let next := mutWriteStep sf defs (mutWriteTable cur) (mutWriteTupleTable cur) cands
+    if next == cur then cur else mutWriteIter sf defs cands fuel next
+
+/-- The write-back functions of an export: `mutWriteStep` iterated from the
+    empty table to a fixpoint. A parameter written only by a nested write-back
+    call is reached one round after the callee that writes it, so a chain of
+    calls needs as many rounds as it is long; each round that is not the
+    fixpoint admits at least one further parameter, so the total number of
+    candidate parameters bounds the iteration. The same table drives the call
+    sites and the definitions, so the two sides cannot disagree about what a
+    callee returns. -/
 def mutWriteFns (sf : StructFieldNames) (fns : List (String × FnTypeInfo))
-    (defs : List (String × TExpr)) : List (String × Nat × String) :=
+    (defs : List (String × TExpr)) : List (String × List Nat × List String × Bool) :=
   let cands := mutWriteCandidates fns
-  let r1 := mutWriteStep sf defs [] cands
-  mutWriteStep sf defs (mutWriteTable r1) cands
+  let fuel := cands.foldl (fun n c => n + c.2.1.length) 0
+  mutWriteIter sf defs cands fuel (mutWriteStep sf defs [] [] cands)
 
 /-! ### Calls through `&mut` outside the write-back fragment
 
@@ -603,58 +839,83 @@ def tCallRebound (sf : StructFieldNames) (writers : List (String × Nat)) (f : S
 /-- The calls in `e` that pass a `&mut` argument — by the callee's signature
     or by the argument's type — and that `tRebindMutCalls` leaves as plain
     calls, as `(callee, &mut positions)`. A place or update head
-    (`tPlaceHead`) is not a call. -/
-def tDroppedMutCalls (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
-    (writers : List (String × Nat)) : TExpr → List (String × List Nat)
+    (`tPlaceHead`) is not a call.
+
+    `site` says whether the node sits in one of the three positions the
+    tuple-form rewrite acts on: the value of a `let`, the right-hand side of an
+    assignment, or the head of a `seq`. It is set by exactly those three arms,
+    carried through the erase-deleted `.ann` marker as `tTupleSite` carries it,
+    and cleared by every other arm, so a tuple-form call is reported exactly
+    where `tRebindMutCalls` leaves it alone. -/
+def tDroppedMutCallsAt (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
+    (writers : List (String × Nat)) (tup : List (String × List Nat × Bool))
+    (site : Bool) : TExpr → List (String × List Nat)
   | .mk (.app f args) ty =>
       let here :=
         if tPlaceHead f then []
         else
           let ps := (tMutParamPositions sigs f ++ tMutArgPositions args).eraseDups
-          if ps.isEmpty || tCallRebound sf writers f args ty then [] else [(f, ps)]
+          if ps.isEmpty || tCallRebound sf writers f args ty
+              || (site && (tTupleWriteback tup f args).isSome) then [] else [(f, ps)]
       here ++ goE args
-  | .mk (.letBind _ v b) _ => tDroppedMutCalls sigs sf writers v ++ tDroppedMutCalls sigs sf writers b
-  | .mk (.lam _ b) _ => tDroppedMutCalls sigs sf writers b
+  | .mk (.letBind _ v b) _ =>
+      tDroppedMutCallsAt sigs sf writers tup true v
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
+  | .mk (.lam _ b) _ => tDroppedMutCallsAt sigs sf writers tup false b
   | .mk (.tuple es) _ => goE es
-  | .mk (.proj e _) _ => tDroppedMutCalls sigs sf writers e
+  | .mk (.proj e _) _ => tDroppedMutCallsAt sigs sf writers tup false e
   | .mk (.ifThenElse c t e) _ =>
-      tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers t
-        ++ tDroppedMutCalls sigs sf writers e
-  | .mk (.match_ s arms) _ => tDroppedMutCalls sigs sf writers s ++ goA arms
-  | .mk (.seq a b) _ => tDroppedMutCalls sigs sf writers a ++ tDroppedMutCalls sigs sf writers b
-  | .mk (.borrow e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.deref e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.assign _ rhs) _ => tDroppedMutCalls sigs sf writers rhs
+      tDroppedMutCallsAt sigs sf writers tup false c
+        ++ tDroppedMutCallsAt sigs sf writers tup false t
+        ++ tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.match_ s arms) _ => tDroppedMutCallsAt sigs sf writers tup false s ++ goA arms
+  | .mk (.seq a b) _ =>
+      tDroppedMutCallsAt sigs sf writers tup true a
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
+  | .mk (.borrow e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.deref e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.assign _ rhs) _ => tDroppedMutCallsAt sigs sf writers tup true rhs
   | .mk (.forLoop _ lo hi b) _ =>
-      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
-        ++ tDroppedMutCalls sigs sf writers b
+      tDroppedMutCallsAt sigs sf writers tup false lo
+        ++ tDroppedMutCallsAt sigs sf writers tup false hi
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
   | .mk (.forLoopRev _ lo hi b) _ =>
-      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
-        ++ tDroppedMutCalls sigs sf writers b
-  | .mk (.whileLoop c b) _ => tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers b
-  | .mk (.earlyReturn e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.questionMark e) _ => tDroppedMutCalls sigs sf writers e
+      tDroppedMutCallsAt sigs sf writers tup false lo
+        ++ tDroppedMutCallsAt sigs sf writers tup false hi
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
+  | .mk (.whileLoop c b) _ =>
+      tDroppedMutCallsAt sigs sf writers tup false c
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
+  | .mk (.earlyReturn e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.questionMark e) _ => tDroppedMutCallsAt sigs sf writers tup false e
   | .mk (.forFold _ lo hi b) _ =>
-      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
-        ++ tDroppedMutCalls sigs sf writers b
+      tDroppedMutCallsAt sigs sf writers tup false lo
+        ++ tDroppedMutCallsAt sigs sf writers tup false hi
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
   | .mk (.forFoldRev _ lo hi b) _ =>
-      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
-        ++ tDroppedMutCalls sigs sf writers b
-  | .mk (.whileFold c b) _ => tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers b
+      tDroppedMutCallsAt sigs sf writers tup false lo
+        ++ tDroppedMutCallsAt sigs sf writers tup false hi
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
+  | .mk (.whileFold c b) _ =>
+      tDroppedMutCallsAt sigs sf writers tup false c
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
   | .mk (.forFoldReturn _ lo hi b) _ =>
-      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
-        ++ tDroppedMutCalls sigs sf writers b
+      tDroppedMutCallsAt sigs sf writers tup false lo
+        ++ tDroppedMutCallsAt sigs sf writers tup false hi
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
   | .mk (.forFoldRevReturn _ lo hi b) _ =>
-      tDroppedMutCalls sigs sf writers lo ++ tDroppedMutCalls sigs sf writers hi
-        ++ tDroppedMutCalls sigs sf writers b
+      tDroppedMutCallsAt sigs sf writers tup false lo
+        ++ tDroppedMutCallsAt sigs sf writers tup false hi
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
   | .mk (.whileFoldReturn c b) _ =>
-      tDroppedMutCalls sigs sf writers c ++ tDroppedMutCalls sigs sf writers b
-  | .mk (.cfBreak e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.cfContinue e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.cfBreakContinue e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.ann e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.namedProj _ e) _ => tDroppedMutCalls sigs sf writers e
-  | .mk (.break_ (some e)) _ => tDroppedMutCalls sigs sf writers e
+      tDroppedMutCallsAt sigs sf writers tup false c
+        ++ tDroppedMutCallsAt sigs sf writers tup false b
+  | .mk (.cfBreak e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.cfContinue e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.cfBreakContinue e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.ann e) _ => tDroppedMutCallsAt sigs sf writers tup site e
+  | .mk (.namedProj _ e) _ => tDroppedMutCallsAt sigs sf writers tup false e
+  | .mk (.break_ (some e)) _ => tDroppedMutCallsAt sigs sf writers tup false e
   | .mk (.lit _) _ => []
   | .mk (.var _) _ => []
   | .mk .unitVal _ => []
@@ -663,10 +924,19 @@ def tDroppedMutCalls (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames
 where
   goE : List TExpr → List (String × List Nat)
     | [] => []
-    | e :: es => tDroppedMutCalls sigs sf writers e ++ goE es
+    | e :: es => tDroppedMutCallsAt sigs sf writers tup false e ++ goE es
   goA : List (ImpPat × TExpr) → List (String × List Nat)
     | [] => []
-    | (_, e) :: rest => tDroppedMutCalls sigs sf writers e ++ goA rest
+    | (_, e) :: rest => tDroppedMutCallsAt sigs sf writers tup false e ++ goA rest
+
+/-- The calls in a function body that pass a `&mut` argument and that
+    `tRebindMutCalls` leaves as plain calls. The body is not itself a `let`
+    value, an assignment's right-hand side or the head of a `seq`, so the scan
+    starts outside every tuple-form call site. -/
+def tDroppedMutCalls (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
+    (writers : List (String × Nat)) (tup : List (String × List Nat × Bool))
+    (e : TExpr) : List (String × List Nat) :=
+  tDroppedMutCallsAt sigs sf writers tup false e
 
 /-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
     `if`-statement detection in `tThreadMut` looks through `.ann` and thus
