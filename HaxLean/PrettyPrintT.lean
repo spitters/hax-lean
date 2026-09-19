@@ -846,14 +846,31 @@ partial def rewriteNewFromStructMap (sname : String) (fields : List (String × S
 /-- TCB pre-process: rewrite `.namedProj T x` to `.app "::namedProj::T" [x]`
     so the renderer can recognize newtype `.0` projections via the
     function-name marker after erasure. This is the bridge between the
-    verified `.namedProj` constructor and the TCB renderer. -/
+    verified `.namedProj` constructor and the TCB renderer.
+
+    Also rewrites a `.proj e i` node whose receiver `e` has a known tuple
+    type (`e.ty = .tuple elems` with at least two elements) to the same
+    `::proj::<path>` marker `markProjChainWith` uses for destructuring
+    chains, with `path` the projection path of component `i` in an
+    `elems.length`-ary right-nested tuple (`PrettyPrint.projPath`). This
+    covers a `.proj` reachable from a typed receiver even outside a
+    destructuring chain, so `toLean`'s untyped `.proj` fallback (which
+    prints an unknown identifier for any component past `0`) is only
+    reached when the receiver's tuple arity truly cannot be recovered
+    from the hax-provided type. -/
 partial def markNamedProj : TExpr → TExpr
   | .mk (.namedProj tname e) ty =>
     .mk (.app s!"::namedProj::{tname}" [markNamedProj e]) ty
   | .mk (.app f args) ty => .mk (.app f (args.map markNamedProj)) ty
   | .mk (.letBind n v b) ty => .mk (.letBind n (markNamedProj v) (markNamedProj b)) ty
   | .mk (.tuple es) ty => .mk (.tuple (es.map markNamedProj)) ty
-  | .mk (.proj e i) ty => .mk (.proj (markNamedProj e) i) ty
+  | .mk (.proj e i) ty =>
+    let e' := markNamedProj e
+    match e'.ty with
+    | .tuple elems =>
+      if elems.length ≥ 2 then .mk (.app s!"::proj::{projPath i elems.length}" [e']) ty
+      else .mk (.proj e' i) ty
+    | _ => .mk (.proj e' i) ty
   | .mk (.ifThenElse c t e) ty =>
     .mk (.ifThenElse (markNamedProj c) (markNamedProj t) (markNamedProj e)) ty
   | .mk (.match_ s arms) ty =>

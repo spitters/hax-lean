@@ -7,6 +7,8 @@ module
 
 public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
+public meta import HaxLean.PrettyPrintT
+public import HaxLean.PrettyPrintT
 
 /-!
 # Emitter regressions
@@ -125,8 +127,48 @@ def pairDestr : ImpExpr :=
       (.letBind "c" (.proj (.var "_tup") 2) (.var "c"))))) 1 ==
   "  let (a, b, c) := f\n  c"
 -- A projection with no destructuring chain: component `0` renders, a later
--- component is refused.
+-- component is refused. This is the untyped fallback, unchanged by the
+-- typed `.proj` marker below: it only fires when the receiver's tuple
+-- arity cannot be recovered from a `TExpr.ty` annotation.
 #guard toLean (.proj (.var "t") 0) == "t.1"
 #guard toLean (.proj (.var "t") 1) == "(hax_unsupported_tuple_projection t 1)"
+
+/-! ## Typed tuple projection outside a destructuring chain
+
+`markNamedProj` (`PrettyPrintT.lean`) rewrites a `TExpr.proj e i` node whose
+receiver `e` carries a known tuple type into the same `::proj::<path>`
+marker `markProjChainWith` emits for a destructuring chain, so a component
+past `0` renders via the recovered arity instead of the untyped fallback's
+refusal above. -/
+
+/-- A pair-typed variable, projected at component `1` with no destructuring
+    chain (e.g. `let s := t.1` after a call whose hax type is a 2-tuple, as
+    in `let (was_square, s) = sqrt_ratio_m1(..)` when only `s` is used
+    further down). -/
+def pairProjTyped : TExpr :=
+  .mk (.proj (.mk (.var "t") (.tuple [.unknown, .unknown])) 1) .unknown
+
+#guard toLean (markNamedProj pairProjTyped).erase == "t.2"
+
+/-- A triple-typed variable, projected at components `1` and `2`. -/
+def tripleProjTyped1 : TExpr :=
+  .mk (.proj (.mk (.var "t") (.tuple [.unknown, .unknown, .unknown])) 1) .unknown
+
+def tripleProjTyped2 : TExpr :=
+  .mk (.proj (.mk (.var "t") (.tuple [.unknown, .unknown, .unknown])) 2) .unknown
+
+#guard toLean (markNamedProj tripleProjTyped1).erase == "t.2.1"
+#guard toLean (markNamedProj tripleProjTyped2).erase == "t.2.2"
+
+/-- A nested projection: component `1` of a pair that is itself component
+    `1` of a triple, i.e. `(t.2.1).2` — `markNamedProj` recurses into the
+    receiver before checking its type, so the inner and outer projections
+    are each rewritten from the tuple type at their own site. -/
+def nestedProjTyped : TExpr :=
+  let inner := .mk (.proj (.mk (.var "t") (.tuple [.unknown, .tuple [.unknown, .unknown], .unknown])) 1)
+    (.tuple [.unknown, .unknown])
+  .mk (.proj inner 1) .unknown
+
+#guard toLean (markNamedProj nestedProjTyped).erase == "(t.2.1).2"
 
 end Hax.EmitterRegressions
