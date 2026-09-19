@@ -2,6 +2,7 @@ module
 
 public import HaxLean.Json
 public import HaxLean.Json.Adapter
+public import HaxLean.Json.IdTable
 public import HaxLean.HaxAdapter
 public import HaxLean.PrettyPrint
 public import HaxLean.Pipeline
@@ -11,9 +12,11 @@ public import HaxLean.Pipeline
 open Hax
 open Lean (Json ToJson FromJson toJson fromJson?)
 
-/-- Verified RFC 8259 JSON parser; replaces the unverified `Lean.Json.parse`. -/
+/-- Verified RFC 8259 JSON parser; replaces the unverified `Lean.Json.parse`.
+    An export written by `cargo hax json --use-ids` is returned in its inline
+    form (`Hax.resolveIds`). -/
 def Json.parseVerified (s : String) : Except String Json :=
-  Hax.Json.parseJsonString s
+  Hax.resolveIds <$> Hax.Json.parseJsonString s
 
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do
