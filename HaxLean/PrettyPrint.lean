@@ -88,9 +88,13 @@ def widthAwareRuntime (f : String) : String :=
   if f.any (· == '#') then
     let parts := f.splitOn "#"
     match parts with
-    | [op, w] =>
-      if w.length > 0 && w.get 0 == 'i' then
-        let iw := w.drop 1
+    | [op, w₀] =>
+      -- `usize` and `isize` carry the tag `size`, whose width is the platform
+      -- word size; the runtime names it `Hax.usizeBits`.
+      let widthTok : String → String := fun t => if t == "size" then "Hax.usizeBits" else t
+      let w := widthTok w₀
+      if w₀.length > 0 && w₀.get 0 == 'i' then
+        let iw := widthTok (w₀.drop 1).toString
         match op with
         | "wrapping_add" => s!"Hax.wrapping_add_iw {iw}"
         | "wrapping_sub" => s!"Hax.wrapping_sub_iw {iw}"
@@ -114,8 +118,8 @@ def widthAwareRuntime (f : String) : String :=
         | "overflowing_add"    => s!"Hax.overflowing_add_iw {iw}"
         | "overflowing_sub"    => s!"Hax.overflowing_sub_iw {iw}"
         | _ => s!"Hax.{op}"
-      else if op == "cast" && w.length > 0 && w.get 0 == 'u' then
-        s!"Hax.cast_uw {w.drop 1}"
+      else if op == "cast" && w₀.length > 0 && w₀.get 0 == 'u' then
+        s!"Hax.cast_uw {widthTok (w₀.drop 1).toString}"
       else match op with
       | "wrapping_add" => s!"Hax.wrapping_add_w {w}"
       | "wrapping_sub" => s!"Hax.wrapping_sub_w {w}"
