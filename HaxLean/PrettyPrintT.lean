@@ -770,7 +770,8 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
     (structLookup : String → Option String := fun _ => none)
     (structMeta : StructMeta := [])
     (allFnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
-    (boolNames : List String := []) : String :=
+    (boolNames : List String := [])
+    (mutWriteRets : List (String × List String × Bool) := []) : String :=
   let (tparams, rawBody) := extractTParams rawTe
   -- Use the pipelined body, but strip leading param bindings (same as extractParams on ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
@@ -807,11 +808,34 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
       let s := ty.toLeanTypeStrSurface structLookup
       s == "Int" || s.startsWith "Array" || s == "Bool" || (s.splitOn " × ").length > 1
   let allParamsTyped := tparams.all fun (_, ty) => isParamAnnotated ty
+  -- A tuple-form `&mut` write-back callee (`mutWriteRets`) returns its Rust
+  -- result, when it carries one, paired with the parameters it writes back, so
+  -- its annotation is the product of their types in that order. A component
+  -- type the renderer cannot spell leaves the annotation off, as an
+  -- unannotated parameter does.
   let retTyStr : String :=
     let ty := rawBody.ty
     let s := ty.toLeanTypeStrSurface structLookup
-    if ty.isUnknown || s == "Int" || s == "Unit" || !allParamsTyped then ""
-    else s!" : {s}"
+    match mutWriteRets.find? (·.1 == name) with
+    | some (_, wbNames, hasRes) =>
+      let comps : List (Option ImpType) :=
+        (if hasRes then [some ty] else []) ++
+          wbNames.map fun v => (tparams.find? (·.1 == v)).map (·.2)
+      let strs : List (Option String) := comps.map fun t =>
+        match t with
+        | none => none
+        | some t =>
+          if t.isUnknown then none
+          else
+            let str := t.toLeanTypeStrSurface structLookup
+            if str == "Unit" || str.isEmpty then none
+            else if (str.splitOn " × ").length > 1 then some s!"({str})"
+            else some str
+      if !allParamsTyped || strs.isEmpty || strs.any (·.isNone) then ""
+      else s!" : {" × ".intercalate (strs.filterMap id)}"
+    | none =>
+      if ty.isUnknown || s == "Int" || s == "Unit" || !allParamsTyped then ""
+      else s!" : {s}"
   let paramStr := if tparams.isEmpty then ""
     else " " ++ " ".intercalate (tparams.map fun (p, ty) =>
       let sn := sanitizeName p
@@ -1030,7 +1054,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (procTdefs : List (String × TExpr) := [])
     (newtypes : HaxAdapter.NewtypeMap := [])
     (enumMeta : List HaxAdapter.EnumInfo := [])
-    (aliasMeta : List HaxAdapter.TypeAliasInfo := []) : String :=
+    (aliasMeta : List HaxAdapter.TypeAliasInfo := [])
+    (mutWriteRets : List (String × List String × Bool) := []) : String :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
@@ -1303,7 +1328,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
-      | some (_, rawTe) => toLeanDefTyped n rawTe e (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes) (boolNames := boolNames)
+      | some (_, rawTe) => toLeanDefTyped n rawTe e (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes) (boolNames := boolNames) (mutWriteRets := mutWriteRets)
       | none => toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
     let surfaceDef := if needsPartial then surfaceDef.replace "def " "partial def " else surfaceDef
     s!"{surfaceDef}")

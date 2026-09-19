@@ -705,6 +705,45 @@ def tupleArgCall : TExpr :=
 #eval tDroppedMutCalls tupleFns sFields tupleWriters [] pushLetCall          -- [("p", [0])]
 #eval (tRebindMutCalls sFields tupleWriters [] pushLetCall).erase == pushLetCall.erase  -- true
 
+/-! ### The rendered signature of a tuple-form callee
+
+The parameters of a definition are the self-bindings the adapter emits ahead of
+the body, and the renderer reads the Rust result from the body's type. A
+tuple-form callee returns a product, so its annotation is the product of that
+Rust result and the written parameters; a single-form callee returns its one
+parameter in place of a `()` result, which carries no annotation. -/
+
+/-- `fn p(dst: &mut [u8; 64], pos: Int) -> Int` with its parameter bindings. -/
+def pushRawTe : TExpr :=
+  .mk (.letBind "dst" (.mk (.var "dst") mutBlockTy)
+    (.mk (.letBind "pos" (.mk (.var "pos") .int) pushBody) .int)) .int
+/-- `fn w(st: &mut [u32; 8], o: &mut [u8; 64])` with its parameter bindings. -/
+def twoWriteRawTe : TExpr :=
+  .mk (.letBind "st" (.mk (.var "st") mutStateTy)
+    (.mk (.letBind "o" (.mk (.var "o") mutBlockTy) twoWriteBody) .unit)) .unit
+/-- `fn f(st: &mut [u32; 8], blk: &[u8; 64])` with its parameter bindings. -/
+def writebackRawTe : TExpr :=
+  .mk (.letBind "st" (.mk (.var "st") mutStateTy)
+    (.mk (.letBind "blk" (.mk (.var "blk") mutBlockTy) writebackBody) .unit)) .unit
+
+/-- The first line of a rendered definition: its signature. -/
+def renderedSignature (name : String) (rawTe : TExpr) (body : ImpExpr)
+    (rets : List (String × List String × Bool)) : String :=
+  ((toLeanDefTyped name rawTe body (mutWriteRets := rets)).splitOn "\n").headD ""
+
+#eval renderedSignature "p" pushRawTe ((tReturnMutParams ["dst"] true pushBody).erase)
+    (mutWriteTupleReturns tupleResolved)
+  -- "def p (dst : Array (Int)) (pos : Int) : Int × Array (Int) :="
+#eval renderedSignature "w" twoWriteRawTe
+    ((tReturnMutParams ["st", "o"] false twoWriteBody).erase)
+    (mutWriteTupleReturns tupleResolved)
+  -- "def w (st : Array (Int)) (o : Array (Int)) : Array (Int) × Array (Int) :="
+-- The single form is not in the tuple table, so its `()` result stays
+-- unannotated and its definition is rendered as before.
+#eval renderedSignature "f" writebackRawTe ((tReturnMutParams ["st"] false writebackBody).erase)
+    (mutWriteTupleReturns (mutWriteFns sFields writebackFns writebackDefs))
+  -- "def f (st : Array (Int)) (blk : Array (Int)) :="
+
 /-! ## Fold-body tails that carry mutations
 
 The plain-fold encoder distributes into a `match` tail, keeps a mutation or a

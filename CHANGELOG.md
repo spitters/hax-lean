@@ -11,8 +11,12 @@
   and splits into a single-parameter call table and a tuple-parameter one, so
   the call sites and the definition read one table. A callee that carries its
   value out of tail position through a `return` or a `?` keeps its original
-  form. (`mutWriteFns`, `tTupleBind`, `tReturnMutParams` in `ThreadMutations`,
-  with the erasure twins and commuting squares in `ThreadMutationsErase`.)
+  form. The signature of such a callee is annotated with that product
+  (`def p (dst : Array (Int)) (pos : Int) : Int × Array (Int) :=`), since its
+  Rust result type no longer describes what it returns. (`mutWriteFns`,
+  `tTupleBind`, `tReturnMutParams` in `ThreadMutations`, `mutWriteTupleReturns`
+  read by `toLeanDefTyped`, with the erasure twins and commuting squares in
+  `ThreadMutationsErase`.)
 - `haxpipeT` refuses to emit when a call through `&mut` falls outside the
   write-back rewrite (a tuple-form call in an expression position the rewrite
   does not reach, or an argument that is not a variable, field place or slice

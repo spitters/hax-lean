@@ -202,7 +202,7 @@ def main (args : List String) : IO UInt32 := do
     let secrecyDef := s!"\n/-- Source-declared secret bindings (IF/CT transfer): binding names whose Rust\ntype is a secret integer. Consumed by `SourceSecrecy` on the CatCrypt side. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
     let rendered :=
       toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
-        newtypes enumMeta aliasMeta ++ secrecyDef
+        newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered

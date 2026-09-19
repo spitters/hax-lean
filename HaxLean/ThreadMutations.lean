@@ -344,6 +344,18 @@ def mutWriteReturns (ws : List (String × List Nat × List String × Bool)) :
     List (String × List String × Bool) :=
   ws.map (fun c => (c.1, c.2.2.1, c.2.2.2))
 
+/-- Write-back parameter names and result flag of the tuple-form entries of a
+    resolved table, read by the renderer: a tuple-form callee's Lean result is
+    the product of its Rust result, when it carries one, and the types of these
+    parameters. A single-form callee returns its one parameter in place of a
+    `()` result, which the renderer leaves unannotated. -/
+def mutWriteTupleReturns (ws : List (String × List Nat × List String × Bool)) :
+    List (String × List String × Bool) :=
+  ws.filterMap fun c =>
+    match c.2.1, c.2.2.2 with
+    | [_], false => none
+    | _, hasRes => some (c.1, c.2.2.1, hasRes)
+
 /-- Standard-library methods that write through their receiver, with the
     receiver's argument position.
 
