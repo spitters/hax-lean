@@ -343,9 +343,10 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
   -- Erased newtype constructors (`struct T(Inner)`, called as `T(x)`) are
-  -- rendered as an identity function defined by the newtype preamble
-  -- (`toLeanCertifiedFileTyped`'s `newtypeBlock`), not as an unknown call —
-  -- they must not surface as a `Deps` field.
+  -- rendered as the identity function `«T.mk»` defined by the newtype
+  -- preamble (`toLeanCertifiedFileTyped`'s `newtypeBlock`), not as an
+  -- unknown call — they must not surface as a `Deps` field. The filter keys
+  -- on the source name `T`, which the call sites still carry at this point.
   let newtypeCtorNames := newtypes.map (·.1)
   let structIsPassthrough := computeStructPassthrough structMeta defs
   let baseStructLookup := mkStructLookup structMeta structIsPassthrough
@@ -1278,6 +1279,14 @@ def toLeanTExprDef (tyName : String → Option String) (name : String) (t : TExp
 def toLeanEraseExample (name : String) : String :=
   s!"example : {sanitizeName (name ++ "_texpr")}.erase = {sanitizeName (name ++ "_impExpr")} := rfl"
 
+/-- Rewrite every newtype tuple-struct construction `.app T args` to
+    `.app "T.mk" args`, the name the newtype preamble gives the definitional
+    constructor. The bare name `T` belongs to the transparent alias
+    `abbrev T := <Inner>`, so the constructor takes the `.mk` suffix, matching
+    the `«T.0»` projection. -/
+def rewriteNewtypeCtors (newtypes : HaxAdapter.NewtypeMap) (e : ImpExpr) : ImpExpr :=
+  newtypes.foldl (fun expr (t, _) => rewriteAppName t s!"{t}.mk" expr) e
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
@@ -1410,6 +1419,11 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       let e' := projConflicts.foldl (fun expr (unqual, qual) =>
         rewriteAppName unqual qual expr) e
       (n, e')
+  -- Newtype constructor call sites take the `«T.mk»` name the newtype
+  -- preamble declares. This runs after `generatePreambleTyped`, whose
+  -- `Deps`-field filter keys on the source name `T`.
+  let defs := if newtypes.isEmpty then defs
+    else defs.map fun (n, e) => (n, rewriteNewtypeCtors newtypes e)
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
@@ -1561,13 +1575,17 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         s!"inductive {ei.name} : Type where\n{variants}{derivingClause}"
       "/-- Rust enum definitions extracted from hax JSON. -/\n"
         ++ "\n\n".intercalate lines ++ "\n\n"
-  -- Newtype preamble: emit `abbrev <T>_T := <Inner>`, the definitional
-  -- unwrap `def «<T>.0» x := x`, and the definitional constructor wrap
-  -- `def <T> x := x` (the inverse of `«<T>.0»`) per newtype. Hax erases the
-  -- newtype at the type level, so a source call `T(x)` is the identity on
-  -- `x`; without this definition the call's head `T` would be an unknown
-  -- function and fall into the `Deps` class (see `newtypeCtorNames` in
-  -- `generatePreambleTyped`, which excludes it from that computation).
+  -- Newtype preamble: emit the alias `abbrev <T> := <Inner>`, the
+  -- definitional unwrap `def «<T>.0» x := x`, and the definitional
+  -- constructor wrap `def «<T>.mk» x := x` (the inverse of `«<T>.0»`) per
+  -- newtype. Hax erases the newtype at the type level, so a source call
+  -- `T(x)` is the identity on `x`; without this definition the call's head
+  -- would be an unknown function and fall into the `Deps` class (see
+  -- `newtypeCtorNames` in `generatePreambleTyped`, which excludes it from
+  -- that computation). The constructor carries the `.mk` suffix because the
+  -- alias already holds the bare name whenever the clash rename does not
+  -- move it to `<T>_T`; `rewriteNewtypeCtors` above rewrites the call sites
+  -- to match.
   let newtypeBlock : String :=
     if newtypeRenamed.isEmpty then ""
     else
@@ -1575,7 +1593,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         -- Original short name (without `_T`): used for the projection name
         -- and the constructor name.
         let bareName := if aliasName.endsWith "_T" then aliasName.dropRight 2 else aliasName
-        s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def {bareName} (x : {innerStr}) : {aliasName} := x"
+        s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def «{bareName}.mk» (x : {innerStr}) : {aliasName} := x"
       "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps and definitional constructors. Inner\n    types may themselves be axiomatized (see the axiom block above). -/\n"
         ++ "\n".intercalate lines ++ "\n\n"
   -- The runtime, the AST and the reference semantics are imported under their

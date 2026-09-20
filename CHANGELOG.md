@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- The definitional constructor of a newtype tuple struct is emitted as
+  `«T.mk»`, matching the `«T.0»` unwrap, and its call sites carry that name
+  in the surface rendering and in both literals. The bare name `T` belongs to
+  the transparent alias `abbrev T := <Inner>`, so emitting the constructor as
+  `def T` declared the same name twice and Lean rejected the file; the
+  collision was hidden wherever the alias took the `<T>_T` clash rename.
+  (`rewriteNewtypeCtors` and `newtypeBlock` in `PrettyPrintT`.)
 - `--emit-certified` emits the typed literal of each function beside its
   `ImpExpr` literal: `def f_texpr : TExpr` carrying the node types of the
   pipelined `TExpr`, and `example : f_texpr.erase = f_impExpr := rfl`. The

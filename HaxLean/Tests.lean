@@ -874,4 +874,61 @@ def addOneImp : ImpExpr := addOneT.erase
 #eval toLeanTExpr (fun _ => none) (retypeWith addOneImp unknownTExpr) ==
   "(.mk (.letBind \"x\" (.mk (.var \"x\") .unknown) (.mk (.app \"add\" [(.mk (.var \"x\") .unknown), (.mk (.lit (ImpLit.int 1)) .unknown)]) .unknown)) .unknown)"  -- true
 
+/-! ## Newtype tuple structs and their neighbours
+
+A single-field tuple struct `struct Tag([u8; 32])` is an erased newtype: the
+printer emits the transparent alias `abbrev Tag`, the unwrap `«Tag.0»` and the
+constructor `«Tag.mk»`, three distinct names, and rewrites the construction
+site `Tag(v)` to the constructor name. A tuple struct with two fields and a
+named-field struct are not newtypes — `buildNewtypeMap` records only
+single-field tuple structs — so their construction sites keep the bare
+struct name. -/
+
+/-- `struct Tag([u8; 32])`, in the adapter's newtype encoding. -/
+def tagNewtypes : HaxAdapter.NewtypeMap := [("Tag", .array (.uint .w8) 32)]
+
+/-- `fn wrap(v: [u8; 32]) -> Tag { Tag(v) }`. -/
+def wrapTagT : TExpr :=
+  .mk (.lam ["v"] (.mk (.app "Tag" [.mk (.var "v") .unknown]) .unknown)) .unknown
+
+/-- The emitted file for `wrapTagT`. -/
+def wrapTagFile : String :=
+  toLeanCertifiedFileTyped [("wrap", wrapTagT)] "T" [] [] [] (newtypes := tagNewtypes)
+
+-- The three declarations carry three distinct names.
+#eval ((wrapTagFile.splitOn
+  "abbrev Tag := Array (Int)\nnoncomputable def «Tag.0» (x : Tag) : Array (Int) := x\nnoncomputable def «Tag.mk» (x : Array (Int)) : Tag := x\n").length == 2)  -- true
+
+-- No declaration reuses the alias name `Tag`.
+#eval ((wrapTagFile.splitOn "def Tag ").length == 1)  -- true
+
+-- The construction site names the constructor, in the surface rendering and
+-- in the `ImpExpr` literal.
+#eval ((wrapTagFile.splitOn "(fun v => «Tag.mk» v)").length == 2)  -- true
+#eval ((wrapTagFile.splitOn "(.app \"Tag.mk\" [(.var \"v\")])").length == 2)  -- true
+
+/-- `struct Pair(u32, u32)`, in the adapter's positional-field encoding. -/
+def pairStructMeta : StructMeta := [("Pair", [("0", "int", .int), ("1", "int", .int)])]
+
+/-- `struct Pt { x: u32, y: u32 }`. -/
+def ptStructMeta : StructMeta := [("Pt", [("x", "int", .int), ("y", "int", .int)])]
+
+/-- `fn mk(a: u32, b: u32) -> S { S(a, b) }` for a struct named `sname`. -/
+def mkStructT (sname : String) : TExpr :=
+  .mk (.lam ["a", "b"]
+    (.mk (.app sname [.mk (.var "a") .int, .mk (.var "b") .int]) .unknown)) .unknown
+
+-- A two-field tuple struct is not in the newtype map, so its construction
+-- site keeps the bare struct name.
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pair")] "T" pairStructMeta [] []).splitOn
+  "Pair.mk").length == 1)  -- true
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pair")] "T" pairStructMeta [] []).splitOn
+  "(fun a b => Pair a b)").length == 2)  -- true
+
+-- A named-field struct is unaffected for the same reason.
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pt")] "T" ptStructMeta [] []).splitOn
+  "Pt.mk").length == 1)  -- true
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pt")] "T" ptStructMeta [] []).splitOn
+  "(fun a b => Pt a b)").length == 2)  -- true
+
 end Hax.Tests
