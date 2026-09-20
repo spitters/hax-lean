@@ -16,6 +16,17 @@
   `traitCallImplMethod`, `resolveTraitImplCall`, `collectLocalTraitImplMethods`
   and `buildTraitImplMethodMap` in `HaxAdapter`, read by `parseHaxTExpr`'s
   `Call` arm and by `parseHaxFileWithTExpr`'s item walk.)
+
+  `collectLocalTraitImplMethods` requires the trait's krate not to be in
+  `builtinKrates`, so an `impl` of a `core`, `alloc` or `std` trait keeps
+  opaque methods even when the `impl` itself is local. That is what
+  `#[derive(Debug)]`, `#[derive(Clone)]` and their siblings produce: the body
+  is compiler-generated rather than written, it is not part of any
+  specification, and for `Debug` it calls the `core::fmt` builder through
+  `&mut`, which the write-back gate refuses. Testing `owner_id.is_local` alone
+  admitted them. The filter is keyed on the trait rather than on the type, so
+  it also covers a hand-written `impl Default`, `impl From` or `impl Iterator`
+  on a type carrying no derive.
 - The definitional constructor of a newtype tuple struct is emitted as
   `«T.mk»`, matching the `«T.0»` unwrap, and its call sites carry that name
   in the surface rendering and in both literals. The bare name `T` belongs to
