@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- A trait-method call resolving to a trait `impl` of the crate being extracted
+  reaches that method's body instead of the generated `Deps` class. The hax
+  `Call` names the trait's associated function and carries its resolution
+  beside it, in `fun.contents.GlobalName.item.value.in_trait.impl`; a
+  `Concrete` atom there names the `impl` block by its `DefId`. The `impl`
+  blocks the crate defines are indexed by that interning id, their methods are
+  emitted as top-level definitions named `<Trait>_<method>` (or
+  `<Trait>_<SelfTy>_<method>` when the crate has several `impl`s of the trait),
+  and the call sites take the same name. A call whose `impl` is outside the
+  crate, and a method the `impl` inherits as a trait default, keep the bare
+  method name and reach the `Deps` class. (`defIdLeafName`,
+  `traitCallImplMethod`, `resolveTraitImplCall`, `collectLocalTraitImplMethods`
+  and `buildTraitImplMethodMap` in `HaxAdapter`, read by `parseHaxTExpr`'s
+  `Call` arm and by `parseHaxFileWithTExpr`'s item walk.)
 - The definitional constructor of a newtype tuple struct is emitted as
   `«T.mk»`, matching the `«T.0»` unwrap, and its call sites carry that name
   in the surface rendering and in both literals. The bare name `T` belongs to

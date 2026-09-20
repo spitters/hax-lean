@@ -33,6 +33,8 @@ public meta import HaxLean.PrettyPrintT
 public import HaxLean.PrettyPrintT
 public meta import HaxLean.EmitterRegressions
 public import HaxLean.EmitterRegressions
+public meta import HaxLean.HaxAdapter
+public import HaxLean.HaxAdapter
 
 /-!
 # Test Programs
@@ -930,5 +932,201 @@ def mkStructT (sname : String) : TExpr :=
   "Pt.mk").length == 1)  -- true
 #eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pt")] "T" ptStructMeta [] []).splitOn
   "(fun a b => Pt a b)").length == 2)  -- true
+
+/-! ## Trait-method calls and the `Deps` class
+
+A hax `Call` through a trait names the trait's associated function and carries
+its resolution beside it, in `fun.contents.GlobalName.item.value.in_trait.impl`.
+When the `Concrete` atom there names a trait `impl` of the crate being
+extracted, the call site and the `impl` method's body meet at the name
+`HaxAdapter.buildTraitImplMethodMap` assigns — `<Trait>_<method>` — and the
+method does not reach the generated `Deps` class. When the `impl` is outside
+the crate, the method has no body in the extraction and the `Deps` class
+carries it.
+
+The fixtures below are a crate `demo` with a trait `Ring` from a dependency
+crate, whose methods `fwd` and `inv` delegate to the crate's own `mul_fwd`
+and `mul_inv` — delegate names that differ from the method names, so no name
+coincidence can resolve the calls. -/
+
+/-- A hax `DefId` path segment in the namespace `ns`. -/
+def traitSeg (ns name : String) : Lean.Json :=
+  Lean.Json.mkObj [("data", Lean.Json.mkObj [(ns, Lean.Json.str name)]),
+    ("disambiguator", Lean.toJson (0 : Nat))]
+
+/-- A hax `DefId` at interning id `id`, with the given crate, path and
+    item kind. -/
+def traitDefId (krate : String) (path : List Lean.Json) (id : Nat)
+    (isLocal : Bool) (kind : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj
+    [("id", Lean.toJson id),
+     ("value", Lean.Json.mkObj
+       [("krate", Lean.Json.str krate), ("path", Lean.Json.arr path.toArray),
+        ("parent", Lean.Json.null), ("is_local", Lean.Json.bool isLocal),
+        ("kind", kind)])])]
+
+/-- The `DefId` of the `impl Ring for P` block of crate `demo`. -/
+def traitImplDefId : Lean.Json :=
+  traitDefId "demo" [traitSeg "TypeNs" "P", Lean.Json.str "Impl"] 100 true
+    (Lean.Json.mkObj [("Impl", Lean.Json.mkObj [("of_trait", Lean.Json.bool true)])])
+
+/-- The `DefId` of the trait method `Ring::<name>`, in the dependency crate
+    `ring`. -/
+def traitMethodDefId (name : String) : Lean.Json :=
+  traitDefId "ring" [traitSeg "TypeNs" "Ring", traitSeg "ValueNs" name] 200 false
+    (Lean.Json.str "AssocFn")
+
+/-- The `DefId` of the crate-level function `demo::<name>`. -/
+def traitFreeFnDefId (name : String) (id : Nat) : Lean.Json :=
+  traitDefId "demo" [traitSeg "ValueNs" name] id true (Lean.Json.str "Fn")
+
+/-- A hax expression node reading the local variable `name`. -/
+def traitVarRef (name : String) : Lean.Json :=
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj
+    [("VarRef", Lean.Json.mkObj
+      [("id", Lean.Json.mkObj [("name", Lean.Json.str name)])])])]
+
+/-- A hax `Call` node. `inTrait` is the callee's `in_trait` field: `null` for a
+    direct call, and the trait resolution for a call through a trait. -/
+def traitCall (calleeDefId inTrait : Lean.Json) (args : List Lean.Json) :
+    Lean.Json :=
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj
+    [("Call", Lean.Json.mkObj
+      [("fun", Lean.Json.mkObj [("contents", Lean.Json.mkObj
+          [("GlobalName", Lean.Json.mkObj
+            [("item", Lean.Json.mkObj [("value", Lean.Json.mkObj
+              [("def_id", calleeDefId), ("generic_args", Lean.Json.arr #[]),
+               ("impl_exprs", Lean.Json.arr #[]), ("in_trait", inTrait)])])])])]),
+       ("args", Lean.Json.arr args.toArray),
+       ("generic_args", Lean.Json.arr #[])])])]
+
+/-- The `in_trait` field of a call through `Ring` resolved by a `Concrete`
+    atom naming the `impl` block at interning id `implId`. -/
+def traitInTrait (implId : Nat) : Lean.Json :=
+  Lean.Json.mkObj [("impl", Lean.Json.mkObj
+    [("Concrete", Lean.Json.mkObj
+      [("id", Lean.toJson (0 : Nat)),
+       ("value", Lean.Json.mkObj
+         [("def_id", traitDefId "demo" [traitSeg "TypeNs" "P", Lean.Json.str "Impl"]
+             implId true
+             (Lean.Json.mkObj [("Impl",
+               Lean.Json.mkObj [("of_trait", Lean.Json.bool true)])]))])])])]
+
+/-- A one-parameter hax function body: `params`, `ret` and `body` as the
+    `Fn` item kind records them. -/
+def traitFnDef (param : String) (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj
+    [("params", Lean.Json.arr #[Lean.Json.mkObj
+        [("pat", Lean.Json.mkObj [("contents", Lean.Json.mkObj
+          [("Binding", Lean.Json.mkObj
+            [("var", Lean.Json.mkObj [("name", Lean.Json.str param)])])])])]]),
+     ("ret", Lean.Json.null), ("body", body)]
+
+/-- A crate-level `fn <name>(<param>) { <body> }` item. -/
+def traitFreeFnItem (name : String) (id : Nat) (param : String)
+    (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj
+    [("def_id", traitFreeFnDefId name id),
+     ("kind", Lean.Json.mkObj [("Fn", Lean.Json.mkObj
+       [("ident", Lean.Json.arr #[Lean.Json.str name, Lean.Json.null]),
+        ("def", traitFnDef param body)])])]
+
+/-- A method of an `impl` block: `fn <name>(<param>) { <body> }`, with the
+    method name on the item and the signature inline under `Fn`. -/
+def traitImplMethodItem (name param : String) (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj
+    [("ident", Lean.Json.arr #[Lean.Json.str name, Lean.Json.null]),
+     ("kind", Lean.Json.mkObj [("Fn", traitFnDef param body)])]
+
+/-- The item `impl Ring for P` of crate `demo`, whose `fwd` and `inv`
+    delegate to `mul_fwd` and `mul_inv`. -/
+def traitImplItem : Lean.Json :=
+  Lean.Json.mkObj
+    [("owner_id", traitImplDefId),
+     ("kind", Lean.Json.mkObj [("Impl", Lean.Json.mkObj
+       [("of_trait", Lean.Json.mkObj
+          [("value", Lean.Json.mkObj
+            [("def_id", traitDefId "ring" [traitSeg "TypeNs" "Ring"] 200 false
+                (Lean.Json.str "Trait"))])]),
+        ("self_ty", Lean.Json.mkObj
+          [("value", Lean.Json.mkObj
+            [("Adt", Lean.Json.mkObj
+              [("value", Lean.Json.mkObj
+                [("def_id", traitDefId "demo" [traitSeg "TypeNs" "P"] 201 true
+                    (Lean.Json.str "Struct"))])])])]),
+        ("items", Lean.Json.arr #[
+          traitImplMethodItem "fwd" "a"
+            (traitCall (traitFreeFnDefId "mul_fwd" 300) Lean.Json.null
+              [traitVarRef "a"]),
+          traitImplMethodItem "inv" "a"
+            (traitCall (traitFreeFnDefId "mul_inv" 301) Lean.Json.null
+              [traitVarRef "a"])])])])]
+
+/-- The delegates `mul_fwd` and `mul_inv`, each the identity on its argument. -/
+def traitDelegateItems : List Lean.Json :=
+  [traitFreeFnItem "mul_fwd" 300 "a" (traitVarRef "a"),
+   traitFreeFnItem "mul_inv" 301 "a" (traitVarRef "a")]
+
+/-- `fn run(a) { Ring::inv(Ring::fwd(a)) }`, both calls resolved by the
+    `Concrete` atom at interning id `implId`. -/
+def traitRunItem (implId : Nat) : Lean.Json :=
+  traitFreeFnItem "run" 302 "a"
+    (traitCall (traitMethodDefId "inv") (traitInTrait implId)
+      [traitCall (traitMethodDefId "fwd") (traitInTrait implId)
+        [traitVarRef "a"]])
+
+/-- An export of crate `demo` whose `Ring` calls resolve to the crate's own
+    `impl Ring for P`. -/
+def traitResolvedExport : Lean.Json :=
+  Lean.Json.arr (traitDelegateItems ++ [traitImplItem, traitRunItem 100]).toArray
+
+/-- An export of crate `demo` whose `Ring` calls resolve to an `impl` block of
+    another crate: the `impl` item is absent and its interning id is unknown. -/
+def traitExternalExport : Lean.Json :=
+  Lean.Json.arr (traitDelegateItems ++ [traitRunItem 900]).toArray
+
+/-- The names the adapter emits defs for, for an export. -/
+def traitDefNames (export_ : Lean.Json) : List String :=
+  match HaxAdapter.parseHaxFileWithTExpr export_ with
+  | .ok (_, _, rawTdefs, _) => rawTdefs.map (·.1)
+  | .error _ => []
+
+/-- The emitted file for an export. -/
+def traitEmittedFile (export_ : Lean.Json) : String :=
+  match HaxAdapter.parseHaxFileWithTExpr export_ with
+  | .ok (_, fnTypes, rawTdefs, procTdefs) =>
+    toLeanCertifiedFileTyped rawTdefs "T" [] fnTypes procTdefs
+  | .error e => e
+
+/-- The emitted preamble for an export: the struct definitions and the
+    `Deps` class. -/
+def traitEmittedPreamble (export_ : Lean.Json) : String :=
+  match HaxAdapter.parseHaxFileWithTExpr export_ with
+  | .ok (_, fnTypes, rawTdefs, procTdefs) =>
+    (generatePreambleTyped rawTdefs "T" [] fnTypes
+      (procTdefs.map fun (n, te) => (n, te.erase)) procTdefs).1
+  | .error e => e
+
+-- The in-crate `impl` contributes both method bodies, under names that carry
+-- the trait and the method.
+#guard (traitDefNames traitResolvedExport ==
+  ["mul_fwd", "mul_inv", "Ring_fwd", "Ring_inv", "run"])
+
+-- The call sites name those defs.
+#guard ((traitEmittedFile traitResolvedExport).splitOn "Ring_inv (Ring_fwd a)").length == 2
+
+-- The bodies delegate to the crate's own functions.
+#guard ((traitEmittedFile traitResolvedExport).splitOn
+  "def Ring_fwd a :=\nmul_fwd a").length == 2
+
+-- Neither method reaches the `Deps` class.
+#guard ((traitEmittedPreamble traitResolvedExport).splitOn "fwd").length == 1
+#guard ((traitEmittedPreamble traitResolvedExport).splitOn "inv").length == 1
+
+-- Control: the `impl` is outside the crate, so the extraction has no body for
+-- the methods and the `Deps` class carries them under their bare names.
+#guard (traitDefNames traitExternalExport == ["mul_fwd", "mul_inv", "run"])
+#guard ((traitEmittedPreamble traitExternalExport).splitOn "\n  fwd ").length == 2
+#guard ((traitEmittedPreamble traitExternalExport).splitOn "\n  inv ").length == 2
 
 end Hax.Tests

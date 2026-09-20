@@ -320,4 +320,77 @@ def mulFnU64 : TExpr :=
 #guard ((toLeanCertifiedFileTyped [("f", mulFnU64)] "Test" [] [] []).splitOn
   "def f (a : Int) (b : Int) :=\nHax.mul a b\n").length == 2
 
+/-! ## Dependency-crate names the export also defines
+
+A `DefId` is named by the last segment of its path, so a function of a
+dependency crate and a function of the exported crate can claim one name.
+`Hax.HaxAdapter.extractDefIdName` qualifies the dependency one with its parent
+module, which keeps it out of the emitted definitions and so routes it to the
+`Deps` class. These pins fix the rule on both sides: the qualification applies
+to a dependency name the export defines, and to nothing else. -/
+
+open Lean in
+/-- A `DefId` path segment `{data: {<ns>: <name>}}`. -/
+def defIdSeg (ns nm : String) : Json :=
+  Json.mkObj [("data", Json.mkObj [(ns, Json.str nm)])]
+
+open Lean in
+/-- A `DefId` in `krate` with the given path segments. -/
+def mkDefIdJson (krate : String) (segs : List Json) : Json :=
+  Json.mkObj [("krate", Json.str krate), ("path", Json.arr segs.toArray)]
+
+open Lean in
+/-- A top-level `Fn` item of `krate`, in module `mod`, named `nm`. -/
+def fnItemJson (krate mod nm : String) : Json :=
+  Json.mkObj
+    [("kind", Json.mkObj [("Fn", Json.mkObj [])]),
+     ("def_id", mkDefIdJson krate [defIdSeg "TypeNs" mod, defIdSeg "ValueNs" nm])]
+
+open Lean in
+/-- An export of `ristretto255_hax` defining `scalar::scalar_add` and
+    `group::point_add`. -/
+def shadowExport : Json :=
+  Json.arr #[fnItemJson "ristretto255_hax" "scalar" "scalar_add",
+             fnItemJson "ristretto255_hax" "group" "point_add"]
+
+#guard (Hax.HaxAdapter.localCrateOfExport shadowExport).krates == ["ristretto255_hax"]
+#guard (Hax.HaxAdapter.localCrateOfExport shadowExport).fnNames.contains "scalar_add"
+#guard Hax.HaxAdapter.shadowsLocalFn
+  (Hax.HaxAdapter.localCrateOfExport shadowExport) "libcrux_specs_hax" "scalar_add"
+#guard !Hax.HaxAdapter.shadowsLocalFn
+  (Hax.HaxAdapter.localCrateOfExport shadowExport) "libcrux_specs_hax" "scalar_mul_mod_l"
+#guard !Hax.HaxAdapter.shadowsLocalFn
+  (Hax.HaxAdapter.localCrateOfExport shadowExport) "ristretto255_hax" "scalar_add"
+#guard !Hax.HaxAdapter.shadowsLocalFn
+  (Hax.HaxAdapter.localCrateOfExport shadowExport) "core" "scalar_add"
+
+/-- `libcrux_specs_hax::edwards25519::scalar_add`, which `shadowExport` shadows. -/
+def depScalarAdd : Lean.Json :=
+  mkDefIdJson "libcrux_specs_hax"
+    [defIdSeg "TypeNs" "edwards25519", defIdSeg "ValueNs" "scalar_add"]
+
+/-- `libcrux_specs_hax::edwards25519::scalar_mul_mod_l`, which it does not. -/
+def depScalarMul : Lean.Json :=
+  mkDefIdJson "libcrux_specs_hax"
+    [defIdSeg "TypeNs" "edwards25519", defIdSeg "ValueNs" "scalar_mul_mod_l"]
+
+/-- `core::slice::len`, a runtime builtin whose bare name is the table key. -/
+def coreSliceLen : Lean.Json :=
+  mkDefIdJson "core" [defIdSeg "TypeNs" "slice", defIdSeg "ValueNs" "len"]
+
+/-- The exporting crate's own `scalar::scalar_add`. -/
+def localScalarAdd : Lean.Json :=
+  mkDefIdJson "ristretto255_hax"
+    [defIdSeg "TypeNs" "scalar", defIdSeg "ValueNs" "scalar_add"]
+
+/-- An exporting crate that also defines `len`. -/
+def shadowCrate : Hax.HaxAdapter.LocalCrate :=
+  { krates := ["ristretto255_hax"], fnNames := ["scalar_add", "point_add", "len"] }
+
+#guard Hax.HaxAdapter.extractDefIdName depScalarAdd [] shadowCrate == "edwards25519_scalar_add"
+#guard Hax.HaxAdapter.extractDefIdName depScalarMul [] shadowCrate == "scalar_mul_mod_l"
+#guard Hax.HaxAdapter.extractDefIdName localScalarAdd [] shadowCrate == "scalar_add"
+#guard Hax.HaxAdapter.extractDefIdName coreSliceLen [] shadowCrate == "len"
+#guard Hax.HaxAdapter.extractDefIdName depScalarAdd == "scalar_add"
+
 end Hax.EmitterRegressions

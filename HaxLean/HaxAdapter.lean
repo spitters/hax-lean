@@ -105,9 +105,36 @@ def castTag? (srcTy dstTy : ImpType) : Option String :=
   | .uint w, _ => some (widthDigits w)
   | _, _ => none
 
+/-- The crates an export carries items for, and the short names of the functions
+    and constants those items define.
+
+    An item of a dependency crate appears in the export only as the `DefId` of a
+    call or of a value reference. A `DefId` is named by the last segment of its
+    path, so a dependency function whose short name is also defined in the
+    export takes that same name: the call then reads as a reference to the
+    emitted definition, and the dependency function reaches no field of the
+    generated `Deps` class. `shadowsLocalFn` identifies that case and
+    `extractDefIdName` qualifies the dependency name with its parent module. -/
+structure LocalCrate where
+  krates : List String := []
+  fnNames : List String := []
+  deriving Inhabited
+
+/-- The krates whose items the runtime builtin table names, not the `Deps`
+    class. A short name from one of these keeps its bare form, which is the key
+    the builtin table reads. -/
+def builtinKrates : List String := ["core", "std", "alloc", "<synthetic>"]
+
+/-- Whether a `DefId` in krate `krate` with short name `n` names an item of a
+    dependency crate whose short name the export also defines. -/
+def shadowsLocalFn (lc : LocalCrate) (krate n : String) : Bool :=
+  !lc.krates.isEmpty && krate != "" && !lc.krates.contains krate
+    && !builtinKrates.contains krate && lc.fnNames.contains n
+
 /-- Extract the last meaningful name from a hax `DefId` path.
     DefId JSON: `{"krate": "...", "path": [{"data": {"TypeNs": "..."}, "disambiguator": 0}, ...]}` -/
-partial def extractDefIdName (j : Json) (collisions : List String := []) : String :=
+partial def extractDefIdName (j : Json) (collisions : List String := [])
+    (lc : LocalCrate := {}) : String :=
   -- hax DefId may be: {path: [...]} or {contents: {value: {path: [...]}}}
   -- Unwrap to find the object containing "path"
   let inner := match j.getObjVal? "contents" with
@@ -198,10 +225,17 @@ partial def extractDefIdName (j : Json) (collisions : List String := []) : Strin
       -- two functions stay distinct. Otherwise one body wins and the other's call
       -- sites mis-type (3-tuple vs 4-tuple point). Applied identically at def and
       -- call sites (both route through here), keeping them consistent.
-      if collisions.contains n then
+      --
+      -- The same qualification separates a dependency-crate function from a
+      -- local definition of the same short name (`shadowsLocalFn`): the two are
+      -- distinct functions, and only the qualified one is absent from the
+      -- emitted defs, which is what routes it into the `Deps` class.
+      let qualified :=
         match names.reverse with
         | _ :: parent :: _ => s!"{parent}_{base}"
         | _ => base
+      let krateName : String := (inner.getObjValAs? String "krate").toOption.getD ""
+      if collisions.contains n || shadowsLocalFn lc krateName n then qualified
       else base
     | none =>
       match inner.getObjValAs? String "krate" with
@@ -222,14 +256,14 @@ def extractLocalIdentName (j : Json) : String :=
 /-- Extract the DefId name from an `item` JSON object.
     hax items have structure: `{id, value: {def_id: ...}}` or `{def_id: ...}`. -/
 partial def extractItemDefIdName (item : Json) (fallback : String)
-    (collisions : List String := []) : String :=
+    (collisions : List String := []) (lc : LocalCrate := {}) : String :=
   let defIdJ := match item.getObjVal? "value" with
     | .ok v => match v.getObjVal? "def_id" with
       | .ok d => some d
       | _ => item.getObjVal? "def_id" |>.toOption
     | _ => item.getObjVal? "def_id" |>.toOption
   match defIdJ with
-  | some defId => extractDefIdName defId collisions
+  | some defId => extractDefIdName defId collisions lc
   | none => fallback
 
 /-- Fallback method-call disambiguation when no impl-self-type map is
@@ -310,6 +344,16 @@ structure ImplSelfTypeMap where
       `struct_update` of the root variable. Empty when the caller has no
       struct metadata; field writes then keep the `_assign` sink. -/
   structFields : StructFieldNames := []
+  /-- The crate the export is taken from, with the short names of the functions
+      it defines. A call into a dependency crate whose short name is one of them
+      is qualified with its parent module (`shadowsLocalFn`). -/
+  localCrate : LocalCrate := {}
+  /-- The methods of the trait `impl` blocks the extracted crate defines, as
+      `(impl interning id, method name, emitted name)`. A trait-method call
+      whose `in_trait.impl` atom resolves to one of these `impl` blocks takes
+      the emitted name, which is also the name the `impl`'s method body is
+      emitted under. Built by `buildTraitImplMethodMap`. -/
+  traitImplMethods : List (Nat × String × String) := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -382,6 +426,27 @@ def tFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
         some (.assign root (TExpr.mk (.app (structUpdateHead sname i n) [sE, mkVal lhs']) sE.ty))
       | none => none
     | none => none
+
+/-- The last path segment of a hax `DefId`: the item's own short name.
+    Each segment's `data` is either a bare string (`"Impl"`) or a one-key
+    object tagged with the namespace it lives in (`{"ValueNs": "intt"}`), as
+    `extractDefIdName` reads them. -/
+def defIdLeafName (defId : Json) : Option String := do
+  let contents ← (defId.getObjVal? "contents").toOption
+  let v ← (contents.getObjVal? "value").toOption
+  match v.getObjVal? "path" with
+  | .ok (.arr segs) =>
+    let names : List String := segs.toList.filterMap fun seg =>
+      match seg.getObjVal? "data" with
+      | .ok (.str s) => some s
+      | .ok d =>
+        ["TypeNs", "ValueNs", "MacroNs", "LifetimeNs"].findSome? fun ns =>
+          match d.getObjVal? ns with
+          | .ok (.str n) => some n
+          | _ => none
+      | _ => none
+    names.getLast?
+  | _ => none
 
 /-- Extract the short name of a struct/enum from an `Adt` type JSON.
     Returns `none` if the JSON doesn't have the expected shape. -/
@@ -493,6 +558,40 @@ partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Option Nat :
 def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String :=
   m.impls.find? (·.1 == id) |>.map (·.2)
 
+/-- The `impl` block and method name a hax trait-method `Call` resolves to.
+
+    The callee of such a call is a `GlobalName` whose `item.value.def_id` is
+    the *trait's* `AssocFn`; the resolution is carried beside it, in
+    `item.value.in_trait.impl`. A `Concrete` atom there names the `impl` block
+    by its `DefId`, whose interning id is the one `buildImplSelfTypeMap` and
+    `buildTraitImplMethodMap` key on. Any other atom (a parametric `LocalBound`,
+    a projection) yields `none`, as does a call that is not through a trait. -/
+def traitCallImplMethod (funJ : Json) : Option (Nat × String) := do
+  let contents ← (funJ.getObjVal? "contents").toOption
+  let gn ← (contents.getObjVal? "GlobalName").toOption
+  let item ← (gn.getObjVal? "item").toOption
+  let v ← (item.getObjVal? "value").toOption
+  let inTrait ← (v.getObjVal? "in_trait").toOption
+  let implJ ← (inTrait.getObjVal? "impl").toOption
+  let concrete ← (implJ.getObjVal? "Concrete").toOption
+  let cVal ← (concrete.getObjVal? "value").toOption
+  let cDefId ← (cVal.getObjVal? "def_id").toOption
+  let cContents ← (cDefId.getObjVal? "contents").toOption
+  let implId ← (cContents.getObjValAs? Nat "id").toOption
+  let calleeDefId ← (v.getObjVal? "def_id").toOption
+  let method ← defIdLeafName calleeDefId
+  some (implId, method)
+
+/-- The emitted name of a trait-method call that resolves to an `impl` block
+    the extracted crate defines and that defines the method itself. `none`
+    for a call resolving to an `impl` outside the crate, and for a method the
+    `impl` inherits as a trait default; such a call keeps its bare name and
+    reaches the generated `Deps` class. -/
+def resolveTraitImplCall (funJ : Json) (m : ImplSelfTypeMap) : Option String := do
+  let (implId, method) ← traitCallImplMethod funJ
+  let entry ← m.traitImplMethods.find? fun p => p.1 == implId && p.2.1 == method
+  some entry.2.2
+
 /-- Disambiguate a method-call name using the impl map. Given the
     Call's `fun` JSON (a GlobalName) and the base method name, walk
     the function's DefId.parent chain to find an Impl ancestor. If
@@ -540,7 +639,8 @@ def disambiguateMethodCallWithImplMap
 /-- Extract a function name from a hax expression (for Call).
     If the callee is a GlobalName, extract its item's DefId name and
     disambiguate user methods.  Otherwise use a placeholder. -/
-partial def extractCallName (j : Json) (collisions : List String := []) : String :=
+partial def extractCallName (j : Json) (collisions : List String := [])
+    (lc : LocalCrate := {}) : String :=
   -- j is the `fun` expression (a Decorated<ExprKind>)
   match j.getObjVal? "contents" with
   | .ok contents =>
@@ -548,7 +648,7 @@ partial def extractCallName (j : Json) (collisions : List String := []) : String
     | .ok gn =>
       match gn.getObjVal? "item" with
       | .ok item =>
-        let baseName := extractItemDefIdName item "unknown_fn" collisions
+        let baseName := extractItemDefIdName item "unknown_fn" collisions lc
         -- Locate the DefId for disambiguation (same lookup pattern as
         -- extractItemDefIdName).
         let defIdJ := match item.getObjVal? "value" with
@@ -2438,7 +2538,7 @@ where
 
     else if let .ok data := j.getObjVal? "GlobalName" then
       let name := match data.getObjVal? "item" with
-        | .ok item => extractItemDefIdName item "global"
+        | .ok item => extractItemDefIdName item "global" [] implMap.localCrate
         | _ => "global"
       return .var name
 
@@ -2484,7 +2584,7 @@ where
 
     else if let .ok data := j.getObjVal? "Call" then
       let funJ ← data.getObjVal? "fun"
-      let funName := extractCallName funJ implMap.collisions
+      let funName := extractCallName funJ implMap.collisions implMap.localCrate
       -- Strip panicking calls. `assert!`, `assert_eq!`, `panic!`,
       -- `unreachable!` etc. expand through hax into calls to
       -- `core::panicking::*` helpers (`assert_failed`, `panic`,
@@ -2520,6 +2620,11 @@ where
       -- (e.g., to `core::slice::Impl::len`), the lookup returns
       -- `none` and we use the bare name.
       let funName' := disambiguateMethodCallWithImplMap funJ funName implMap
+      -- A trait-method call resolved to a trait `impl` of the extracted crate
+      -- takes that `impl` method's emitted name, so the call reaches the
+      -- method's body instead of the generated `Deps` class. A call through a
+      -- trait whose `impl` is outside the crate is left alone.
+      let funName' := (resolveTraitImplCall funJ implMap).getD funName'
       -- A width-tagged inherent integer method (`wrapping_add#32`) carries the
       -- tag of its integer type: the result type where that is an integer
       -- (`wrapping_*`, `rotate_*`, `from_*_bytes`), else the first argument's
@@ -2846,7 +2951,7 @@ where
 
     else if let .ok data := j.getObjVal? "NamedConst" then
       let name := match data.getObjVal? "item" with
-        | .ok item => extractItemDefIdName item "const"
+        | .ok item => extractItemDefIdName item "const" [] implMap.localCrate
         | _ => "const"
       return .var name
 
@@ -2863,7 +2968,7 @@ where
 
     else if let .ok data := j.getObjVal? "StaticRef" then
       let name := match data.getObjVal? "def_id" with
-        | .ok defId => extractDefIdName defId
+        | .ok defId => extractDefIdName defId [] implMap.localCrate
         | _ => "static"
       return .var name
 
@@ -3409,6 +3514,49 @@ partial def collectFnNameParents (items : List Json) : List (String × String) :
         | _ => acc
     | _ => acc
 
+/-- The krate of a hax `DefId`, or `""` when the node carries none. -/
+def defIdKrate (defId : Json) : String :=
+  let inner := match defId.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
+    | _ => defId
+  (inner.getObjValAs? String "krate").toOption.getD ""
+
+/-- `(krate, shortName)` for every item `parseItemsTExpr` turns into a definition
+    under its bare name: an `Fn` item and a top-level `Const` item (the
+    four-element form), at the top level or under a `Mod`. An inherent-impl
+    method is named `<SelfType>_<method>` and a trait impl is skipped, so
+    neither is recursed into. -/
+partial def collectItemKrateNames (items : List Json) : List (String × String) :=
+  items.foldl (init := []) fun acc item =>
+    match item.getObjVal? "kind" with
+    | .ok kind =>
+      let isTopLevelConst := match kind.getObjVal? "Const" with
+        | .ok (Json.arr constData) => constData.size ≥ 4
+        | _ => false
+      if (kind.getObjVal? "Fn").toOption.isSome || isTopLevelConst then
+        match item.getObjVal? "def_id" with
+        | .ok defId =>
+          match (defIdPathNames defId).getLast? with
+          | some name => (defIdKrate defId, name) :: acc
+          | none => acc
+        | _ => acc
+      else
+        match kind.getObjVal? "Mod" with
+        | .ok (Json.arr modData) =>
+          match modData.toList[1]? with
+          | some (Json.arr subItems) => collectItemKrateNames subItems.toList ++ acc
+          | _ => acc
+        | _ => acc
+    | _ => acc
+
+/-- The crates the export carries items for and the short names those items
+    define, read off the top-level item list. -/
+partial def localCrateOfExport (root : Json) : LocalCrate :=
+  let items := match root with | .arr xs => xs.toList | _ => []
+  let pairs := collectItemKrateNames items
+  { krates := (pairs.map (·.1)).eraseDups.filter (· != ""),
+    fnNames := (pairs.map (·.2)).eraseDups }
+
 /-- Function short names that collide across ≥2 distinct parent modules. Such
     names are module-qualified at both def and call sites (Bug-2). -/
 partial def fnNameCollisions (root : Json) : List String :=
@@ -3417,6 +3565,96 @@ partial def fnNameCollisions (root : Json) : List String :=
   let names := (pairs.map (·.1)).eraseDups
   names.filter fun nm =>
     ((pairs.filter (·.1 == nm)).map (·.2)).eraseDups.length > 1
+
+/-- The methods every trait `impl` block of the extracted crate defines, as
+    `(impl interning id, trait short name, self-type short name, method name)`,
+    recursing into `Mod` sub-items. Two kinds of `impl` are excluded and keep
+    opaque methods: one whose `owner_id` is not local, which belongs to a
+    dependency crate, and one of a trait of `core`, `alloc` or `std`. The
+    second is what `#[derive(Debug)]`, `#[derive(Clone)]` and their siblings
+    produce: the body is compiler-generated rather than written, it is not
+    part of any specification, and for `Debug` it calls the `core::fmt`
+    builder through `&mut`, which the write-back gate refuses. -/
+partial def collectLocalTraitImplMethods (j : Json) :
+    List (Nat × String × String × String) :=
+  let ofImpl (it : Json) (impl : Json) : List (Nat × String × String × String) :=
+    let traitName : Option String := do
+      let tr ← (impl.getObjVal? "of_trait").toOption
+      let tv ← (tr.getObjVal? "value").toOption
+      let defId ← (tv.getObjVal? "def_id").toOption
+      guard (!builtinKrates.contains (defIdKrate defId))
+      defIdLeafName defId
+    let ownerVal : Option Json := do
+      let oid ← (it.getObjVal? "owner_id").toOption
+      let c ← (oid.getObjVal? "contents").toOption
+      (c.getObjVal? "value").toOption
+    let implId : Option Nat := do
+      let oid ← (it.getObjVal? "owner_id").toOption
+      let c ← (oid.getObjVal? "contents").toOption
+      (c.getObjValAs? Nat "id").toOption
+    let isLocal : Bool := match ownerVal with
+      | some v => (v.getObjValAs? Bool "is_local").toOption == some true
+      | none => false
+    let selfName : Option String := do
+      let selfTy ← (impl.getObjVal? "self_ty").toOption
+      let stVal ← (selfTy.getObjVal? "value").toOption
+      let adt ← (stVal.getObjVal? "Adt").toOption
+      extractAdtShortName adt
+    match isLocal, implId, traitName with
+    | true, some iid, some tn =>
+      let sn := selfName.getD tn
+      match impl.getObjValAs? (Array Json) "items" with
+      | .ok implItems =>
+        implItems.toList.filterMap fun implItem =>
+          match implItem.getObjVal? "kind" with
+          | .ok k =>
+            if (k.getObjVal? "Fn").toOption.isSome then
+              match implItem.getObjVal? "ident" with
+              | .ok ident => some (iid, tn, sn, extractFnName ident)
+              | _ => none
+            else none
+          | _ => none
+      | _ => []
+    | _, _, _ => []
+  let ofItem (it : Json) : List (Nat × String × String × String) :=
+    match it.getObjVal? "kind" with
+    | .ok kindJ =>
+      match kindJ.getObjVal? "Mod" with
+      | .ok (.arr modData) =>
+        match modData.toList[1]? with
+        | some sub => collectLocalTraitImplMethods sub
+        | none => []
+      | .ok modData =>
+        match modData.getObjValAs? (Array Json) "items" with
+        | .ok subItems => collectLocalTraitImplMethods (.arr subItems)
+        | _ => []
+      | _ =>
+        match kindJ.getObjVal? "Impl" with
+        | .ok impl =>
+          match impl.getObjVal? "of_trait" with
+          | .ok Json.null => []
+          | .ok _ => ofImpl it impl
+          | _ => []
+        | _ => []
+    | _ => []
+  match j with
+  | .arr items => items.toList.foldl (init := []) fun acc it => acc ++ ofItem it
+  | _ => []
+
+/-- The emitted name of every trait-`impl` method of the extracted crate, keyed
+    by the `impl`'s interning id and the method name.
+
+    The name is `<Trait>_<method>`, which identifies the trait and the method
+    the call site named. When the crate has more than one `impl` of that trait,
+    the self type disambiguates them: `<Trait>_<SelfTy>_<method>`. A dot is not
+    usable as the separator: `PrettyPrint.isFieldProjection` classifies any app
+    head containing one as a struct-field projection. -/
+def buildTraitImplMethodMap (j : Json) : List (Nat × String × String) :=
+  let raw := collectLocalTraitImplMethods j
+  raw.map fun (implId, traitName, selfName, method) =>
+    let implsOfTrait := ((raw.filter (·.2.1 == traitName)).map (·.1)).eraseDups
+    let qual := if implsOfTrait.length > 1 then s!"{traitName}_{selfName}" else traitName
+    (implId, method, s!"{qual}_{method}")
 
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
@@ -3431,7 +3669,8 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
   -- assignment arms lower struct-field writes to `struct_update` assignments.
   let implMap : ImplSelfTypeMap :=
     { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j,
-      structFields := structFields }
+      structFields := structFields, localCrate := localCrateOfExport j,
+      traitImplMethods := buildTraitImplMethodMap j }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
@@ -3459,12 +3698,12 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
               result := result ++ sub
             | _ => pure ()
           | _ =>
-            -- Recurse into inherent impl blocks. Each method becomes a
+            -- Recurse into impl blocks. An inherent impl's method becomes a
             -- top-level def `<SelfType>_<method>`, matching the name
             -- produced by `disambiguateMethodCallWithImplMap` at call
-            -- sites. Trait impls (`of_trait != null`) are skipped — they
-            -- contribute trait method implementations that are accessed
-            -- through the trait, not by name.
+            -- sites. A trait impl's method becomes a top-level def under the
+            -- name `buildTraitImplMethodMap` assigns it, matching the name
+            -- `resolveTraitImplCall` gives its call sites.
             match kindJ.getObjVal? "Impl" with
             | .ok impl =>
               let isTraitImpl := match impl.getObjVal? "of_trait" with
@@ -3486,6 +3725,22 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
                     match ← parseHaxItemTExpr implItem implMap with
                     | some (mName, raw, proc, ti) =>
                       result := result ++ [(s!"{sn}_{mName}", raw, proc, ti)]
+                    | none => pure ()
+                | _, _ => pure ()
+              else
+                let implId : Option Nat := do
+                  let oid ← (item.getObjVal? "owner_id").toOption
+                  let c ← (oid.getObjVal? "contents").toOption
+                  (c.getObjValAs? Nat "id").toOption
+                match implId, impl.getObjValAs? (Array Json) "items" with
+                | some iid, .ok implItems =>
+                  for implItem in implItems do
+                    match ← parseHaxItemTExpr implItem implMap with
+                    | some (mName, raw, proc, ti) =>
+                      match implMap.traitImplMethods.find? fun p =>
+                          p.1 == iid && p.2.1 == mName with
+                      | some entry => result := result ++ [(entry.2.2, raw, proc, ti)]
+                      | none => pure ()
                     | none => pure ()
                 | _, _ => pure ()
             | _ => pure ()
