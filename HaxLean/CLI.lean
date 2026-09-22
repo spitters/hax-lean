@@ -79,6 +79,11 @@ structure Options where
       rewrite, so that its effect does not reach the caller. Off by default:
       such an extraction misdescribes the source. -/
   allowDroppedWriteback : Bool := false
+  /-- Emit, beside each verbatim `_impExpr` literal, its ANF-normalised form
+      and the `haxToLowCT` lowering of that form. Off by default: the two extra
+      definitions pull the CatCrypt `LowCT` closure into the generated file,
+      which the security-provenance consumers do not need. -/
+  emitLowCT : Bool := false
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -101,6 +106,7 @@ where
       go rest { opts with filterFns := some (fns.splitOn ",") }
     | "--allow-dropped-writeback" :: rest, opts =>
       go rest { opts with allowDroppedWriteback := true }
+    | "--emit-lowct" :: rest, opts => go rest { opts with emitLowCT := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -120,6 +126,8 @@ OPTIONS:
   --hax             Input is in hax's native JSON format (Decorated<ExprKind>)
   --name NAME       Name for the generated definition (default: result)
   --filter FN,FN    Only include matching functions (comma-separated)
+  --emit-lowct      With --emit-certified: also emit the ANF-normalised literal
+                    and its haxToLowCT lowering per function
   --help            Show this help message
 
 INPUT:
