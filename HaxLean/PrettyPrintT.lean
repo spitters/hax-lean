@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.TExpr
+public import HaxLean.AnfLowCT
 public import HaxLean.PrettyPrint
 public import HaxLean.Pipeline
 public import HaxLean.HaxAdapter
@@ -318,6 +319,78 @@ partial def collectAnnVarTypes : TExpr → List (String × ImpType)
     collectAnnVarTypes e
   | .mk (.break_ (some e)) _ => collectAnnVarTypes e
   | _ => []
+
+/-! ## One `Deps` field, one type
+
+A name the export does not define becomes a field of the generated `Deps`
+class, and a field has a single type. Every site that uses the name has to
+agree on it.
+
+A trait `impl` the crate defines is emitted as top-level definitions at the
+concrete self type (`HaxAdapter.buildTraitImplMethodMap`). Its method bodies
+reach the self type's components through the trait methods and associated
+constants of a *further* `impl` — of a dependency crate, or of a type the
+export does not define — which stay opaque. When the crate is also generic
+over the same trait, its generic functions call those same names at a type
+parameter, which the adapter parses as `.slice .int`. The two readings of one
+name are then two types, and only one of them can be the field's.
+
+Whether they are two types is a question about the emitted surface, not about
+the hax types: a newtype over `[u64; 5]` and a type parameter both print as
+`Array (Int)` and agree, while a newtype over a type the export does not define
+prints as that type's axiom and does not. `depTypeStr` with the preamble's
+struct lookup is the printer that decides it. -/
+
+/-- The emitted signature of one call site: its argument types and its result
+    type, as the `Deps` class would print them.
+
+    `mkStructLookup` spells the collapsed array type of a pass-through struct
+    `Array Int` and `ImpType.toLeanTypeStrSurface` spells it `Array (Int)`; the
+    two are one Lean type, so the key carries one spelling. -/
+def depSiteKey (argTys : List ImpType) (retTy : ImpType)
+    (sl : String → Option String) : String :=
+  let key := " → ".intercalate
+    (argTys.map (fun t => depTypeStr t sl) ++ [depTypeStr retTy sl true])
+  key.replace "Array Int" "Array (Int)"
+
+/-- The `Deps` names that two sites of the same arity use at two emitted types,
+    where a method body of a trait `impl` is one of the sites.
+
+    `traitImplDefNames` are the definitions the trait-`impl` resolution
+    contributes (the `buildTraitImplMethodMap` names); `sl` is the preamble's
+    struct lookup and `newtypeCtorNames` the erased newtype constructors, both
+    read exactly as `generatePreambleTyped` reads them. An empty result means
+    every `Deps` field has one type, and the `impl`s can be resolved as they
+    are; a non-empty one is `HaxAdapter.parseHaxFileWithTExpr`'s
+    `resolveTraitImpls := false`. -/
+def traitImplDepTypeConflicts (tdefs : List (String × TExpr))
+    (traitImplDefNames : List String) (sl : String → Option String)
+    (newtypeCtorNames : List String := []) : List String :=
+  let definedNames := tdefs.map (·.1)
+  -- The `Deps`-field filter of `generatePreambleTyped`, minus the free-var and
+  -- lambda-name refinements: a name here is a candidate field, and a name the
+  -- filter admits too freely only adds sites that agree.
+  let isDepName (f : String) : Bool :=
+    !definedNames.contains f && !isFieldProjection f && !f.startsWith "::"
+      && (f.splitOn "::").length == 1 && !newtypeCtorNames.contains f
+      && (!isAlwaysBuiltin f || isDepOpHead f)
+  let sites : List (String × Nat × String × Bool) :=
+    tdefs.foldl (init := []) fun acc (fname, te) =>
+      let fromTraitImpl := traitImplDefNames.contains fname
+      let calls := (collectTAppCalls te).map fun (f, arity, argTys, retTy) =>
+        (f, arity, depSiteKey argTys retTy sl, fromTraitImpl)
+      let vars := (collectTFreeVars [fname] te).map fun (v, ty) =>
+        (v, 0, depSiteKey [] ty sl, fromTraitImpl)
+      acc ++ calls ++ vars
+  let sites := sites.filter fun (f, _, _, _) => isDepName f
+  -- Compared per arity: a name read as a call in one place and as a value in
+  -- another describes two different fields, not a disagreement about one.
+  let namesAndArities := (sites.map fun (f, arity, _, _) => (f, arity)).eraseDups
+  (namesAndArities.filterMap fun (f, arity) =>
+    let atArity := sites.filter fun (g, m, _, _) => g == f && m == arity
+    let keys := (atArity.map fun (_, _, k, _) => k).eraseDups
+    if keys.length > 1 && atArity.any (fun (_, _, _, fromImpl) => fromImpl) then some f
+    else none).eraseDups
 
 /-- Generate the deps class and struct definitions using typed information from TExprs.
     This replaces `generatePreamble` by using types directly from the TExpr tree
@@ -1287,12 +1360,53 @@ def toLeanEraseExample (name : String) : String :=
 def rewriteNewtypeCtors (newtypes : HaxAdapter.NewtypeMap) (e : ImpExpr) : ImpExpr :=
   newtypes.foldl (fun expr (t, _) => rewriteAppName t s!"{t}.mk" expr) e
 
+/-- The module docstring of a generated extraction, in the `/-! ... -/` form,
+    with a trailing newline.
+
+    `moduleName` is the namespace the extraction is emitted under, `crateName`
+    the Rust crate the export came from (omitted from the text when empty),
+    `depsParametric` says whether the `Deps` class has fields and therefore
+    carries a `variable` binder the definitions stand under, `fnCount` is the
+    number of extracted functions and `opaqueTypes` the types the extraction
+    leaves as `axiom`. -/
+def moduleDocstring (moduleName crateName : String) (depsParametric : Bool)
+    (fnCount : Nat) (opaqueTypes : List String) : String :=
+  let depsClassName := s!"{moduleName}Deps"
+  let depsDoc :=
+    if depsParametric then
+      s!"* `{depsClassName}`: the operations the crate calls and does not define. Every\n  definition below stands under `variable [{depsClassName}]`, so each is\n  parametric in an instance of it, which the consuming side supplies."
+    else
+      s!"* `{depsClassName}`: the operations the crate calls and does not define. The\n  extraction found none, so the class has no fields; it is emitted because the\n  consuming side names it."
+  let opaqueDoc :=
+    if opaqueTypes.isEmpty then ""
+    else
+      let names := String.intercalate ", " (opaqueTypes.map fun n => s!"`{n}`")
+      s!"\n* Types the crate does not define, left as `axiom` for the consuming side to\n  instantiate: {names}."
+  let crateDesc :=
+    if crateName.isEmpty then "the crate" else s!"the Rust crate `{crateName}`"
+  let fnWord := if fnCount == 1 then "function" else "functions"
+  s!"/-!\n# `{moduleName}`: haxpipeT extraction\n\nThe haxpipeT extraction of {crateDesc},\ntaken from its hax frontend export. Each extracted function gives a Lean\ndefinition, the `ImpExpr` literal of its body and, where the definition's term\nerases to one, the `TExpr` literal carrying its node types; an `example` per\npair states the erasure identity `f_texpr.erase = f_impExpr`.\n\n## Main definitions\n\n{depsDoc}\n* `f`, `f_impExpr` and `f_texpr` for each of the {fnCount} extracted {fnWord}: the\n  surface definition, the literal of its erased body, and the typed literal.{opaqueDoc}\n\nThis file is generated. Extracting the crate again overwrites it, so an edit\nmade here does not survive; change the Rust source or the emitter.\n-/\n"
+
+/-- The `anfLowCT`-normalised companion of a `_impExpr` literal: the same body
+    in the let-normalised fragment `CatCrypt.Crypto.Hax.haxToLowCT` reads. -/
+def toLeanImpExprAnfDef (name : String) (e : ImpExpr) : String :=
+  s!"def {sanitizeName (name ++ "_impExprAnf")} : ImpExpr :=\n  {toLeanImpExpr (anfLowCT e)}\n"
+
+/-- The `LowCT` lowering of the normalised literal. -/
+def toLeanLowCTDef (name : String) : String :=
+  s!"def {sanitizeName (name ++ "_lowct")} : Option LowCT :=\n  haxToLowCT {sanitizeName (name ++ "_impExprAnf")}\n"
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
     If `procTdefs` is empty, bodies are rendered from rawTdefs (erased + pipelined).
     `newtypes` is the JSON-derived newtype map; the renderer uses it to emit
-    `abbrev T_T := <Inner>` aliases plus definitional `«T.0»` unwraps. -/
+    `abbrev T_T := <Inner>` aliases plus definitional `«T.0»` unwraps.
+    `crateName` is the Rust crate the export was taken from; it appears in the
+    module docstring and is omitted from it when empty.
+    `emitLowCT` adds, beside each verbatim `_impExpr` literal, its
+    `anfLowCT`-normalised form and the `haxToLowCT` lowering of that form; the
+    file then imports the CatCrypt modules those two definitions name. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1301,7 +1415,9 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (newtypes : HaxAdapter.NewtypeMap := [])
     (enumMeta : List HaxAdapter.EnumInfo := [])
     (aliasMeta : List HaxAdapter.TypeAliasInfo := [])
-    (mutWriteRets : List (String × List String × Bool) := []) : String :=
+    (mutWriteRets : List (String × List String × Bool) := [])
+    (crateName : String := "")
+    (emitLowCT : Bool := false) : String :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
@@ -1491,6 +1607,14 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let opaqueFromCalls := allTCallsAxiom.foldl (fun acc (_, _, argTys, retTy) =>
     let argOpaque := argTys.foldl (fun a t => a ++ t.collectOpaqueAdtNames baseStructLookup) []
     acc ++ argOpaque ++ retTy.collectOpaqueAdtNames baseStructLookup) ([] : List String)
+  -- And every newtype's inner type, which `newtypeBlock` below names in an
+  -- `abbrev <Name> := <Inner>` and in the two definitional wrappers. The
+  -- newtype block is emitted from the crate's struct declarations, so it names
+  -- the inner type whether or not any body or signature that survives to the
+  -- emit mentions it; an opaque inner type reached only that way still needs
+  -- its `axiom`, or the alias has no right-hand side.
+  let opaqueFromNewtypes := newtypes.foldl (fun acc (_, innerTy) =>
+    acc ++ innerTy.collectOpaqueAdtNames baseStructLookup) ([] : List String)
   -- Apply the clash-rename: names colliding with a Deps method are emitted
   -- as `axiom <Name>_T : Type` and the augmented structLookup inside
   -- generatePreambleTyped routes type references to `<Name>_T`. This
@@ -1516,7 +1640,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- names out of the axiom set (so we don't emit `axiom Scalar : Type` AND
   -- `abbrev Scalar := Vector UInt8 32` for the same name).
   let isTypeAlias (s : String) : Bool := aliasMeta.any (·.name == s)
-  let allOpaque := (opaqueFromFnTypes ++ opaqueFromCalls).eraseDups.map renameForClash
+  let allOpaque :=
+    (opaqueFromFnTypes ++ opaqueFromCalls ++ opaqueFromNewtypes).eraseDups.map renameForClash
   let allOpaque := (allOpaque.filter (fun n =>
     !isNewtypeAlias n && !isEnum n && !isTypeAlias n)).eraseDups
   let axiomsBlock := if allOpaque.isEmpty then ""
@@ -1596,12 +1721,31 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def «{bareName}.mk» (x : {innerStr}) : {aliasName} := x"
       "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps and definitional constructors. Inner\n    types may themselves be axiomatized (see the axiom block above). -/\n"
         ++ "\n".intercalate lines ++ "\n\n"
+  -- The `Deps` class carries a `variable` binder exactly when it has fields,
+  -- so the preamble decides whether the module docstring may call the
+  -- definitions parametric in it.
+  let depsParametric :=
+    (preamble.splitOn s!"variable [{moduleName}Deps]").length > 1
+  let moduleDoc := moduleDocstring moduleName crateName depsParametric defs.length allOpaque
   -- The runtime, the AST and the reference semantics are imported under their
   -- `HaxLean.*` names. A bare `Hax.*` module name would resolve against the
   -- upstream `Hax` Rust repo when it is a Lake dependency, whose
   -- `proof-libs/lean/Hax/` has no `Runtime.lean`. The untyped path's
-  -- standalone preamble (`PrettyPrint.lean`) is separate.
-  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\n\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\nset_option maxHeartbeats 6400000\n\nnamespace {moduleName}\n\nopen Hax\n\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{inductiveBlock}{newtypeBlock}{preamble}\n{typeAliasBlock}{texprTyBlock}mutual\n\n"
+  -- standalone preamble (`PrettyPrint.lean`) is separate. The module docstring
+  -- goes between the imports and the options, where `port-to-module.sh` on the
+  -- consuming side expects it.
+  -- Under `--emit-lowct` the file also names the compiler-side lowering, so it
+  -- imports the two CatCrypt modules `_lowct` refers to and opens their
+  -- namespaces.
+  let lowCTImports :=
+    if emitLowCT then
+      "import CatCrypt.Crypto.Jasmin.LowCT\nimport CatCrypt.Crypto.Hax.HaxToLowCT\n"
+    else ""
+  let lowCTOpens :=
+    if emitLowCT then
+      "open CatCrypt.Crypto.Hax\nopen CatCrypt.Crypto.Jasmin.LowCT\n"
+    else ""
+  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{inductiveBlock}{newtypeBlock}{preamble}\n{typeAliasBlock}{texprTyBlock}mutual\n\n"
   let body := "\n".intercalate (defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
@@ -1623,8 +1767,17 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     s!"{ds}\n"
   let exampleBlock := if texprs.isEmpty || needsPartial then "" else
     "\n".intercalate (texprs.map fun (n, _) => toLeanEraseExample n) ++ "\n\n"
+  let lowCTBlock :=
+    if !emitLowCT then "" else
+    let ds := "\n".intercalate (defs.map fun (n, e) =>
+      let anfDef := toLeanImpExprAnfDef n (unmarkDepOperators e)
+      let anfDef := if needsPartial then anfDef.replace "def " "partial def " else anfDef
+      let lowDef := toLeanLowCTDef n
+      let lowDef := if needsPartial then lowDef.replace "def " "partial def " else lowDef
+      s!"{anfDef}\n{lowDef}")
+    s!"{ds}\n"
   let footer :=
-    s!"\n{impExprs}\n{texprBlock}end\n\n{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
+    s!"\n{impExprs}\n{lowCTBlock}{texprBlock}end\n\n{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax

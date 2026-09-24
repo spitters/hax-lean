@@ -3658,8 +3658,19 @@ def buildTraitImplMethodMap (j : Json) : List (Nat × String × String) :=
 
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
-    processed typed defs (for pipeline/rendering)). -/
-partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := []) :
+    processed typed defs (for pipeline/rendering)).
+
+    `resolveTraitImpls := false` empties the trait-`impl` method map, so every
+    method of every trait `impl` the crate defines keeps its bare name, reaches
+    the generated `Deps` class and contributes no definition of its own. It is
+    the uniform reading of an export whose `impl`s cannot be resolved
+    consistently: a method body emitted at the concrete self type calls the
+    trait methods and reads the associated constants of a further `impl`, which
+    stays opaque, while the crate's generic functions call those same names at a
+    type parameter — and the `Deps` class carries one field, hence one type, per
+    name. `Hax.traitImplDepTypeConflicts` identifies such an export. -/
+partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
+    (resolveTraitImpls : Bool := true) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
   -- Build the impl-self-type map once from the full JSON. This lets the
@@ -3670,7 +3681,7 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
   let implMap : ImplSelfTypeMap :=
     { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j,
       structFields := structFields, localCrate := localCrateOfExport j,
-      traitImplMethods := buildTraitImplMethodMap j }
+      traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else [] }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []

@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+- The emitted file carries a module docstring and sets no heartbeat budget. The
+  docstring (`moduleDocstring` in `PrettyPrintT`) sits after the imports in the
+  `/-! ... -/` form with a `## Main definitions` section, and is derived from the
+  emit: the crate the export came from (the directory holding
+  `hax_frontend_export.json`, passed as `crateName`), the `Deps` class and
+  whether the definitions stand under its `variable` binder, the number of
+  extracted functions, and the types left as `axiom`. The header sets no
+  `maxHeartbeats`: thirteen extractions, among them the five largest, elaborate
+  inside the 200000 default, and whole-module elaboration of the largest
+  measures 16 s. `maxRecDepth 2048` stays, the nested `ImpExpr`/`TExpr` literals
+  needing it.
+- An export whose trait `impl`s cannot be resolved without giving one `Deps`
+  field two types is read with every trait `impl` opaque. Resolving an `impl`
+  emits its method bodies at the concrete self type, and those bodies reach the
+  self type's components through the trait methods and associated constants of
+  a further `impl` — of a dependency crate, or of a type the export does not
+  define — which stay opaque; where the crate is also generic over the trait,
+  its generic functions use those same names at a type parameter. The `Deps`
+  class carries one field, hence one type, per name, so the two readings have
+  to print alike. They do when the wrapped type is transparent at the surface
+  (a newtype over a limb array prints as `Array (Int)`, as a type parameter
+  does) and they do not when it is a type the emitter declares as an axiom.
+  `traitImplDepTypeConflicts` (`PrettyPrintT`) names the fields that disagree,
+  reading the emitted types through the preamble's struct lookup, and
+  `parseHaxFileWithTExpr`'s `resolveTraitImpls := false` (`HaxAdapter`) is the
+  uniform reading it selects: every method of every trait `impl` keeps its bare
+  name and reaches `Deps`, and the `impl` contributes no definition. Of the 121
+  exports available, nine resolve a trait `impl` and one (`hash-to-curve-hax`,
+  whose `Fe51H2C` wraps `ristretto255_hax::Fe51` and forwards `Field`,
+  `CtField` and `SqrtRatio` to it) disagrees.
+- The axiom block declares the opaque wrapped type of every emitted newtype
+  alias. `abbrev <Name> := <Inner>` and its two definitional wrappers are
+  emitted from the crate's struct declarations, so they name the wrapped type
+  whichever definitions survive to the emit, while the axiom set was collected
+  from call-site and signature types alone; a wrapped type reached only through
+  the alias then had no declaration, and the alias no right-hand side. Of the
+  121 exports available, one (`hash-to-curve-hax`, whose `Fe51H2C` wraps
+  `ristretto255_hax::Fe51`) has a newtype over an opaque wrapped type.
+  (`opaqueFromNewtypes` in `toLeanCertifiedFileTyped`.)
 - A trait-method call resolving to a trait `impl` of the crate being extracted
   reaches that method's body instead of the generated `Deps` class. The hax
   `Call` names the trait's associated function and carries its resolution

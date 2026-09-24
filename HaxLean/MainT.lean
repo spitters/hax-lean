@@ -119,7 +119,30 @@ def main (args : List String) : IO UInt32 := do
     let fnTypes := dedupByName fnTypes
     let rawTdefs := dedupByName rawTdefs
     let procTdefs := dedupByName procTdefs
-    IO.eprintln s!"INFO defs={procTdefs.length}"
+    -- A `Deps` field has one type, so every site that uses the name has to
+    -- agree on it. Resolving the crate's trait `impl`s emits their method
+    -- bodies at the concrete self type, and those bodies read the trait items
+    -- of a further `impl` that stays opaque; where the crate is also generic
+    -- over the trait, the same names are used at a type parameter and the two
+    -- readings do not print as one type. The export is then read with every
+    -- trait `impl` opaque, which is uniform.
+    let traitImplNames :=
+      ((HaxAdapter.buildTraitImplMethodMap inputJson).map (·.2.2)).eraseDups
+    let depTypeConflicts :=
+      if traitImplNames.isEmpty then []
+      else
+        let erased := procTdefs.map fun (n, te) => (n, te.erase)
+        let sl := mkStructLookup structMeta (computeStructPassthrough structMeta erased)
+        traitImplDepTypeConflicts rawTdefs traitImplNames sl (newtypes.map (·.1))
+    let (fnTypes, rawTdefs, procTdefs) ←
+      if depTypeConflicts.isEmpty then pure (fnTypes, rawTdefs, procTdefs)
+      else do
+        IO.eprintln s!"INFO trait-impl-opaque: the `Deps` names {depTypeConflicts} are used at two types; every trait `impl` of the crate keeps opaque methods"
+        let (_expr, fnTypes, rawTdefs, procTdefs) ←
+          IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
+            (resolveTraitImpls := false))
+        pure (dedupByName fnTypes, dedupByName rawTdefs, dedupByName procTdefs)
+    IO.eprintln s!"INFO defs={procTdefs.length} trait-impl-defs={traitImplNames.length} dep-type-conflicts={depTypeConflicts.length}"
     let t ← phaseTick "adapter-to-texpr" t
 
     -- Filter if requested
@@ -200,9 +223,17 @@ def main (args : List String) : IO UInt32 := do
     let secretNames := (secrecyOfBindings paramBindings).eraseDups
     let secrecyLit := "[" ++ ", ".intercalate (secretNames.map (fun s => "\"" ++ s ++ "\"")) ++ "]"
     let secrecyDef := s!"\n/-- Source-declared secret bindings (IF/CT transfer): binding names whose Rust\ntype is a secret integer. Consumed by `SourceSecrecy` on the CatCrypt side. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
+    -- The crate the export was taken from: the directory holding
+    -- `hax_frontend_export.json`, which is the crate root `cargo hax json` ran
+    -- in. Empty when the export arrives on stdin, and then the module docstring
+    -- names no crate.
+    let crateName := match opts.inputFile with
+      | some p => ((System.FilePath.mk p).parent.bind (·.fileName)).getD ""
+      | none => ""
     let rendered :=
       toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
-        newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns) ++ secrecyDef
+        newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns)
+        (crateName := crateName) (emitLowCT := opts.emitLowCT) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered
