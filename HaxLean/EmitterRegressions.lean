@@ -652,4 +652,41 @@ def nttFormProjJson (param : String) : Lean.Json :=
 #guard (ringHooks.orderBody (fun _ => none)
     [("a", "A", ["b"]), ("b", "B", ["a"])]).isNone
 
+/-- The typed literal of `fn demo<R: PolyRing>(a_hat: R::NttForm, s: R) -> R::NttForm`
+    with its parameters bound to themselves, as the adapter reads it from an export
+    rewritten by `keepTypeParams`. -/
+def projParamDef : TExpr :=
+  let nttTy : ImpType := .typeVar "(PolyRing.NttForm R)"
+  .mk (.letBind "a_hat" (.mk (.var "a_hat") nttTy)
+    (.mk (.letBind "s" (.mk (.var "s") (.typeVar "R")) (.mk (.var "a_hat") nttTy)) nttTy)) nttTy
+
+-- A parameter typed by a type parameter or by an associated type of one is
+-- annotated in the surface signature, the associated type as the class field
+-- applied to the parameter.
+#guard (toLeanDefTyped "demo" projParamDef projParamDef.erase).startsWith
+  "def demo (a_hat : (PolyRing.NttForm R)) (s : R) :=\n"
+
+/-- A read of the associated constant `Field::ZERO` whose `in_trait.impl` atom has
+    the kind `atom`, as the `contents` of a hax expression node. -/
+def assocConstReadJson (atom : String) : Lean.Json :=
+  let seg (k v : String) : Lean.Json := Lean.Json.mkObj [("data", Lean.Json.mkObj [(k, .str v)])]
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj [("NamedConst", Lean.Json.mkObj [
+    ("item", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+        ("krate", "k"), ("path", Lean.Json.arr #[seg "TypeNs" "Field", seg "ValueNs" "ZERO"]),
+        ("kind", "AssocConst")])])]),
+      ("in_trait", Lean.Json.mkObj [("impl", Lean.Json.mkObj [(atom, Lean.Json.mkObj [])])])])])])])]
+
+-- In the class mode a read of an associated constant through a trait bound is a
+-- nullary call of the class constant; the default mode reads it as a variable, and
+-- a read through a `Concrete` atom stays a variable in both modes.
+#guard match HaxAdapter.parseHaxTExpr (assocConstReadJson "LocalBound")
+    { localBoundConstCalls := true } with
+  | .ok (.mk (.app "ZERO" []) _) => true | _ => false
+#guard match HaxAdapter.parseHaxTExpr (assocConstReadJson "LocalBound") with
+  | .ok (.mk (.var "ZERO") _) => true | _ => false
+#guard match HaxAdapter.parseHaxTExpr (assocConstReadJson "Concrete")
+    { localBoundConstCalls := true } with
+  | .ok (.mk (.var "ZERO") _) => true | _ => false
+
 end Hax.EmitterRegressions

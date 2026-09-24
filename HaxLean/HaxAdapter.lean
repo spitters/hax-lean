@@ -361,6 +361,11 @@ structure ImplSelfTypeMap where
       unless the trait-to-class emission asks for it
       (`parseHaxFileWithTExpr (traitImplConsts := true)`). -/
   traitImplConsts : List (Nat × String × String) := []
+  /-- Whether a read of an associated constant through a trait bound of a
+      type parameter (`localBoundAssocConst`) is a nullary call of the constant,
+      `.app "ZERO" []`, rather than a variable. Set by the trait-to-class
+      emission, where such a read names the class field. -/
+  localBoundConstCalls : Bool := false
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -612,6 +617,38 @@ def resolveTraitImplConstRef (globalName : Json) (m : ImplSelfTypeMap) :
     (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])])
   let entry ← m.traitImplConsts.find? fun p => p.1 == implId && p.2.1 == item
   some entry.2.2
+
+/-- Whether the `NamedConst` or `GlobalName` node of a read names an associated
+    constant (`def_id` of kind `AssocConst`) through a trait bound of a type
+    parameter (an `in_trait.impl` atom of kind `LocalBound`), as `F::ZERO` in a
+    function generic over `F: Field`. -/
+def localBoundAssocConst (globalName : Json) : Bool :=
+  let r : Option Unit := do
+    let item ← (globalName.getObjVal? "item").toOption
+    let v ← (item.getObjVal? "value").toOption
+    let defId ← (v.getObjVal? "def_id").toOption
+    let contents ← (defId.getObjVal? "contents").toOption
+    let dv ← (contents.getObjVal? "value").toOption
+    let kind ← (dv.getObjValAs? String "kind").toOption
+    guard (kind == "AssocConst")
+    let inTrait ← (v.getObjVal? "in_trait").toOption
+    let implJ ← (inTrait.getObjVal? "impl").toOption
+    let _ ← (implJ.getObjVal? "LocalBound").toOption
+    pure ()
+  r.isSome
+
+/-- The typed-expression kind of a read of a constant named `name` from its
+    `NamedConst` or `GlobalName` node: the emitted name of a constant of a trait
+    `impl` of the crate (`resolveTraitImplConstRef`); a nullary call of an
+    associated constant read through a trait bound when
+    `m.localBoundConstCalls` is set (`localBoundAssocConst`); a variable
+    otherwise. -/
+def constReadKind (globalName : Json) (m : ImplSelfTypeMap) (name : String) : TExprKind :=
+  match resolveTraitImplConstRef globalName m with
+  | some n => .var n
+  | none =>
+    if m.localBoundConstCalls && localBoundAssocConst globalName then .app name []
+    else .var name
 
 /-- Disambiguate a method-call name using the impl map. Given the
     Call's `fun` JSON (a GlobalName) and the base method name, walk
@@ -2566,7 +2603,7 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "global" [] implMap.localCrate
         | _ => "global"
-      return .var ((resolveTraitImplConstRef data implMap).getD name)
+      return constReadKind data implMap name
 
     else if let .ok data := j.getObjVal? "Literal" then
       -- ByteStr and Str can't be represented as ImpLit; handle before parseTLiteral
@@ -2979,7 +3016,7 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "const" [] implMap.localCrate
         | _ => "const"
-      return .var ((resolveTraitImplConstRef data implMap).getD name)
+      return constReadKind data implMap name
 
     else if let .ok _data := j.getObjVal? "ConstParam" then
       return .var "const_param"
@@ -3729,7 +3766,9 @@ partial def parseImplConstTExpr (implItem : Json) (implMap : ImplSelfTypeMap) :
     `traitImplConsts := true` also resolves the associated constants of the
     crate's trait `impl`s (`buildTraitImplConstMap`): each becomes a
     definition, and a read of it through a `Concrete` atom takes its name. The
-    trait-to-class emission sets it; its instances name those definitions. -/
+    trait-to-class emission sets it; its instances name those definitions. It
+    also makes a read of an associated constant through a trait bound of a type
+    parameter a nullary call, `.app "ZERO" []` (`constReadKind`). -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false) :
     Except String (ImpExpr × List (String × FnTypeInfo)
@@ -3743,7 +3782,8 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
     { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j,
       structFields := structFields, localCrate := localCrateOfExport j,
       traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else []
-      traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else [] }
+      traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else []
+      localBoundConstCalls := traitImplConsts }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []

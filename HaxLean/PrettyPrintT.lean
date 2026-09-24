@@ -928,6 +928,11 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
       let sn := sanitizeName p
       -- Use the type directly from TExpr when it's known
       if ty.isUnknown then sn
+      -- A type parameter or an associated type of one (`.typeVar`, possibly
+      -- behind a reference) is annotated with its surface spelling, which may
+      -- be a parenthesized application such as `(PolyRing.NttForm R)`.
+      else if (match ty with | .typeVar _ | .ref (.typeVar _) _ => true | _ => false) then
+        s!"({sn} : {ty.toLeanTypeStrSurface structLookup})"
       else
         -- Use surface types (Int/Array Int) for compatibility with untyped Runtime.
         -- Width-aware types (UInt16, Vector) are preserved in ImpExpr literals.

@@ -43,7 +43,12 @@ their call graph has no cycle besides self-recursion, so that each instance can
 stand after the definitions it names and before the definitions that use it
 (`orderBody`).
 
-The `ImpExpr` and `TExpr` literals are emitted as in the default mode.
+The `ImpExpr` and `TExpr` literals are emitted as in the default mode, except
+that a read of an associated constant through a trait bound of a type parameter
+is a nullary call of the class constant, `.app "ZERO" []`
+(`HaxAdapter.constReadKind`). A parameter whose type is a type parameter or a
+projection on one carries its type in the surface signature,
+`(a_hat : (PolyRing.NttForm R))`.
 -/
 
 @[expose] public section
