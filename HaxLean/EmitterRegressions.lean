@@ -593,6 +593,31 @@ def ringHooks : ClassEmit.ClassHooks :=
   "class Ring (Self : Type) extends Base Self where\n  ZERO : Self\n  add (self : Self) (rhs : Self) : Self").length == 2
 #guard ((ringHooks.renderClasses (fun _ => none)).splitOn "export Ring (add)").length == 2
 
+/-- The `Alias` node of the projection `P::NttForm` of the trait `PolyRing` on
+    the type parameter `P`. -/
+def nttFormProjJson (param : String) : Lean.Json :=
+  let defId (path : List String) : Lean.Json := Lean.Json.mkObj [("contents",
+    Lean.Json.mkObj [("value", Lean.Json.mkObj [("krate", "k"), ("path",
+      Lean.Json.arr (path.toArray.map fun s =>
+        Lean.Json.mkObj [("data", Lean.Json.mkObj [("TypeNs", .str s)])]))])])]
+  Lean.Json.mkObj [("kind", Lean.Json.mkObj [("Projection", Lean.Json.mkObj [
+    ("impl_expr", Lean.Json.mkObj [("trait", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("value", Lean.Json.mkObj [
+        ("def_id", defId ["poly", "PolyRing"]),
+        ("generic_args", Lean.Json.arr #[Lean.Json.mkObj [("Type", Lean.Json.mkObj [
+          ("value", Lean.Json.mkObj [("Param", Lean.Json.mkObj [("index", 0),
+            ("name", .str param)])])])]])])])])]),
+    ("assoc_item", Lean.Json.mkObj [("def_id", defId ["poly", "PolyRing", "NttForm"])])])])]
+
+-- A projection on `Self` is the class field; a projection on another type
+-- parameter is the class field applied to it.
+#guard ClassEmit.selfAssocName (nttFormProjJson "Self") == some "NttForm"
+#guard ClassEmit.paramAssocType (nttFormProjJson "Self") == none
+#guard ClassEmit.paramAssocType (nttFormProjJson "R") == some "(PolyRing.NttForm R)"
+#guard match HaxAdapter.parseHaxType (ClassEmit.keepTypeParams (Lean.Json.mkObj
+    [("value", Lean.Json.mkObj [("Alias", nttFormProjJson "R")])])) with
+  | .typeVar "(PolyRing.NttForm R)" => true | _ => false
+
 -- A trait that both the trait export and the crate export define is planned
 -- and rendered once.
 #guard (ClassEmit.plan ringTraitJson ringTraitJson).traits.map (·.name) == ["Ring"]

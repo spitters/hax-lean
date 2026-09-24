@@ -56,12 +56,10 @@ open Hax.HaxAdapter (parseHaxType defIdLeafName defIdKrate defIdPathNames
 
 /-! ## Export rewriting -/
 
-/-- The associated-type name of a projection `Self::Name`, from the `Alias`
-    node of the type: a projection whose trait reference has the type parameter
-    `Self` as its self argument. Inside a trait definition hax resolves such a
-    projection through `SelfImpl` or through the `Self: Trait` bound
-    (`LocalBound`); either way the self argument is `Self`. -/
-def selfAssocName (alias : Json) : Option String := do
+/-- The type parameter, trait and associated item of a projection `P::A` on a
+    type parameter `P`, by short names, from the `Alias` node of the type: the
+    self argument of the projection's trait reference is the `Param` `P`. -/
+def paramAssocProj (alias : Json) : Option (String × String × String) := do
   let kind ← (alias.getObjVal? "kind").toOption
   let proj ← (kind.getObjVal? "Projection").toOption
   let ie ← (proj.getObjVal? "impl_expr").toOption
@@ -73,15 +71,37 @@ def selfAssocName (alias : Json) : Option String := do
   let ty ← (a0.getObjVal? "Type").toOption
   let tyv ← (ty.getObjVal? "value").toOption
   let p ← (tyv.getObjVal? "Param").toOption
-  guard ((p.getObjValAs? String "name").toOption == some "Self")
+  let param ← (p.getObjValAs? String "name").toOption
+  let traitName ← (tvv.getObjVal? "def_id").toOption >>= defIdLeafName
   let item ← (proj.getObjVal? "assoc_item").toOption
   let defId ← (item.getObjVal? "def_id").toOption
-  defIdLeafName defId
+  let itemName ← defIdLeafName defId
+  pure (param, traitName, itemName)
+
+/-- The associated-type name of a projection `Self::Name`, from the `Alias`
+    node of the type: a projection whose trait reference has the type parameter
+    `Self` as its self argument. Inside a trait definition hax resolves such a
+    projection through `SelfImpl` or through the `Self: Trait` bound
+    (`LocalBound`); either way the self argument is `Self`. -/
+def selfAssocName (alias : Json) : Option String := do
+  let (param, _, item) ← paramAssocProj alias
+  guard (param == "Self")
+  pure item
+
+/-- The Lean type of a projection `P::A` of the trait `T` on a type parameter
+    `P` other than `Self`: the class field applied to the parameter,
+    `(T.A P)`. -/
+def paramAssocType (alias : Json) : Option String := do
+  let (param, traitName, item) ← paramAssocProj alias
+  guard (param != "Self")
+  pure s!"({traitName}.{item} {param})"
 
 /-- Rewrite every type-parameter node `{"Param": {"index": i, "name": n}}` of
     a hax export to `{"TypeVar": n}`, and every projection `Self::A` through the
-    enclosing trait to `{"TypeVar": A}`. `HaxAdapter.parseHaxType` reads the
-    rewritten node as `ImpType.typeVar n`; it reads a `Param` as `.slice .int`. -/
+    enclosing trait to `{"TypeVar": A}`, and every projection `P::A` of a trait
+    `T` on another type parameter `P` to `{"TypeVar": "(T.A P)"}`.
+    `HaxAdapter.parseHaxType` reads the rewritten node as `ImpType.typeVar n`;
+    it reads a `Param` as `.slice .int`. -/
 partial def keepTypeParams (j : Json) : Json :=
   match j with
   | .arr xs => .arr (xs.map keepTypeParams)
@@ -92,9 +112,10 @@ partial def keepTypeParams (j : Json) : Json :=
       | .ok n => Json.mkObj [("TypeVar", .str n)]
       | _ => Json.mkObj [("Param", keepTypeParams p)]
     | [("Alias", a)] =>
-      match selfAssocName a with
-      | some n => Json.mkObj [("TypeVar", .str n)]
-      | none => Json.mkObj [("Alias", keepTypeParams a)]
+      match selfAssocName a, paramAssocType a with
+      | some n, _ => Json.mkObj [("TypeVar", .str n)]
+      | none, some n => Json.mkObj [("TypeVar", .str n)]
+      | none, none => Json.mkObj [("Alias", keepTypeParams a)]
     | kvs => Json.mkObj (kvs.map fun (k, v) => (k, keepTypeParams v))
   | _ => j
 
