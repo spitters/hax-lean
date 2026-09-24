@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- `haxpipeT --hax --emit-certified --emit-classes <trait-export.json>` emits
+  Rust traits as Lean classes (`HaxLean/ClassEmit.lean`). The trait export is
+  the hax frontend export of the crate that defines the traits; the traits the
+  extracted crate defines itself are read from its own export. The mode emits
+  one `class` per trait over its `Self` type, with a field per associated type
+  (its trait bounds as instance fields), associated constant and method, and
+  its supertraits outside `core`/`alloc`/`std` as `extends`; an `export` of
+  every trait item the crate reads through a trait bound (`LocalBound`), which
+  is then not a `Deps` field; each generic function with binders
+  `{F : Type} [Inhabited F] [Trait F]`; each generic struct as a
+  type-parametric tuple abbreviation with constructor and projections, so
+  `RPoint<F>` prints as `RPoint_T F` and `RPoint<Fe51>` as `RPoint_T Fe51_T`;
+  and each trait `impl` of the crate as an `instance` whose fields name the
+  emitted method bodies and associated-constant values of the `impl`
+  (`buildTraitImplConstMap`, with a `Concrete` constant read resolved to its
+  definition). Definitions and instances are emitted in dependency order
+  outside `mutual` when the call graph has no cycle beyond self-recursion. A
+  type parameter reaches the renderer as `ImpType.typeVar`, which the surface
+  stringifier prints by name. The `ImpExpr` and `TExpr` literals are as in the
+  default mode. Without the flag the output is byte-identical.
 - The emitted file carries a module docstring and sets no heartbeat budget. The
   docstring (`moduleDocstring` in `PrettyPrintT`) sits after the imports in the
   `/-! ... -/` form with a `## Main definitions` section, and is derived from the

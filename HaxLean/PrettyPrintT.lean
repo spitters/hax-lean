@@ -16,6 +16,7 @@ public import HaxLean.TPhase.QualifyProjections
 public import HaxLean.TPhase.RewriteNewToStructCtor
 public import HaxLean.TPhase.RewriteStructFromElem
 public import HaxLean.TPhase.FixProjectionPaths
+public import HaxLean.ClassEmit
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -224,10 +225,12 @@ def depOpBaseName (f : String) : String :=
   if isDepOpHead f then (f.splitOn "#").head! else f
 
 /-- Whether a type is the adapter's encoding of a generic type parameter,
-    `.slice .int`, under any number of references. -/
+    `.slice .int`, or a type parameter kept by the trait-to-class emission,
+    `.typeVar`, under any number of references. -/
 def isErasedTypeParam : ImpType → Bool
   | .ref inner _ => isErasedTypeParam inner
   | .slice .int => true
+  | .typeVar _ => true
   | _ => false
 
 /-- Tag every operator-named app whose operand is a type parameter with
@@ -403,13 +406,19 @@ def traitImplDepTypeConflicts (tdefs : List (String × TExpr))
     - `projConflicts` : projection-name conflicts to resolve
     - `clashSet` : opaque ADT names that collide with a Deps method name
       (these must be emitted as `axiom <Name>_T : Type` to avoid the
-      type-vs-function ambiguity at the namespace level). -/
+      type-vs-function ambiguity at the namespace level).
+
+    `classHooks` is the trait-to-class plan (`Hax.ClassEmit`): its generic
+    structs are looked up through their templates and left to
+    `ClassHooks.renderGenericStructs`, and the trait items it exports are not
+    `Deps` fields. -/
 def generatePreambleTyped (tdefs : List (String × TExpr))
     (moduleName : String) (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (processedDefs : List (String × ImpExpr) := [])
     (procTdefs : List (String × TExpr) := [])
     (newtypes : HaxAdapter.NewtypeMap := [])
+    (classHooks : ClassEmit.ClassHooks := {})
     : String × List (String × String) × List String :=
   -- Use processed defs for structural analysis (qualified projections etc.)
   let defs := if processedDefs.isEmpty then tdefs.map fun (n, te) => (n, te.erase) else processedDefs
@@ -422,7 +431,7 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   -- on the source name `T`, which the call sites still carry at this point.
   let newtypeCtorNames := newtypes.map (·.1)
   let structIsPassthrough := computeStructPassthrough structMeta defs
-  let baseStructLookup := mkStructLookup structMeta structIsPassthrough
+  let baseStructLookup := classHooks.wrapLookup (mkStructLookup structMeta structIsPassthrough)
   -- Compute opaque-ADT-vs-Deps-method clashes: when a type used in a Deps
   -- signature has the same short name as a Deps method, emit the axiom
   -- with a `_T` suffix and route every type reference through that suffix.
@@ -446,7 +455,8 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   -- bodies INLINED via resolveStructType also route clashing field-types
   -- to `<name>_T` instead of expanding them (which would re-introduce the
   -- raw `FieldElement` reference that collides with the Deps method).
-  let clashedBaseLookup := mkStructLookup structMeta structIsPassthrough clashSet
+  let clashedBaseLookup :=
+    classHooks.wrapLookup (mkStructLookup structMeta structIsPassthrough clashSet)
   let structLookup : String → Option String := fun name =>
     let short := ImpType.sanitizeAdtShortName name
     if clashSet.contains short then some s!"{short}_T"
@@ -521,7 +531,9 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
     !newtypeCtorNames.contains f &&
     -- A `#dep`-tagged operator call is an external trait method
     -- (`markDepOperators`); its field is named by the bare operator.
-    (!isAlwaysBuiltin f || freeVarDeps.contains f || isDepOpHead f)
+    (!isAlwaysBuiltin f || freeVarDeps.contains f || isDepOpHead f) &&
+    -- A trait item exported from an emitted class is not a Deps field.
+    !classHooks.classItemNames.contains (depOpBaseName f)
 
   -- === Generate struct definitions ===
   -- Reuse existing PrettyPrint struct generation (it's structural, not heuristic)
@@ -529,7 +541,8 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
   let sortedStructMeta := structMeta.toArray.qsort (fun a b => a.2.length > b.2.length) |>.toList
   let (structDefs, _, projConflicts) := sortedStructMeta.foldl
     (fun (acc, emittedProjs, conflicts) (sname, fields) =>
-      if fields.isEmpty then (acc, emittedProjs, conflicts)
+      if fields.isEmpty || classHooks.genericStructs.any (·.1 == sname) then
+        (acc, emittedProjs, conflicts)
       else
         let isUsed := allAppNames.contains sname
         let isPassthrough := structIsPassthrough.any fun (n, pt) => n == sname && pt
@@ -1417,7 +1430,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (aliasMeta : List HaxAdapter.TypeAliasInfo := [])
     (mutWriteRets : List (String × List String × Bool) := [])
     (crateName : String := "")
-    (emitLowCT : Bool := false) : String :=
+    (emitLowCT : Bool := false)
+    (classHooks : ClassEmit.ClassHooks := {}) : String :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
@@ -1482,7 +1496,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Apply typed passes (struct projection disambiguation, etc.)
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
-  let structLookup := mkStructLookup structMeta structIsPassthrough
+  let structLookup := classHooks.wrapLookup (mkStructLookup structMeta structIsPassthrough)
   -- The four type-dependent post-erase rewriters
   -- (`qualifyProjections`, `rewriteNewToStructCtor`,
   -- `rewriteStructFromElem`, `fixProjectionPaths`) were removed here on
@@ -1511,7 +1525,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       | _ => (fname, e)
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
-  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs) (newtypes := newtypes)
+  let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs) (newtypes := newtypes) (classHooks := classHooks)
   -- Keep the BASE structLookup (no clash augment) for opaque-ADT
   -- collection — augmenting it would make collectOpaqueAdtNames treat
   -- clashing names as known structs and skip them, leaving `Commitment_T`
@@ -1520,7 +1534,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Clash-aware base lookup: `mkStructLookup` threads clashSet into
   -- `resolveStructType`, so inlined struct bodies route clashing field
   -- types to `<name>_T` instead of expanding them.
-  let clashedBaseLookup := mkStructLookup structMeta structIsPassthrough axiomClashSet
+  let clashedBaseLookup :=
+    classHooks.wrapLookup (mkStructLookup structMeta structIsPassthrough axiomClashSet)
   -- Augmented structLookup: clash names route to their `_T` alias.
   -- Used for body emission (toLeanDefTyped) so let-binding type
   -- ascriptions render as `(val : Commitment_T)` instead of
@@ -1641,7 +1656,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- `abbrev Scalar := Vector UInt8 32` for the same name).
   let isTypeAlias (s : String) : Bool := aliasMeta.any (·.name == s)
   let allOpaque :=
-    (opaqueFromFnTypes ++ opaqueFromCalls ++ opaqueFromNewtypes).eraseDups.map renameForClash
+    (opaqueFromFnTypes ++ opaqueFromCalls ++ opaqueFromNewtypes
+      ++ classHooks.opaqueNames baseStructLookup).eraseDups.map renameForClash
   let allOpaque := (allOpaque.filter (fun n =>
     !isNewtypeAlias n && !isEnum n && !isTypeAlias n)).eraseDups
   let axiomsBlock := if allOpaque.isEmpty then ""
@@ -1745,15 +1761,37 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if emitLowCT then
       "open CatCrypt.Crypto.Hax\nopen CatCrypt.Crypto.Jasmin.LowCT\n"
     else ""
-  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{inductiveBlock}{newtypeBlock}{preamble}\n{typeAliasBlock}{texprTyBlock}mutual\n\n"
-  let body := "\n".intercalate (defs.map fun (n, e) =>
+  let surfaceDefs : List (String × String) := defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
       | some (_, rawTe) => toLeanDefTyped n rawTe e (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes) (boolNames := boolNames) (mutWriteRets := mutWriteRets)
       | none => toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
+    let surfaceDef := classHooks.addBinders n surfaceDef
     let surfaceDef := if needsPartial then surfaceDef.replace "def " "partial def " else surfaceDef
-    s!"{surfaceDef}")
+    (n, s!"{surfaceDef}")
+  -- The trait-to-class emission (`Hax.ClassEmit`) puts the generic structs and
+  -- the classes before the preamble, and emits the definitions and instances
+  -- in dependency order outside a `mutual` block when the call graph allows
+  -- it; otherwise the instances follow the `mutual` block.
+  let classPreamble :=
+    if !classHooks.enabled then ""
+    else classHooks.renderGenericStructs structMeta structLookup
+      ++ classHooks.renderClasses structLookup
+  let classOrder : Option (List String) :=
+    if !classHooks.enabled then none
+    else classHooks.orderBody structLookup ((defs.zip surfaceDefs).map fun ((n, e), (_, t)) =>
+      (n, t, (collectAppCalls e).map (·.1) ++ collectFreeVars [n] e))
+  let (bodyParts, mutualOpen, mutualClose) : List String × String × String :=
+    match classOrder with
+    | some parts => (parts, "", "")
+    | none =>
+      let insts := if !classHooks.enabled then ""
+        else "\n".intercalate (classHooks.instances.map (classHooks.renderInstance structLookup))
+          ++ "\n"
+      (surfaceDefs.map (·.2), "mutual\n\n", "end\n\n" ++ insts)
+  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{inductiveBlock}{newtypeBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
+  let body := "\n".intercalate bodyParts
   let impExprs := "\n".intercalate (defs.map fun (n, e) =>
     let impExprDef := toLeanImpExprDef n (unmarkDepOperators e)
     let impExprDef := if needsPartial then impExprDef.replace "def " "partial def " else impExprDef
@@ -1777,7 +1815,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       s!"{anfDef}\n{lowDef}")
     s!"{ds}\n"
   let footer :=
-    s!"\n{impExprs}\n{lowCTBlock}{texprBlock}end\n\n{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
+    s!"\n{impExprs}\n{lowCTBlock}{texprBlock}{mutualClose}{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax

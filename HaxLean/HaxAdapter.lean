@@ -354,6 +354,13 @@ structure ImplSelfTypeMap where
       the emitted name, which is also the name the `impl`'s method body is
       emitted under. Built by `buildTraitImplMethodMap`. -/
   traitImplMethods : List (Nat × String × String) := []
+  /-- The associated constants of the trait `impl` blocks the extracted crate
+      defines, keyed like `traitImplMethods`. A constant read whose
+      `in_trait.impl` atom resolves to one of these blocks takes the emitted
+      name, under which the constant's value is emitted as a definition. Empty
+      unless the trait-to-class emission asks for it
+      (`parseHaxFileWithTExpr (traitImplConsts := true)`). -/
+  traitImplConsts : List (Nat × String × String) := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -590,6 +597,20 @@ def traitCallImplMethod (funJ : Json) : Option (Nat × String) := do
 def resolveTraitImplCall (funJ : Json) (m : ImplSelfTypeMap) : Option String := do
   let (implId, method) ← traitCallImplMethod funJ
   let entry ← m.traitImplMethods.find? fun p => p.1 == implId && p.2.1 == method
+  some entry.2.2
+
+/-- The emitted name of a read of an associated constant (`Self::ONE`) that
+    resolves to a trait `impl` block of the extracted crate, from the
+    `NamedConst` or `GlobalName` node of the read (a node with an `item` whose
+    value carries `in_trait`). `none` when `traitImplConsts` has no entry
+    for it, which is always the case unless the trait-to-class emission built
+    that table. -/
+def resolveTraitImplConstRef (globalName : Json) (m : ImplSelfTypeMap) :
+    Option String := do
+  guard (!m.traitImplConsts.isEmpty)
+  let (implId, item) ← traitCallImplMethod
+    (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])])
+  let entry ← m.traitImplConsts.find? fun p => p.1 == implId && p.2.1 == item
   some entry.2.2
 
 /-- Disambiguate a method-call name using the impl map. Given the
@@ -830,6 +851,11 @@ partial def parseHaxType (j : Json) : ImpType :=
       match elemType with
       | some et => .slice et
       | none => .slice .unknown
+    else if let .ok (.str n) := tyKind.getObjVal? "TypeVar" then
+      -- A named type parameter kept as such. hax emits no `TypeVar` kind; it
+      -- is written by `Hax.ClassEmit.keepTypeParams`, which rewrites every
+      -- `Param` of an export for the trait-to-class emission.
+      .typeVar n
     else if let .ok _paramData := tyKind.getObjVal? "Param" then
       -- Generic type parameter: in the untyped extraction model,
       -- crypto type params are almost always byte arrays.
@@ -2540,7 +2566,7 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "global" [] implMap.localCrate
         | _ => "global"
-      return .var name
+      return .var ((resolveTraitImplConstRef data implMap).getD name)
 
     else if let .ok data := j.getObjVal? "Literal" then
       -- ByteStr and Str can't be represented as ImpLit; handle before parseTLiteral
@@ -2953,7 +2979,7 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "const" [] implMap.localCrate
         | _ => "const"
-      return .var name
+      return .var ((resolveTraitImplConstRef data implMap).getD name)
 
     else if let .ok _data := j.getObjVal? "ConstParam" then
       return .var "const_param"
@@ -3574,8 +3600,11 @@ partial def fnNameCollisions (root : Json) : List String :=
     second is what `#[derive(Debug)]`, `#[derive(Clone)]` and their siblings
     produce: the body is compiler-generated rather than written, it is not
     part of any specification, and for `Debug` it calls the `core::fmt`
-    builder through `&mut`, which the write-back gate refuses. -/
-partial def collectLocalTraitImplMethods (j : Json) :
+    builder through `&mut`, which the write-back gate refuses.
+
+    `itemKind` selects the `impl` items collected: `"Fn"` (the methods, the
+    default) or `"Const"` (the associated constants). -/
+partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn") :
     List (Nat × String × String × String) :=
   let ofImpl (it : Json) (impl : Json) : List (Nat × String × String × String) :=
     let traitName : Option String := do
@@ -3608,7 +3637,7 @@ partial def collectLocalTraitImplMethods (j : Json) :
         implItems.toList.filterMap fun implItem =>
           match implItem.getObjVal? "kind" with
           | .ok k =>
-            if (k.getObjVal? "Fn").toOption.isSome then
+            if (k.getObjVal? itemKind).toOption.isSome then
               match implItem.getObjVal? "ident" with
               | .ok ident => some (iid, tn, sn, extractFnName ident)
               | _ => none
@@ -3622,11 +3651,11 @@ partial def collectLocalTraitImplMethods (j : Json) :
       match kindJ.getObjVal? "Mod" with
       | .ok (.arr modData) =>
         match modData.toList[1]? with
-        | some sub => collectLocalTraitImplMethods sub
+        | some sub => collectLocalTraitImplMethods sub itemKind
         | none => []
       | .ok modData =>
         match modData.getObjValAs? (Array Json) "items" with
-        | .ok subItems => collectLocalTraitImplMethods (.arr subItems)
+        | .ok subItems => collectLocalTraitImplMethods (.arr subItems) itemKind
         | _ => []
       | _ =>
         match kindJ.getObjVal? "Impl" with
@@ -3656,6 +3685,33 @@ def buildTraitImplMethodMap (j : Json) : List (Nat × String × String) :=
     let qual := if implsOfTrait.length > 1 then s!"{traitName}_{selfName}" else traitName
     (implId, method, s!"{qual}_{method}")
 
+/-- The emitted name of every associated constant of a trait `impl` of the
+    extracted crate, keyed by the `impl`'s interning id and the constant name.
+    The naming rule is `buildTraitImplMethodMap`'s, with the `impl` blocks of a
+    trait counted over methods and constants together, so a constant and a
+    method of one `impl` carry the same qualifier. -/
+def buildTraitImplConstMap (j : Json) : List (Nat × String × String) :=
+  let consts := collectLocalTraitImplMethods j "Const"
+  let all := collectLocalTraitImplMethods j ++ consts
+  consts.map fun (implId, traitName, selfName, item) =>
+    let implsOfTrait := ((all.filter (·.2.1 == traitName)).map (·.1)).eraseDups
+    let qual := if implsOfTrait.length > 1 then s!"{traitName}_{selfName}" else traitName
+    (implId, item, s!"{qual}_{item}")
+
+/-- The definition of an associated constant of a trait `impl` block, from the
+    `impl` item. Such an item has the two-element form `Const: [ty, body]`,
+    with `body` an expression node. `none` for any other item. -/
+partial def parseImplConstTExpr (implItem : Json) (implMap : ImplSelfTypeMap) :
+    Except String (Option (TExpr × TExpr × FnTypeInfo)) := do
+  let kind ← implItem.getObjVal? "kind"
+  match kind.getObjVal? "Const" with
+  | .ok (.arr #[tyJ, bodyJ]) =>
+    if bodyJ.isNull then return none
+    let body ← parseHaxTExpr bodyJ implMap
+    let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
+    return some (body, processed, ⟨[], parseHaxType tyJ⟩)
+  | _ => return none
+
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
     processed typed defs (for pipeline/rendering)).
@@ -3668,9 +3724,14 @@ def buildTraitImplMethodMap (j : Json) : List (Nat × String × String) :=
     trait methods and reads the associated constants of a further `impl`, which
     stays opaque, while the crate's generic functions call those same names at a
     type parameter — and the `Deps` class carries one field, hence one type, per
-    name. `Hax.traitImplDepTypeConflicts` identifies such an export. -/
+    name. `Hax.traitImplDepTypeConflicts` identifies such an export.
+
+    `traitImplConsts := true` also resolves the associated constants of the
+    crate's trait `impl`s (`buildTraitImplConstMap`): each becomes a
+    definition, and a read of it through a `Concrete` atom takes its name. The
+    trait-to-class emission sets it; its instances name those definitions. -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
-    (resolveTraitImpls : Bool := true) :
+    (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
   -- Build the impl-self-type map once from the full JSON. This lets the
@@ -3681,7 +3742,8 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
   let implMap : ImplSelfTypeMap :=
     { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j,
       structFields := structFields, localCrate := localCrateOfExport j,
-      traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else [] }
+      traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else []
+      traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else [] }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
@@ -3752,7 +3814,18 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
                           p.1 == iid && p.2.1 == mName with
                       | some entry => result := result ++ [(entry.2.2, raw, proc, ti)]
                       | none => pure ()
-                    | none => pure ()
+                    | none =>
+                      let cName := match implItem.getObjVal? "ident" with
+                        | .ok ident => extractFnName ident
+                        | _ => ""
+                      match implMap.traitImplConsts.find? fun p =>
+                          p.1 == iid && p.2.1 == cName with
+                      | some entry =>
+                        match ← parseImplConstTExpr implItem implMap with
+                        | some (raw, proc, ti) =>
+                          result := result ++ [(entry.2.2, raw, proc, ti)]
+                        | none => pure ()
+                      | none => pure ()
                 | _, _ => pure ()
             | _ => pure ()
         | none => pure ()
@@ -3809,6 +3882,9 @@ def classifyFieldType (tyVal : Json) : String :=
   -- In crypto crates, generic params are almost always byte arrays.
   -- Classify as "array" (safe default; will get `Array Int` type).
   else if tyVal.getObjVal? "Param" |>.isOk then "array"
+  -- A type parameter kept by `Hax.ClassEmit.keepTypeParams`, classified as
+  -- the `Param` it rewrites.
+  else if tyVal.getObjVal? "TypeVar" |>.isOk then "array"
   -- Array: {"Array": {id: ..., value: ...}}
   else if tyVal.getObjVal? "Array" |>.isOk then "array"
   -- Slice

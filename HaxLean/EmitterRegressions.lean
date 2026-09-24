@@ -533,4 +533,92 @@ def scalarCtorFile : String :=
 #guard ((moduleDocstring "Test" "t-hax" true 2 []).splitOn
   "2 extracted functions:").length == 2
 
+/-! ### Trait-to-class emission
+
+`--emit-classes` (`Hax.ClassEmit`) renders each trait as a class, keeps a
+generic function generic over its trait bounds, renders each trait `impl` as
+an instance, and orders definitions and instances so that each instance stands
+between the definitions it names and the ones that use it. The pins below run
+on a synthetic trait `Ring` over a supertrait `Base`. -/
+
+open ClassEmit in
+/-- `trait Ring: Base { const ZERO: Self; fn add(self, rhs: Self) -> Self; }`
+    in the export form of a hax `Trait` item, with its type parameter kept. -/
+def ringTraitJson : Lean.Json :=
+  let self : Lean.Json := Lean.Json.mkObj [("id", 1), ("value",
+    Lean.Json.mkObj [("Param", Lean.Json.mkObj [("index", 0), ("name", "Self")])])]
+  let base : Lean.Json := Lean.Json.mkObj [("kind", Lean.Json.mkObj [("value",
+    Lean.Json.mkObj [("Trait", Lean.Json.mkObj [("trait_ref", Lean.Json.mkObj [("value",
+      Lean.Json.mkObj [("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value",
+        Lean.Json.mkObj [("krate", "k"), ("path", Lean.Json.arr #[Lean.Json.mkObj
+          [("data", Lean.Json.mkObj [("TypeNs", "Base")])]])])])])])])])])])]
+  let item (name : String) (kind : Lean.Json) : Lean.Json :=
+    Lean.Json.mkObj [("ident", Lean.Json.arr #[name, .null]), ("kind", kind)]
+  let zero := item "ZERO" (Lean.Json.mkObj [("Const", Lean.Json.arr #[self, .null])])
+  let add := item "add" (Lean.Json.mkObj [("RequiredFn", Lean.Json.arr #[
+    Lean.Json.mkObj [("decl", Lean.Json.mkObj [("inputs", Lean.Json.arr #[self, self]),
+      ("output", Lean.Json.mkObj [("Return", self)])])],
+    Lean.Json.arr #[Lean.Json.arr #["self", .null], Lean.Json.arr #["rhs", .null]]])])
+  keepTypeParams (Lean.Json.arr #[Lean.Json.mkObj [
+    ("kind", Lean.Json.mkObj [("Trait", Lean.Json.arr #["NotConst", "No", "Safe",
+      Lean.Json.arr #["Ring", .null], Lean.Json.mkObj [], Lean.Json.arr #[base],
+      Lean.Json.arr #[zero, add]])]),
+    ("owner_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value",
+      Lean.Json.mkObj [("krate", "k")])])])]])
+
+/-- The plan for a crate generic over `Ring`: `Ring` and `Base` as classes, `add`
+    exported, `f<F: Ring>` generic, a generic struct `P<F>`, and one `impl Ring
+    for Fe`. -/
+def ringHooks : ClassEmit.ClassHooks :=
+  { traits := ClassEmit.orderTraits
+      ({ name := "Base", krate := "k" } :: ClassEmit.parseTraitDefs ringTraitJson)
+    exports := [("Ring", ["add"])]
+    genericFns := [{ name := "f", typeParams := ["F"], bounds := [("Ring", "F")] }]
+    genericStructs := [("P", ["F"])]
+    instances := [{ trait := "Ring", selfTy := .adt "Fe" [],
+                    fields := [("ZERO", "Ring_ZERO"), ("add", "Ring_add")] }] }
+
+-- A type parameter is kept as a named type variable only in a rewritten export.
+#guard match HaxAdapter.parseHaxType (Lean.Json.mkObj [("value",
+    Lean.Json.mkObj [("Param", Lean.Json.mkObj [("index", 0), ("name", "F")])])]) with
+  | .slice .int => true | _ => false
+#guard match HaxAdapter.parseHaxType (ClassEmit.keepTypeParams (Lean.Json.mkObj [("value",
+    Lean.Json.mkObj [("Param", Lean.Json.mkObj [("index", 0), ("name", "F")])])])) with
+  | .typeVar "F" => true | _ => false
+
+-- The trait definition is read with its supertrait, constant and method, and
+-- follows its supertrait.
+#guard ringHooks.traits.map (·.name) == ["Base", "Ring"]
+#guard ((ringHooks.renderClasses (fun _ => none)).splitOn
+  "class Ring (Self : Type) extends Base Self where\n  ZERO : Self\n  add (self : Self) (rhs : Self) : Self").length == 2
+#guard ((ringHooks.renderClasses (fun _ => none)).splitOn "export Ring (add)").length == 2
+
+-- A generic struct renders at its type arguments; the default plan leaves the
+-- lookup as it was.
+#guard (ImpType.adt "P" [.typeVar "F"]).toLeanTypeStrSurface (ringHooks.wrapLookup opaqueInner)
+  == "P_T F"
+#guard (ImpType.adt "P" [.adt "Fe51" []]).toLeanTypeStrSurface
+  (ringHooks.wrapLookup transparentInner) == "P_T (Array Int)"
+#guard (ImpType.adt "P" [.typeVar "F"]).toLeanTypeStrSurface
+  (({} : ClassEmit.ClassHooks).wrapLookup opaqueInner) == "P"
+
+-- A generic function takes its type parameters and bounds as binders.
+#guard ringHooks.addBinders "f" "def f (x : F) :=\nx\n"
+  == "def f {F : Type} [Inhabited F] [Ring F] (x : F) :=\nx\n"
+#guard ringHooks.addBinders "g" "def g (x : Int) :=\nx\n" == "def g (x : Int) :=\nx\n"
+
+-- The instance names the `impl`'s definitions and fills its supertrait field by
+-- instance resolution.
+#guard ringHooks.renderInstance (fun _ => none) ringHooks.instances.head!
+  == "instance : Ring Fe where\n  toBase := inferInstance\n  ZERO := Ring_ZERO\n  add := Ring_add\n"
+
+-- The instance stands after the definitions it names and before the concrete
+-- definition that calls the generic one; a cycle leaves the order to `mutual`.
+#guard (ringHooks.orderBody (fun _ => none)
+    [("user", "U", ["f"]), ("f", "F", ["add"]), ("Ring_add", "A", []),
+     ("Ring_ZERO", "Z", [])]).map (·.map (·.take 1 |>.toString))
+  == some ["F", "A", "Z", "i", "U"]
+#guard (ringHooks.orderBody (fun _ => none)
+    [("a", "A", ["b"]), ("b", "B", ["a"])]).isNone
+
 end Hax.EmitterRegressions

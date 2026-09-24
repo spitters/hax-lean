@@ -84,6 +84,11 @@ structure Options where
       definitions pull the CatCrypt `LowCT` closure into the generated file,
       which the security-provenance consumers do not need. -/
   emitLowCT : Bool := false
+  /-- The hax frontend export holding the definitions of the traits the crate
+      uses. When set, `--emit-certified --hax` emits each trait as a class,
+      each trait `impl` as an instance, and each generic function with its
+      type parameters and trait bounds as binders (`Hax.ClassEmit`). -/
+  emitClasses : Option String := none
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -107,6 +112,8 @@ where
     | "--allow-dropped-writeback" :: rest, opts =>
       go rest { opts with allowDroppedWriteback := true }
     | "--emit-lowct" :: rest, opts => go rest { opts with emitLowCT := true }
+    | "--emit-classes" :: file :: rest, opts =>
+      go rest { opts with emitClasses := some file }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -128,6 +135,11 @@ OPTIONS:
   --filter FN,FN    Only include matching functions (comma-separated)
   --emit-lowct      With --emit-certified: also emit the ANF-normalised literal
                     and its haxToLowCT lowering per function
+  --emit-classes FILE
+                    With --emit-certified --hax: read the trait definitions
+                    from the hax export FILE; emit each trait as a class, each
+                    trait impl as an instance, and each generic function with
+                    its type parameters and trait bounds as binders
   --help            Show this help message
 
 INPUT:

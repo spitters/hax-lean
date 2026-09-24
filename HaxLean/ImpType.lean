@@ -73,6 +73,7 @@ inductive ImpType where
   | ref (inner : ImpType) (isMut : Bool)
   | slice (inner : ImpType)
   | array (inner : ImpType) (len : Nat)
+  /-- A type parameter of a generic definition, by name. -/
   | typeVar (name : String)
   | unknown
   deriving Inhabited
@@ -288,6 +289,20 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
   | .typeVar _ => "Int"
   | .unknown => "Int"
 
+/-- The slot for the `i`-th type argument in a struct-lookup template: `⟪i⟫`.
+    A lookup returns a template for a generic struct, such as `RPoint_T ⟪0⟫`,
+    and the surface stringifier substitutes the rendered type arguments of the
+    ADT for the slots. -/
+def typeArgSlot (i : Nat) : String := s!"⟪{i}⟫"
+
+/-- Whether a struct-lookup result is a template over type arguments. -/
+def isTypeArgTemplate (s : String) : Bool := s.any (· == '⟪')
+
+/-- Substitute rendered type arguments for the slots of a template. -/
+def fillTypeArgs (template : String) (args : List String) : String :=
+  ((List.range args.length).zip args).foldl
+    (fun acc (i, a) => acc.replace (typeArgSlot i) a) template
+
 /-- Convert an ImpType to a surface Lean type string, collapsing all
     integer-like types to `Int` and array/vector types to `Array (Int)`.
     This produces types compatible with the untyped Runtime (Hax.add etc.
@@ -295,9 +310,18 @@ partial def toLeanTypeStr (ty : ImpType) (structLookup : String → Option Strin
     are preserved. -/
 partial def toLeanTypeStrSurface (ty : ImpType)
     (structLookup : String → Option String := fun _ => none) : String :=
+  -- A struct lookup result may be a template over the ADT's type arguments
+  -- (`fillTypeArgs`); the arguments are rendered only when it is one.
+  let fill (s : String) (args : List ImpType) : String :=
+    if isTypeArgTemplate s then
+      fillTypeArgs s (args.map fun a =>
+        let t := a.toLeanTypeStrSurface structLookup
+        if t.any (· == ' ') then s!"({t})" else t)
+    else s
   match ty with
   | .bool => "Bool"
-  | .int | .uint _ | .sint _ | .typeVar _ | .unknown | .fn _ _ => "Int"
+  | .typeVar n => n
+  | .int | .uint _ | .sint _ | .unknown | .fn _ _ => "Int"
   | .unit => "Unit"
   | .str => "String"
   | .tuple elems =>
@@ -314,7 +338,7 @@ partial def toLeanTypeStrSurface (ty : ImpType)
     s!"ControlFlow ({brk.toLeanTypeStrSurface structLookup}) ({cont.toLeanTypeStrSurface structLookup})"
   | .adt name args =>
     match structLookup name with
-    | some s => s
+    | some s => fill s args
     | none =>
       if name == "Vec" || name.endsWith "::Vec" then
         match args with
@@ -343,7 +367,7 @@ partial def toLeanTypeStrSurface (ty : ImpType)
       else
         let shortName := sanitizeAdtShortName name
         match structLookup shortName with
-        | some s => s
+        | some s => fill s args
         | none =>
           -- Stdlib iterator/range/format types collapse to Int (no axiom).
           if isStdlibCollapseName shortName then "Int"

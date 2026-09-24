@@ -104,6 +104,19 @@ def main (args : List String) : IO UInt32 := do
     -- so the JSON tree is released before the pipeline runs.
     let inputJson ← IO.ofExcept (Json.parseVerified input)
     let t ← phaseTick "json-parse" t
+    -- `--emit-classes`: keep the type parameters of both exports as named
+    -- type variables and plan the classes, instances and generic binders
+    -- (`Hax.ClassEmit`). Without the flag the plan is empty and nothing below
+    -- consults it.
+    let (inputJson, classHooks) ← match opts.emitClasses with
+      | none => pure (inputJson, ({} : ClassEmit.ClassHooks))
+      | some traitFile => do
+        let traitJson ← IO.ofExcept (Json.parseVerified (← IO.FS.readFile traitFile))
+        let inputJson := ClassEmit.keepTypeParams inputJson
+        let hooks := ClassEmit.plan (ClassEmit.keepTypeParams traitJson) inputJson
+        IO.eprintln s!"INFO classes={hooks.traits.length} class-items={hooks.classItemNames.length} generic-fns={hooks.genericFns.length} generic-structs={hooks.genericStructs.length} instances={hooks.instances.length}"
+        pure (inputJson, hooks)
+    let classMode := classHooks.enabled
     let structMeta := structMetaOfJson inputJson
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
@@ -115,7 +128,8 @@ def main (args : List String) : IO UInt32 := do
     let structFields : StructFieldNames :=
       structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
     let (_expr, fnTypes, rawTdefs, procTdefs) ←
-      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields)
+      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
+        (traitImplConsts := classMode))
     let fnTypes := dedupByName fnTypes
     let rawTdefs := dedupByName rawTdefs
     let procTdefs := dedupByName procTdefs
@@ -128,8 +142,11 @@ def main (args : List String) : IO UInt32 := do
     -- trait `impl` opaque, which is uniform.
     let traitImplNames :=
       ((HaxAdapter.buildTraitImplMethodMap inputJson).map (·.2.2)).eraseDups
+    -- Under `--emit-classes` the names a generic function calls through a trait
+    -- bound are class items rather than `Deps` fields, so the conflict does
+    -- not arise and the `impl`s stay resolved.
     let depTypeConflicts :=
-      if traitImplNames.isEmpty then []
+      if traitImplNames.isEmpty || classMode then []
       else
         let erased := procTdefs.map fun (n, te) => (n, te.erase)
         let sl := mkStructLookup structMeta (computeStructPassthrough structMeta erased)
@@ -233,7 +250,8 @@ def main (args : List String) : IO UInt32 := do
     let rendered :=
       toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
         newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns)
-        (crateName := crateName) (emitLowCT := opts.emitLowCT) ++ secrecyDef
+        (crateName := crateName) (emitLowCT := opts.emitLowCT)
+        (classHooks := classHooks) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered
