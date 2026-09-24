@@ -593,6 +593,12 @@ def ringHooks : ClassEmit.ClassHooks :=
   "class Ring (Self : Type) extends Base Self where\n  ZERO : Self\n  add (self : Self) (rhs : Self) : Self").length == 2
 #guard ((ringHooks.renderClasses (fun _ => none)).splitOn "export Ring (add)").length == 2
 
+-- A trait that both the trait export and the crate export define is planned
+-- and rendered once.
+#guard (ClassEmit.plan ringTraitJson ringTraitJson).traits.map (·.name) == ["Ring"]
+#guard (((ClassEmit.plan ringTraitJson ringTraitJson).renderClasses (fun _ => none)).splitOn
+  "class Ring ").length == 2
+
 -- A generic struct renders at its type arguments; the default plan leaves the
 -- lookup as it was.
 #guard (ImpType.adt "P" [.typeVar "F"]).toLeanTypeStrSurface (ringHooks.wrapLookup opaqueInner)

@@ -194,6 +194,10 @@ def addTraitItem (td : TraitDef) (it : Json) : TraitDef :=
     else td
   | _ => td
 
+/-- The first definition of each trait name, in list order. -/
+def dedupTraits (tds : List TraitDef) : List TraitDef :=
+  tds.foldl (fun acc d => if acc.any (·.name == d.name) then acc else acc ++ [d]) []
+
 /-- The trait definitions of an export rewritten by `keepTypeParams`, one per
     trait name, in export order. A trait item is `Trait: [constness, auto,
     safety, ident, generics, supertrait clauses, items]`. -/
@@ -210,7 +214,7 @@ def parseTraitDefs (j : Json) : List TraitDef :=
       | some (.arr xs) => xs.toList
       | _ => []
     some (items.foldl addTraitItem { name, krate, supers })
-  defs.foldl (fun acc d => if acc.any (·.name == d.name) then acc else acc ++ [d]) []
+  dedupTraits defs
 
 /-- Order trait definitions so that each follows its supertraits. -/
 def orderTraits (tds : List TraitDef) : List TraitDef :=
@@ -375,9 +379,11 @@ def ClassHooks.classItemNames (h : ClassHooks) : List String := h.exports.flatMa
 
 /-- The plan for an extracted crate (`crate`) and the definitions of the traits
     it uses (`traitExport`), both rewritten by `keepTypeParams`. The traits are
-    those of `traitExport` and of `crate`. -/
+    those of `traitExport` and of `crate`, one per trait name, so a trait both
+    exports define (as when `traitExport` is the crate's own export) is emitted
+    once. -/
 def plan (traitExport crate : Json) : ClassHooks :=
-  let traits := orderTraits (parseTraitDefs traitExport ++ parseTraitDefs crate)
+  let traits := orderTraits (dedupTraits (parseTraitDefs traitExport ++ parseTraitDefs crate))
   let names := traits.map (·.name)
   let used := (localBoundItems crate).toList.filter fun (_, t) => names.contains t
   let exports := names.filterMap fun t =>
