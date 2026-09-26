@@ -782,4 +782,99 @@ def traceSetCaller : TExpr :=
   .seq (.assign "t" (.app "Trace_set" [.borrow (.var "t"), .lit (.int 0), .var "v"]))
     (.var "t")
 
+/-! ## A `Vec` passed to a `&mut [T]` parameter
+
+A `Vec` variable `v` passed where `&mut [T]` is expected, as in
+`ntt(&mut coeffs, ω)` with `coeffs : Vec<u64>`, reaches hax as the deref
+coercion `&mut *DerefMut::deref_mut(&mut v)`. The parse reads the argument as
+the place `v`, so a write-back callee rebinds `v` and the dropped-write-back
+check has nothing to report. A `deref_mut` feeding a callee outside the
+write-back rewrite (`split_at_mut`, which splits the place in two), or bound to
+a name, is still reported. -/
+
+open Lean in
+/-- A hax expression node with the given type and `contents`. -/
+def haxNodeT (ty contents : Json) : Json :=
+  Json.mkObj [("ty", ty), ("contents", contents)]
+
+open Lean in
+/-- The type `&mut t`. -/
+def refMutTyJson (t : Json) : Json :=
+  Json.mkObj [("Ref", Json.arr #[Json.mkObj [("kind", Json.str "ReErased")], t, Json.bool true])]
+
+open Lean in
+/-- The type `Vec<u64>`. -/
+def vecTyJson : Json :=
+  Json.mkObj [("Adt", Json.mkObj [
+    ("def_id", mkDefIdJson "alloc" [defIdSeg "TypeNs" "vec", defIdSeg "TypeNs" "Vec"]),
+    ("generic_args", Json.arr #[])])]
+
+open Lean in
+/-- The type `[u64]`. -/
+def sliceTyJson : Json :=
+  Json.mkObj [("Slice", Json.mkObj [
+    ("generic_args", Json.arr #[Json.mkObj [("Type", Json.mkObj [("Uint", Json.str "U64")])]])])]
+
+open Lean in
+/-- The function item `krate::segs`. -/
+def haxFnJson (krate : String) (segs : List Json) : Json :=
+  haxNode (Json.mkObj [("GlobalName", Json.mkObj [
+    ("item", Json.mkObj [("def_id", mkDefIdJson krate segs)])])])
+
+open Lean in
+/-- `&mut *DerefMut::deref_mut(&mut v)` for `v : Vec<u64>`, typed `&mut [u64]`. -/
+def derefMutVecArgJson (v : String) : Json :=
+  let borrowV := haxNodeT (refMutTyJson vecTyJson)
+    (Json.mkObj [("Borrow", Json.mkObj [("arg", haxVarRef v)])])
+  let derefMutFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "deref", defIdSeg "TypeNs" "DerefMut",
+     defIdSeg "ValueNs" "deref_mut"]
+  let call := haxNodeT (refMutTyJson sliceTyJson)
+    (Json.mkObj [("Call", Json.mkObj [("fun", derefMutFn), ("args", Json.arr #[borrowV])])])
+  let deref := haxNodeT sliceTyJson (Json.mkObj [("Deref", Json.mkObj [("arg", call)])])
+  haxNodeT (refMutTyJson sliceTyJson) (Json.mkObj [("Borrow", Json.mkObj [("arg", deref)])])
+
+open Lean in
+/-- The call `f(&mut *deref_mut(&mut v), x)` of the crate function `ntt::f`. -/
+def derefMutCallJson (f v x : String) : Json :=
+  haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", haxFnJson "plonky3_hax" [defIdSeg "TypeNs" "ntt", defIdSeg "ValueNs" f]),
+    ("args", Json.arr #[derefMutVecArgJson v, haxVarRef x])])])
+
+/-- The typed parse of a hax expression, `()` on a parse error. -/
+def parseT (j : Lean.Json) : TExpr :=
+  match HaxAdapter.parseHaxTExpr j {} with
+  | .ok e => e
+  | .error _ => .mk .unitVal .unit
+
+/-- `ntt(&mut coeffs, omega)` with `coeffs : Vec<u64>`. -/
+def nttVecCall : TExpr := parseT (derefMutCallJson "ntt" "coeffs" "omega")
+
+-- The `deref_mut` re-borrow is gone; the argument's root is `coeffs`.
+#guard nttVecCall.erase ==
+  .app "ntt" [.borrow (.deref (.borrow (.var "coeffs"))), .var "omega"]
+
+/-- `fn ntt(vals: &mut [u64], omega: u64)`. -/
+def nttSig : FnTypeInfo :=
+  ⟨[("vals", .ref (.slice (.uint .w64)) true), ("omega", .uint .w64)], .unit⟩
+
+-- In statement position the call rebinds `coeffs`, and nothing is dropped.
+#guard (tRebindMutCalls [] [("ntt", 0)] [] nttVecCall).erase ==
+  .assign "coeffs" (.app "ntt" [.borrow (.deref (.borrow (.var "coeffs"))), .var "omega"])
+#guard tDroppedMutCalls [("ntt", nttSig)] [] [("ntt", 0)] [] nttVecCall == []
+
+/-- `coeffs.split_at_mut(h)` with `coeffs : Vec<u64>`: the two halves are
+    separate places, which the write-back rewrite does not thread. -/
+def splitAtMutVecCall : TExpr := parseT (derefMutCallJson "split_at_mut" "coeffs" "h")
+
+#guard tDroppedMutCalls [("ntt", nttSig)] [] [("ntt", 0)] [] splitAtMutVecCall ==
+  [("split_at_mut", [0])]
+
+/-- `let r: &mut [u64] = &mut coeffs; r`: the re-borrow bound to a name stays a
+    `deref_mut` call, whose target a later write through `r` does not reach. -/
+def derefMutLet : TExpr :=
+  .mk (.letBind "r" (parseT (derefMutVecArgJson "coeffs")) (.mk (.var "r") .unknown)) .unknown
+
+#guard tDroppedMutCalls [] [] [] [] derefMutLet == [("deref_mut", [0])]
+
 end Hax.EmitterRegressions

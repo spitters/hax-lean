@@ -414,6 +414,25 @@ def tIndexMutPlace : TExpr → TExpr
     .mk (.app "index" [tIndexMutPlace1 (tStripRefPlace a), i]) ty
   | e => e
 
+/-- Whether `t` is the type `&mut Vec<_>`. -/
+def isMutVecRef : ImpType → Bool
+  | .ref (.adt n _) true => n == "Vec" || n.endsWith "::Vec"
+  | _ => false
+
+/-- A call argument with the `DerefMut::deref_mut` re-borrow of a `Vec` removed.
+    hax gives a `&mut Vec<T>` place `v` passed where `&mut [T]` is expected as
+    `&mut *deref_mut(&mut v)`; for `Vec` the call returns a reference to the
+    same elements, so the argument is read as `&mut *(&mut v)`, whose root is
+    `v`. The `borrow`/`deref` wrappers above the call are kept; a `deref_mut`
+    whose argument is not typed `&mut Vec<_>`, and every other expression, is
+    returned unchanged. -/
+def tDerefMutArg : TExpr → TExpr
+  | .mk (.borrow e) ty => .mk (.borrow (tDerefMutArg e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tDerefMutArg e)) ty
+  | .mk (.app "deref_mut" [a]) ty =>
+    if isMutVecRef a.ty then a else .mk (.app "deref_mut" [a]) ty
+  | e => e
+
 /-- View a typed expression as a single-level struct-field place: the root
     variable, the field name, and the deref-stripped struct expression. `none`
     for the newtype projection `.0`, a nested field path, or a root that is not
@@ -2693,6 +2712,10 @@ where
         return .unitVal
       let argsJ ← data.getObjValAs? (Array Json) "args"
       let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a implMap)
+      -- A `Vec` passed through a `deref_mut` re-borrow is the `Vec` place
+      -- itself (`tDerefMutArg`), so a write-back through the argument reaches
+      -- its root variable.
+      let args := args.map tDerefMutArg
       -- Principled method-call disambiguation via the impl-self-type map.
       --
       -- When the Rust source has `crs.len()` and hax resolves it via
