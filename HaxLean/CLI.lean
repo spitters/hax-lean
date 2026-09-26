@@ -2,6 +2,7 @@ module
 
 public import HaxLean.Json
 public import HaxLean.Json.Adapter
+public import HaxLean.Json.IdTable
 public import HaxLean.HaxAdapter
 public import HaxLean.PrettyPrint
 public import HaxLean.Pipeline
@@ -11,9 +12,11 @@ public import HaxLean.Pipeline
 open Hax
 open Lean (Json ToJson FromJson toJson fromJson?)
 
-/-- Verified RFC 8259 JSON parser; replaces the unverified `Lean.Json.parse`. -/
+/-- Verified RFC 8259 JSON parser; replaces the unverified `Lean.Json.parse`.
+    An export written by `cargo hax json --use-ids` is returned in its inline
+    form (`Hax.resolveIds`). -/
 def Json.parseVerified (s : String) : Except String Json :=
-  Hax.Json.parseJsonString s
+  Hax.resolveIds <$> Hax.Json.parseJsonString s
 
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do
@@ -72,6 +75,20 @@ structure Options where
   help : Bool := false
   name : String := "result"
   filterFns : Option (List String) := none  -- only include these functions
+  /-- Emit even when a call through `&mut` is left outside the write-back
+      rewrite, so that its effect does not reach the caller. Off by default:
+      such an extraction misdescribes the source. -/
+  allowDroppedWriteback : Bool := false
+  /-- Emit, beside each verbatim `_impExpr` literal, its ANF-normalised form
+      and the `haxToLowCT` lowering of that form. Off by default: the two extra
+      definitions pull the CatCrypt `LowCT` closure into the generated file,
+      which the security-provenance consumers do not need. -/
+  emitLowCT : Bool := false
+  /-- The hax frontend export holding the definitions of the traits the crate
+      uses. When set, `--emit-certified --hax` emits each trait as a class,
+      each trait `impl` as an instance, and each generic function with its
+      type parameters and trait bounds as binders (`Hax.ClassEmit`). -/
+  emitClasses : Option String := none
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -92,6 +109,11 @@ where
     | "--name" :: n :: rest, opts => go rest { opts with name := n }
     | "--filter" :: fns :: rest, opts =>
       go rest { opts with filterFns := some (fns.splitOn ",") }
+    | "--allow-dropped-writeback" :: rest, opts =>
+      go rest { opts with allowDroppedWriteback := true }
+    | "--emit-lowct" :: rest, opts => go rest { opts with emitLowCT := true }
+    | "--emit-classes" :: file :: rest, opts =>
+      go rest { opts with emitClasses := some file }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -111,6 +133,13 @@ OPTIONS:
   --hax             Input is in hax's native JSON format (Decorated<ExprKind>)
   --name NAME       Name for the generated definition (default: result)
   --filter FN,FN    Only include matching functions (comma-separated)
+  --emit-lowct      With --emit-certified: also emit the ANF-normalised literal
+                    and its haxToLowCT lowering per function
+  --emit-classes FILE
+                    With --emit-certified --hax: read the trait definitions
+                    from the hax export FILE; emit each trait as a class, each
+                    trait impl as an instance, and each generic function with
+                    its type parameters and trait bounds as binders
   --help            Show this help message
 
 INPUT:

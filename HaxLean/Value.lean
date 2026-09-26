@@ -129,6 +129,15 @@ theorem extend_other (env : Env) (name : String) (v : Value)
   simp only [extend, beq_iff_eq]
   exact if_neg h
 
+/-- Extending an environment at a name with the value it already holds is the
+    identity. -/
+theorem extend_self (env : Env) (name : String) (w : Value)
+    (h : env name = some w) : env.extend name w = env := by
+  funext x
+  by_cases hx : x = name
+  · subst hx; simp [extend, h]
+  · simp [extend, hx]
+
 end Env
 
 /-- Bind a pattern match result to the environment.

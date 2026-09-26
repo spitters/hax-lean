@@ -29,8 +29,12 @@ public meta import HaxLean.PrettyPrint
 public import HaxLean.PrettyPrint
 public meta import HaxLean.Json.AdapterProbes
 public import HaxLean.Json.AdapterProbes
+public meta import HaxLean.PrettyPrintT
+public import HaxLean.PrettyPrintT
 public meta import HaxLean.EmitterRegressions
 public import HaxLean.EmitterRegressions
+public meta import HaxLean.HaxAdapter
+public import HaxLean.HaxAdapter
 
 /-!
 # Test Programs
@@ -431,21 +435,33 @@ def writebackTable : List (String × Nat) :=
   mutWriteTable (mutWriteFns sFields writebackFns writebackDefs)
 
 #eval mutWriteCandidates writebackFns
-  -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
-#eval mutWriteStep sFields writebackDefs [] (mutWriteCandidates writebackFns)
-  -- [("f", 0, "st"), ("m", 0, "self")]
+  -- [("f", [0], ["st"], false), ("h", [0], ["st"], true), ("k", [0, 1], ["st", "o"], false),
+  --  ("m", [0], ["self"], false), ("n", [0], ["v"], false)]
+#eval mutWriteStep sFields writebackDefs [] [] (mutWriteCandidates writebackFns)
+  -- [("f", [0], ["st"], false), ("m", [0], ["self"], false)]
 #eval mutWriteFns sFields writebackFns writebackDefs
-  -- [("f", 0, "st"), ("m", 0, "self"), ("n", 0, "v")]
-#eval mutWriteParams (mutWriteFns sFields writebackFns writebackDefs)
-  -- [("f", "st"), ("m", "self"), ("n", "v")]
-#eval tAssignedVars (tRebindMutCalls sFields writebackTable writebackStmt)      -- ["st"]
-#eval tAssignedVars (tRebindMutCalls sFields writebackTable writebackIndexed)   -- []
-#eval (tRebindMutCalls sFields writebackTable valueCall).erase == valueCall.erase  -- true
+  -- [("f", [0], ["st"], false), ("m", [0], ["self"], false), ("n", [0], ["v"], false)]
+#eval mutWriteReturns (mutWriteFns sFields writebackFns writebackDefs)
+  -- [("f", ["st"], false), ("m", ["self"], false), ("n", ["v"], false)]
+#eval mutWriteTupleTable (mutWriteFns sFields writebackFns writebackDefs)  -- []
+#eval tAssignedVars (tRebindMutCalls sFields writebackTable [] writebackStmt)      -- ["st"]
+#eval tAssignedVars (tRebindMutCalls sFields writebackTable [] writebackIndexed)   -- []
+#eval (tRebindMutCalls sFields writebackTable [] valueCall).erase == valueCall.erase  -- true
 #eval tAssignedVars
-  (tThreadMut true (tRebindMutCalls sFields writebackTable writebackStmt))  -- ["st"]
-#eval (tReturnMutParam (some "st") writebackBody).erase
+  (tThreadMut true (tRebindMutCalls sFields writebackTable [] writebackStmt))  -- ["st"]
+#eval (tReturnMutParams ["st"] false writebackBody).erase
         == ImpExpr.seq (.assign "st" (.var "q")) (.var "st")            -- true
-#eval (tReturnMutParam none writebackBody).erase == writebackBody.erase  -- true
+#eval (tReturnMutParams [] false writebackBody).erase == writebackBody.erase  -- true
+
+/-- `k(&mut st, &mut o)` — two `&mut` parameters, outside the write-back fragment. -/
+def twoMutCall : TExpr :=
+  .mk (.app "k" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true),
+    .mk (.borrow (.mk (.var "o") mutBlockTy)) (.ref mutBlockTy true)]) .unit
+
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] writebackStmt    -- []
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] twoMutCall       -- [("k", [0, 1])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] valueCall        -- [("h", [0])]
+#eval tDroppedMutCalls writebackFns sFields writebackTable [] writebackIndexed -- [("f", [0])]
 
 /-! ## Struct-field writes
 
@@ -491,7 +507,7 @@ def writebackFieldCall : TExpr :=
   .mk (.app "f" [.mk (.borrow fieldWriteLhs) (.ref mutStateTy true),
     .mk (.var "blk") (.ref mutBlockTy false)]) .unit
 
-#eval (tRebindMutCalls sFields writebackTable writebackFieldCall).erase
+#eval (tRebindMutCalls sFields writebackTable [] writebackFieldCall).erase
   == ImpExpr.assign "self" (.app "struct_update#S#1#2" [.var "self",
        .app "f" [.borrow (.app ".buf" [.var "self"]), .var "blk"]])  -- true
 
@@ -542,31 +558,195 @@ def sliceFromCall : TExpr :=
 
 def sliceWriteTable : List (String × Nat) := writebackTable ++ builtinWriteTable
 
-#eval (tRebindMutCalls sFields sliceWriteTable sliceRangeCall).erase
+#eval (tRebindMutCalls sFields sliceWriteTable [] sliceRangeCall).erase
   == ImpExpr.assign "header" (.app "slice_update"
        [.var "header", .lit (.int 16), .lit (.int 48),
         .app "copy_from_slice"
           [.app "index_mut" [.var "header", .app "Range" [.lit (.int 16), .lit (.int 48)]],
            .var "sig"]])  -- true
-#eval (tRebindMutCalls sFields sliceWriteTable sliceToCall).erase
+#eval (tRebindMutCalls sFields sliceWriteTable [] sliceToCall).erase
   == ImpExpr.assign "header" (.app "slice_update"
        [.var "header", .lit (.int 0), .lit (.int 16),
         .app "copy_from_slice"
           [.app "index_mut" [.var "header", .app "RangeTo" [.lit (.int 16)]],
            .var "nonce"]])  -- true
-#eval (tRebindMutCalls sFields sliceWriteTable sliceFromCall).erase
+#eval (tRebindMutCalls sFields sliceWriteTable [] sliceFromCall).erase
   == ImpExpr.assign "header" (.app "slice_update"
        [.var "header", .lit (.int 16), .app "len" [.var "header"],
         .app "copy_from_slice"
           [.app "index_mut" [.var "header", .app "RangeFrom" [.lit (.int 16)]],
            .var "tail"]])  -- true
-#eval tAssignedVars (tRebindMutCalls sFields sliceWriteTable sliceRangeCall)  -- ["header"]
+#eval tAssignedVars (tRebindMutCalls sFields sliceWriteTable [] sliceRangeCall)  -- ["header"]
 -- Declined: a full range carries no bounds.
 #eval (tMutArgSlice (.mk (.app "index_mut" [.mk (.var "header") mutBlockTy,
     .mk (.app "RangeFull" []) .unknown]) mutBlockTy)).isNone  -- true
 #eval toLean (.app "slice_update"
     [.var "header", .lit (.int 0), .lit (.int 16), .var "nonce"])
   == "Hax.slice_update header (0 : Int) (16 : Int) nonce"  -- true
+
+/-! ## Tuple-form `&mut` write-back
+
+A callee with a value result, or with several `&mut` parameters, returns the
+tuple of its result and its written parameters. A call site binds that tuple to
+`_wb` and assigns each component: from a `let`, from an assignment, and from a
+statement. A call in any other position keeps its value and is reported by
+`tDroppedMutCalls`.
+
+The three signatures are the three shapes: a value result with one written
+parameter (`p`, `rej`) and a `()` result with two (`w`). -/
+
+/-- `fn p(dst: &mut [u8; 64], pos: Int) -> Int`. -/
+def pushSig : FnTypeInfo := ⟨[("dst", .ref mutBlockTy true), ("pos", .int)], .int⟩
+/-- `fn rej(f: &mut [u32; 8], idx: Int) -> Int`. -/
+def rejSig : FnTypeInfo := ⟨[("f", .ref mutStateTy true), ("idx", .int)], .int⟩
+/-- `fn w(st: &mut [u32; 8], o: &mut [u8; 64])`. -/
+def twoWriteSig : FnTypeInfo :=
+  ⟨[("st", .ref mutStateTy true), ("o", .ref mutBlockTy true)], .unit⟩
+
+def tupleFns : List (String × FnTypeInfo) :=
+  [("p", pushSig), ("rej", rejSig), ("w", twoWriteSig)]
+
+/-- `dst = q; pos + 1` — `p`'s body: it writes its parameter and ends in a
+    value. -/
+def pushBody : TExpr :=
+  .mk (.seq (.mk (.assign "dst" (.mk (.var "q") mutBlockTy)) .unit)
+    (.mk (.app "add" [.mk (.var "pos") .int, .mk (.lit (.int 1)) .int]) .int)) .int
+/-- `f = q; idx + 1` — `rej`'s body. -/
+def rejBody : TExpr :=
+  .mk (.seq (.mk (.assign "f" (.mk (.var "q") mutStateTy)) .unit)
+    (.mk (.app "add" [.mk (.var "idx") .int, .mk (.lit (.int 1)) .int]) .int)) .int
+/-- `st = q; o = r;` — `w`'s body: it writes both of its parameters. -/
+def twoWriteBody : TExpr :=
+  .mk (.seq (.mk (.assign "st" (.mk (.var "q") mutStateTy)) .unit)
+    (.mk (.seq (.mk (.assign "o" (.mk (.var "r") mutBlockTy)) .unit)
+      (.mk .unitVal .unit)) .unit)) .unit
+
+def tupleDefs : List (String × TExpr) :=
+  [("p", pushBody), ("rej", rejBody), ("w", twoWriteBody)]
+
+def tupleResolved : List (String × List Nat × List String × Bool) :=
+  mutWriteFns sFields tupleFns tupleDefs
+def tupleWriters : List (String × Nat) := mutWriteTable tupleResolved
+def tupleTup : List (String × List Nat × Bool) := mutWriteTupleTable tupleResolved
+
+#eval tupleResolved
+  -- [("p", [0], ["dst"], true), ("rej", [0], ["f"], true), ("w", [0, 1], ["st", "o"], false)]
+#eval tupleWriters  -- []
+#eval tupleTup      -- [("p", [0], true), ("rej", [0], true), ("w", [0, 1], false)]
+
+-- The callee's tail: the value paired with the written parameter, and the pair
+-- of the two written parameters.
+#eval (tReturnMutParams ["dst"] true pushBody).erase
+  == ImpExpr.seq (.assign "dst" (.var "q"))
+       (.tuple [.app "add" [.var "pos", .lit (.int 1)], .var "dst"])  -- true
+#eval (tReturnMutParams ["st", "o"] false twoWriteBody).erase
+  == ImpExpr.seq (.assign "st" (.var "q"))
+       (.seq (.assign "o" (.var "r")) (.tuple [.var "st", .var "o"]))  -- true
+
+/-- `let p0 = p(&mut dst, pos); use(p0, dst)` — the call in `let` position with
+    its result used. -/
+def pushLetCall : TExpr :=
+  .mk (.letBind "p0"
+    (.mk (.app "p" [.mk (.borrow (.mk (.var "dst") mutBlockTy)) (.ref mutBlockTy true),
+      .mk (.var "pos") .int]) .int)
+    (.mk (.app "use" [.mk (.var "p0") .int, .mk (.var "dst") mutBlockTy]) .int)) .int
+
+/-- `while c { idx = rej(&mut f, idx) }` — the call in assignment position
+    inside a loop body. -/
+def rejLoopCall : TExpr :=
+  .mk (.whileLoop (.mk (.var "c") .bool)
+    (.mk (.assign "idx"
+      (.mk (.app "rej" [.mk (.borrow (.mk (.var "f") mutStateTy)) (.ref mutStateTy true),
+        .mk (.var "idx") .int]) .int)) .unit)) .unit
+
+/-- `w(&mut st, &mut o); digest(st)` — the two-parameter call in statement
+    position. -/
+def twoWriteStmt : TExpr :=
+  .mk (.seq
+    (.mk (.app "w" [.mk (.borrow (.mk (.var "st") mutStateTy)) (.ref mutStateTy true),
+      .mk (.borrow (.mk (.var "o") mutBlockTy)) (.ref mutBlockTy true)]) .unit)
+    (.mk (.app "digest" [.mk (.var "st") mutStateTy]) mutBlockTy)) mutBlockTy
+
+/-- `outer(p(&mut dst, pos))` — a tuple-form call as the argument of another
+    call, which the rewrite does not reach. -/
+def tupleArgCall : TExpr :=
+  .mk (.app "outer"
+    [.mk (.app "p" [.mk (.borrow (.mk (.var "dst") mutBlockTy)) (.ref mutBlockTy true),
+      .mk (.var "pos") .int]) .int]) .int
+
+#eval (tRebindMutCalls sFields tupleWriters tupleTup pushLetCall).erase
+  == ImpExpr.letBind "_wb" (.app "p" [.borrow (.var "dst"), .var "pos"])
+       (.seq (.assign "dst" (.app "::proj::.2" [.var "_wb"]))
+         (.letBind "p0" (.proj (.var "_wb") 0)
+           (.app "use" [.var "p0", .var "dst"])))  -- true
+#eval (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall).erase
+  == ImpExpr.whileLoop (.var "c")
+       (.letBind "_wb" (.app "rej" [.borrow (.var "f"), .var "idx"])
+         (.seq (.assign "f" (.app "::proj::.2" [.var "_wb"]))
+           (.assign "idx" (.proj (.var "_wb") 0))))  -- true
+#eval (tRebindMutCalls sFields tupleWriters tupleTup twoWriteStmt).erase
+  == ImpExpr.letBind "_wb" (.app "w" [.borrow (.var "st"), .borrow (.var "o")])
+       (.seq (.assign "st" (.proj (.var "_wb") 0))
+         (.seq (.assign "o" (.app "::proj::.2" [.var "_wb"]))
+           (.app "digest" [.var "st"])))  -- true
+#eval (tRebindMutCalls sFields tupleWriters tupleTup tupleArgCall).erase
+  == tupleArgCall.erase  -- true
+
+-- The written variables reach the mutation analyses, so the loop threads them.
+#eval tAssignedVars (tRebindMutCalls sFields tupleWriters tupleTup pushLetCall)  -- ["dst"]
+#eval tAssignedVars (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall)  -- ["f", "idx"]
+#eval tAssignedVars
+  (tThreadMut true (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall))  -- ["f", "idx"]
+#eval tAssignedVars (tRebindMutCalls sFields tupleWriters tupleTup twoWriteStmt) -- ["st", "o"]
+
+-- Rewritten and reported are complements: the three rewritten sites report
+-- nothing, the call in argument position is reported.
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup pushLetCall    -- []
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup rejLoopCall    -- []
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup twoWriteStmt   -- []
+#eval tDroppedMutCalls tupleFns sFields tupleWriters tupleTup tupleArgCall   -- [("p", [0])]
+-- Without the tuple table the same sites are reported, and nothing is rewritten.
+#eval tDroppedMutCalls tupleFns sFields tupleWriters [] pushLetCall          -- [("p", [0])]
+#eval (tRebindMutCalls sFields tupleWriters [] pushLetCall).erase == pushLetCall.erase  -- true
+
+/-! ### The rendered signature of a tuple-form callee
+
+The parameters of a definition are the self-bindings the adapter emits ahead of
+the body, and the renderer reads the Rust result from the body's type. A
+tuple-form callee returns a product, so its annotation is the product of that
+Rust result and the written parameters; a single-form callee returns its one
+parameter in place of a `()` result, which carries no annotation. -/
+
+/-- `fn p(dst: &mut [u8; 64], pos: Int) -> Int` with its parameter bindings. -/
+def pushRawTe : TExpr :=
+  .mk (.letBind "dst" (.mk (.var "dst") mutBlockTy)
+    (.mk (.letBind "pos" (.mk (.var "pos") .int) pushBody) .int)) .int
+/-- `fn w(st: &mut [u32; 8], o: &mut [u8; 64])` with its parameter bindings. -/
+def twoWriteRawTe : TExpr :=
+  .mk (.letBind "st" (.mk (.var "st") mutStateTy)
+    (.mk (.letBind "o" (.mk (.var "o") mutBlockTy) twoWriteBody) .unit)) .unit
+/-- `fn f(st: &mut [u32; 8], blk: &[u8; 64])` with its parameter bindings. -/
+def writebackRawTe : TExpr :=
+  .mk (.letBind "st" (.mk (.var "st") mutStateTy)
+    (.mk (.letBind "blk" (.mk (.var "blk") mutBlockTy) writebackBody) .unit)) .unit
+
+/-- The first line of a rendered definition: its signature. -/
+def renderedSignature (name : String) (rawTe : TExpr) (body : ImpExpr)
+    (rets : List (String × List String × Bool)) : String :=
+  ((toLeanDefTyped name rawTe body (mutWriteRets := rets)).splitOn "\n").headD ""
+
+#eval renderedSignature "p" pushRawTe ((tReturnMutParams ["dst"] true pushBody).erase)
+    (mutWriteTupleReturns tupleResolved)
+  -- "def p (dst : Array (Int)) (pos : Int) : Int × Array (Int) :="
+#eval renderedSignature "w" twoWriteRawTe
+    ((tReturnMutParams ["st", "o"] false twoWriteBody).erase)
+    (mutWriteTupleReturns tupleResolved)
+  -- "def w (st : Array (Int)) (o : Array (Int)) : Array (Int) × Array (Int) :="
+-- The single form is not in the tuple table, so its `()` result stays
+-- unannotated and its definition is rendered as before.
+#eval renderedSignature "f" writebackRawTe ((tReturnMutParams ["st"] false writebackBody).erase)
+    (mutWriteTupleReturns (mutWriteFns sFields writebackFns writebackDefs))
+  -- "def f (st : Array (Int)) (blk : Array (Int)) :="
 
 /-! ## Fold-body tails that carry mutations
 
@@ -657,5 +837,296 @@ def rendersOnce (e : ImpExpr) (s : String) : Bool :=
 #guard rendersOnce nestedIfLoop
   "let in_idx := if Hax.lt in_idx (Hax.array_len input) then Hax.add in_idx (1 : Int) else in_idx"
 #guard rendersOnce nestedIfLoop "Hax.cfContinue (total, in_idx, bits, result, out_idx)"
+
+/-! ## Typed literals
+
+The `_texpr` literal of a generated definition: `retypeWith` rebuilds the
+emitted `ImpExpr` as a `TExpr` carrying the node types of the typed term,
+`toLeanTExpr` prints it, and `TExpr.erase` maps it back. -/
+
+/-- `fn f(x: u32) -> u32 { x + 1 }`, in the adapter's parameter encoding. -/
+def addOneT : TExpr :=
+  .mk (.letBind "x" (.mk (.var "x") (.uint .w32))
+    (.mk (.app "add" [.mk (.var "x") (.uint .w32), .mk (.lit (.int 1)) (.uint .w32)])
+      (.uint .w32))) (.uint .w32)
+
+/-- The `ImpExpr` literal of `addOneT`. -/
+def addOneImp : ImpExpr := addOneT.erase
+
+#eval toLeanImpExpr addOneImp ==
+  "(.letBind \"x\" (.var \"x\") (.app \"add\" [(.var \"x\"), (.lit (ImpLit.int 1))]))"  -- true
+
+-- The rebuilt term prints every node with its type.
+#eval toLeanTExpr (fun _ => none) (retypeWith addOneImp addOneT) ==
+  "(.mk (.letBind \"x\" (.mk (.var \"x\") (.uint .w32)) (.mk (.app \"add\" [(.mk (.var \"x\") (.uint .w32)), (.mk (.lit (ImpLit.int 1)) (.uint .w32))]) (.uint .w32))) (.uint .w32))"  -- true
+
+-- The erase round trip: the rebuilt term erases to the literal it was built
+-- from, which is what the emitted `example ... := rfl` states.
+#eval toLeanImpExpr (retypeWith addOneImp addOneT).erase == toLeanImpExpr addOneImp  -- true
+
+-- A repeated type is shared by an abbreviation, which the printer uses in
+-- place of the rendering.
+#eval mkTyAbbrevs "ty_" (collectTyStrs addOneT) == [("(.uint .w32)", "ty_0")]  -- true
+#eval toLeanTExpr (fun s => if s == "(.uint .w32)" then some "ty_0" else none)
+    (retypeWith addOneImp addOneT) ==
+  "(.mk (.letBind \"x\" (.mk (.var \"x\") ty_0) (.mk (.app \"add\" [(.mk (.var \"x\") ty_0), (.mk (.lit (ImpLit.int 1)) ty_0)]) ty_0)) ty_0)"  -- true
+
+-- Types come from the typed term: rebuilt against a term with none, every
+-- node is `.unknown`.
+#eval toLeanTExpr (fun _ => none) (retypeWith addOneImp unknownTExpr) ==
+  "(.mk (.letBind \"x\" (.mk (.var \"x\") .unknown) (.mk (.app \"add\" [(.mk (.var \"x\") .unknown), (.mk (.lit (ImpLit.int 1)) .unknown)]) .unknown)) .unknown)"  -- true
+
+/-! ## Newtype tuple structs and their neighbours
+
+A single-field tuple struct `struct Tag([u8; 32])` is an erased newtype: the
+printer emits the transparent alias `abbrev Tag`, the unwrap `«Tag.0»` and the
+constructor `«Tag.mk»`, three distinct names, and rewrites the construction
+site `Tag(v)` to the constructor name. A tuple struct with two fields and a
+named-field struct are not newtypes — `buildNewtypeMap` records only
+single-field tuple structs — so their construction sites keep the bare
+struct name. -/
+
+/-- `struct Tag([u8; 32])`, in the adapter's newtype encoding. -/
+def tagNewtypes : HaxAdapter.NewtypeMap := [("Tag", .array (.uint .w8) 32)]
+
+/-- `fn wrap(v: [u8; 32]) -> Tag { Tag(v) }`. -/
+def wrapTagT : TExpr :=
+  .mk (.lam ["v"] (.mk (.app "Tag" [.mk (.var "v") .unknown]) .unknown)) .unknown
+
+/-- The emitted file for `wrapTagT`. -/
+def wrapTagFile : String :=
+  toLeanCertifiedFileTyped [("wrap", wrapTagT)] "T" [] [] [] (newtypes := tagNewtypes)
+
+-- The three declarations carry three distinct names.
+#eval ((wrapTagFile.splitOn
+  "abbrev Tag := Array (Int)\nnoncomputable def «Tag.0» (x : Tag) : Array (Int) := x\nnoncomputable def «Tag.mk» (x : Array (Int)) : Tag := x\n").length == 2)  -- true
+
+-- No declaration reuses the alias name `Tag`.
+#eval ((wrapTagFile.splitOn "def Tag ").length == 1)  -- true
+
+-- The construction site names the constructor, in the surface rendering and
+-- in the `ImpExpr` literal.
+#eval ((wrapTagFile.splitOn "(fun v => «Tag.mk» v)").length == 2)  -- true
+#eval ((wrapTagFile.splitOn "(.app \"Tag.mk\" [(.var \"v\")])").length == 2)  -- true
+
+/-- `struct Pair(u32, u32)`, in the adapter's positional-field encoding. -/
+def pairStructMeta : StructMeta := [("Pair", [("0", "int", .int), ("1", "int", .int)])]
+
+/-- `struct Pt { x: u32, y: u32 }`. -/
+def ptStructMeta : StructMeta := [("Pt", [("x", "int", .int), ("y", "int", .int)])]
+
+/-- `fn mk(a: u32, b: u32) -> S { S(a, b) }` for a struct named `sname`. -/
+def mkStructT (sname : String) : TExpr :=
+  .mk (.lam ["a", "b"]
+    (.mk (.app sname [.mk (.var "a") .int, .mk (.var "b") .int]) .unknown)) .unknown
+
+-- A two-field tuple struct is not in the newtype map, so its construction
+-- site keeps the bare struct name.
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pair")] "T" pairStructMeta [] []).splitOn
+  "Pair.mk").length == 1)  -- true
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pair")] "T" pairStructMeta [] []).splitOn
+  "(fun a b => Pair a b)").length == 2)  -- true
+
+-- A named-field struct is unaffected for the same reason.
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pt")] "T" ptStructMeta [] []).splitOn
+  "Pt.mk").length == 1)  -- true
+#eval (((toLeanCertifiedFileTyped [("mk", mkStructT "Pt")] "T" ptStructMeta [] []).splitOn
+  "(fun a b => Pt a b)").length == 2)  -- true
+
+/-! ## Trait-method calls and the `Deps` class
+
+A hax `Call` through a trait names the trait's associated function and carries
+its resolution beside it, in `fun.contents.GlobalName.item.value.in_trait.impl`.
+When the `Concrete` atom there names a trait `impl` of the crate being
+extracted, the call site and the `impl` method's body meet at the name
+`HaxAdapter.buildTraitImplMethodMap` assigns — `<Trait>_<method>` — and the
+method does not reach the generated `Deps` class. When the `impl` is outside
+the crate, the method has no body in the extraction and the `Deps` class
+carries it.
+
+The fixtures below are a crate `demo` with a trait `Ring` from a dependency
+crate, whose methods `fwd` and `inv` delegate to the crate's own `mul_fwd`
+and `mul_inv` — delegate names that differ from the method names, so no name
+coincidence can resolve the calls. -/
+
+/-- A hax `DefId` path segment in the namespace `ns`. -/
+def traitSeg (ns name : String) : Lean.Json :=
+  Lean.Json.mkObj [("data", Lean.Json.mkObj [(ns, Lean.Json.str name)]),
+    ("disambiguator", Lean.toJson (0 : Nat))]
+
+/-- A hax `DefId` at interning id `id`, with the given crate, path and
+    item kind. -/
+def traitDefId (krate : String) (path : List Lean.Json) (id : Nat)
+    (isLocal : Bool) (kind : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj
+    [("id", Lean.toJson id),
+     ("value", Lean.Json.mkObj
+       [("krate", Lean.Json.str krate), ("path", Lean.Json.arr path.toArray),
+        ("parent", Lean.Json.null), ("is_local", Lean.Json.bool isLocal),
+        ("kind", kind)])])]
+
+/-- The `DefId` of the `impl Ring for P` block of crate `demo`. -/
+def traitImplDefId : Lean.Json :=
+  traitDefId "demo" [traitSeg "TypeNs" "P", Lean.Json.str "Impl"] 100 true
+    (Lean.Json.mkObj [("Impl", Lean.Json.mkObj [("of_trait", Lean.Json.bool true)])])
+
+/-- The `DefId` of the trait method `Ring::<name>`, in the dependency crate
+    `ring`. -/
+def traitMethodDefId (name : String) : Lean.Json :=
+  traitDefId "ring" [traitSeg "TypeNs" "Ring", traitSeg "ValueNs" name] 200 false
+    (Lean.Json.str "AssocFn")
+
+/-- The `DefId` of the crate-level function `demo::<name>`. -/
+def traitFreeFnDefId (name : String) (id : Nat) : Lean.Json :=
+  traitDefId "demo" [traitSeg "ValueNs" name] id true (Lean.Json.str "Fn")
+
+/-- A hax expression node reading the local variable `name`. -/
+def traitVarRef (name : String) : Lean.Json :=
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj
+    [("VarRef", Lean.Json.mkObj
+      [("id", Lean.Json.mkObj [("name", Lean.Json.str name)])])])]
+
+/-- A hax `Call` node. `inTrait` is the callee's `in_trait` field: `null` for a
+    direct call, and the trait resolution for a call through a trait. -/
+def traitCall (calleeDefId inTrait : Lean.Json) (args : List Lean.Json) :
+    Lean.Json :=
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj
+    [("Call", Lean.Json.mkObj
+      [("fun", Lean.Json.mkObj [("contents", Lean.Json.mkObj
+          [("GlobalName", Lean.Json.mkObj
+            [("item", Lean.Json.mkObj [("value", Lean.Json.mkObj
+              [("def_id", calleeDefId), ("generic_args", Lean.Json.arr #[]),
+               ("impl_exprs", Lean.Json.arr #[]), ("in_trait", inTrait)])])])])]),
+       ("args", Lean.Json.arr args.toArray),
+       ("generic_args", Lean.Json.arr #[])])])]
+
+/-- The `in_trait` field of a call through `Ring` resolved by a `Concrete`
+    atom naming the `impl` block at interning id `implId`. -/
+def traitInTrait (implId : Nat) : Lean.Json :=
+  Lean.Json.mkObj [("impl", Lean.Json.mkObj
+    [("Concrete", Lean.Json.mkObj
+      [("id", Lean.toJson (0 : Nat)),
+       ("value", Lean.Json.mkObj
+         [("def_id", traitDefId "demo" [traitSeg "TypeNs" "P", Lean.Json.str "Impl"]
+             implId true
+             (Lean.Json.mkObj [("Impl",
+               Lean.Json.mkObj [("of_trait", Lean.Json.bool true)])]))])])])]
+
+/-- A one-parameter hax function body: `params`, `ret` and `body` as the
+    `Fn` item kind records them. -/
+def traitFnDef (param : String) (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj
+    [("params", Lean.Json.arr #[Lean.Json.mkObj
+        [("pat", Lean.Json.mkObj [("contents", Lean.Json.mkObj
+          [("Binding", Lean.Json.mkObj
+            [("var", Lean.Json.mkObj [("name", Lean.Json.str param)])])])])]]),
+     ("ret", Lean.Json.null), ("body", body)]
+
+/-- A crate-level `fn <name>(<param>) { <body> }` item. -/
+def traitFreeFnItem (name : String) (id : Nat) (param : String)
+    (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj
+    [("def_id", traitFreeFnDefId name id),
+     ("kind", Lean.Json.mkObj [("Fn", Lean.Json.mkObj
+       [("ident", Lean.Json.arr #[Lean.Json.str name, Lean.Json.null]),
+        ("def", traitFnDef param body)])])]
+
+/-- A method of an `impl` block: `fn <name>(<param>) { <body> }`, with the
+    method name on the item and the signature inline under `Fn`. -/
+def traitImplMethodItem (name param : String) (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj
+    [("ident", Lean.Json.arr #[Lean.Json.str name, Lean.Json.null]),
+     ("kind", Lean.Json.mkObj [("Fn", traitFnDef param body)])]
+
+/-- The item `impl Ring for P` of crate `demo`, whose `fwd` and `inv`
+    delegate to `mul_fwd` and `mul_inv`. -/
+def traitImplItem : Lean.Json :=
+  Lean.Json.mkObj
+    [("owner_id", traitImplDefId),
+     ("kind", Lean.Json.mkObj [("Impl", Lean.Json.mkObj
+       [("of_trait", Lean.Json.mkObj
+          [("value", Lean.Json.mkObj
+            [("def_id", traitDefId "ring" [traitSeg "TypeNs" "Ring"] 200 false
+                (Lean.Json.str "Trait"))])]),
+        ("self_ty", Lean.Json.mkObj
+          [("value", Lean.Json.mkObj
+            [("Adt", Lean.Json.mkObj
+              [("value", Lean.Json.mkObj
+                [("def_id", traitDefId "demo" [traitSeg "TypeNs" "P"] 201 true
+                    (Lean.Json.str "Struct"))])])])]),
+        ("items", Lean.Json.arr #[
+          traitImplMethodItem "fwd" "a"
+            (traitCall (traitFreeFnDefId "mul_fwd" 300) Lean.Json.null
+              [traitVarRef "a"]),
+          traitImplMethodItem "inv" "a"
+            (traitCall (traitFreeFnDefId "mul_inv" 301) Lean.Json.null
+              [traitVarRef "a"])])])])]
+
+/-- The delegates `mul_fwd` and `mul_inv`, each the identity on its argument. -/
+def traitDelegateItems : List Lean.Json :=
+  [traitFreeFnItem "mul_fwd" 300 "a" (traitVarRef "a"),
+   traitFreeFnItem "mul_inv" 301 "a" (traitVarRef "a")]
+
+/-- `fn run(a) { Ring::inv(Ring::fwd(a)) }`, both calls resolved by the
+    `Concrete` atom at interning id `implId`. -/
+def traitRunItem (implId : Nat) : Lean.Json :=
+  traitFreeFnItem "run" 302 "a"
+    (traitCall (traitMethodDefId "inv") (traitInTrait implId)
+      [traitCall (traitMethodDefId "fwd") (traitInTrait implId)
+        [traitVarRef "a"]])
+
+/-- An export of crate `demo` whose `Ring` calls resolve to the crate's own
+    `impl Ring for P`. -/
+def traitResolvedExport : Lean.Json :=
+  Lean.Json.arr (traitDelegateItems ++ [traitImplItem, traitRunItem 100]).toArray
+
+/-- An export of crate `demo` whose `Ring` calls resolve to an `impl` block of
+    another crate: the `impl` item is absent and its interning id is unknown. -/
+def traitExternalExport : Lean.Json :=
+  Lean.Json.arr (traitDelegateItems ++ [traitRunItem 900]).toArray
+
+/-- The names the adapter emits defs for, for an export. -/
+def traitDefNames (export_ : Lean.Json) : List String :=
+  match HaxAdapter.parseHaxFileWithTExpr export_ with
+  | .ok (_, _, rawTdefs, _) => rawTdefs.map (·.1)
+  | .error _ => []
+
+/-- The emitted file for an export. -/
+def traitEmittedFile (export_ : Lean.Json) : String :=
+  match HaxAdapter.parseHaxFileWithTExpr export_ with
+  | .ok (_, fnTypes, rawTdefs, procTdefs) =>
+    toLeanCertifiedFileTyped rawTdefs "T" [] fnTypes procTdefs
+  | .error e => e
+
+/-- The emitted preamble for an export: the struct definitions and the
+    `Deps` class. -/
+def traitEmittedPreamble (export_ : Lean.Json) : String :=
+  match HaxAdapter.parseHaxFileWithTExpr export_ with
+  | .ok (_, fnTypes, rawTdefs, procTdefs) =>
+    (generatePreambleTyped rawTdefs "T" [] fnTypes
+      (procTdefs.map fun (n, te) => (n, te.erase)) procTdefs).1
+  | .error e => e
+
+-- The in-crate `impl` contributes both method bodies, under names that carry
+-- the trait and the method.
+#guard (traitDefNames traitResolvedExport ==
+  ["mul_fwd", "mul_inv", "Ring_fwd", "Ring_inv", "run"])
+
+-- The call sites name those defs.
+#guard ((traitEmittedFile traitResolvedExport).splitOn "Ring_inv (Ring_fwd a)").length == 2
+
+-- The bodies delegate to the crate's own functions.
+#guard ((traitEmittedFile traitResolvedExport).splitOn
+  "def Ring_fwd a :=\nmul_fwd a").length == 2
+
+-- Neither method reaches the `Deps` class.
+#guard ((traitEmittedPreamble traitResolvedExport).splitOn "fwd").length == 1
+#guard ((traitEmittedPreamble traitResolvedExport).splitOn "inv").length == 1
+
+-- Control: the `impl` is outside the crate, so the extraction has no body for
+-- the methods and the `Deps` class carries them under their bare names.
+#guard (traitDefNames traitExternalExport == ["mul_fwd", "mul_inv", "run"])
+#guard ((traitEmittedPreamble traitExternalExport).splitOn "\n  fwd ").length == 2
+#guard ((traitEmittedPreamble traitExternalExport).splitOn "\n  inv ").length == 2
 
 end Hax.Tests

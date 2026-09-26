@@ -17,6 +17,12 @@ Two families of secret nominal newtype are recognized:
 - secret *values* (`secretValueNewtypeNames`: `Scalar`) — the secret-array
   pattern (sole field `[u8; N]`, ingress `from_bytes_secret`, egress
   `declassify`), e.g. an EdDSA scalar.
+- the generic wrapper of libcrux-secrets (`secretWrapperNames`: `Secret`). With
+  the crate feature `check-secret-independence` its aliases are
+  `pub type U8 = Secret<u8>` and so on; the export expands the alias, so a
+  binding declared `x : U8` reaches the extraction as `.adt "Secret" [.uint .w8]`.
+  Without the feature the aliases are the plain integers and carry no secrecy, so
+  a crate is extracted with the feature for its secret bindings to be recovered.
 
 `secrecyOfBindings` produces exactly the `List String` of secret binding names
 that the compiler-side consumer wraps — `SourceSecrecy.secret` in
@@ -47,13 +53,22 @@ def secretNewtypeNames : List String :=
 def secretValueNewtypeNames : List String :=
   ["Scalar"]
 
+/-- The generic secret wrapper names — the `Secret<T>` of libcrux-secrets, whose field is
+    private to that crate and whose only escapes are `declassify` and its `_ref`
+    and `_mut_slice` variants. A `Secret<T>` is secret whatever `T` is. -/
+def secretWrapperNames : List String :=
+  ["Secret"]
+
 /-- The phase-2 recognizer: a type is a source secret value iff it is a secret
-    newtype (`adt`) — a secret integer or a secret-array value newtype — or an
+    newtype (`adt`) — a secret integer, a secret-array value newtype or the
+    libcrux-secrets wrapper `Secret` — or an
     `array`/`slice`/`ref` whose element is one (a buffer of secret bytes is
     secret — its values, though not its public length, must not leak). A plain
     `uint`/`sint` (declassified, or never classified) is not secret. -/
 def ImpType.isSecretValue : ImpType → Bool
-  | .adt name _    => secretNewtypeNames.contains name || secretValueNewtypeNames.contains name
+  | .adt name _    =>
+      secretNewtypeNames.contains name || secretValueNewtypeNames.contains name
+        || secretWrapperNames.contains name
   | .array inner _ => inner.isSecretValue
   | .slice inner   => inner.isSecretValue
   | .ref inner _   => inner.isSecretValue
@@ -77,6 +92,18 @@ example : ImpType.isSecretValue (.adt "U8" []) = true := by decide
 
 /-- A secret-array value newtype (`Scalar`) is recognized. -/
 example : ImpType.isSecretValue (.adt "Scalar" []) = true := by decide
+
+/-- A libcrux-secrets byte, `U8 = Secret<u8>` under `check-secret-independence`, is
+    recognized. -/
+example : ImpType.isSecretValue (.adt "Secret" [.uint .w8]) = true := by decide
+
+/-- A buffer of libcrux-secrets words (`[U64; 4]`) is secret. -/
+example : ImpType.isSecretValue (.array (.adt "Secret" [.uint .w64]) 4) = true := by decide
+
+/-- A slice of libcrux-secrets bytes (`&[U8]`) is secret. -/
+example :
+    ImpType.isSecretValue (.ref (.slice (.adt "Secret" [.uint .w8])) false) = true := by
+  decide
 
 /-- A plain fixed-width integer is not secret (it is `Public` — e.g. a
     declassified value or one never classified). -/
@@ -112,5 +139,13 @@ example :
       [("self", .adt "Edwards25519" []), ("k", .adt "Scalar" []),
        ("k_bytes", .array (.uint .w8) 32)]
       = ["k"] := by decide
+
+/-- A libcrux-secrets signature: a secret key `sk : &[U8]`, a public message
+    `msg : &[u8]` and a secret nonce `r : U64` — `sk` and `r` are secret. -/
+example :
+    secrecyOfBindings
+      [("sk", .ref (.slice (.adt "Secret" [.uint .w8])) false),
+       ("msg", .ref (.slice (.uint .w8)) false), ("r", .adt "Secret" [.uint .w64])]
+      = ["sk", "r"] := by decide
 
 end Hax

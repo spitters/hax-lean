@@ -505,15 +505,17 @@ def wrapSint (w : IntWidth) (n : Int) : Value :=
   let r := n % m
   .sint w (if r ≥ m / 2 then r - m else r)
 
-/-- Signed arithmetic operations on `Value.sint`. -/
+/-- Signed arithmetic operations on `Value.sint`. `div` and `rem` round
+    towards zero (`Int.tdiv`/`Int.tmod`), matching Rust's `/` and `%` on a
+    signed type and `Hax.div_iw`/`Hax.rem_iw`. -/
 def signedArithOps : Builtins
   | "add", [.sint w a, .sint _ b] => some (wrapSint w (a + b))
   | "sub", [.sint w a, .sint _ b] => some (wrapSint w (a - b))
   | "mul", [.sint w a, .sint _ b] => some (wrapSint w (a * b))
   | "div", [.sint w a, .sint _ b] =>
-    if b = 0 then some (.sint w 0) else some (wrapSint w (a / b))
+    if b = 0 then some (.sint w 0) else some (wrapSint w (a.tdiv b))
   | "rem", [.sint w a, .sint _ b] =>
-    if b = 0 then some (.sint w 0) else some (wrapSint w (a % b))
+    if b = 0 then some (.sint w 0) else some (wrapSint w (a.tmod b))
   | "neg", [.sint w a] => some (wrapSint w (-a))
   | _, _ => none
 
@@ -525,6 +527,42 @@ def signedCmpOps : Builtins
   | "le", [.sint _ a, .sint _ b] => some (.bool (a ≤ b))
   | "gt", [.sint _ a, .sint _ b] => some (.bool (a > b))
   | "ge", [.sint _ a, .sint _ b] => some (.bool (a ≥ b))
+  | _, _ => none
+
+/-- Signed bitwise and rotate operations on `Value.sint`: the operands are
+    read as their two's-complement unsigned representative (residue modulo
+    `2^w.bits`), the unsigned bit operation applies, and the result is read
+    back into signed range through `wrapSint`. `shr` (arithmetic right
+    shift) acts on the signed value directly, sign-extending. Matches
+    `Hax.bitand_iw` and siblings, and `Hax.shr_iw`, in `Runtime.lean`. -/
+def signedBitwiseOps : Builtins
+  | "shl", [.sint w a, .sint _ b] =>
+    let au := (a % (w.modulus : Int)).toNat
+    some (wrapSint w (↑((au <<< b.toNat) % w.modulus)))
+  | "shr", [.sint w a, .sint _ b] => some (wrapSint w (a >>> b.toNat))
+  | "bitand", [.sint w a, .sint _ b] =>
+    let au := (a % (w.modulus : Int)).toNat
+    let bu := (b % (w.modulus : Int)).toNat
+    some (wrapSint w (↑(au &&& bu)))
+  | "bitor", [.sint w a, .sint _ b] =>
+    let au := (a % (w.modulus : Int)).toNat
+    let bu := (b % (w.modulus : Int)).toNat
+    some (wrapSint w (↑(au ||| bu)))
+  | "bitxor", [.sint w a, .sint _ b] =>
+    let au := (a % (w.modulus : Int)).toNat
+    let bu := (b % (w.modulus : Int)).toNat
+    some (wrapSint w (↑(au ^^^ bu)))
+  | "bitnot", [.sint w a] =>
+    let au := (a % (w.modulus : Int)).toNat
+    some (wrapSint w (↑(w.modulus - 1 - au)))
+  | "rotate_right", [.sint w x, .sint _ n] =>
+    let xu := (x % (w.modulus : Int)).toNat
+    let shift := n.toNat % w.bits
+    some (wrapSint w (↑(((xu >>> shift) ||| (xu <<< (w.bits - shift))) % w.modulus)))
+  | "rotate_left", [.sint w x, .sint _ n] =>
+    let xu := (x % (w.modulus : Int)).toNat
+    let shift := n.toNat % w.bits
+    some (wrapSint w (↑(((xu <<< shift) ||| (xu >>> (w.bits - shift))) % w.modulus)))
   | _, _ => none
 
 /-- Panic/unwrap operations. Models Rust's `unwrap`, `expect`, `unwrap_or`.
@@ -562,7 +600,7 @@ def panicOps : Builtins
 def widthOps : Builtins := fun f args =>
   widthArithOps f args <|> widthBitwiseOps f args <|> widthCmpOps f args <|>
   widthCastOps f args <|> widthArrayOps f args <|>
-  signedArithOps f args <|> signedCmpOps f args
+  signedArithOps f args <|> signedCmpOps f args <|> signedBitwiseOps f args
 
 /-- Full builtins: width ops + panic ops + defaults. -/
 def fullBuiltins : Builtins := fun f args =>

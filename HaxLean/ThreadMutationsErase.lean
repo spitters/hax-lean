@@ -21,6 +21,14 @@ so the pre-pass is a refinement of an untyped transformation, like the five
 verified pipeline phases. The analysis twins (`assignedVars`, `varRefs`,
 `containsLoop`) and the rewrite helpers (`replaceTail`, `varTuple`,
 `destructure`) get their own `@[simp]` erase lemmas first.
+
+## Main results
+
+* `tThreadMut_erase`: erasure commutes with the mutation-threading pre-pass.
+* `tRebindMutCalls_erase`: erasure commutes with the `&mut` call rewrite, in
+  its single and tuple forms.
+* `tReturnMutParams_erase`, `tTupleTail_erase`: erasure commutes with the
+  write-back tail of a callee.
 -/
 
 @[expose] public section
@@ -181,7 +189,7 @@ def destructure : List String → ImpExpr → ImpExpr → ImpExpr
   | [], _, cont => cont
   | [v], tup, cont => .letBind v tup cont
   | v :: vs, tup, cont =>
-    .letBind v (.proj tup 0) (destructure vs (.proj tup 1) cont)
+    .letBind v (.proj tup 0) (destructure vs (.app "::proj::.2" [tup]) cont)
 
 /-! ## Erase commutation for the helpers -/
 
@@ -262,7 +270,7 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
       simp only [tReplaceTail.goA, replaceTail.goA, List.map_cons,
         iharms (p, e) (List.mem_cons_self ..),
         ih (fun pa hpa => iharms pa (List.mem_cons_of_mem _ hpa))]
-  | ann _ _ ih => simp_all [tReplaceTail, replaceTail, TExpr.erase]
+  | ann _ _ ih => simp_all [tReplaceTail, TExpr.erase]
   | _ => first | rfl | simp [tReplaceTail, replaceTail, TExpr.erase]
 
 /-- The arms component of `tReplaceTail_erase`, used where a `match` is
@@ -291,7 +299,8 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
   | cons v vs ih =>
     cases vs with
     | nil => simp [tDestructure, destructure, TExpr.erase]
-    | cons v₂ vs => simp [tDestructure, destructure, TExpr.erase, ih]
+    | cons v₂ vs =>
+      simp [tDestructure, destructure, TExpr.erase, TExpr.eraseList_eq, ih]
 
 /-! ## Untyped twins of the `&mut` write-back rewrites
 
@@ -368,6 +377,50 @@ def callWritebackSlice (writers : List (String × Nat)) (f : String) (args : Lis
     | some i => (args[i]?).bind mutArgSlice
     | none => none
 
+/-- Untyped twin of `tTupleComp`. -/
+def tupleComp (tup : ImpExpr) : Nat → Nat → ImpExpr
+  | _, 0 => tup
+  | _, 1 => tup
+  | 0, _ => .proj tup 0
+  | i + 1, n + 1 => tupleComp (.app "::proj::.2" [tup]) i n
+
+/-- Untyped twin of `tMutArgRoots`. -/
+def mutArgRoots (args : List ImpExpr) : List Nat → Option (List String)
+  | [] => some []
+  | i :: is =>
+    ((args[i]?).bind mutArgRoot).bind fun r =>
+      (mutArgRoots args is).map (fun rs => r :: rs)
+
+/-- Untyped twin of `tTupleWriteback`. -/
+def tupleWriteback (tup : List (String × List Nat × Bool)) (f : String)
+    (args : List ImpExpr) : Option (List String × Bool) :=
+  if f == ".0" then none
+  else
+    match tup.lookup f with
+    | some (ps, hasRes) => (mutArgRoots args ps).map (fun rs => (rs, hasRes))
+    | none => none
+
+/-- Untyped twin of `tTupleSite`. -/
+def tupleSite (tup : List (String × List Nat × Bool)) : ImpExpr → Option (List String × Bool)
+  | .app f args => tupleWriteback tup f args
+  | _ => none
+
+/-- Untyped twin of `tTupleAssigns`. -/
+def tupleAssigns : List String → Nat → Nat → ImpExpr → ImpExpr
+  | [], _, _, cont => cont
+  | v :: vs, offset, n, cont =>
+    .seq (.assign v (tupleComp (.var tWbTmp) offset n)) (tupleAssigns vs (offset + 1) n cont)
+
+/-- Untyped twin of `tTupleBind`. -/
+def tupleBind (call : ImpExpr) (roots : List String) (hasRes : Bool) (tail : ImpExpr) : ImpExpr :=
+  .letBind tWbTmp call
+    (tupleAssigns roots (if hasRes then 1 else 0)
+      (roots.length + (if hasRes then 1 else 0)) tail)
+
+/-- Untyped twin of `tTupleResult`. -/
+def tupleResult (roots : List String) (hasRes : Bool) : ImpExpr :=
+  if hasRes then tupleComp (.var tWbTmp) 0 (roots.length + 1) else .unitVal
+
 /-- Untyped twin of `tRebindCall`. -/
 def rebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : String)
     (args : List ImpExpr) : ImpExpr :=
@@ -384,69 +437,121 @@ def rebindCall (sf : StructFieldNames) (writers : List (String × Nat)) (f : Str
       | none => .app f args
 
 /-- Untyped twin of `tRebindMutCalls`. -/
-def rebindMutCalls (sf : StructFieldNames) (writers : List (String × Nat)) : ImpExpr → ImpExpr
-  | .app f args => rebindCall sf writers f (mapE sf writers args)
+def rebindMutCalls (sf : StructFieldNames) (writers : List (String × Nat))
+    (tup : List (String × List Nat × Bool)) : ImpExpr → ImpExpr
+  | .app f args => rebindCall sf writers f (mapE sf writers tup args)
   | .lit v => .lit v
   | .var n => .var n
   | .letBind n val body =>
-      .letBind n (rebindMutCalls sf writers val) (rebindMutCalls sf writers body)
-  | .lam ps body => .lam ps (rebindMutCalls sf writers body)
-  | .tuple elems => .tuple (mapE sf writers elems)
-  | .proj e i => .proj (rebindMutCalls sf writers e) i
+      let val' := rebindMutCalls sf writers tup val
+      let body' := rebindMutCalls sf writers tup body
+      match tupleSite tup val' with
+      | some (roots, hasRes) =>
+          tupleBind val' roots hasRes (.letBind n (tupleResult roots hasRes) body')
+      | none => .letBind n val' body'
+  | .lam ps body => .lam ps (rebindMutCalls sf writers tup body)
+  | .tuple elems => .tuple (mapE sf writers tup elems)
+  | .proj e i => .proj (rebindMutCalls sf writers tup e) i
   | .ifThenElse c t e =>
-      .ifThenElse (rebindMutCalls sf writers c) (rebindMutCalls sf writers t)
-        (rebindMutCalls sf writers e)
-  | .match_ scrut arms => .match_ (rebindMutCalls sf writers scrut) (mapA sf writers arms)
+      .ifThenElse (rebindMutCalls sf writers tup c) (rebindMutCalls sf writers tup t)
+        (rebindMutCalls sf writers tup e)
+  | .match_ scrut arms => .match_ (rebindMutCalls sf writers tup scrut) (mapA sf writers tup arms)
   | .unitVal => .unitVal
-  | .seq a b => .seq (rebindMutCalls sf writers a) (rebindMutCalls sf writers b)
-  | .borrow e => .borrow (rebindMutCalls sf writers e)
-  | .deref e => .deref (rebindMutCalls sf writers e)
-  | .assign n rhs => .assign n (rebindMutCalls sf writers rhs)
+  | .seq a b =>
+      let a' := rebindMutCalls sf writers tup a
+      let b' := rebindMutCalls sf writers tup b
+      match tupleSite tup a' with
+      | some (roots, hasRes) => tupleBind a' roots hasRes b'
+      | none => .seq a' b'
+  | .borrow e => .borrow (rebindMutCalls sf writers tup e)
+  | .deref e => .deref (rebindMutCalls sf writers tup e)
+  | .assign n rhs =>
+      let rhs' := rebindMutCalls sf writers tup rhs
+      match tupleSite tup rhs' with
+      | some (roots, hasRes) =>
+          tupleBind rhs' roots hasRes (.assign n (tupleResult roots hasRes))
+      | none => .assign n rhs'
   | .forLoop v lo hi b =>
-      .forLoop v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
-        (rebindMutCalls sf writers b)
+      .forLoop v (rebindMutCalls sf writers tup lo) (rebindMutCalls sf writers tup hi)
+        (rebindMutCalls sf writers tup b)
   | .forLoopRev v lo hi b =>
-      .forLoopRev v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
-        (rebindMutCalls sf writers b)
-  | .whileLoop c b => .whileLoop (rebindMutCalls sf writers c) (rebindMutCalls sf writers b)
+      .forLoopRev v (rebindMutCalls sf writers tup lo) (rebindMutCalls sf writers tup hi)
+        (rebindMutCalls sf writers tup b)
+  | .whileLoop c b =>
+      .whileLoop (rebindMutCalls sf writers tup c) (rebindMutCalls sf writers tup b)
   | .break_ none => .break_ none
-  | .break_ (some e) => .break_ (some (rebindMutCalls sf writers e))
+  | .break_ (some e) => .break_ (some (rebindMutCalls sf writers tup e))
   | .continue_ => .continue_
-  | .earlyReturn e => .earlyReturn (rebindMutCalls sf writers e)
-  | .questionMark e => .questionMark (rebindMutCalls sf writers e)
+  | .earlyReturn e => .earlyReturn (rebindMutCalls sf writers tup e)
+  | .questionMark e => .questionMark (rebindMutCalls sf writers tup e)
   | .forFold v lo hi b =>
-      .forFold v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
-        (rebindMutCalls sf writers b)
+      .forFold v (rebindMutCalls sf writers tup lo) (rebindMutCalls sf writers tup hi)
+        (rebindMutCalls sf writers tup b)
   | .forFoldRev v lo hi b =>
-      .forFoldRev v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
-        (rebindMutCalls sf writers b)
-  | .whileFold c b => .whileFold (rebindMutCalls sf writers c) (rebindMutCalls sf writers b)
+      .forFoldRev v (rebindMutCalls sf writers tup lo) (rebindMutCalls sf writers tup hi)
+        (rebindMutCalls sf writers tup b)
+  | .whileFold c b =>
+      .whileFold (rebindMutCalls sf writers tup c) (rebindMutCalls sf writers tup b)
   | .forFoldReturn v lo hi b =>
-      .forFoldReturn v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
-        (rebindMutCalls sf writers b)
+      .forFoldReturn v (rebindMutCalls sf writers tup lo) (rebindMutCalls sf writers tup hi)
+        (rebindMutCalls sf writers tup b)
   | .forFoldRevReturn v lo hi b =>
-      .forFoldRevReturn v (rebindMutCalls sf writers lo) (rebindMutCalls sf writers hi)
-        (rebindMutCalls sf writers b)
+      .forFoldRevReturn v (rebindMutCalls sf writers tup lo) (rebindMutCalls sf writers tup hi)
+        (rebindMutCalls sf writers tup b)
   | .whileFoldReturn c b =>
-      .whileFoldReturn (rebindMutCalls sf writers c) (rebindMutCalls sf writers b)
-  | .cfBreak e => .cfBreak (rebindMutCalls sf writers e)
-  | .cfContinue e => .cfContinue (rebindMutCalls sf writers e)
-  | .cfBreakContinue e => .cfBreakContinue (rebindMutCalls sf writers e)
-  | .typeAscription e ty => .typeAscription (rebindMutCalls sf writers e) ty
+      .whileFoldReturn (rebindMutCalls sf writers tup c) (rebindMutCalls sf writers tup b)
+  | .cfBreak e => .cfBreak (rebindMutCalls sf writers tup e)
+  | .cfContinue e => .cfContinue (rebindMutCalls sf writers tup e)
+  | .cfBreakContinue e => .cfBreakContinue (rebindMutCalls sf writers tup e)
+  | .typeAscription e ty => .typeAscription (rebindMutCalls sf writers tup e) ty
 where
-  mapE (sf : StructFieldNames) (writers : List (String × Nat)) : List ImpExpr → List ImpExpr
+  mapE (sf : StructFieldNames) (writers : List (String × Nat))
+      (tup : List (String × List Nat × Bool)) : List ImpExpr → List ImpExpr
     | [] => []
-    | e :: es => rebindMutCalls sf writers e :: mapE sf writers es
-  mapA (sf : StructFieldNames) (writers : List (String × Nat)) :
+    | e :: es => rebindMutCalls sf writers tup e :: mapE sf writers tup es
+  mapA (sf : StructFieldNames) (writers : List (String × Nat))
+      (tup : List (String × List Nat × Bool)) :
       List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
     | [] => []
-    | (p, e) :: rest => (p, rebindMutCalls sf writers e) :: mapA sf writers rest
+    | (p, e) :: rest => (p, rebindMutCalls sf writers tup e) :: mapA sf writers tup rest
 
-/-- Untyped twin of `tReturnMutParam`. -/
-def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
-  match param with
-  | some v => replaceTail body (.var v)
-  | none => body
+/-- Untyped twin of `tTupleTail`. -/
+def tupleTail (vars : List String) : ImpExpr → Option ImpExpr
+  | .letBind n v body => (tupleTail vars body).map fun b => .letBind n v b
+  | .seq a b => (tupleTail vars b).map fun b' => .seq a b'
+  | .ifThenElse c t f =>
+      (tupleTail vars t).bind fun t' => (tupleTail vars f).map fun f' => .ifThenElse c t' f'
+  | .match_ s arms => (goA vars arms).map fun arms' => .match_ s arms'
+  | .assign _ _ => none
+  | .forLoop .. => none
+  | .forLoopRev .. => none
+  | .whileLoop .. => none
+  | .forFold .. => none
+  | .forFoldRev .. => none
+  | .whileFold .. => none
+  | .forFoldReturn .. => none
+  | .forFoldRevReturn .. => none
+  | .whileFoldReturn .. => none
+  | .earlyReturn _ => none
+  | .questionMark _ => none
+  | .break_ _ => none
+  | .continue_ => none
+  | .cfBreak _ => none
+  | .cfContinue _ => none
+  | .cfBreakContinue _ => none
+  | e => some (.tuple (e :: vars.map (fun v => .var v)))
+where
+  goA (vars : List String) :
+      List (ImpPat × ImpExpr) → Option (List (ImpPat × ImpExpr))
+    | [] => some []
+    | (p, e) :: rest =>
+      (tupleTail vars e).bind fun e' => (goA vars rest).map fun rest' => (p, e') :: rest'
+
+/-- Untyped twin of `tReturnMutParams`. -/
+def returnMutParams (names : List String) (hasRes : Bool) (body : ImpExpr) : ImpExpr :=
+  match names with
+  | [] => body
+  | _ => if hasRes then (tupleTail names body).getD body else replaceTail body (varTuple names)
 
 @[simp] theorem tMutArgRoot_erase (e : TExpr) : tMutArgRoot e = mutArgRoot e.erase := by
   induction e using TExpr.ind with
@@ -563,32 +668,117 @@ def returnMutParam (param : Option String) (body : ImpExpr) : ImpExpr :=
     · simp [TExpr.erase, TExpr.eraseList_eq]
   · simp [TExpr.erase, TExpr.eraseList_eq]
 
-@[simp] theorem tReturnMutParam_erase (param : Option String) (body : TExpr) :
-    (tReturnMutParam param body).erase = returnMutParam param body.erase := by
-  cases param with
-  | none => rfl
-  | some v => simp [tReturnMutParam, returnMutParam, tReplaceTail_erase, TExpr.erase]
+@[simp] theorem tTupleComp_erase (tup : TExpr) (i n : Nat) :
+    (tTupleComp tup i n).erase = tupleComp tup.erase i n := by
+  induction i generalizing tup n <;> rcases n with _ | _ | n <;>
+    simp_all [tTupleComp, tupleComp, TExpr.erase, TExpr.eraseList_eq]
+
+@[simp] theorem tMutArgRoots_erase (args : List TExpr) (ps : List Nat) :
+    tMutArgRoots args ps = mutArgRoots (args.map TExpr.erase) ps := by
+  induction ps with
+  | nil => rfl
+  | cons i is ih =>
+    simp only [tMutArgRoots, mutArgRoots, List.getElem?_map, ih]
+    cases args[i]? with
+    | none => rfl
+    | some a => simp [tMutArgRoot_erase]
+
+@[simp] theorem tTupleWriteback_erase (tup : List (String × List Nat × Bool)) (f : String)
+    (args : List TExpr) :
+    tTupleWriteback tup f args = tupleWriteback tup f (args.map TExpr.erase) := by
+  simp only [tTupleWriteback, tupleWriteback, tMutArgRoots_erase]
+  rfl
+
+@[simp] theorem tTupleSite_erase (tup : List (String × List Nat × Bool)) (e : TExpr) :
+    tTupleSite tup e = tupleSite tup e.erase := by
+  induction e using TExpr.ind with
+  | app _ _ _ _ => simp [tTupleSite, tupleSite, TExpr.erase, TExpr.eraseList_eq]
+  | ann _ _ ih => simpa only [tTupleSite, TExpr.erase] using ih
+  | namedProj _ _ _ _ => simp [tTupleSite, tupleSite, tupleWriteback, TExpr.erase]
+  | _ => rfl
+
+@[simp] theorem tTupleAssigns_erase (roots : List String) (offset n : Nat) (cont : TExpr) :
+    (tTupleAssigns roots offset n cont).erase = tupleAssigns roots offset n cont.erase := by
+  induction roots generalizing offset with
+  | nil => rfl
+  | cons v vs ih => simp [tTupleAssigns, tupleAssigns, TExpr.erase, ih]
+
+@[simp] theorem tTupleResult_erase (roots : List String) (hasRes : Bool) :
+    (tTupleResult roots hasRes).erase = tupleResult roots hasRes := by
+  cases hasRes <;> simp [tTupleResult, tupleResult, TExpr.erase]
+
+@[simp] theorem tTupleBind_erase (call : TExpr) (roots : List String) (hasRes : Bool)
+    (tail : TExpr) :
+    (tTupleBind call roots hasRes tail).erase = tupleBind call.erase roots hasRes tail.erase := by
+  simp [tTupleBind, tupleBind, TExpr.erase]
 
 /-- Commuting diagram: type erasure commutes with `tRebindMutCalls`. -/
 theorem tRebindMutCalls_erase (sf : StructFieldNames) (writers : List (String × Nat))
-    (e : TExpr) :
-    (tRebindMutCalls sf writers e).erase = rebindMutCalls sf writers e.erase := by
-  apply tRebindMutCalls.induct
-    (motive_2 := fun e => (tRebindMutCalls sf writers e).erase
-                  = rebindMutCalls sf writers e.erase)
-    (motive_1 := fun es => (tRebindMutCalls.mapE sf writers es).map TExpr.erase
-                  = rebindMutCalls.mapE sf writers (es.map TExpr.erase))
+    (tup : List (String × List Nat × Bool)) (e : TExpr) :
+    (tRebindMutCalls sf writers tup e).erase = rebindMutCalls sf writers tup e.erase := by
+  apply tRebindMutCalls.induct (sf := sf) (writers := writers) (tup := tup)
+    (motive_2 := fun e => (tRebindMutCalls sf writers tup e).erase
+                  = rebindMutCalls sf writers tup e.erase)
+    (motive_1 := fun es => (tRebindMutCalls.mapE sf writers tup es).map TExpr.erase
+                  = rebindMutCalls.mapE sf writers tup (es.map TExpr.erase))
     (motive_3 := fun arms =>
-                  (tRebindMutCalls.mapA sf writers arms).map (fun pe => (pe.1, pe.2.erase))
-                  = rebindMutCalls.mapA sf writers (arms.map (fun pe => (pe.1, pe.2.erase))))
+                  (tRebindMutCalls.mapA sf writers tup arms).map (fun pe => (pe.1, pe.2.erase))
+                  = rebindMutCalls.mapA sf writers tup (arms.map (fun pe => (pe.1, pe.2.erase))))
   all_goals (try intros)
   all_goals
     first
       | rfl
-      | simp_all [tRebindMutCalls, rebindMutCalls, rebindCall, callWriteback,
+      | (simp_all [tRebindMutCalls, rebindMutCalls, rebindCall, callWriteback,
           callWritebackField, callWritebackSlice, TExpr.erase,
           tRebindMutCalls.mapE, tRebindMutCalls.mapA, rebindMutCalls.mapE, rebindMutCalls.mapA,
-          tRebindCall_erase, TExpr.eraseList_eq, TExpr.eraseArms_eq]
+          tRebindCall_erase, TExpr.eraseList_eq, TExpr.eraseArms_eq]; done)
+      | (unfold tRebindMutCalls rebindMutCalls
+         simp_all [TExpr.erase, tTupleSite_erase]
+         all_goals (split <;> simp_all [TExpr.erase, tTupleBind_erase, tTupleResult_erase]))
+
+/-- The arms component of `tTupleTail_erase`. -/
+theorem tTupleTail_goA_erase (vars : List String) (arms : List (ImpPat × TExpr))
+    (h : ∀ pa ∈ arms, (tTupleTail vars pa.2).map TExpr.erase = tupleTail vars pa.2.erase) :
+    (tTupleTail.goA vars arms).map (fun l => l.map (fun pe => (pe.1, pe.2.erase)))
+      = tupleTail.goA vars (arms.map (fun pe => (pe.1, pe.2.erase))) := by
+  induction arms with
+  | nil => rfl
+  | cons pa rest ih =>
+    obtain ⟨p, e⟩ := pa
+    have he := h (p, e) (List.mem_cons_self ..)
+    have hr := ih (fun pa hpa => h pa (List.mem_cons_of_mem _ hpa))
+    simp only [tTupleTail.goA, tupleTail.goA, List.map_cons, ← he, ← hr]
+    cases tTupleTail vars e <;> cases tTupleTail.goA vars rest <;> rfl
+
+@[simp] theorem tTupleTail_erase (vars : List String) (e : TExpr) :
+    (tTupleTail vars e).map TExpr.erase = tupleTail vars e.erase := by
+  induction e using TExpr.ind with
+  | letBind _ _ _ _ _ ih =>
+    simp only [tTupleTail, tupleTail, TExpr.erase, ← ih, Option.map_map]
+    cases tTupleTail vars _ <;> rfl
+  | seq _ _ _ _ ih =>
+    simp only [tTupleTail, tupleTail, TExpr.erase, ← ih, Option.map_map]
+    cases tTupleTail vars _ <;> rfl
+  | ann _ _ ih =>
+    simpa only [tTupleTail, TExpr.erase, Option.map_map, Function.comp_def] using ih
+  | ifThenElse _ _ _ _ _ iht ihf =>
+    simp only [tTupleTail, tupleTail, TExpr.erase, ← iht, ← ihf]
+    cases tTupleTail vars _ <;> cases tTupleTail vars _ <;> rfl
+  | match_ _ _ arms _ iharms =>
+    simp only [tTupleTail, tupleTail, TExpr.erase, TExpr.eraseArms_eq, Option.map_map,
+      ← tTupleTail_goA_erase vars arms iharms]
+    cases tTupleTail.goA vars arms <;>
+      simp [TExpr.erase, TExpr.eraseArms_eq, Function.comp_def]
+  | _ =>
+    first
+      | rfl
+      | simp [tTupleTail, tupleTail, TExpr.erase, TExpr.eraseList_eq, List.map_map,
+          Function.comp_def]
+
+@[simp] theorem tReturnMutParams_erase (names : List String) (hasRes : Bool) (body : TExpr) :
+    (tReturnMutParams names hasRes body).erase = returnMutParams names hasRes body.erase := by
+  cases names <;> cases hasRes <;>
+    simp [tReturnMutParams, returnMutParams, ← tTupleTail_erase, Option.getD_map]
 
 /-! ## Untyped twin of `tThreadMut` -/
 
@@ -686,9 +876,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_erase, tVarTuple_erase,
+        tDestructure_erase]
   case case2 =>
     intro active a rest sty a' rest' c t f ifty hx used m hcond ih_a ih_rest
     have hx' : tStripAnn (tThreadMut active a) = .mk (.ifThenElse c t f) ifty := hx
@@ -699,9 +888,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_erase, tVarTuple_erase,
+        tDestructure_erase]
   case case3 =>
     intro active a rest sty a' rest' s arms mty hx used m hcond ih_a ih_rest
     have hx' : tStripAnn (tThreadMut active a) = .mk (.match_ s arms) mty := hx
@@ -713,9 +901,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_goA_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_goA_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_goA_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_goA_erase, tVarTuple_erase,
+        tDestructure_erase, TExpr.eraseArms_eq]
   case case4 =>
     intro active a rest sty a' rest' s arms mty hx used m hcond ih_a ih_rest
     have hx' : tStripAnn (tThreadMut active a) = .mk (.match_ s arms) mty := hx
@@ -727,9 +914,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_goA_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_goA_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_goA_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_goA_erase, tVarTuple_erase,
+        tDestructure_erase, TExpr.eraseArms_eq]
   case case5 =>
     intro active a rest sty a' hneg hnegm ih_a ih_rest
     have hau : threadMut active a.erase = (tStripAnn (tThreadMut active a)).erase := by
@@ -742,11 +928,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
         | exact absurd hk (hneg _ _ _ _)
         | exact absurd hk (hnegm _ _ _)
         | exact absurd hk (tStripAnn_ne_ann _ _ _)
-        | (cases ‹Option TExpr› <;>
-            simp_all [TExpr.erase, tStripAnn_ne_ann, ih_a, ih_rest,
-              TExpr.eraseList_eq, TExpr.eraseArms_eq])
-        | simp_all [TExpr.erase, tStripAnn_ne_ann, ih_a, ih_rest,
-            TExpr.eraseList_eq, TExpr.eraseArms_eq]
+        | (cases ‹Option TExpr› <;> simp_all [TExpr.erase])
+        | simp_all [TExpr.erase, TExpr.eraseList_eq]
   all_goals (try intros)
   all_goals
     simp_all [tThreadMut, threadMut, TExpr.erase,

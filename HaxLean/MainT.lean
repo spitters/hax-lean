@@ -104,6 +104,19 @@ def main (args : List String) : IO UInt32 := do
     -- so the JSON tree is released before the pipeline runs.
     let inputJson ← IO.ofExcept (Json.parseVerified input)
     let t ← phaseTick "json-parse" t
+    -- `--emit-classes`: keep the type parameters of both exports as named
+    -- type variables and plan the classes, instances and generic binders
+    -- (`Hax.ClassEmit`). Without the flag the plan is empty and nothing below
+    -- consults it.
+    let (inputJson, classHooks) ← match opts.emitClasses with
+      | none => pure (inputJson, ({} : ClassEmit.ClassHooks))
+      | some traitFile => do
+        let traitJson ← IO.ofExcept (Json.parseVerified (← IO.FS.readFile traitFile))
+        let inputJson := ClassEmit.keepTypeParams inputJson
+        let hooks := ClassEmit.plan (ClassEmit.keepTypeParams traitJson) inputJson
+        IO.eprintln s!"INFO classes={hooks.traits.length} class-items={hooks.classItemNames.length} generic-fns={hooks.genericFns.length} generic-structs={hooks.genericStructs.length} instances={hooks.instances.length}"
+        pure (inputJson, hooks)
+    let classMode := classHooks.enabled
     let structMeta := structMetaOfJson inputJson
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
@@ -115,11 +128,38 @@ def main (args : List String) : IO UInt32 := do
     let structFields : StructFieldNames :=
       structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
     let (_expr, fnTypes, rawTdefs, procTdefs) ←
-      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields)
+      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
+        (traitImplConsts := classMode))
     let fnTypes := dedupByName fnTypes
     let rawTdefs := dedupByName rawTdefs
     let procTdefs := dedupByName procTdefs
-    IO.eprintln s!"INFO defs={procTdefs.length}"
+    -- A `Deps` field has one type, so every site that uses the name has to
+    -- agree on it. Resolving the crate's trait `impl`s emits their method
+    -- bodies at the concrete self type, and those bodies read the trait items
+    -- of a further `impl` that stays opaque; where the crate is also generic
+    -- over the trait, the same names are used at a type parameter and the two
+    -- readings do not print as one type. The export is then read with every
+    -- trait `impl` opaque, which is uniform.
+    let traitImplNames :=
+      ((HaxAdapter.buildTraitImplMethodMap inputJson).map (·.2.2)).eraseDups
+    -- Under `--emit-classes` the names a generic function calls through a trait
+    -- bound are class items rather than `Deps` fields, so the conflict does
+    -- not arise and the `impl`s stay resolved.
+    let depTypeConflicts :=
+      if traitImplNames.isEmpty || classMode then []
+      else
+        let erased := procTdefs.map fun (n, te) => (n, te.erase)
+        let sl := mkStructLookup structMeta (computeStructPassthrough structMeta erased)
+        traitImplDepTypeConflicts rawTdefs traitImplNames sl (newtypes.map (·.1))
+    let (fnTypes, rawTdefs, procTdefs) ←
+      if depTypeConflicts.isEmpty then pure (fnTypes, rawTdefs, procTdefs)
+      else do
+        IO.eprintln s!"INFO trait-impl-opaque: the `Deps` names {depTypeConflicts} are used at two types; every trait `impl` of the crate keeps opaque methods"
+        let (_expr, fnTypes, rawTdefs, procTdefs) ←
+          IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
+            (resolveTraitImpls := false))
+        pure (dedupByName fnTypes, dedupByName rawTdefs, dedupByName procTdefs)
+    IO.eprintln s!"INFO defs={procTdefs.length} trait-impl-defs={traitImplNames.length} dep-type-conflicts={depTypeConflicts.length}"
     let t ← phaseTick "adapter-to-texpr" t
 
     -- Filter if requested
@@ -149,13 +189,27 @@ def main (args : List String) : IO UInt32 := do
     -- pure value.
     let writeFns := mutWriteFns structFields fnTypes procTdefs
     -- The builtin table is appended to the call-site rebind table only, not to
-    -- `writeParams`: `tReturnMutParam` rewrites a callee to return its written
-    -- parameter, and these four have no body in the export to rewrite.
+    -- `writeReturns`: `tReturnMutParams` rewrites a callee to return its
+    -- written parameters, and these four have no body in the export to rewrite.
     let writers := mutWriteTable writeFns ++ builtinWriteTable
-    let writeParams := mutWriteParams writeFns
-    IO.eprintln s!"INFO mut-writeback-fns={writers.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
+    let tupWriters := mutWriteTupleTable writeFns
+    let writeReturns := mutWriteReturns writeFns
+    IO.eprintln s!"INFO mut-writeback-fns={writers.length + tupWriters.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
+    -- A call through `&mut` that the rewrite leaves as a plain call keeps its
+    -- effect inside the callee: the emitted surface would ignore the
+    -- computation. Refuse to emit unless asked to.
+    let dropped := procTdefs.flatMap fun (n, te) =>
+      (tDroppedMutCalls fnTypes structFields writers tupWriters te).map fun d => (n, d)
+    for (n, (f, ps)) in dropped do
+      IO.eprintln s!"ERROR dropped-writeback: `{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the write-back rewrite; the effect of the call does not reach the caller. The rewrite covers a callee with one `&mut` parameter and result `()` applied to a variable, a field place or a slice range, and a callee with several `&mut` parameters or a value result applied to variables, called in `let`, assignment or statement position."
+    IO.eprintln s!"INFO dropped-writeback-calls={dropped.length}"
+    if !dropped.isEmpty && !opts.allowDroppedWriteback then
+      IO.eprintln "haxpipeT: no output; pass --allow-dropped-writeback to emit anyway"
+      return 1
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      let te := tReturnMutParam (writeParams.lookup n) (tRebindMutCalls structFields writers te)
+      let ret := (writeReturns.lookup n).getD ([], false)
+      let te := tReturnMutParams ret.1 ret.2
+        (tRebindMutCalls structFields writers tupWriters te)
       (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
     let t ← phaseTick "tPipelineFull" t
@@ -186,9 +240,18 @@ def main (args : List String) : IO UInt32 := do
     let secretNames := (secrecyOfBindings paramBindings).eraseDups
     let secrecyLit := "[" ++ ", ".intercalate (secretNames.map (fun s => "\"" ++ s ++ "\"")) ++ "]"
     let secrecyDef := s!"\n/-- Source-declared secret bindings (IF/CT transfer): binding names whose Rust\ntype is a secret integer. Consumed by `SourceSecrecy` on the CatCrypt side. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
+    -- The crate the export was taken from: the directory holding
+    -- `hax_frontend_export.json`, which is the crate root `cargo hax json` ran
+    -- in. Empty when the export arrives on stdin, and then the module docstring
+    -- names no crate.
+    let crateName := match opts.inputFile with
+      | some p => ((System.FilePath.mk p).parent.bind (·.fileName)).getD ""
+      | none => ""
     let rendered :=
       toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
-        newtypes enumMeta aliasMeta ++ secrecyDef
+        newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns)
+        (crateName := crateName) (emitLowCT := opts.emitLowCT)
+        (classHooks := classHooks) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered
