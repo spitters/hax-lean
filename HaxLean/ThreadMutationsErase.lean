@@ -21,6 +21,14 @@ so the pre-pass is a refinement of an untyped transformation, like the five
 verified pipeline phases. The analysis twins (`assignedVars`, `varRefs`,
 `containsLoop`) and the rewrite helpers (`replaceTail`, `varTuple`,
 `destructure`) get their own `@[simp]` erase lemmas first.
+
+## Main results
+
+* `tThreadMut_erase`: erasure commutes with the mutation-threading pre-pass.
+* `tRebindMutCalls_erase`: erasure commutes with the `&mut` call rewrite, in
+  its single and tuple forms.
+* `tReturnMutParams_erase`, `tTupleTail_erase`: erasure commutes with the
+  write-back tail of a callee.
 -/
 
 @[expose] public section
@@ -262,7 +270,7 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
       simp only [tReplaceTail.goA, replaceTail.goA, List.map_cons,
         iharms (p, e) (List.mem_cons_self ..),
         ih (fun pa hpa => iharms pa (List.mem_cons_of_mem _ hpa))]
-  | ann _ _ ih => simp_all [tReplaceTail, replaceTail, TExpr.erase]
+  | ann _ _ ih => simp_all [tReplaceTail, TExpr.erase]
   | _ => first | rfl | simp [tReplaceTail, replaceTail, TExpr.erase]
 
 /-- The arms component of `tReplaceTail_erase`, used where a `match` is
@@ -662,17 +670,8 @@ def returnMutParams (names : List String) (hasRes : Bool) (body : ImpExpr) : Imp
 
 @[simp] theorem tTupleComp_erase (tup : TExpr) (i n : Nat) :
     (tTupleComp tup i n).erase = tupleComp tup.erase i n := by
-  induction i generalizing tup n with
-  | zero =>
-    match n with
-    | 0 => rfl
-    | 1 => rfl
-    | _ + 2 => simp [tTupleComp, tupleComp, TExpr.erase]
-  | succ i ih =>
-    match n with
-    | 0 => rfl
-    | 1 => rfl
-    | _ + 2 => simp [tTupleComp, tupleComp, TExpr.erase, TExpr.eraseList_eq, ih]
+  induction i generalizing tup n <;> rcases n with _ | _ | n <;>
+    simp_all [tTupleComp, tupleComp, TExpr.erase, TExpr.eraseList_eq]
 
 @[simp] theorem tMutArgRoots_erase (args : List TExpr) (ps : List Nat) :
     tMutArgRoots args ps = mutArgRoots (args.map TExpr.erase) ps := by
@@ -778,15 +777,8 @@ theorem tTupleTail_goA_erase (vars : List String) (arms : List (ImpPat × TExpr)
 
 @[simp] theorem tReturnMutParams_erase (names : List String) (hasRes : Bool) (body : TExpr) :
     (tReturnMutParams names hasRes body).erase = returnMutParams names hasRes body.erase := by
-  match names with
-  | [] => rfl
-  | v :: vs =>
-    cases hasRes with
-    | false =>
-      simp [tReturnMutParams, returnMutParams, tReplaceTail_erase, tVarTuple_erase]
-    | true =>
-      simp only [tReturnMutParams, returnMutParams, reduceIte, ← tTupleTail_erase]
-      cases tTupleTail (v :: vs) body <;> rfl
+  cases names <;> cases hasRes <;>
+    simp [tReturnMutParams, returnMutParams, ← tTupleTail_erase, Option.getD_map]
 
 /-! ## Untyped twin of `tThreadMut` -/
 
@@ -884,9 +876,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_erase, tVarTuple_erase,
+        tDestructure_erase]
   case case2 =>
     intro active a rest sty a' rest' c t f ifty hx used m hcond ih_a ih_rest
     have hx' : tStripAnn (tThreadMut active a) = .mk (.ifThenElse c t f) ifty := hx
@@ -897,9 +888,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_erase, tVarTuple_erase,
+        tDestructure_erase]
   case case3 =>
     intro active a rest sty a' rest' s arms mty hx used m hcond ih_a ih_rest
     have hx' : tStripAnn (tThreadMut active a) = .mk (.match_ s arms) mty := hx
@@ -911,9 +901,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_goA_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_goA_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_goA_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_goA_erase, tVarTuple_erase,
+        tDestructure_erase, TExpr.eraseArms_eq]
   case case4 =>
     intro active a rest sty a' rest' s arms mty hx used m hcond ih_a ih_rest
     have hx' : tStripAnn (tThreadMut active a) = .mk (.match_ s arms) mty := hx
@@ -925,9 +914,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
     simp only [tThreadMut, threadMut, TExpr.erase, hx', hbridge,
       tContainsLoop_erase, tVarRefs_erase, tAssignedVars_goA_erase, ih_rest]
     split <;>
-      simp_all [TExpr.erase, tAssignedVars_goA_erase, tVarRefs_erase, tContainsLoop_erase,
-        tReplaceTail_goA_erase, tVarTuple_erase, tDestructure_erase, ih_a, ih_rest, hbridge,
-        TExpr.eraseList_eq, TExpr.eraseArms_eq]
+      simp_all [TExpr.erase, tContainsLoop_erase, tReplaceTail_goA_erase, tVarTuple_erase,
+        tDestructure_erase, TExpr.eraseArms_eq]
   case case5 =>
     intro active a rest sty a' hneg hnegm ih_a ih_rest
     have hau : threadMut active a.erase = (tStripAnn (tThreadMut active a)).erase := by
@@ -940,11 +928,8 @@ theorem tThreadMut_erase (active : Bool) (e : TExpr) :
         | exact absurd hk (hneg _ _ _ _)
         | exact absurd hk (hnegm _ _ _)
         | exact absurd hk (tStripAnn_ne_ann _ _ _)
-        | (cases ‹Option TExpr› <;>
-            simp_all [TExpr.erase, tStripAnn_ne_ann, ih_a, ih_rest,
-              TExpr.eraseList_eq, TExpr.eraseArms_eq])
-        | simp_all [TExpr.erase, tStripAnn_ne_ann, ih_a, ih_rest,
-            TExpr.eraseList_eq, TExpr.eraseArms_eq]
+        | (cases ‹Option TExpr› <;> simp_all [TExpr.erase])
+        | simp_all [TExpr.erase, TExpr.eraseList_eq]
   all_goals (try intros)
   all_goals
     simp_all [tThreadMut, threadMut, TExpr.erase,

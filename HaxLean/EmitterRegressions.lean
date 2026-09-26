@@ -152,10 +152,11 @@ def pairProjTyped : TExpr :=
 
 #guard toLean (markNamedProj pairProjTyped).erase == "t.2"
 
-/-- A triple-typed variable, projected at components `1` and `2`. -/
+/-- A triple-typed variable, projected at component `1`. -/
 def tripleProjTyped1 : TExpr :=
   .mk (.proj (.mk (.var "t") (.tuple [.unknown, .unknown, .unknown])) 1) .unknown
 
+/-- A triple-typed variable, projected at component `2`. -/
 def tripleProjTyped2 : TExpr :=
   .mk (.proj (.mk (.var "t") (.tuple [.unknown, .unknown, .unknown])) 2) .unknown
 
@@ -248,9 +249,12 @@ definitional unwrap `«Scalar.0» x := x` and the definitional constructor
 lands in the generated `Deps` class. The constructor is named `«Scalar.mk»`
 rather than `Scalar`, which the alias holds. -/
 
+/-- `fn from_bytes_secret(bytes) -> Self { Scalar(bytes) }`, with the source
+    constructor name at the call head. -/
 def scalarCtorFn : TExpr :=
   .mk (.lam ["bytes"] (.mk (.app "Scalar" [.mk (.var "bytes") .unknown]) .unknown)) .unknown
 
+/-- The newtype map of a crate whose one erased newtype is `Scalar([u8; 32])`. -/
 def scalarNewtypes : HaxAdapter.NewtypeMap := [("Scalar", .array (.uint .w8) 32)]
 
 -- The `Deps` class generated for a module whose only call is an erased

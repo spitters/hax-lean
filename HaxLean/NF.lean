@@ -95,7 +95,9 @@ def nfRhs : ImpExpr → Bool
   | _ => false
 
 /-- The right-hand side of an `assign` in normal form: a right-hand side of a
-    `letBind` in normal form. -/
+    `letBind` in normal form. The two positions share one predicate; the separate
+    name marks the `assign` clause of `isNFK`, so a consumer unfolds the assign
+    position by name without unfolding `nfRhs` at every `letBind`. -/
 def nfAssignRhs (e : ImpExpr) : Bool := nfRhs e
 
 /-- `e` is in monadic A-normal form in loop context `il` (`true` inside the body of
@@ -147,7 +149,10 @@ def NF (e : ImpExpr) : Prop := isNF e = true
 
 instance : DecidablePred NF := fun e => inferInstanceAs (Decidable (isNF e = true))
 
+/-- A variable is an atom. -/
 @[simp] theorem nfAtom_var (n : String) : nfAtom (.var n) = true := rfl
+
+/-- A literal is an atom. -/
 @[simp] theorem nfAtom_lit (l : ImpLit) : nfAtom (.lit l) = true := rfl
 
 /-- A normal form in loop context `il₀` is a normal form in loop context

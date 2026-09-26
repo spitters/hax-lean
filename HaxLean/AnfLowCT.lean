@@ -77,7 +77,18 @@ lifters name their temporaries alike.
 
 On the source fragment `anfSrc false`, the output of `anfLowCT` is in the monadic
 A-normal form `NF` (`anfLowCT_NF`), and every expression in `NF` is in that fragment
-(`anfSrc_of_isNFK`).
+(`anfSrc_of_isNFK`), so `anfLowCT` maps `NF` into `NF` (`NF.anfLowCT`).
+
+## Main results
+
+* `anfStmt_isNFK` — on the fragment `anfSrc il`, `anfStmt` produces a normal form
+  in loop context `il`
+* `anfLowCT_NF` — on the fragment `anfSrc false`, `anfLowCT` produces `NF`
+* `anfSrc_of_isNFK` — a normal form in loop context `il` lies in `anfSrc il`
+* `NF.anfLowCT` — `anfLowCT` maps `NF` into `NF`
+* `normWhileTrue_denoteValueCF` — the guard rewrite preserves the value of a
+  desugared `while` at every fuel, for a `GuardChain` and a body that never
+  continues
 -/
 
 @[expose] public section
@@ -378,20 +389,25 @@ def anfSrc : Bool → ImpExpr → Bool
 def IsNFChain (w : ImpExpr → ImpExpr) : Prop :=
   ∃ gs : List (String × ImpExpr), gs.all (fun p => nfRhs p.2) = true ∧ ∀ k, w k = bindChain gs k
 
+/-- The chain of `gs ++ hs` is the chain of `gs` over the chain of `hs`. -/
 theorem bindChain_append (gs hs : List (String × ImpExpr)) (k : ImpExpr) :
     bindChain (gs ++ hs) k = bindChain gs (bindChain hs k) := by
   induction gs with
   | nil => rfl
   | cons p rest ih => obtain ⟨x, v⟩ := p; simp [bindChain, ih]
 
+/-- A chain over `k` is in normal form exactly when every right-hand side is
+    (`nfRhs`) and `k` is. -/
 theorem isNFK_bindChain (il : Bool) (gs : List (String × ImpExpr)) (k : ImpExpr) :
     isNFK il (bindChain gs k) = (gs.all (fun p => nfRhs p.2) && isNFK il k) := by
   induction gs with
   | nil => simp [bindChain]
   | cons p rest ih => obtain ⟨x, v⟩ := p; simp [bindChain, isNFK, ih, Bool.and_assoc]
 
+/-- The identity prepends the empty chain. -/
 theorem IsNFChain.id : IsNFChain id := ⟨[], rfl, fun _ => rfl⟩
 
+/-- The composite of two chain wrappers is a chain wrapper. -/
 theorem IsNFChain.comp {w₁ w₂ : ImpExpr → ImpExpr} (h₁ : IsNFChain w₁) (h₂ : IsNFChain w₂) :
     IsNFChain (fun b => w₁ (w₂ b)) := by
   obtain ⟨g₁, hg₁, e₁⟩ := h₁
@@ -399,6 +415,8 @@ theorem IsNFChain.comp {w₁ w₂ : ImpExpr → ImpExpr} (h₁ : IsNFChain w₁)
   exact ⟨g₁ ++ g₂, by rw [List.all_append, hg₁, hg₂]; rfl,
     fun k => by simp [e₁, e₂, bindChain_append]⟩
 
+/-- A chain wrapper followed by one binding with a normal-form right-hand side
+    is a chain wrapper. -/
 theorem IsNFChain.snoc {w : ImpExpr → ImpExpr} (h : IsNFChain w) (t : String) {rhs : ImpExpr}
     (hr : nfRhs rhs = true) : IsNFChain (fun b => w (.letBind t rhs b)) := by
   obtain ⟨g, hg, e⟩ := h
@@ -498,6 +516,7 @@ theorem anfRhs_app (n : Nat) (f : String) (args : List ImpExpr) :
   · exact ⟨args, rfl⟩
   · exact ⟨_, rfl⟩
 
+/-- An expression satisfying `nfVar` is a `var`. -/
 theorem nfVar_eq {e : ImpExpr} (h : nfVar e = true) : ∃ x, e = .var x := by
   cases e <;> simp_all [nfVar]
 
@@ -615,6 +634,7 @@ theorem anfStmt_isNFK (e : ImpExpr) : ∀ n il, anfSrc il e = true →
 theorem anfLowCT_NF (e : ImpExpr) (h : anfSrc false e = true) : NF (anfLowCT e) :=
   anfStmt_isNFK e 0 false h
 
+/-- A list of atoms is a list of value expressions. -/
 theorem anfValSrcs_of_all_nfAtom {args : List ImpExpr} (h : args.all nfAtom = true) :
     anfValSrcs args = true := by
   induction args with
@@ -623,6 +643,7 @@ theorem anfValSrcs_of_all_nfAtom {args : List ImpExpr} (h : args.all nfAtom = tr
     simp only [List.all_cons, Bool.and_eq_true] at h
     cases a <;> simp_all [anfValSrcs, anfValSrc, nfAtom]
 
+/-- A list of variables is a list of value expressions. -/
 theorem anfValSrcs_of_all_nfVar {args : List ImpExpr} (h : args.all nfVar = true) :
     anfValSrcs args = true := by
   induction args with
@@ -631,6 +652,7 @@ theorem anfValSrcs_of_all_nfVar {args : List ImpExpr} (h : args.all nfVar = true
     simp only [List.all_cons, Bool.and_eq_true] at h
     cases a <;> simp_all [anfValSrcs, anfValSrc, nfVar]
 
+/-- A normal-form right-hand side is bindable and a value expression. -/
 theorem bindable_of_nfRhs {v : ImpExpr} (h : nfRhs v = true) :
     bindableRhs v = true ∧ anfValSrc v = true := by
   cases v with
@@ -638,13 +660,16 @@ theorem bindable_of_nfRhs {v : ImpExpr} (h : nfRhs v = true) :
   | proj b i => cases b <;> simp_all [nfRhs, bindableRhs, anfValSrc]
   | _ => simp_all [nfRhs, bindableRhs, anfValSrc]
 
-/-- A normal form in loop context `il` lies in the source fragment `anfSrc il`, so
-    `anfLowCT` maps `NF` into `NF`. -/
+/-- A normal form in loop context `il` lies in the source fragment `anfSrc il`. -/
 theorem anfSrc_of_isNFK (il : Bool) (e : ImpExpr) (h : isNFK il e = true) :
     anfSrc il e = true := by
   fun_induction isNFK il e <;>
     simp_all [-List.all_eq_true, anfSrc, anfValSrc, nfAssignRhs, bindable_of_nfRhs,
       anfValSrcs_of_all_nfAtom, anfValSrcs_of_all_nfVar]
+
+/-- `anfLowCT` maps the normal form `NF` into itself. -/
+theorem NF.anfLowCT {e : ImpExpr} (h : NF e) : NF (anfLowCT e) :=
+  anfLowCT_NF e (anfSrc_of_isNFK false e h)
 
 /-! ### Denotation of the guard rewrite -/
 
@@ -688,8 +713,7 @@ def afterGuard (p : Outcome × Env) (k : Env → Outcome × Env) : Outcome × En
 /-- `denote'` at `unitVal`. -/
 theorem denote'_unitVal_run (bi : Builtins) (fuel : Nat) (env : Env) :
     denote' bi fuel .unitVal env = (.val .unit, env) := by
-  conv => lhs; unfold denote'
-  rfl
+  unfold denote'; rfl
 
 /-- One-step unfolding of `denote'` at a `letBind`. -/
 theorem denote'_letBind_run (bi : Builtins) (fuel : Nat) (n : String) (v b : ImpExpr)
@@ -759,8 +783,7 @@ theorem denote'_bindChain (bi : Builtins) (fuel : Nat) (gs : List (String × Imp
 /-- `denote'` at a literal. -/
 theorem denote'_lit_run (bi : Builtins) (fuel : Nat) (l : ImpLit) (env : Env) :
     denote' bi fuel (.lit l) env = (.val (Value.ofLit l), env) := by
-  conv => lhs; unfold denote'
-  rfl
+  unfold denote'; rfl
 
 /-- `denote'` at a variable. -/
 theorem denote'_var_run (bi : Builtins) (fuel : Nat) (x : String) (env : Env) :
@@ -776,10 +799,7 @@ theorem denote'_var_run (bi : Builtins) (fuel : Nat) (x : String) (env : Env) :
 /-- `denote'` at a value-less `cfBreak`. -/
 theorem denote'_cfBreak_unit_run (bi : Builtins) (fuel : Nat) (env : Env) :
     denote' bi fuel (.cfBreak .unitVal) env = (.val (.controlFlow true .unit), env) := by
-  conv => lhs; unfold denote'
-  dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
-  rw [denote'_unitVal_run]
-  rfl
+  simp [denote']; rfl
 
 /-- `denote'` at the `break` statement hax leaves in the else-branch of a
     desugared `while` guard. -/

@@ -1350,8 +1350,9 @@ partial def collectTyStrs (t : TExpr) : List String :=
   impTypeToConstructor t.ty :: (tChildren t).foldl (fun acc c => acc ++ collectTyStrs c) []
 
 /-- Abbreviation names, keyed by rendered type, for the types a file's `TExpr`
-    literals repeat: those occurring at least twice whose rendering is longer
-    than the name replacing it. -/
+    literals repeat: those occurring at least twice whose rendering is at least
+    three characters longer than the prefix `pfx` of the names replacing them,
+    numbered in the order of their renderings. -/
 def mkTyAbbrevs (pfx : String) (tyStrs : List String) : List (String × String) :=
   let sorted := tyStrs.mergeSort (fun a b => a ≤ b)
   let grouped := sorted.foldl (fun acc s =>
@@ -1738,7 +1739,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       let lines := newtypeRenamed.map fun (aliasName, innerStr) =>
         -- Original short name (without `_T`): used for the projection name
         -- and the constructor name.
-        let bareName := if aliasName.endsWith "_T" then aliasName.dropRight 2 else aliasName
+        let bareName := if aliasName.endsWith "_T" then (aliasName.dropEnd 2).copy else aliasName
         s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def «{bareName}.mk» (x : {innerStr}) : {aliasName} := x"
       "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps and definitional constructors. Inner\n    types may themselves be axiomatized (see the axiom block above). -/\n"
         ++ "\n".intercalate lines ++ "\n\n"
