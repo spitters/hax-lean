@@ -390,6 +390,30 @@ def tStripDerefPlace : TExpr → TExpr
   | .mk (.deref e) _ => tStripDerefPlace e
   | e => e
 
+/-- Strip `borrow` and `deref` wrappers from a typed place expression. -/
+def tStripRefPlace : TExpr → TExpr
+  | .mk (.deref e) _ => tStripRefPlace e
+  | .mk (.borrow e) _ => tStripRefPlace e
+  | e => e
+
+/-- One level of `tIndexMutPlace`: `index_mut a i` read as `index a' i`, where
+    `a'` is `a` without its `borrow`/`deref` wrappers. -/
+def tIndexMutPlace1 : TExpr → TExpr
+  | .mk (.app "index_mut" [a, i]) ty => .mk (.app "index" [tStripRefPlace a, i]) ty
+  | e => e
+
+/-- The element place of an overloaded `IndexMut::index_mut` call. For a `Vec`
+    (or any other `IndexMut` implementor) hax gives the left-hand side `a[i]` of
+    an assignment as `*index_mut(&mut a, i)`; with the outer `deref` stripped this
+    is `index_mut (borrow a) i`, which this function reads as the place
+    `index a i`, the `borrow`/`deref` wrappers of `a` removed. A nested place
+    `a[i][j]` is normalised at both levels. Every other expression is returned
+    unchanged. -/
+def tIndexMutPlace : TExpr → TExpr
+  | .mk (.app "index_mut" [a, i]) ty =>
+    .mk (.app "index" [tIndexMutPlace1 (tStripRefPlace a), i]) ty
+  | e => e
+
 /-- View a typed expression as a single-level struct-field place: the root
     variable, the field name, and the deref-stripped struct expression. `none`
     for the newtype projection `.0`, a nested field path, or a root that is not
@@ -2795,7 +2819,7 @@ where
       let rec stripD : TExpr → TExpr
         | .mk (.deref e) _ => stripD e
         | e => e
-      let lhs' := stripD lhs
+      let lhs' := tIndexMutPlace (stripD lhs)
       let getVarName : TExpr → String
         | .mk (.var n) _ => n
         | .mk (.deref (.mk (.var n) _)) _ => n
@@ -2836,7 +2860,7 @@ where
       let rec stripD2 : TExpr → TExpr
         | .mk (.deref e) _ => stripD2 e
         | e => e
-      let lhs' := stripD2 lhs
+      let lhs' := tIndexMutPlace (stripD2 lhs)
       match lhs'.kind with
       | .var n => return .assign n (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
       | .app "index" [arr, idx] =>
@@ -2849,7 +2873,8 @@ where
           | some k => return k
           | none => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
         else
-          return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs, rhs]) lhs.ty]) arr.ty)
+          -- The element read is the place `lhs'`, never an `index_mut` call.
+          return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs', rhs]) lhs.ty]) arr.ty)
       | _ =>
         -- Struct-field place: self.buf_len op= v.
         match tFieldPlaceAssign implMap.structFields lhs'

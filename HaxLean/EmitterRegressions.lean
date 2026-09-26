@@ -693,4 +693,93 @@ def assocConstReadJson (atom : String) : Lean.Json :=
     { localBoundConstCalls := true } with
   | .ok (.mk (.var "ZERO") _) => true | _ => false
 
+/-! ## A `&mut self` setter writing an element of a `Vec` field
+
+`fn set(&mut self, i: usize, val: u64) { self.cells[i] = val; }` on
+`struct Trace { width: usize, height: usize, cells: Vec<u64> }`. For a `Vec`
+field hax gives the place `self.cells[i]` as the overloaded call
+`*IndexMut::index_mut(&mut (*self).cells, i)`. The parse lowers the write to an
+assignment of `self` to a functional update of its `cells` field, which makes
+`Trace_set` a write-back function: its body ends in `self`, and a call
+`Trace_set(&mut t, …)` in statement position rebinds `t`. -/
+
+open Lean in
+/-- A hax expression node with the given `contents`. -/
+def haxNode (contents : Json) : Json := Json.mkObj [("contents", contents)]
+
+open Lean in
+/-- A read of the local variable `n`. -/
+def haxVarRef (n : String) : Json :=
+  haxNode (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str n)])])])
+
+open Lean in
+/-- The place `self.cells[i]` as hax exports it for a `Vec` field:
+    `*IndexMut::index_mut(&mut (*self).cells, i)`. -/
+def traceCellPlaceJson : Json :=
+  let selfDeref := haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", haxVarRef "self")])])
+  let cellsField := haxNode (Json.mkObj [("Field", Json.mkObj [
+    ("field", mkDefIdJson "plonky3_hax"
+      [defIdSeg "TypeNs" "air", defIdSeg "TypeNs" "Trace", defIdSeg "ValueNs" "cells"]),
+    ("lhs", selfDeref)])])
+  let borrowMut := haxNode (Json.mkObj [("Borrow", Json.mkObj [("arg", cellsField)])])
+  let indexMutFn := haxNode (Json.mkObj [("GlobalName", Json.mkObj [
+    ("item", Json.mkObj [("def_id", mkDefIdJson "core"
+      [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "index", defIdSeg "TypeNs" "IndexMut",
+       defIdSeg "ValueNs" "index_mut"])])])])
+  let call := haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", indexMutFn), ("args", Json.arr #[borrowMut, haxVarRef "i"])])])
+  haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", call)])])
+
+open Lean in
+/-- The statement `self.cells[i] = val`. -/
+def traceSetAssignJson : Json :=
+  haxNode (Json.mkObj [("Assign", Json.mkObj [
+    ("lhs", traceCellPlaceJson), ("rhs", haxVarRef "val")])])
+
+/-- Field layout of `Trace`. -/
+def traceFields : StructFieldNames := [("Trace", ["width", "height", "cells"])]
+
+/-- The parse of `self.cells[i] = val` under `traceFields`. -/
+def traceSetAssign : TExpr :=
+  match HaxAdapter.parseHaxTExpr traceSetAssignJson { structFields := traceFields } with
+  | .ok e => e
+  | .error _ => .mk .unitVal .unit
+
+-- The write is an assignment of `self`: `cells` (position 2 of 3) updated at `i`.
+#guard traceSetAssign.erase == .assign "self" (.app "struct_update#Trace#2#3"
+  [.var "self", .app "array_update"
+    [.app ".cells" [.deref (.var "self")], .var "i", .var "val"]])
+
+/-- `fn set(&mut self, i: usize, val: u64)`. -/
+def traceSetSig : FnTypeInfo :=
+  ⟨[("self", .ref (.adt "Trace" []) true), ("i", .int), ("val", .int)], .unit⟩
+
+/-- `set`'s body: the assignment, then `()`. -/
+def traceSetBody : TExpr := .mk (.seq traceSetAssign (.mk .unitVal .unit)) .unit
+
+/-- The write-back table of an export holding `Trace_set` alone. -/
+def traceWriteFns : List (String × List Nat × List String × Bool) :=
+  mutWriteFns traceFields [("Trace_set", traceSetSig)] [("Trace_set", traceSetBody)]
+
+#guard traceWriteFns == [("Trace_set", [0], ["self"], false)]
+
+-- The definition returns the updated `self`.
+#guard (tReturnMutParams ["self"] false traceSetBody).erase ==
+  .seq (.assign "self" (.app "struct_update#Trace#2#3"
+    [.var "self", .app "array_update"
+      [.app ".cells" [.deref (.var "self")], .var "i", .var "val"]])) (.var "self")
+
+/-- `t.set(0, v); t` — the caller: a statement-position call, then a read of `t`. -/
+def traceSetCaller : TExpr :=
+  .mk (.seq
+    (.mk (.app "Trace_set" [.mk (.borrow (.mk (.var "t") (.adt "Trace" [])))
+        (.ref (.adt "Trace" []) true),
+      .mk (.lit (.int 0)) .int, .mk (.var "v") .int]) .unit)
+    (.mk (.var "t") (.adt "Trace" []))) (.adt "Trace" [])
+
+-- The call site rebinds `t` to the call's result.
+#guard (tRebindMutCalls traceFields (mutWriteTable traceWriteFns) [] traceSetCaller).erase ==
+  .seq (.assign "t" (.app "Trace_set" [.borrow (.var "t"), .lit (.int 0), .var "v"]))
+    (.var "t")
+
 end Hax.EmitterRegressions
