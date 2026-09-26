@@ -613,6 +613,151 @@ def widthAwareBuiltins : Builtins := fun f args =>
   | some v => some v
   | none => defaultBuiltins f args
 
+/-! ## The `u64` word table on `int` values
+
+The adapter tags the operations of `u64` code with the width (`wrapping_add#64`,
+`Shr#64`, …).  `hax64WordOps` gives each tagged name its Rust meaning on `.int`
+values in `[0, 2^64)`, and `hax64Builtins` adds the array operations of
+`widthArrayOps`. -/
+
+/-- A binary operation on two `int` values in `[0, 2^64)`, read as natural
+    numbers; `none` for any other operand. -/
+def u64BinOp (a b : Int) (g : Nat → Nat → Option Nat) : Option Value :=
+  if 0 ≤ a ∧ a < 2 ^ 64 ∧ 0 ≤ b ∧ b < 2 ^ 64 then
+    (g a.toNat b.toNat).map fun r => Value.int r
+  else none
+
+/-- The Rust `u64` operations on `int` values in `[0, 2^64)`:
+    * `wrapping_add#64`, `wrapping_sub#64`, `wrapping_mul#64` modulo `2^64`;
+    * `mulhi#64`, the high 64 bits of the 128-bit product;
+    * `BitAnd#64`, `BitOr#64`, `BitXor#64`;
+    * `Shl#64`, `Shr#64` (the operators `<<`, `>>`) and `shl#64`, `shr#64` (the
+      trait methods), `none` for an amount of 64 or more, where Rust panics;
+    * `Add`, `none` when the sum is `2^64` or more, where Rust panics;
+    * the steps of the widening multiply `((a as u128) * (b as u128) >> 64) as u64`:
+      `cast#128` and `cast#64` on a non-negative value modulo `2^128` and `2^64`,
+      `Mul` on non-negative values with product below `2^128`, and `Shr#128` on a
+      value below `2^128` by an amount below `128`. -/
+def hax64WordOps : Builtins
+  | "wrapping_add#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
+  | "wrapping_sub#64", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 64 + 2 ^ 64 - y % 2 ^ 64) % 2 ^ 64)
+  | "wrapping_mul#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x * y) % 2 ^ 64)
+  | "mulhi#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x * y) >>> 64)
+  | "BitAnd#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x % 2 ^ 64) &&& (y % 2 ^ 64))
+  | "BitOr#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x % 2 ^ 64) ||| (y % 2 ^ 64))
+  | "BitXor#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x % 2 ^ 64) ^^^ (y % 2 ^ 64))
+  | "Shl#64", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 64 then some (((x % 2 ^ 64) <<< y) % 2 ^ 64) else none
+  | "shl#64", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 64 then some (((x % 2 ^ 64) <<< y) % 2 ^ 64) else none
+  | "Shr#64", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 64 then some ((x % 2 ^ 64) >>> y) else none
+  | "shr#64", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 64 then some ((x % 2 ^ 64) >>> y) else none
+  | "Add", [.int a, .int b] => u64BinOp a b fun x y =>
+      if x + y < 2 ^ 64 then some (x + y) else none
+  | "cast#64", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
+  | "cast#128", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 128 : Nat)) else none
+  | "Mul", [.int a, .int b] =>
+      if 0 ≤ a ∧ 0 ≤ b ∧ a.toNat * b.toNat < 2 ^ 128 then
+        some (.int (a.toNat * b.toNat : Nat))
+      else none
+  | "Shr#128", [.int a, .int b] =>
+      if 0 ≤ a ∧ a < 2 ^ 128 ∧ 0 ≤ b ∧ b < 128 then
+        some (.int (a.toNat >>> b.toNat : Nat))
+      else none
+  | _, _ => none
+
+/-- The builtin table of `u64` code: `hax64WordOps`, then the array operations
+    `widthArrayOps` (`index`, `array_update` and `array_lit` on `.array`). -/
+def hax64Builtins : Builtins := fun f args =>
+  hax64WordOps f args <|> widthArrayOps f args
+
+/-- On two words below `2^64`, `u64BinOp` is the operation on their natural
+    numbers. -/
+theorem u64BinOp_natCast {n m : Nat} (hn : n < 2 ^ 64) (hm : m < 2 ^ 64)
+    (g : Nat → Nat → Option Nat) :
+    u64BinOp n m g = (g n m).map fun r => Value.int r := by
+  have hn' : (n : Int) < 2 ^ 64 := by exact_mod_cast hn
+  have hm' : (m : Int) < 2 ^ 64 := by exact_mod_cast hm
+  rw [u64BinOp, if_pos ⟨by omega, hn', by omega, hm'⟩, Int.toNat_natCast, Int.toNat_natCast]
+
+/-- Where `hax64WordOps` is undefined, `hax64Builtins` is `widthArrayOps`. -/
+theorem hax64Builtins_of_none {f : String} {args : List Value}
+    (h : hax64WordOps f args = none) : hax64Builtins f args = widthArrayOps f args := by
+  unfold hax64Builtins
+  rw [h]
+  rfl
+
+/-! The arms of `hax64WordOps` and of `widthArrayOps` used by the word
+contract, as equations. -/
+
+section hax64Arms
+
+variable (a b : Int)
+
+theorem hax64WordOps_wrapping_add : hax64WordOps "wrapping_add#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x + y) % 2 ^ 64) := rfl
+
+theorem hax64WordOps_wrapping_sub : hax64WordOps "wrapping_sub#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64 + 2 ^ 64 - y % 2 ^ 64) % 2 ^ 64) := rfl
+
+theorem hax64WordOps_wrapping_mul : hax64WordOps "wrapping_mul#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x * y) % 2 ^ 64) := rfl
+
+theorem hax64WordOps_mulhi : hax64WordOps "mulhi#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x * y) >>> 64) := rfl
+
+theorem hax64WordOps_bitAnd : hax64WordOps "BitAnd#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64) &&& (y % 2 ^ 64)) := rfl
+
+theorem hax64WordOps_bitXor : hax64WordOps "BitXor#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64) ^^^ (y % 2 ^ 64)) := rfl
+
+theorem hax64WordOps_shl : hax64WordOps "Shl#64" [.int a, .int b] =
+    u64BinOp a b fun x y => if y < 64 then some (((x % 2 ^ 64) <<< y) % 2 ^ 64) else none :=
+  rfl
+
+theorem hax64WordOps_shr : hax64WordOps "Shr#64" [.int a, .int b] =
+    u64BinOp a b fun x y => if y < 64 then some ((x % 2 ^ 64) >>> y) else none := rfl
+
+theorem hax64WordOps_add : hax64WordOps "Add" [.int a, .int b] =
+    u64BinOp a b fun x y => if x + y < 2 ^ 64 then some (x + y) else none := rfl
+
+theorem hax64WordOps_cast64 : hax64WordOps "cast#64" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none := rfl
+
+theorem hax64WordOps_cast128 : hax64WordOps "cast#128" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 128 : Nat)) else none := rfl
+
+theorem hax64WordOps_mul : hax64WordOps "Mul" [.int a, .int b] =
+    if 0 ≤ a ∧ 0 ≤ b ∧ a.toNat * b.toNat < 2 ^ 128 then
+      some (.int (a.toNat * b.toNat : Nat)) else none := rfl
+
+theorem hax64WordOps_shr128 : hax64WordOps "Shr#128" [.int a, .int b] =
+    if 0 ≤ a ∧ a < 2 ^ 128 ∧ 0 ≤ b ∧ b < 128 then
+      some (.int (a.toNat >>> b.toNat : Nat)) else none := rfl
+
+theorem hax64WordOps_index (vs : List Value) :
+    hax64WordOps "index" [.array vs, .int a] = none := rfl
+
+theorem hax64WordOps_array_update (vs : List Value) (v : Value) :
+    hax64WordOps "array_update" [.array vs, .int a, v] = none := rfl
+
+theorem widthArrayOps_index_int (vs : List Value) :
+    widthArrayOps "index" [.array vs, .int a] =
+      if 0 ≤ a then vs[a.toNat]?.bind (fun
+        | .controlFlow _ _ => none
+        | v => some v) else none := rfl
+
+theorem widthArrayOps_array_update_int (vs : List Value) (v : Value) :
+    widthArrayOps "array_update" [.array vs, .int a, v] =
+      if 0 ≤ a && a.toNat < vs.length then some (.array (vs.set a.toNat v))
+      else some (.array vs) := rfl
+
+end hax64Arms
+
 /-! ## Convenience: extract result value -/
 
 /-- Run `denote` and extract the result value (if evaluation succeeds). -/
