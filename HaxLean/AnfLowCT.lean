@@ -9,6 +9,7 @@ public meta import HaxLean.AST
 public meta import HaxLean.SemanticsCF
 public import HaxLean.AST
 public import HaxLean.SemanticsCF
+public import HaxLean.NF
 
 /-!
 # ANF normalisation for the `haxToLowCT` subset
@@ -71,6 +72,12 @@ other position, is left as it is.
 The fresh-name scheme is the one
 `CatCrypt.Crypto.SecureCompilation.ImpExprToThir.anfName` uses, so the two
 lifters name their temporaries alike.
+
+## Normal form
+
+On the source fragment `anfSrc false`, the output of `anfLowCT` is in the monadic
+A-normal form `NF` (`anfLowCT_NF`), and every expression in `NF` is in that fragment
+(`anfSrc_of_isNFK`).
 -/
 
 @[expose] public section
@@ -96,7 +103,7 @@ mutual
     right-hand side of a `letBind`: the head is kept and each argument is
     reduced to a variable. Returns the next counter, a wrapper prepending the
     hoisted bindings in evaluation order, and the rewritten right-hand side. -/
-partial def anfRhs (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
+def anfRhs (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
   match e with
   | .app f args =>
       if isLimbRead f args then (n, id, .app f args)
@@ -108,21 +115,23 @@ partial def anfRhs (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × Imp
       (n₁, w, .proj b' i)
   | .typeAscription b _ => anfRhs n b
   | _ => (n, id, e)
+termination_by (sizeOf e, 0)
 
 /-- Normalise an expression in *argument* position, where `haxToLowCT` requires
     a variable: a variable passes through, anything else is normalised as a
     right-hand side and bound to a fresh `_anf<n>`. -/
-partial def anfArg (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
+def anfArg (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
   match e with
   | .var x => (n, id, .var x)
-  | _ =>
-      let (n₁, w, rhs) := anfRhs n e
+  | e' =>
+      let (n₁, w, rhs) := anfRhs n e'
       let t := anfName n₁
       (n₁ + 1, fun body => w (.letBind t rhs body), .var t)
+termination_by (sizeOf e, 1)
 
 /-- Normalise an argument list left to right, so the hoisted bindings appear in
     the order the arguments were evaluated. -/
-partial def anfArgs (n : Nat) (es : List ImpExpr) :
+def anfArgs (n : Nat) (es : List ImpExpr) :
     Nat × (ImpExpr → ImpExpr) × List ImpExpr :=
   match es with
   | [] => (n, id, [])
@@ -130,6 +139,7 @@ partial def anfArgs (n : Nat) (es : List ImpExpr) :
       let (n₁, w₁, a') := anfArg n a
       let (n₂, w₂, rest') := anfArgs n₁ rest
       (n₂, fun body => w₁ (w₂ body), a' :: rest')
+termination_by (sizeOf es, 0)
 
 end
 
@@ -202,7 +212,7 @@ def normWhileTrue (c body : ImpExpr) : ImpExpr :=
 mutual
 
 /-- Normalise an expression in *statement* position. -/
-partial def anfStmt (n : Nat) (e : ImpExpr) : Nat × ImpExpr :=
+def anfStmt (n : Nat) (e : ImpExpr) : Nat × ImpExpr :=
   match e with
   | .letBind x v body =>
       if bindableRhs v then
@@ -288,9 +298,10 @@ partial def anfStmt (n : Nat) (e : ImpExpr) : Nat × ImpExpr :=
       let t := anfName n₁
       (n₁ + 1, w (.letBind t rhs (.var t)))
   | _ => (n, e)
+termination_by sizeOf e
 
 /-- Normalise the bodies of the arms of a `match_`. -/
-partial def anfArms (n : Nat) (arms : List (ImpPat × ImpExpr)) :
+def anfArms (n : Nat) (arms : List (ImpPat × ImpExpr)) :
     Nat × List (ImpPat × ImpExpr) :=
   match arms with
   | [] => (n, [])
@@ -298,12 +309,342 @@ partial def anfArms (n : Nat) (arms : List (ImpPat × ImpExpr)) :
       let (n₁, b') := anfStmt n b
       let (n₂, rest') := anfArms n₁ rest
       (n₂, (p, b') :: rest')
+termination_by sizeOf arms
 
 end
 
 /-- ANF-normalise an extracted function body into the fragment
     `haxToLowCT` accepts. -/
 def anfLowCT (e : ImpExpr) : ImpExpr := (anfStmt 0 e).2
+
+/-! ### The normal form of `anfLowCT`
+
+`anfSrc il e` is the source fragment on which `anfStmt` produces the normal form
+`NF`: the fragment `isNFK il` describes, with every argument position except exit
+payloads (a call argument, a branch condition, a tuple component, a tail value)
+widened to a value expression, which `anfStmt` hoists into `letBind`s. The `whileFold` on the literal
+`true` that `normWhileTrue` rewrites is outside the fragment. -/
+
+mutual
+
+/-- A value expression: a variable, a literal, a call on value expressions, or a
+    projection or type ascription of a value expression. -/
+def anfValSrc : ImpExpr → Bool
+  | .var _ => true
+  | .lit _ => true
+  | .app _ args => anfValSrcs args
+  | .proj b _ => anfValSrc b
+  | .typeAscription b _ => anfValSrc b
+  | _ => false
+
+/-- Every expression of the list is a value expression. -/
+def anfValSrcs : List ImpExpr → Bool
+  | [] => true
+  | a :: rest => anfValSrc a && anfValSrcs rest
+
+end
+
+/-- The source fragment of `anfStmt` in loop context `il`: the clauses of `isNFK il`
+    with value expressions (`anfValSrc`) in argument positions, a bindable value
+    expression as the right-hand side of a `letBind` or an `assign`, and a call on
+    value expressions as the scrutinee of the two-tuple `match_`. -/
+def anfSrc : Bool → ImpExpr → Bool
+  | il, .letBind _ v b => bindableRhs v && anfValSrc v && anfSrc il b
+  | _, .var _ => true
+  | _, .lit _ => true
+  | _, .unitVal => true
+  | _, .app _ args => anfValSrcs args
+  | _, .proj b _ => anfValSrc b
+  | il, .seq a b => anfSrc il a && anfSrc il b
+  | il, .ifThenElse c t e => anfValSrc c && anfSrc il t && anfSrc il e
+  | _, .assign _ r => bindableRhs r && anfValSrc r
+  | _, .tuple es => anfValSrcs es
+  | il, .match_ (.app _ args) [(.tuplePat [.varPat _, .varPat _], b)] =>
+      anfValSrcs args && anfSrc il b
+  | _, .whileLoop (.var _) b => anfSrc false b
+  | _, .whileFold (.var _) b => anfSrc false b
+  | _, .whileFoldReturn (.var _) b => anfSrc true b
+  | _, .forFold _ lo hi b => nfLit lo && nfBound hi && anfSrc false b
+  | _, .forFoldRev _ lo hi b => nfLit lo && nfLit hi && anfSrc false b
+  | _, .forFoldReturn _ lo hi b => nfLit lo && nfLit hi && anfSrc true b
+  | _, .forFoldRevReturn _ lo hi b => nfLit lo && nfLit hi && anfSrc true b
+  | il, .cfBreak e => il && nfBreakArg e
+  | il, .cfContinue e => il && nfBreakArg e
+  | il, .cfBreakContinue e => il && nfBreakArg e
+  | il, .typeAscription e _ => anfSrc il e
+  | _, _ => false
+
+/-- `w` prepends a `letBind` chain whose right-hand sides are in normal form. -/
+def IsNFChain (w : ImpExpr → ImpExpr) : Prop :=
+  ∃ gs : List (String × ImpExpr), gs.all (fun p => nfRhs p.2) = true ∧ ∀ k, w k = bindChain gs k
+
+theorem bindChain_append (gs hs : List (String × ImpExpr)) (k : ImpExpr) :
+    bindChain (gs ++ hs) k = bindChain gs (bindChain hs k) := by
+  induction gs with
+  | nil => rfl
+  | cons p rest ih => obtain ⟨x, v⟩ := p; simp [bindChain, ih]
+
+theorem isNFK_bindChain (il : Bool) (gs : List (String × ImpExpr)) (k : ImpExpr) :
+    isNFK il (bindChain gs k) = (gs.all (fun p => nfRhs p.2) && isNFK il k) := by
+  induction gs with
+  | nil => simp [bindChain]
+  | cons p rest ih => obtain ⟨x, v⟩ := p; simp [bindChain, isNFK, ih, Bool.and_assoc]
+
+theorem IsNFChain.id : IsNFChain id := ⟨[], rfl, fun _ => rfl⟩
+
+theorem IsNFChain.comp {w₁ w₂ : ImpExpr → ImpExpr} (h₁ : IsNFChain w₁) (h₂ : IsNFChain w₂) :
+    IsNFChain (fun b => w₁ (w₂ b)) := by
+  obtain ⟨g₁, hg₁, e₁⟩ := h₁
+  obtain ⟨g₂, hg₂, e₂⟩ := h₂
+  exact ⟨g₁ ++ g₂, by rw [List.all_append, hg₁, hg₂]; rfl,
+    fun k => by simp [e₁, e₂, bindChain_append]⟩
+
+theorem IsNFChain.snoc {w : ImpExpr → ImpExpr} (h : IsNFChain w) (t : String) {rhs : ImpExpr}
+    (hr : nfRhs rhs = true) : IsNFChain (fun b => w (.letBind t rhs b)) := by
+  obtain ⟨g, hg, e⟩ := h
+  exact ⟨g ++ [(t, rhs)], by rw [List.all_append, hg]; simp [hr],
+    fun k => by simp [e, bindChain_append, bindChain]⟩
+
+/-- A chain of normal-form bindings over a normal form is a normal form. -/
+theorem IsNFChain.isNFK {w : ImpExpr → ImpExpr} (h : IsNFChain w) {il : Bool} {k : ImpExpr}
+    (hk : isNFK il k = true) : isNFK il (w k) = true := by
+  obtain ⟨g, hg, e⟩ := h
+  simp [e, isNFK_bindChain, hg, hk]
+
+/-- On a value expression, `anfRhs` returns a normal-form right-hand side after a
+    chain of normal-form bindings, and `anfArg` a variable after such a chain. -/
+theorem anfRhs_nf (e : ImpExpr) : ∀ n, anfValSrc e = true →
+    (IsNFChain (anfRhs n e).2.1 ∧ nfRhs (anfRhs n e).2.2 = true) ∧
+    (IsNFChain (anfArg n e).2.1 ∧ nfVar (anfArg n e).2.2 = true) := by
+  induction e using ImpExpr.ind with
+  | var x => intro n _; simp [anfRhs, anfArg, nfRhs, nfVar, IsNFChain.id]
+  | lit l =>
+    intro n _
+    refine ⟨by simp [anfRhs, nfRhs, IsNFChain.id], ?_⟩
+    simp only [anfArg, anfRhs]
+    exact ⟨IsNFChain.snoc IsNFChain.id _ rfl, rfl⟩
+  | app f args ih =>
+    intro n h
+    simp only [anfValSrc] at h
+    have hargs : ∀ m, IsNFChain (anfArgs m args).2.1 ∧ (anfArgs m args).2.2.all nfVar = true := by
+      induction args with
+      | nil => intro m; simp [anfArgs, IsNFChain.id]
+      | cons a rest ihl =>
+        intro m
+        simp only [anfValSrcs, Bool.and_eq_true] at h
+        have ha := (ih a (by simp) m h.1).2
+        have hrest := ihl (fun x hx => ih x (by simp [hx])) h.2 (anfArg m a).1
+        simp only [anfArgs]
+        exact ⟨IsNFChain.comp ha.1 hrest.1, by simp [ha.2, hrest.2]⟩
+    have hr : IsNFChain (anfRhs n (.app f args)).2.1 ∧ nfRhs (anfRhs n (.app f args)).2.2 = true := by
+      simp only [anfRhs]
+      split
+      · rename_i hl
+        refine ⟨IsNFChain.id, ?_⟩
+        simp only [isLimbRead, Bool.and_eq_true] at hl
+        obtain ⟨_, hl⟩ := hl
+        split at hl <;> simp_all [nfRhs]
+      · refine ⟨(hargs n).1, ?_⟩
+        have hv := (hargs n).2
+        simp only [nfRhs, List.all_eq_true] at hv ⊢
+        intro x hx
+        have := hv x hx
+        cases x <;> simp_all [nfVar]
+    refine ⟨hr, ?_⟩
+    simp only [anfArg]
+    exact ⟨IsNFChain.snoc hr.1 _ hr.2, rfl⟩
+  | proj b i ih =>
+    intro n h
+    simp only [anfValSrc] at h
+    have hr : IsNFChain (anfRhs n (.proj b i)).2.1 ∧ nfRhs (anfRhs n (.proj b i)).2.2 = true := by
+      obtain ⟨_, ⟨hc, hv⟩⟩ := ih n h
+      simp only [anfRhs]
+      refine ⟨hc, ?_⟩
+      generalize (anfArg n b).2.2 = v at hv
+      cases v <;> simp_all [nfVar, nfRhs]
+    refine ⟨hr, ?_⟩
+    simp only [anfArg]
+    exact ⟨IsNFChain.snoc hr.1 _ hr.2, rfl⟩
+  | typeAscription b s ih =>
+    intro n h
+    simp only [anfValSrc] at h
+    have hr : IsNFChain (anfRhs n (.typeAscription b s)).2.1 ∧
+        nfRhs (anfRhs n (.typeAscription b s)).2.2 = true := by
+      simp only [anfRhs]; exact (ih n h).1
+    refine ⟨hr, ?_⟩
+    simp only [anfArg]
+    exact ⟨IsNFChain.snoc hr.1 _ hr.2, rfl⟩
+  | _ => intro n h; simp [anfValSrc] at h
+
+/-- On a list of value expressions, `anfArgs` returns variables after a chain of
+    normal-form bindings. -/
+theorem anfArgs_nf (args : List ImpExpr) : ∀ n, anfValSrcs args = true →
+    IsNFChain (anfArgs n args).2.1 ∧ (anfArgs n args).2.2.all nfVar = true := by
+  induction args with
+  | nil => intro m _; simp [anfArgs, IsNFChain.id]
+  | cons a rest ihl =>
+    intro m h
+    simp only [anfValSrcs, Bool.and_eq_true] at h
+    have ha := (anfRhs_nf a m h.1).2
+    have hrest := ihl (anfArg m a).1 h.2
+    simp only [anfArgs]
+    exact ⟨IsNFChain.comp ha.1 hrest.1, by simp [ha.2, hrest.2]⟩
+
+/-- `anfRhs` keeps the head of a call. -/
+theorem anfRhs_app (n : Nat) (f : String) (args : List ImpExpr) :
+    ∃ args', (anfRhs n (.app f args)).2.2 = .app f args' := by
+  simp only [anfRhs]
+  split
+  · exact ⟨args, rfl⟩
+  · exact ⟨_, rfl⟩
+
+theorem nfVar_eq {e : ImpExpr} (h : nfVar e = true) : ∃ x, e = .var x := by
+  cases e <;> simp_all [nfVar]
+
+/-- On the source fragment `anfSrc il`, `anfStmt` produces a normal form in loop
+    context `il`. -/
+theorem anfStmt_isNFK (e : ImpExpr) : ∀ n il, anfSrc il e = true →
+    isNFK il (anfStmt n e).2 = true := by
+  induction e using ImpExpr.ind with
+  | lit l => intro n il _; simp [anfStmt, isNFK, nfRhs]
+  | var x => intro n il _; simp [anfStmt, isNFK]
+  | unitVal => intro n il _; simp [anfStmt, isNFK]
+  | letBind x v b ihv ihb =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    obtain ⟨⟨hb, hv⟩, hs⟩ := h
+    have hr := (anfRhs_nf v n hv).1
+    unfold anfStmt
+    simp only [hb, if_true]
+    exact hr.1.isNFK (by simp [isNFK, hr.2, ihb _ _ hs])
+  | app f args ih =>
+    intro n il h
+    have hr := (anfRhs_nf (.app f args) n (by simpa [anfValSrc, anfSrc] using h)).1
+    simp only [anfStmt]
+    exact hr.1.isNFK (by simp [isNFK, hr.2])
+  | proj b i ih =>
+    intro n il h
+    have hr := (anfRhs_nf (.proj b i) n (by simpa [anfValSrc, anfSrc] using h)).1
+    simp only [anfStmt]
+    exact hr.1.isNFK (by simp [isNFK, hr.2])
+  | seq a b iha ihb =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    simp [anfStmt, isNFK, iha _ _ h.1, ihb _ _ h.2]
+  | ifThenElse c t f ihc iht ihf =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    obtain ⟨⟨hc, ht⟩, hf⟩ := h
+    have hr := (anfRhs_nf c n hc).2
+    simp only [anfStmt]
+    refine hr.1.isNFK ?_
+    obtain ⟨x, hx⟩ := nfVar_eq hr.2
+    rw [hx]
+    simp [isNFK, iht _ _ ht, ihf _ _ hf]
+  | assign x r ih =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    have hr := (anfRhs_nf r n h.2).1
+    simp only [anfStmt, h.1, if_true]
+    exact hr.1.isNFK (by simp [isNFK, nfAssignRhs, hr.2])
+  | tuple es ih =>
+    intro n il h
+    have hr := anfArgs_nf es n (by simpa [anfSrc] using h)
+    simp only [anfStmt]
+    exact hr.1.isNFK (by simp [isNFK, hr.2])
+  | match_ scrut arms ihs iha =>
+    intro n il h
+    unfold anfSrc at h
+    split at h
+    all_goals try (rename_i heq; cases heq; done)
+    all_goals try (simp at h; done)
+    rename_i f args a b body heq
+    cases heq
+    simp only [Bool.and_eq_true] at h
+    have hr := (anfRhs_nf (.app f args) n (by simpa [anfValSrc] using h.1)).1
+    obtain ⟨args', hargs'⟩ := anfRhs_app n f args
+    have hb := iha (.tuplePat [.varPat a, .varPat b], body) (by simp)
+      (anfRhs n (.app f args)).1 _ h.2
+    have hn := hr.2
+    rw [hargs'] at hn
+    unfold anfStmt
+    simp only [anfArms]
+    refine hr.1.isNFK ?_
+    rw [hargs']
+    simp only [nfRhs] at hn
+    simp [isNFK, hn, hb]
+  | whileLoop c b ihc ihb =>
+    intro n il h
+    cases c <;> simp [anfSrc] at h
+    simp [anfStmt, isNFK, ihb _ _ h]
+  | whileFold c b ihc ihb =>
+    intro n il h
+    cases c <;> simp [anfSrc] at h
+    simp [anfStmt, normWhileTrue, isNFK, ihb _ _ h]
+  | whileFoldReturn c b ihc ihb =>
+    intro n il h
+    cases c <;> simp [anfSrc] at h
+    simp [anfStmt, isNFK, ihb _ _ h]
+  | forFold v lo hi b _ _ ihb =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    simp [anfStmt, isNFK, h.1.1, h.1.2, ihb _ _ h.2]
+  | forFoldRev v lo hi b _ _ ihb =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    simp [anfStmt, isNFK, h.1.1, h.1.2, ihb _ _ h.2]
+  | forFoldReturn v lo hi b _ _ ihb =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    simp [anfStmt, isNFK, h.1.1, h.1.2, ihb _ _ h.2]
+  | forFoldRevReturn v lo hi b _ _ ihb =>
+    intro n il h
+    simp only [anfSrc, Bool.and_eq_true] at h
+    simp [anfStmt, isNFK, h.1.1, h.1.2, ihb _ _ h.2]
+  | cfBreak e _ => intro n il h; simpa [anfStmt, anfSrc, isNFK] using h
+  | cfContinue e _ => intro n il h; simpa [anfStmt, anfSrc, isNFK] using h
+  | cfBreakContinue e _ => intro n il h; simpa [anfStmt, anfSrc, isNFK] using h
+  | typeAscription b s ih =>
+    intro n il h
+    simp only [anfSrc] at h
+    simp [anfStmt, isNFK, ih _ _ h]
+  | _ => intro n il h; simp [anfSrc] at h
+
+/-- On the source fragment `anfSrc false`, `anfLowCT` produces the normal form
+    `NF`. -/
+theorem anfLowCT_NF (e : ImpExpr) (h : anfSrc false e = true) : NF (anfLowCT e) :=
+  anfStmt_isNFK e 0 false h
+
+theorem anfValSrcs_of_all_nfAtom {args : List ImpExpr} (h : args.all nfAtom = true) :
+    anfValSrcs args = true := by
+  induction args with
+  | nil => rfl
+  | cons a rest ih =>
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    cases a <;> simp_all [anfValSrcs, anfValSrc, nfAtom]
+
+theorem anfValSrcs_of_all_nfVar {args : List ImpExpr} (h : args.all nfVar = true) :
+    anfValSrcs args = true := by
+  induction args with
+  | nil => rfl
+  | cons a rest ih =>
+    simp only [List.all_cons, Bool.and_eq_true] at h
+    cases a <;> simp_all [anfValSrcs, anfValSrc, nfVar]
+
+theorem bindable_of_nfRhs {v : ImpExpr} (h : nfRhs v = true) :
+    bindableRhs v = true ∧ anfValSrc v = true := by
+  cases v with
+  | app f args => exact ⟨rfl, by simpa [anfValSrc] using anfValSrcs_of_all_nfAtom h⟩
+  | proj b i => cases b <;> simp_all [nfRhs, bindableRhs, anfValSrc]
+  | _ => simp_all [nfRhs, bindableRhs, anfValSrc]
+
+/-- A normal form in loop context `il` lies in the source fragment `anfSrc il`, so
+    `anfLowCT` maps `NF` into `NF`. -/
+theorem anfSrc_of_isNFK (il : Bool) (e : ImpExpr) (h : isNFK il e = true) :
+    anfSrc il e = true := by
+  fun_induction isNFK il e <;>
+    simp_all [-List.all_eq_true, anfSrc, anfValSrc, nfAssignRhs, bindable_of_nfRhs,
+      anfValSrcs_of_all_nfAtom, anfValSrcs_of_all_nfVar]
 
 /-! ### Denotation of the guard rewrite -/
 

@@ -4,6 +4,7 @@ public import HaxLean.AST
 public import HaxLean.Value
 public import HaxLean.Features
 public import HaxLean.FreeVars
+public import HaxLean.NF
 public import HaxLean.Semantics
 public import HaxLean.Phase.DropReferences
 public import HaxLean.Phase.LocalMutation
