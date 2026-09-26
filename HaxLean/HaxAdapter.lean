@@ -433,6 +433,67 @@ def tDerefMutArg : TExpr → TExpr
     if isMutVecRef a.ty then a else .mk (.app "deref_mut" [a]) ty
   | e => e
 
+/-- Whether `t` is a mutable reference to a sequence: `&mut [T]`, `&mut [T; n]`
+    or `&mut Vec<T>`. -/
+def isMutSeqRef : ImpType → Bool
+  | .ref (.slice _) true => true
+  | .ref (.array _ _) true => true
+  | t => isMutVecRef t
+
+/-- The element type of a sequence type `[T]`, `[T; n]` or `Vec<T>`, seen through
+    at most one reference; `.unknown` for any other type. -/
+def seqElemTy : ImpType → ImpType
+  | .slice t | .array t _ | .adt _ [t] => t
+  | .ref (.slice t) _ | .ref (.array t _) _ | .ref (.adt _ [t]) _ => t
+  | _ => .unknown
+
+/-- The krate of the item a hax `fun` expression names, or `""` when it names
+    no global item. -/
+def callKrate (funJ : Json) : String :=
+  let item := (funJ.getObjVal? "contents" >>= (·.getObjVal? "GlobalName")
+    >>= (·.getObjVal? "item")).toOption
+  let defId := item.bind fun it =>
+    ((it.getObjVal? "value" >>= (·.getObjVal? "def_id")) <|> it.getObjVal? "def_id").toOption
+  let inner := defId.map fun d => match d.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
+    | _ => d
+  (inner.bind fun i => (i.getObjValAs? String "krate").toOption).getD ""
+
+/-- The write-back form of the `core` slice method `a.swap(i, j)`. For `a` a
+    `&mut [T]`, `&mut [T; n]` or `&mut Vec<T>` argument whose place is a variable
+    `v`, it is the assignment
+
+    `v := if i < len v && j < len v then
+            array_update (array_update v i (index v j)) j (index v i)
+          else v`,
+
+    whose two reads are of the value of `v` before the call. When an index is out
+    of range Rust panics; the model then leaves `v` unchanged, the out-of-range
+    convention of `array_update`, so no partially swapped array is produced. The
+    reads of `v` are through a `deref` typed with the referenced sequence type, so
+    no operand of the rewritten form is a `&mut` argument. `none` when `a` is not
+    such a place. -/
+def tSliceSwap (a i j : TExpr) : Option TExprKind :=
+  if !isMutSeqRef a.ty then none
+  else
+    match tStripRefPlace a with
+    | v@(.mk (.var n) vTy) =>
+      let seqTy := match vTy with | .ref t _ => t | t => t
+      let sv : TExpr := match vTy with
+        | .ref t _ => .mk (.deref v) t
+        | _ => v
+      let elTy := seqElemTy seqTy
+      let usz : ImpType := .uint .wsize
+      let lenV : TExpr := .mk (.app "len" [sv]) usz
+      let inRange : TExpr := .mk (.app "&&"
+        [.mk (.app "Lt" [i, lenV]) .bool, .mk (.app "Lt" [j, lenV]) .bool]) .bool
+      let upd1 : TExpr := .mk (.app "array_update"
+        [sv, i, .mk (.app "index" [sv, j]) elTy]) seqTy
+      let upd2 : TExpr := .mk (.app "array_update"
+        [upd1, j, .mk (.app "index" [sv, i]) elTy]) seqTy
+      some (.assign n (.mk (.ifThenElse inRange upd2 sv) seqTy))
+    | _ => none
+
 /-- View a typed expression as a single-level struct-field place: the root
     variable, the field name, and the deref-stripped struct expression. `none`
     for the newtype projection `.0`, a nested field path, or a root that is not
@@ -2716,6 +2777,12 @@ where
       -- itself (`tDerefMutArg`), so a write-back through the argument reaches
       -- its root variable.
       let args := args.map tDerefMutArg
+      -- The `core` slice method `a.swap(i, j)` writes through its receiver; it
+      -- becomes the rebinding of the receiver's variable (`tSliceSwap`).
+      if funName == "swap" && callKrate funJ == "core" then
+        if let [a, i, k] := args then
+          if let some e := tSliceSwap a i k then
+            return e
       -- Principled method-call disambiguation via the impl-self-type map.
       --
       -- When the Rust source has `crs.len()` and hax resolves it via

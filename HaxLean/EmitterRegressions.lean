@@ -877,4 +877,60 @@ def derefMutLet : TExpr :=
 
 #guard tDroppedMutCalls [] [] [] [] derefMutLet == [("deref_mut", [0])]
 
+/-! ## `swap` on a `&mut [T]` place
+
+In `fn ntt(vals: &mut [u64], ω)`, the statement `vals.swap(i, j)` reaches hax as
+the `core` slice method call `swap(&mut *vals, i, j)`. The parse reads it as the
+assignment of `vals` to the array with cells `i` and `j` exchanged, guarded by
+both indices being in range (`tSliceSwap`); the rewritten form passes no `&mut`
+argument, and the definition returns the updated `vals`. A crate function of
+the same name is left a call and reported. -/
+
+open Lean in
+/-- `&mut *v` for a variable `v : &mut [u64]`, typed `&mut [u64]`. -/
+def reborrowSliceArgJson (v : String) : Json :=
+  let var := haxNodeT (refMutTyJson sliceTyJson)
+    (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str v)])])])
+  let deref := haxNodeT sliceTyJson (Json.mkObj [("Deref", Json.mkObj [("arg", var)])])
+  haxNodeT (refMutTyJson sliceTyJson) (Json.mkObj [("Borrow", Json.mkObj [("arg", deref)])])
+
+open Lean in
+/-- `v.swap(i, j)` for `v : &mut [u64]`: the call
+    `core::slice::<impl [T]>::swap(&mut *v, i, j)`. -/
+def sliceSwapCallJson (v i j : String) : Json :=
+  let swapFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "slice", Json.mkObj [("data", Json.str "Impl")],
+     defIdSeg "ValueNs" "swap"]
+  haxNode (Json.mkObj [("Call", Json.mkObj [("fun", swapFn),
+    ("args", Json.arr #[reborrowSliceArgJson v, haxVarRef i, haxVarRef j])])])
+
+/-- `vals.swap(i, j)` with `vals : &mut [u64]`. -/
+def sliceSwapCall : TExpr := parseT (sliceSwapCallJson "vals" "i" "j")
+
+/-- The value of `vals` read through its reference. -/
+def valsDeref : ImpExpr := .deref (.var "vals")
+
+-- The call is the rebinding of `vals` to the swapped array.
+#guard sliceSwapCall.erase ==
+  .assign "vals" (.ifThenElse
+    (.app "&&" [.app "Lt" [.var "i", .app "len" [valsDeref]],
+                .app "Lt" [.var "j", .app "len" [valsDeref]]])
+    (.app "array_update"
+      [.app "array_update" [valsDeref, .var "i", .app "index" [valsDeref, .var "j"]],
+       .var "j", .app "index" [valsDeref, .var "i"]])
+    valsDeref)
+
+-- Nothing is dropped, whether or not `swap` is in the write-back table.
+#guard tDroppedMutCalls [("ntt", nttSig)] [] [("ntt", 0)] [] sliceSwapCall == []
+#guard tDroppedMutCalls [] [] builtinWriteTable [] sliceSwapCall == []
+
+-- The definition returns the updated `vals`.
+#guard (tReturnMutParams ["vals"] false sliceSwapCall).erase ==
+  .seq sliceSwapCall.erase (.var "vals")
+
+/-- `swap(&mut coeffs, h)` for a crate function `ntt::swap`: not the slice method. -/
+def crateSwapCall : TExpr := parseT (derefMutCallJson "swap" "coeffs" "h")
+
+#guard tDroppedMutCalls [] [] [] [] crateSwapCall == [("swap", [0])]
+
 end Hax.EmitterRegressions
