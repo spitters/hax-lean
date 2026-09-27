@@ -377,7 +377,7 @@ def anfSrc : Bool → ImpExpr → Bool
   | _, .whileFoldReturn (.var _) b => anfSrc true b
   | _, .forFold _ lo hi b => nfLit lo && nfBound hi && anfSrc false b
   | _, .forFoldRev _ lo hi b => nfLit lo && nfLit hi && anfSrc false b
-  | _, .forFoldReturn _ lo hi b => nfLit lo && nfLit hi && anfSrc true b
+  | _, .forFoldReturn _ lo hi b => nfLit lo && nfBound hi && anfSrc true b
   | _, .forFoldRevReturn _ lo hi b => nfLit lo && nfLit hi && anfSrc true b
   | il, .cfBreak e => il && nfBreakArg e
   | il, .cfContinue e => il && nfBreakArg e

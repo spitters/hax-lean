@@ -12,8 +12,8 @@ public import HaxLean.AST
 
 `NF` is an A-normal form of `ImpExpr` in which every intermediate value is named by
 a `letBind`. A call takes atoms (variables or literals) as arguments; the one
-exception is the upper bound of a `forFold`, which may be an `Add`, `Sub`, `Mul` or
-`min` of bounds. A branch or loop guard is a variable. By convention an array is a
+exception is the upper bound of a `forFold` or a `forFoldReturn`, which may be an
+`Add`, `Sub`, `Mul` or `min` of bounds. A branch or loop guard is a variable. By convention an array is a
 value, read by an `index` call and written by an `array_update` call that rebinds or
 assigns the array's name; the predicate does not check this.
 
@@ -111,8 +111,9 @@ def nfAssignRhs (e : ImpExpr) : Bool := nfRhs e
     * `whileLoop (var _) b`, `whileFold (var _) b`, `forFold _ lo hi b` with `lo` a
       literal and `hi` a bound, and `forFoldRev _ lo hi b` with literal bounds, the
       body `b` in normal form outside every exit loop;
-    * `whileFoldReturn (var _) b`, `forFoldReturn _ lo hi b` and
-      `forFoldRevReturn _ lo hi b` with literal bounds, the body inside an exit loop;
+    * `whileFoldReturn (var _) b`, `forFoldReturn _ lo hi b` with `lo` a literal and
+      `hi` a bound, and `forFoldRevReturn _ lo hi b` with literal bounds, the body
+      inside an exit loop;
     * inside an exit loop, `cfBreak`, `cfContinue` and `cfBreakContinue` of an atom
       or `unitVal`;
     * `assign _ r` with `nfAssignRhs r`;
@@ -133,7 +134,7 @@ def isNFK : Bool → ImpExpr → Bool
   | _, .forFoldRev _ lo hi b => nfLit lo && nfLit hi && isNFK false b
   | _, .whileFold (.var _) b => isNFK false b
   | _, .whileFoldReturn (.var _) b => isNFK true b
-  | _, .forFoldReturn _ lo hi b => nfLit lo && nfLit hi && isNFK true b
+  | _, .forFoldReturn _ lo hi b => nfLit lo && nfBound hi && isNFK true b
   | _, .forFoldRevReturn _ lo hi b => nfLit lo && nfLit hi && isNFK true b
   | il, .cfBreak e => il && nfBreakArg e
   | il, .cfContinue e => il && nfBreakArg e
