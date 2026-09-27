@@ -778,27 +778,36 @@ def mutWriteStep (sf : StructFieldNames) (defs : List (String × TExpr))
 /-- Iterate `mutWriteStep` from `cur` until it is stationary or `fuel` runs
     out. -/
 def mutWriteIter (sf : StructFieldNames) (defs : List (String × TExpr))
+    (ext : List (String × Nat))
     (cands : List (String × List Nat × List String × Bool)) :
     Nat → List (String × List Nat × List String × Bool) →
     List (String × List Nat × List String × Bool)
   | 0, cur => cur
   | fuel + 1, cur =>
-    let next := mutWriteStep sf defs (mutWriteTable cur) (mutWriteTupleTable cur) cands
-    if next == cur then cur else mutWriteIter sf defs cands fuel next
+    let next := mutWriteStep sf defs (mutWriteTable cur ++ ext) (mutWriteTupleTable cur) cands
+    if next == cur then cur else mutWriteIter sf defs ext cands fuel next
 
-/-- The write-back functions of an export: `mutWriteStep` iterated from the
-    empty table to a fixpoint. A parameter written only by a nested write-back
-    call is reached one round after the callee that writes it, so a chain of
-    calls needs as many rounds as it is long; each round that is not the
-    fixpoint admits at least one further parameter, so the total number of
-    candidate parameters bounds the iteration. The same table drives the call
-    sites and the definitions, so the two sides cannot disagree about what a
-    callee returns. -/
-def mutWriteFns (sf : StructFieldNames) (fns : List (String × FnTypeInfo))
-    (defs : List (String × TExpr)) : List (String × List Nat × List String × Bool) :=
+/-- The write-back functions of an export, given the single-form write-back
+    entries `ext` of callees outside it: `mutWriteStep` iterated from the table
+    `ext` to a fixpoint. A parameter written only by a nested write-back call is
+    reached one round after the callee that writes it, so a chain of calls
+    needs as many rounds as it is long; each round that is not the fixpoint
+    admits at least one further parameter, so the total number of candidate
+    parameters bounds the iteration. The same table drives the call sites and
+    the definitions, so the two sides cannot disagree about what a callee
+    returns. -/
+def mutWriteFnsExt (sf : StructFieldNames) (fns : List (String × FnTypeInfo))
+    (defs : List (String × TExpr)) (ext : List (String × Nat)) :
+    List (String × List Nat × List String × Bool) :=
   let cands := mutWriteCandidates fns
   let fuel := cands.foldl (fun n c => n + c.2.1.length) 0
-  mutWriteIter sf defs cands fuel (mutWriteStep sf defs [] [] cands)
+  mutWriteIter sf defs ext cands fuel (mutWriteStep sf defs ext [] cands)
+
+/-- The write-back functions of an export with no callee outside it
+    (`mutWriteFnsExt` with an empty external table). -/
+def mutWriteFns (sf : StructFieldNames) (fns : List (String × FnTypeInfo))
+    (defs : List (String × TExpr)) : List (String × List Nat × List String × Bool) :=
+  mutWriteFnsExt sf fns defs []
 
 /-! ### Calls through `&mut` outside the write-back fragment
 
@@ -1054,5 +1063,171 @@ where
   mapA (active : Bool) : List (ImpPat × TExpr) → List (ImpPat × TExpr)
     | [] => []
     | (p, e) :: rest => (p, tThreadMut active e) :: mapA active rest
+
+/-! ### Normalisations that bring a `&mut` call into the write-back fragment
+
+Each pass below rewrites a call the write-back rewrite leaves alone into a form
+it covers; it runs before the write-back table is computed, and none drops a
+write.
+
+* `tHoistMutCalls`: a call with a `&mut` argument and a value result that is
+  the stored value of an element or field write (`a[i] = f(&mut x)`), or the
+  tail value of a block, is bound by a `let` first, which is a tuple-form call
+  site. Rust evaluates the right-hand side of an assignment before the place,
+  so the binding keeps the order of effects.
+* `externalWriteTable`: a callee without a definition in the export (an FFI
+  function, a trait method of a type parameter) that takes one `&mut`
+  argument, a variable, and returns `()` is a single-form write-back function:
+  its call rebinds the variable to the call's value, which is the variable's
+  new value. `tRetypeExtWriters` gives such a call the variable's type.
+* `tQualifyWritebackFields`: the field of a `&mut root.f` argument whose name
+  several structs declare is resolved by the type of `root` and written
+  `.S.f`, which `resolveStructField` reads as field `f` of `S`;
+  `tUnqualifyFieldHeads` turns `.S.f` into the projection name `S.f` the
+  renderer emits for such a field. -/
+
+/-- Every call node `f args` of type `ty` in `e`, as `(f, args, ty)`, outermost
+    first. -/
+partial def tCallsIn (e : TExpr) : List (String × List TExpr × ImpType) :=
+  let here := match e with
+    | .mk (.app f args) ty => [(f, args, ty)]
+    | _ => []
+  here ++ (tChildren e).flatMap tCallsIn
+
+/-- Whether `f args : ty` is a call, not a place or update head, that passes a
+    `&mut` argument by the callee's signature or the argument's type, and whose
+    result is not `()`. -/
+def tValueMutCall (sigs : List (String × FnTypeInfo)) (f : String) (args : List TExpr)
+    (ty : ImpType) : Bool :=
+  !tPlaceHead f && f != ".0"
+    && !(tMutParamPositions sigs f ++ tMutArgPositions args).isEmpty
+    && (match ty with | .unit => false | _ => true)
+
+/-- The name bound to a call hoisted by `tHoistMutCalls`. -/
+def tHoistTmp : String := "_mutcall"
+
+mutual
+/-- The value argument of an element or field update chain
+    (`array_update a i v`, `struct_update#… s v`) that is a `tValueMutCall`,
+    with the chain in which that argument is the variable `tHoistTmp`. -/
+partial def tHoistFromUpdate (sigs : List (String × FnTypeInfo)) :
+    TExpr → Option (TExpr × TExpr)
+  | .mk (.app "array_update" [a, i, v]) ty =>
+    (tHoistValue sigs v).map fun cv => (cv.1, .mk (.app "array_update" [a, i, cv.2]) ty)
+  | .mk (.app h [s, v]) ty =>
+    if h.startsWith "struct_update#" then
+      (tHoistValue sigs v).map fun cv => (cv.1, .mk (.app h [s, cv.2]) ty)
+    else none
+  | _ => none
+
+/-- A `tValueMutCall` with the variable `tHoistTmp` in its place, or the call
+    found in a nested update chain (`tHoistFromUpdate`). -/
+partial def tHoistValue (sigs : List (String × FnTypeInfo)) : TExpr → Option (TExpr × TExpr)
+  | c@(.mk (.app f args) ty) =>
+    if tValueMutCall sigs f args ty then some (c, .mk (.var tHoistTmp) ty)
+    else tHoistFromUpdate sigs c
+  | _ => none
+end
+
+/-- Bind by a `let` every `tValueMutCall` that is the stored value of an
+    element or field write, or the tail value of a block (the body of a `let`,
+    the second part of a `seq`, a branch of an `if` or a `match` in tail
+    position, or the whole expression). A `let` value, an assignment's
+    right-hand side and the head of a `seq` are left as they are: they are
+    tuple-form call sites already. -/
+partial def tHoistMutCalls (sigs : List (String × FnTypeInfo)) (e : TExpr) : TExpr :=
+  go true e
+where
+  /-- The rewrite of `e`; `tail` says whether `e` is in tail position. -/
+  go (tail : Bool) : TExpr → TExpr
+    | .mk (.app f args) ty =>
+      let e' : TExpr := .mk (.app f (args.map (go false))) ty
+      if tail && tValueMutCall sigs f args ty then
+        .mk (.letBind tHoistTmp e' (.mk (.var tHoistTmp) ty)) ty
+      else e'
+    | .mk (.letBind n v b) ty => .mk (.letBind n (go false v) (go tail b)) ty
+    | .mk (.seq a b) ty => .mk (.seq (go false a) (go tail b)) ty
+    | .mk (.ifThenElse c t f) ty => .mk (.ifThenElse (go false c) (go tail t) (go tail f)) ty
+    | .mk (.match_ s arms) ty =>
+      .mk (.match_ (go false s) (arms.map fun pe => (pe.1, go tail pe.2))) ty
+    | .mk (.assign v rhs) ty =>
+      let rhs' := go false rhs
+      match tHoistFromUpdate sigs rhs' with
+      | some (call, rhs'') => .mk (.letBind tHoistTmp call (.mk (.assign v rhs'') ty)) ty
+      | none => .mk (.assign v rhs') ty
+    | e => tMapChildren (go false) e
+
+/-- The single-form write-back entries of the callees of `defs` that have no
+    definition among `defs` (an FFI function, a trait method without a body;
+    not a place head, not in `builtinWriteTable`): a callee every call of which
+    passes exactly one `&mut` argument, at the same position, whose place is a
+    variable, and returns `()`. A callee with a call of another shape is left
+    out, and its calls stay reported by `tDroppedMutCalls`. -/
+def externalWriteTable (defs : List (String × TExpr)) :
+    List (String × Nat) :=
+  let calls := (defs.flatMap fun d => tCallsIn d.2).filter fun c =>
+    (defs.lookup c.1).isNone && !tPlaceHead c.1 && c.1 != ".0"
+      && (builtinWriteTable.lookup c.1).isNone && !(tMutArgPositions c.2.1).isEmpty
+  let shape : String × List TExpr × ImpType → Option Nat := fun c =>
+    match tMutArgPositions c.2.1, c.2.2 with
+    | [p], .unit => if ((c.2.1[p]?).bind tMutArgRoot).isSome then some p else none
+    | _, _ => none
+  let heads := (calls.map (·.1)).eraseDups
+  heads.filterMap fun f =>
+    match (calls.filter (·.1 == f)).map shape with
+    | some p :: rest => if rest.all (· == some p) then some (f, p) else none
+    | _ => none
+
+/-- The pointee type of a `&mut` argument: `t` for `&mut t`, else the type
+    itself. -/
+def tPointee : ImpType → ImpType
+  | .ref t _ => t
+  | t => t
+
+/-- Give each call of an `ext` callee the type of the variable it writes back,
+    the type of the call's value under the write-back rewrite. -/
+partial def tRetypeExtWriters (ext : List (String × Nat)) : TExpr → TExpr
+  | .mk (.app f args) ty =>
+    let args' := args.map (tRetypeExtWriters ext)
+    match ext.lookup f, args[(ext.lookup f).getD 0]? with
+    | some _, some a => .mk (.app f args') (tPointee a.ty)
+    | _, _ => .mk (.app f args') ty
+  | e => tMapChildren (tRetypeExtWriters ext) e
+
+/-- The field place `.f sE` of a `&mut` argument, seen through `borrow`/`deref`,
+    with the head `.S.f` when several structs of `sf` declare `f` and the type
+    of `sE` names the struct `S` among them (`resolveFieldOfTy`). -/
+def tQualifyFieldArg (sf : StructFieldNames) : TExpr → TExpr
+  | .mk (.borrow e) ty => .mk (.borrow (tQualifyFieldArg sf e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tQualifyFieldArg sf e)) ty
+  | e@(.mk (.app pf [sE]) ty) =>
+    if pf.startsWith "." && pf != ".0" && (tMutArgRoot sE).isSome then
+      let f := (pf.drop 1).toString
+      match resolveStructField sf f, resolveFieldOfTy sf sE.ty f with
+      | none, some (sname, _, _) => .mk (.app s!".{sname}.{f}" [sE]) ty
+      | _, _ => e
+    else e
+  | e => e
+
+/-- `tQualifyFieldArg` applied to every `&mut`-typed call argument. -/
+partial def tQualifyWritebackFields (sf : StructFieldNames) : TExpr → TExpr
+  | .mk (.app f args) ty =>
+    let args' := args.map fun a =>
+      let a' := tQualifyWritebackFields sf a
+      match a'.ty with
+      | .ref _ true => tQualifyFieldArg sf a'
+      | _ => a'
+    .mk (.app f args') ty
+  | e => tMapChildren (tQualifyWritebackFields sf) e
+
+/-- The head `.S.f` written by `tQualifyWritebackFields` as the qualified
+    projection name `S.f`; every other head is kept. -/
+partial def tUnqualifyFieldHeads : TExpr → TExpr
+  | .mk (.app pf args) ty =>
+    let args' := args.map tUnqualifyFieldHeads
+    if pf.startsWith "." && ((pf.drop 1).toString.splitOn ".").length == 2 then
+      .mk (.app (pf.drop 1).toString args') ty
+    else .mk (.app pf args') ty
+  | e => tMapChildren tUnqualifyFieldHeads e
 
 end Hax

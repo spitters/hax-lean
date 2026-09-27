@@ -418,14 +418,35 @@ assignment lowering and the `&mut` write-back rewrite, so it lives here. -/
 abbrev StructFieldNames := List (String × List String)
 
 /-- The struct owning field `fname`, with the field's position and the struct's
-    field count, when exactly one struct of `sf` declares that field name. An
-    ambiguous or unknown field name resolves to `none`, and the write that
-    asked keeps its previous lowering. -/
+    field count, when exactly one struct of `sf` declares that field name. A
+    qualified name `S.f` names field `f` of struct `S`. An ambiguous or unknown
+    field name resolves to `none`, and the write that asked keeps its previous
+    lowering. -/
 def resolveStructField (sf : StructFieldNames) (fname : String) :
     Option (String × Nat × Nat) :=
-  match sf.filter (fun p => p.2.contains fname) with
-  | [(sname, fs)] => (fs.idxOf? fname).map fun i => (sname, i, fs.length)
-  | _ => none
+  match fname.splitOn "." with
+  | [sname, f] =>
+    (sf.lookup sname).bind fun fs => (fs.idxOf? f).map fun i => (sname, i, fs.length)
+  | _ =>
+    match sf.filter (fun p => p.2.contains fname) with
+    | [(sname, fs)] => (fs.idxOf? fname).map fun i => (sname, i, fs.length)
+    | _ => none
+
+/-- The struct owning field `g` of a value of type `t`, seen through one
+    reference, with the field's position and the struct's field count: the
+    struct `t` names (by the last `::` segment) when `sf` declares it with a
+    field `g`, and otherwise the unique struct of `sf` declaring `g`
+    (`resolveStructField`). -/
+def resolveFieldOfTy (sf : StructFieldNames) (t : ImpType) (g : String) :
+    Option (String × Nat × Nat) :=
+  let byTy : Option (String × Nat × Nat) := match t with
+    | .adt n _ | .ref (.adt n _) _ =>
+      let short := ((n.splitOn "::").getLast?).getD n
+      match sf.lookup short with
+      | some fs => (fs.idxOf? g).map fun k => (short, k, fs.length)
+      | none => none
+    | _ => none
+  byTy <|> resolveStructField sf g
 
 /-- App head carrying a resolved struct-field update:
     `struct_update#<struct>#<index>#<count>`. The `#` sigil keeps the head out

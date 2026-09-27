@@ -1029,8 +1029,8 @@ same field names. hax gives the place as the field `leaf` of
 `*index_mut(&mut (*state).stash, si)`. The parse resolves `leaf` through the
 element's type `Entry` and lowers the write to an assignment of `state`: the
 `stash` field updated at `si` by the element with `leaf` replaced
-(`tElemFieldPlaceAssign`). A place no arm lowers, such as the two-level field
-path `state.a.b`, is refused by the parse. -/
+(`tElemFieldPlaceAssign`). A place no arm lowers, such as `state.a.b` where no
+struct declares the fields `a` and `b`, is refused by the parse. -/
 
 /-- Field layouts of `Oram`, `Entry` and `Pos`. -/
 def oramFields : StructFieldNames :=
@@ -1083,7 +1083,8 @@ def stashElem : ImpExpr := .app "index" [.app ".stash" [.deref (.var "state")], 
   | .error _ => false
 
 open Lean in
-/-- The statement `state.a.b = v`: a two-level field path. -/
+/-- The statement `state.a.b = v`, with fields `a` and `b` that no struct of
+    `oramFields` declares. -/
 def nestedFieldAssignJson : Json :=
   let stateDeref := haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", haxVarRef "state")])])
   let aField := haxNode (Json.mkObj [("Field", Json.mkObj [
@@ -1096,5 +1097,182 @@ def nestedFieldAssignJson : Json :=
 #guard match HaxAdapter.parseHaxTExpr nestedFieldAssignJson { structFields := oramFields } with
   | .ok _ => false
   | .error _ => true
+
+/-! ## Assignment places lowered by `tPlaceAssign`
+
+The places the specific arms of the parse do not cover and the general lowering
+`tPlaceAssign` does: a compound assignment to an element of an element
+(`shares[0][i] ^= v`, Picnic), the same through the `index_mut` of a `Vec` of
+arrays (`result[j][k] ^= v`, SoftSpoken), and a field whose name two structs
+declare, written through a `&mut` parameter (`state.root_key = v`, resolved
+by the type of `*state`). -/
+
+open Lean in
+/-- The binary operator node `op(lhs, rhs)` as the `op`, `lhs`, `rhs` of an
+    `AssignOp`. -/
+def assignOpJson (op : String) (lhs rhs : Json) : Json :=
+  haxNode (Json.mkObj [("AssignOp", Json.mkObj [("op", Json.str op), ("lhs", lhs), ("rhs", rhs)])])
+
+open Lean in
+/-- `a[i]` for hax expressions `a` and `i`. -/
+def haxIndexJson (a i : Json) : Json :=
+  haxNode (Json.mkObj [("Index", Json.mkObj [("lhs", a), ("index", i)])])
+
+/-- The typed parse of a hax expression under `oramFields`, `()` on a parse
+    error. -/
+def parseOram (j : Lean.Json) : TExpr :=
+  match HaxAdapter.parseHaxTExpr j { structFields := oramFields } with
+  | .ok e => e
+  | .error _ => .mk .unitVal .unit
+
+/-- `shares[0][i] ^= v`. -/
+def sharesXorAssign : TExpr :=
+  parseOram (assignOpJson "BitXorAssign"
+    (haxIndexJson (haxIndexJson (haxVarRef "shares") (haxVarRef "z")) (haxVarRef "i"))
+    (haxVarRef "v"))
+
+/-- The element `shares[z][i]`. -/
+def sharesElem : ImpExpr := .app "index" [.app "index" [.var "shares", .var "z"], .var "i"]
+
+-- `shares` is rebound with row `z` updated at `i` by the combined value.
+#guard match sharesXorAssign.erase with
+  | .assign "shares" (.app "array_update" [.var "shares", .var "z",
+      .app "array_update" [.app "index" [.var "shares", .var "z"], .var "i",
+        .app _ [e, .var "v"]]]) => e == sharesElem
+  | _ => false
+
+open Lean in
+/-- `(*index_mut(&mut result, j))[k] ^= v` for `result : Vec<[u8; n]>`. -/
+def vecRowXorAssign : TExpr :=
+  let borrowRes := haxNodeT (refMutTyJson vecTyJson)
+    (Json.mkObj [("Borrow", Json.mkObj [("arg", haxVarRef "result")])])
+  let indexMutFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "index", defIdSeg "TypeNs" "IndexMut",
+     defIdSeg "ValueNs" "index_mut"]
+  let call := haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", indexMutFn), ("args", Json.arr #[borrowRes, haxVarRef "j"])])])
+  let row := haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", call)])])
+  parseOram (assignOpJson "BitXorAssign" (haxIndexJson row (haxVarRef "k")) (haxVarRef "v"))
+
+-- `result` is rebound with row `j` updated at `k`.
+#guard match vecRowXorAssign.erase with
+  | .assign "result" (.app "array_update" [.var "result", .var "j",
+      .app "array_update" [.app "index" [.var "result", .var "j"], .var "k", _]]) => true
+  | _ => false
+
+/-- Field layouts with the field `root_key` declared by two structs. -/
+def ratchetFields : StructFieldNames :=
+  [("State", ["root_key", "epoch"]), ("Keys", ["root_key"])]
+
+open Lean in
+/-- The type `types::State`. -/
+def stateTyJson : Json :=
+  Json.mkObj [("Adt", Json.mkObj [
+    ("def_id", mkDefIdJson "spqr" [defIdSeg "TypeNs" "types", defIdSeg "TypeNs" "State"]),
+    ("generic_args", Json.arr #[])])]
+
+open Lean in
+/-- `state.root_key = v` for `state : &mut State`: the field of `*state`. -/
+def rootKeyAssign : TExpr :=
+  let stateDeref := haxNodeT stateTyJson (Json.mkObj [("Deref", Json.mkObj [("arg", haxVarRef "state")])])
+  let field := haxNode (Json.mkObj [("Field", Json.mkObj [
+    ("field", mkDefIdJson "spqr" [defIdSeg "TypeNs" "types", defIdSeg "TypeNs" "State",
+      defIdSeg "ValueNs" "root_key"]),
+    ("lhs", stateDeref)])])
+  match HaxAdapter.parseHaxTExpr
+      (haxNode (Json.mkObj [("Assign", Json.mkObj [("lhs", field), ("rhs", haxVarRef "v")])]))
+      { structFields := ratchetFields } with
+  | .ok e => e
+  | .error _ => .mk .unitVal .unit
+
+-- `state` is rebound with field 0 of `State` replaced.
+#guard rootKeyAssign.erase ==
+  .assign "state" (.app "struct_update#State#0#2" [.deref (.var "state"), .var "v"])
+
+/-! ## `&mut` calls brought into the write-back fragment
+
+* A call with a value result and a `&mut` argument stored into an element
+  (`tmp[i] = wots_chain(…, adrs)`, SLH-DSA) or returned as a block's tail
+  (`blake2b_finalize(&mut state)`, Argon2) is bound by a `let`
+  (`tHoistMutCalls`), a tuple-form call site.
+* A callee outside the export with one `&mut` variable argument and result
+  `()` (`jade_sha256(&mut out, input)`, the FFI hash) is a single-form
+  write-back function (`externalWriteTable`).
+* A `&mut state.h` argument whose field name two structs declare (Classic
+  McEliece) is resolved by the type of `state` (`tQualifyWritebackFields`). -/
+
+/-- The type `[u8; 32]`. -/
+def bytes32 : ImpType := .array (.uint .w8) 32
+
+/-- `tmp = array_update tmp i (chain(x, &mut adrs))` with a value result. -/
+def chainIntoElem : TExpr :=
+  let adrsTy : ImpType := .adt "Adrs" []
+  let call : TExpr := .mk (.app "chain"
+    [.mk (.var "x") bytes32, .mk (.borrow (.mk (.var "adrs") adrsTy)) (.ref adrsTy true)]) bytes32
+  .mk (.assign "tmp" (.mk (.app "array_update"
+    [.mk (.var "tmp") .unknown, .mk (.var "i") .int, call]) .unknown)) .unit
+
+-- The call is bound first; the element write stores the bound value.
+#guard (tHoistMutCalls [] chainIntoElem).erase ==
+  .letBind "_mutcall" (.app "chain" [.var "x", .borrow (.var "adrs")])
+    (.assign "tmp" (.app "array_update" [.var "tmp", .var "i", .var "_mutcall"]))
+
+-- With `chain` a tuple-form write-back function of its `&mut` argument, nothing
+-- is dropped once the call is bound.
+#guard tDroppedMutCalls [] [] [] [("chain", [1], true)] (tHoistMutCalls [] chainIntoElem) == []
+#guard tDroppedMutCalls [] [] [] [("chain", [1], true)] chainIntoElem == [("chain", [1])]
+
+/-- `let s := init; finalize(&mut s)`: a value call as the tail of a block. -/
+def finalizeTail : TExpr :=
+  let sTy : ImpType := .adt "St" []
+  .mk (.letBind "s" (.mk (.var "init") sTy)
+    (.mk (.app "finalize" [.mk (.borrow (.mk (.var "s") sTy)) (.ref sTy true)]) bytes32)) bytes32
+
+-- The tail call is bound by a `let` whose body is the bound value.
+#guard (tHoistMutCalls [] finalizeTail).erase ==
+  .letBind "s" (.var "init")
+    (.letBind "_mutcall" (.app "finalize" [.borrow (.var "s")]) (.var "_mutcall"))
+#guard tDroppedMutCalls [] [] [] [("finalize", [0], true)] (tHoistMutCalls [] finalizeTail) == []
+
+/-- `jade_sha256(&mut out, input); out` with `jade_sha256` outside the export. -/
+def ffiHashCall : TExpr :=
+  .mk (.seq
+    (.mk (.app "jade_sha256" [.mk (.borrow (.mk (.var "out") bytes32)) (.ref bytes32 true),
+      .mk (.var "input") .unknown]) .unit)
+    (.mk (.var "out") bytes32)) bytes32
+
+-- `jade_sha256` is a single-form write-back function of position 0.
+#guard externalWriteTable [("sha256", ffiHashCall)] == [("jade_sha256", 0)]
+
+-- The call rebinds `out`, is typed as `out`, and nothing is dropped.
+#guard (tRebindMutCalls [] [("jade_sha256", 0)] []
+    (tRetypeExtWriters [("jade_sha256", 0)] ffiHashCall)).erase ==
+  .seq (.assign "out" (.app "jade_sha256" [.borrow (.var "out"), .var "input"])) (.var "out")
+#guard match tRetypeExtWriters [("jade_sha256", 0)] ffiHashCall with
+  | .mk (.seq (.mk (.app _ _) ty) _) _ => ty == bytes32
+  | _ => false
+#guard tDroppedMutCalls [] [] [("jade_sha256", 0)] [] ffiHashCall == []
+
+/-- Two structs declaring a field `h`. -/
+def shaFields : StructFieldNames := [("Sha", ["h", "buf"]), ("Toy", ["h"])]
+
+/-- `compress(&mut state.h, block)` with `state : Sha`. -/
+def compressField : TExpr :=
+  let shaTy : ImpType := .adt "Sha" []
+  let place : TExpr := .mk (.app ".h" [.mk (.var "state") shaTy]) (.array (.uint .w32) 8)
+  .mk (.app "compress" [.mk (.borrow place) (.ref (.array (.uint .w32) 8) true),
+    .mk (.var "block") .unknown]) .unit
+
+-- By name the field does not resolve, so the call is reported.
+#guard tDroppedMutCalls [] shaFields [("compress", 0)] [] compressField == [("compress", [0])]
+
+-- Qualified by the type of `state`, the call rebinds `state`, and the
+-- projection is renamed `Sha.h`.
+#guard tDroppedMutCalls [] shaFields [("compress", 0)] []
+    (tQualifyWritebackFields shaFields compressField) == []
+#guard (tUnqualifyFieldHeads (tRebindMutCalls shaFields [("compress", 0)] []
+    (tQualifyWritebackFields shaFields compressField))).erase ==
+  .assign "state" (.app "struct_update#Sha#0#2" [.var "state",
+    .app "compress" [.borrow (.app "Sha.h" [.var "state"]), .var "block"]])
 
 end Hax.EmitterRegressions

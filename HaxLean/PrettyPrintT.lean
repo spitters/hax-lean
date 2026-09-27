@@ -1216,39 +1216,6 @@ def sameHead : ImpExpr → TExprKind → Bool
   | .typeAscription _ _, .ann _ => true
   | _, _ => false
 
-/-- The immediate sub-expressions of a `TExpr`, in constructor order; a
-    `match_`'s scrutinee comes first, followed by the arm bodies. -/
-def tChildren : TExpr → List TExpr
-  | .mk (.letBind _ v b) _ => [v, b]
-  | .mk (.lam _ b) _ => [b]
-  | .mk (.app _ args) _ => args
-  | .mk (.tuple elems) _ => elems
-  | .mk (.proj e _) _ => [e]
-  | .mk (.ifThenElse c t e) _ => [c, t, e]
-  | .mk (.match_ scrut arms) _ => scrut :: arms.map (·.2)
-  | .mk (.seq a b) _ => [a, b]
-  | .mk (.borrow e) _ => [e]
-  | .mk (.deref e) _ => [e]
-  | .mk (.assign _ r) _ => [r]
-  | .mk (.forLoop _ l h b) _ => [l, h, b]
-  | .mk (.forLoopRev _ l h b) _ => [l, h, b]
-  | .mk (.whileLoop c b) _ => [c, b]
-  | .mk (.break_ (some e)) _ => [e]
-  | .mk (.earlyReturn e) _ => [e]
-  | .mk (.questionMark e) _ => [e]
-  | .mk (.forFold _ l h b) _ => [l, h, b]
-  | .mk (.forFoldRev _ l h b) _ => [l, h, b]
-  | .mk (.whileFold c b) _ => [c, b]
-  | .mk (.forFoldReturn _ l h b) _ => [l, h, b]
-  | .mk (.forFoldRevReturn _ l h b) _ => [l, h, b]
-  | .mk (.whileFoldReturn c b) _ => [c, b]
-  | .mk (.cfBreak e) _ => [e]
-  | .mk (.cfContinue e) _ => [e]
-  | .mk (.cfBreakContinue e) _ => [e]
-  | .mk (.ann e) _ => [e]
-  | .mk (.namedProj _ e) _ => [e]
-  | _ => []
-
 /-- Rebuild `e` as a `TExpr`, taking each node's type from the node of `t` at
     the same position when the two have the same head constructor and
     `.unknown` otherwise. The tree is `e`'s, so `TExpr.erase` maps the result

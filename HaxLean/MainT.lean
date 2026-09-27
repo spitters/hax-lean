@@ -187,11 +187,19 @@ def main (args : List String) : IO UInt32 := do
     -- rewrite: a body whose own tail is a write-back call has to be an
     -- assignment before `tReplaceTail` reaches it, or the call is dropped as a
     -- pure value.
-    let writeFns := mutWriteFns structFields fnTypes procTdefs
-    -- The builtin table is appended to the call-site rebind table only, not to
-    -- `writeReturns`: `tReturnMutParams` rewrites a callee to return its
-    -- written parameters, and these four have no body in the export to rewrite.
-    let writers := mutWriteTable writeFns ++ builtinWriteTable
+    -- Calls outside the write-back fragment are first brought into it
+    -- (`tHoistMutCalls`, `tQualifyWritebackFields`, `externalWriteTable`); see
+    -- the normalisation section of `ThreadMutations`.
+    let procTdefs := procTdefs.map fun (n, te) =>
+      (n, tQualifyWritebackFields structFields (tHoistMutCalls fnTypes te))
+    let extWriters := externalWriteTable procTdefs
+    let procTdefs := procTdefs.map fun (n, te) => (n, tRetypeExtWriters extWriters te)
+    let writeFns := mutWriteFnsExt structFields fnTypes procTdefs extWriters
+    -- The builtin and external tables are appended to the call-site rebind
+    -- table only, not to `writeReturns`: `tReturnMutParams` rewrites a callee
+    -- to return its written parameters, and these callees have no body in the
+    -- export to rewrite.
+    let writers := mutWriteTable writeFns ++ builtinWriteTable ++ extWriters
     let tupWriters := mutWriteTupleTable writeFns
     let writeReturns := mutWriteReturns writeFns
     IO.eprintln s!"INFO mut-writeback-fns={writers.length + tupWriters.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
@@ -210,7 +218,8 @@ def main (args : List String) : IO UInt32 := do
       let ret := (writeReturns.lookup n).getD ([], false)
       let te := tReturnMutParams ret.1 ret.2
         (tRebindMutCalls structFields writers tupWriters te)
-      (n, tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te)))
+      (n, tUnqualifyFieldHeads
+        (tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te))))
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
     let t ← phaseTick "tPipelineFull" t
 

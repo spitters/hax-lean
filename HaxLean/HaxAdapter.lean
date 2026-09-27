@@ -543,22 +543,6 @@ def tFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
       | none => none
     | none => none
 
-/-- The struct owning field `g` of a value of type `t`, seen through one
-    reference, with the field's position and the struct's field count: the
-    struct `t` names (by the last `::` segment) when `sf` declares it with a
-    field `g`, and otherwise the unique struct of `sf` declaring `g`
-    (`resolveStructField`). -/
-def resolveFieldOfTy (sf : StructFieldNames) (t : ImpType) (g : String) :
-    Option (String × Nat × Nat) :=
-  let byTy : Option (String × Nat × Nat) := match t with
-    | .adt n _ | .ref (.adt n _) _ =>
-      let short := ((n.splitOn "::").getLast?).getD n
-      match sf.lookup short with
-      | some fs => (fs.idxOf? g).map fun k => (short, k, fs.length)
-      | none => none
-    | _ => none
-  byTy <|> resolveStructField sf g
-
 /-- Lower an assignment through the place `a[j].g`, field `g` of element `j` of a
     sequence place `a` that is a variable or a single-level struct-field place
     `x.f`. With `e := index a j` and `g` at position `k` of the `m` fields of the
@@ -591,10 +575,71 @@ def tElemFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
       | _ => none
   | _ => none
 
-/-- The refusal of an assignment whose place the parse cannot lower to a
-    threaded write: lowering it would lose the write. -/
-def unsupportedPlaceError (lhsJ : Json) : String :=
-  s!"unsupported assignment place (the write would be lost): {toString (lhsJ.compress.take 400)}"
+/-- The place `p` with every `index_mut(&mut a, i)` read as `index a i`, and
+    the `deref` of such a call dropped (the call's target is the element place
+    itself). `index` and field projections are normalised below the top; every
+    other node is kept. -/
+partial def tPlaceRead : TExpr → TExpr
+  | .mk (.app "index_mut" [a, i]) ty => .mk (.app "index" [tPlaceRead (tStripRefPlace a), i]) ty
+  | .mk (.app "index" [a, i]) ty => .mk (.app "index" [tPlaceRead a, i]) ty
+  | e@(.mk (.app pf [s]) ty) =>
+    if pf.startsWith "." then .mk (.app pf [tPlaceRead s]) ty else e
+  | .mk (.deref p) ty =>
+    match p with
+    | .mk (.app "index_mut" _) _ => tPlaceRead p
+    | _ => .mk (.deref (tPlaceRead p)) ty
+  | e => e
+
+/-- The assignment storing `new` in the place `p`, for a place built from a
+    variable by `deref`, `borrow`, `index`, `index_mut` and named struct-field
+    projections, in any order and depth. Each step is a functional update of the
+    enclosing value, read by `tPlaceRead`:
+
+      `v := new`,
+      `a[i] ← new` is `a ← array_update a i new`,
+      `s.g ← new` is `s ← struct_update#T#k#m s new`,
+
+    with `g` at position `k` of the `m` fields of `T`, resolved from the type of
+    `s` (`resolveFieldOfTy`). `none` when a field does not resolve or the place
+    has another node (a call result, the newtype projection `.0`, a tuple
+    field). -/
+partial def tPlaceAssign (sf : StructFieldNames) : TExpr → TExpr → Option TExprKind
+  | .mk (.var n) _, new => some (.assign n new)
+  | .mk (.deref p) _, new => tPlaceAssign sf p new
+  | .mk (.borrow p) _, new => tPlaceAssign sf p new
+  | .mk (.app "index_mut" [a, i]) ty, new =>
+    tPlaceAssign sf (.mk (.app "index" [tStripRefPlace a, i]) ty) new
+  | .mk (.app "index" [a, i]) _, new =>
+    let a' := tPlaceRead a
+    tPlaceAssign sf a (.mk (.app "array_update" [a', i, new]) a'.ty)
+  | .mk (.app pf [s]) _, new =>
+    if pf.startsWith "." && pf != ".0" then
+      let s' := tPlaceRead s
+      match resolveFieldOfTy sf s'.ty (pf.drop 1).toString with
+      | some (sname, k, m) =>
+        tPlaceAssign sf s (.mk (.app (structUpdateHead sname k m) [s', new]) s'.ty)
+      | none => none
+    else none
+  | _, _ => none
+
+/-- A one-line outline of a place, for a refusal message: variables by name,
+    `*p`, `&p`, `p[_]`, `p.f`, and the head of any other node. -/
+partial def placeOutline : TExpr → String
+  | .mk (.var n) _ => n
+  | .mk (.deref p) _ => s!"*({placeOutline p})"
+  | .mk (.borrow p) _ => s!"&({placeOutline p})"
+  | .mk (.app "index" [a, _]) _ => s!"{placeOutline a}[_]"
+  | .mk (.app "index_mut" [a, _]) _ => s!"index_mut({placeOutline a}, _)"
+  | .mk (.app f [s]) _ =>
+    if f.startsWith "." then s!"{placeOutline s}{f}" else s!"{f}(…)"
+  | .mk (.app f _) _ => s!"{f}(…)"
+  | .mk (.proj p i) _ => s!"{placeOutline p}.{i}"
+  | _ => "<expr>"
+
+/-- The refusal of an assignment to the place `lhs` that the parse cannot lower
+    to a threaded write: lowering it would lose the write. -/
+def unsupportedPlaceError (lhs : TExpr) : String :=
+  s!"unsupported assignment place (the write would be lost): {placeOutline lhs}"
 
 /-- The value, before a call, of the sequence place a `&mut [T]`, `&mut [T; n]`
     or `&mut Vec<T>` argument `a` names. For a variable `v` it is `v`, read
@@ -3038,13 +3083,20 @@ where
         | .mk (.var n) _ => n
         | .mk (.deref (.mk (.var n) _)) _ => n
         | _ => "_assign"
-      -- A place no arm lowers is refused, so that no write is dropped.
+      -- A place the specific arms do not lower goes to the general place
+      -- lowering `tPlaceAssign`; a place it does not lower either is refused,
+      -- so that no write is dropped.
+      let general : Except String TExprKind :=
+        match tPlaceAssign implMap.structFields lhs' rhs with
+        | some k => pure k
+        | none => throw (unsupportedPlaceError lhs')
       match lhs'.kind with
       | .var n => return .assign n rhs
       -- Nested: arr[i][j] = v → assign arr (array_update arr i (array_update (index arr i) j v))
       | .app "index" [.mk (.app "index" [outerArr, outerIdx]) _, innerIdx] =>
         let outerName := getVarName (stripD outerArr)
-        if outerName == "_assign" then throw (unsupportedPlaceError lhsJ)
+        if outerName == "_assign" then general
+        else
         let innerUpdate := TExpr.mk (.app "array_update"
           [TExpr.mk (.app "index" [outerArr, outerIdx]) rhs.ty, innerIdx, rhs]) rhs.ty
         return .assign outerName (TExpr.mk (.app "array_update" [outerArr, outerIdx, innerUpdate]) outerArr.ty)
@@ -3054,7 +3106,7 @@ where
           -- Element of a struct-field place: self.buf[i] = v.
           match tFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
           | some k => return k
-          | none => throw (unsupportedPlaceError lhsJ)
+          | none => general
         else
           return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, rhs]) rhs.ty)
       | _ =>
@@ -3065,7 +3117,7 @@ where
         | none =>
           match tElemFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
           | some k => return k
-          | none => throw (unsupportedPlaceError lhsJ)
+          | none => general
 
     else if let .ok data := j.getObjVal? "AssignOp" then
       let rawOp := match data.getObjVal? "op" with
@@ -3081,6 +3133,12 @@ where
         | .mk (.deref e) _ => stripD2 e
         | e => e
       let lhs' := tIndexMutPlace (stripD2 lhs)
+      -- As in `Assign`: the general place lowering, then refusal.
+      let general : Except String TExprKind :=
+        match tPlaceAssign implMap.structFields lhs'
+            (TExpr.mk (.app op [tPlaceRead lhs', rhs]) lhs.ty) with
+        | some k => pure k
+        | none => throw (unsupportedPlaceError lhs')
       match lhs'.kind with
       | .var n => return .assign n (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
       | .app "index" [arr, idx] =>
@@ -3091,20 +3149,20 @@ where
           match tFieldPlaceAssign implMap.structFields lhs'
               (fun read => TExpr.mk (.app op [read, rhs]) lhs.ty) with
           | some k => return k
-          | none => throw (unsupportedPlaceError lhsJ)
+          | none => general
         else
           -- The element read is the place `lhs'`, never an `index_mut` call.
           return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs', rhs]) lhs.ty]) arr.ty)
       | _ =>
         -- Struct-field place `self.buf_len op= v`, or a field of a sequence
-        -- element `self.v[i].g op= v`; any other place is refused.
+        -- element `self.v[i].g op= v`; any other place goes to `general`.
         let mkVal := fun read => TExpr.mk (.app op [read, rhs]) lhs.ty
         match tFieldPlaceAssign implMap.structFields lhs' mkVal with
         | some k => return k
         | none =>
           match tElemFieldPlaceAssign implMap.structFields lhs' mkVal with
           | some k => return k
-          | none => throw (unsupportedPlaceError lhsJ)
+          | none => general
 
     else if let .ok data := j.getObjVal? "Borrow" then
       let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
