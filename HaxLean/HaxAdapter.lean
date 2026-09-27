@@ -4316,6 +4316,28 @@ partial def parseStructDefs (items : List Json) : List StructInfo :=
       | _ => ""
     if name.isEmpty then none
     else
+      -- A field definition; `ident` is the field name, which hax writes as
+      -- the position (`"0"`, `"1"`, …) for a tuple struct.
+      let parseField (fj : Json) : Option FieldInfo :=
+        let ident := match fj.getObjVal? "ident" with
+          | Except.ok (Json.arr identPair) => match identPair.toList with
+            | (Json.str n) :: _ => n
+            | _ => ""
+          | _ => ""
+        if ident.isEmpty then none
+        else
+          let ty := (fj.getObjVal? "ty").toOption
+          let typeTag := match ty with
+            | some tyJ =>
+              let tyVal := (tyJ.getObjVal? "value").toOption
+              match tyVal with
+              | some v => classifyFieldType v
+              | none => "array"
+            | none => "array"
+          let impTy := match ty with
+            | some tyJ => parseHaxType tyJ
+            | none => ImpType.unknown
+          some { name := ident, typeTag := typeTag, impType := impTy : FieldInfo }
       let variantData := structData.toList[2]?
       match variantData with
       | some vd =>
@@ -4325,29 +4347,22 @@ partial def parseStructDefs (items : List Json) : List StructInfo :=
           let fieldsJ := sf.getObjValAs? (Array Json) "fields" |>.toOption
           match fieldsJ with
           | some fields =>
-            let fieldInfos := fields.toList.filterMap fun fj =>
-              let ident := match fj.getObjVal? "ident" with
-                | Except.ok (Json.arr identPair) => match identPair.toList with
-                  | (Json.str n) :: _ => n
-                  | _ => ""
-                | _ => ""
-              if ident.isEmpty then none
-              else
-                let ty := (fj.getObjVal? "ty").toOption
-                let typeTag := match ty with
-                  | some tyJ =>
-                    let tyVal := (tyJ.getObjVal? "value").toOption
-                    match tyVal with
-                    | some v => classifyFieldType v
-                    | none => "array"
-                  | none => "array"
-                let impTy := match ty with
-                  | some tyJ => parseHaxType tyJ
-                  | none => ImpType.unknown
-                some { name := ident, typeTag := typeTag, impType := impTy : FieldInfo }
-            some { name := name, fields := fieldInfos : StructInfo }
+            some { name := name, fields := fields.toList.filterMap parseField : StructInfo }
           | none => none
-        | none => none
+        | none =>
+          -- A unit struct (`struct X;`, variant data `Unit`) is a struct with
+          -- no fields. A tuple struct (`Tuple` variant data) is a struct with
+          -- positional fields `0`, `1`, … unless it has exactly one field:
+          -- `struct T(Inner)` is a newtype, which `buildNewtypeMap` collects.
+          if (vd.getObjVal? "Unit").toOption.isSome then
+            some { name := name, fields := [] : StructInfo }
+          else match vd.getObjVal? "Tuple" with
+            | .ok (Json.arr tupleData) => match tupleData.toList with
+              | (Json.arr fields) :: _ =>
+                if fields.size == 1 then none
+                else some { name := name, fields := fields.toList.filterMap parseField : StructInfo }
+              | _ => none
+            | _ => none
       | none => none
   items.foldl (fun acc item =>
     let kind := (item.getObjVal? "kind").toOption
@@ -4527,9 +4542,11 @@ def parseEnumDefsFromJson (j : Json) : List EnumInfo :=
   raw.foldl (fun acc ei =>
     if acc.any (·.name == ei.name) then acc else acc ++ [ei]) []
 
-/-- Parse the inner ImpType from a Tuple-variant struct's field list.
+/-- Parse the inner ImpType of a newtype, a tuple struct with exactly one field.
     Hax represents `struct T(Inner)` as `kind: Struct(..., {Tuple: [[field0_data]]})`.
-    Returns the inner ImpType of the first positional field, if any. -/
+    Returns `none` for any other struct, including a tuple struct with zero or
+    several fields, which `parseStructDefs` reads as a struct with positional
+    fields. -/
 def parseTupleStructInner (structData : Array Json) : Option ImpType :=
   let variantData := structData.toList[2]?
   match variantData with
@@ -4539,7 +4556,7 @@ def parseTupleStructInner (structData : Array Json) : Option ImpType :=
       match tupleData.toList with
       | (Json.arr fields) :: _ =>
         match fields.toList with
-        | fj :: _ =>
+        | [fj] =>
           match fj.getObjVal? "ty" with
           | .ok tyJ => some (parseHaxType tyJ)
           | _ => none

@@ -1432,4 +1432,113 @@ def fillBody : TExpr :=
   [("fill", [0], ["okm"], false)]
 #guard mutWriteFns [] [("fill", fillSig)] [("fill", fillBody)] == []
 
+/-! ### Unit structs
+
+A struct the crate defines with no fields (`pub struct HkdfOutputTooLong;`) is
+emitted as a fieldless `structure HkdfOutputTooLong_T` and the definition
+`HkdfOutputTooLong : HkdfOutputTooLong_T`, never as an `axiom` type with its
+value a `Deps` field. The struct parser reads the `Unit` variant data and the
+empty `Tuple` variant data as a struct with no fields. -/
+
+section UnitStructs
+
+open Lean
+
+/-- A hax `Struct` item named `name` whose variant data is `variantData`. -/
+def structItemJson (name : String) (variantData : Json) : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Struct", Json.arr
+    #[Json.arr #[Json.str name, Json.null], Json.null, variantData])])]
+
+/-- `pub struct HkdfOutputTooLong;`. -/
+def unitStructJson : Json :=
+  structItemJson "HkdfOutputTooLong" (Json.mkObj [("Unit", Json.arr #[Json.null, Json.null])])
+
+/-- `pub struct Empty();`. -/
+def emptyTupleStructJson : Json :=
+  structItemJson "Empty" (Json.mkObj [("Tuple", Json.arr #[Json.arr #[], Json.null])])
+
+#guard (HaxAdapter.parseStructDefsFromJson (Json.arr #[unitStructJson, emptyTupleStructJson])).map
+  (fun si => (si.name, si.fields.length)) == [("HkdfOutputTooLong", 0), ("Empty", 0)]
+
+/-- The unit struct `HkdfOutputTooLong` as a type. -/
+def unitStructTy : ImpType := .adt "HkdfOutputTooLong" []
+
+/-- `fn expand(n: usize) -> Result<(), HkdfOutputTooLong> { Err(HkdfOutputTooLong) }`
+    after the adapter: the construction is the nullary call of the struct's
+    name. -/
+def unitStructErrFn : TExpr :=
+  .mk (.letBind "n" (.mk (.var "n") .int)
+    (.mk (.app "Err" [.mk (.app "HkdfOutputTooLong" []) unitStructTy])
+      (.result .unit unitStructTy))) (.result .unit unitStructTy)
+
+/-- The emitted file of a crate defining the unit struct and `expand`. -/
+def unitStructFile : String :=
+  toLeanCertifiedFileTyped [("expand", unitStructErrFn)] "Test"
+    [("HkdfOutputTooLong", [])] []
+
+#guard ((unitStructFile.splitOn
+  "structure HkdfOutputTooLong_T where\n  deriving Inhabited, BEq, Repr\n").length) == 2
+#guard ((unitStructFile.splitOn
+  "def HkdfOutputTooLong : HkdfOutputTooLong_T := {}").length) == 2
+-- No `axiom` for the crate-defined type, and no `Deps` field for its value.
+#guard ((unitStructFile.splitOn "axiom HkdfOutputTooLong").length) == 1
+#guard ((unitStructFile.splitOn "\n  HkdfOutputTooLong :").length) == 1
+-- A type the crate does not define stays an `axiom`.
+#guard ((toLeanCertifiedFileTyped [("expand", unitStructErrFn)] "Test" [] []).splitOn
+  "axiom HkdfOutputTooLong").length == 2
+
+/-! ### Tuple structs
+
+A tuple struct with exactly one field is a newtype. A tuple struct with several
+fields is a struct with the positional fields `0`, `1`, …, all of them kept;
+its constructor binds them as `«0»`, `«1»`, …. -/
+
+/-- A positional field `idx` of type `u32`. -/
+def tupleFieldJson (idx : String) : Json :=
+  Json.mkObj [("ident", Json.arr #[Json.str idx, Json.null]),
+    ("ty", Json.mkObj [("value", Json.mkObj [("Uint", Json.str "U32")])])]
+
+/-- `pub struct W(u32);`. -/
+def newtypeStructJson : Json :=
+  structItemJson "W" (Json.mkObj [("Tuple",
+    Json.arr #[Json.arr #[tupleFieldJson "0"], Json.null])])
+
+/-- `pub struct Pair(u32, u32);`. -/
+def pairStructJson : Json :=
+  structItemJson "Pair" (Json.mkObj [("Tuple",
+    Json.arr #[Json.arr #[tupleFieldJson "0", tupleFieldJson "1"], Json.null])])
+
+-- The one-field tuple struct is a newtype and not a struct.
+#guard (HaxAdapter.buildNewtypeMap (Json.arr #[newtypeStructJson])).map (·.1) == ["W"]
+#guard (HaxAdapter.parseStructDefsFromJson (Json.arr #[newtypeStructJson])).isEmpty
+-- The two-field tuple struct is a struct with both fields and not a newtype.
+#guard (HaxAdapter.buildNewtypeMap (Json.arr #[pairStructJson])).isEmpty
+#guard (HaxAdapter.parseStructDefsFromJson (Json.arr #[pairStructJson])).map
+  (fun si => (si.name, si.fields.map (·.name))) == [("Pair", ["0", "1"])]
+
+/-- The struct metadata of `Pair`. -/
+def pairMeta : StructMeta :=
+  (HaxAdapter.parseStructDefsFromJson (Json.arr #[pairStructJson])).map fun si =>
+    (si.name, si.fields.map fun fi => (fi.name, fi.typeTag, fi.impType))
+
+/-- `fn swap(p: Pair) -> Pair { Pair(p.1, p.0) }`. -/
+def pairSwapFn : TExpr :=
+  let pairTy : ImpType := .adt "Pair" []
+  let p : TExpr := .mk (.var "p") pairTy
+  .mk (.letBind "p" p
+    (.mk (.app "Pair" [.mk (.app ".1" [p]) (.uint .w32), .mk (.app ".0" [p]) (.uint .w32)])
+      pairTy)) pairTy
+
+/-- The emitted file of a crate defining `Pair` and `swap`. -/
+def pairFile : String :=
+  toLeanCertifiedFileTyped [("swap", pairSwapFn)] "Test" pairMeta []
+
+#guard ((pairFile.splitOn "def Pair («0» : ").length) == 2
+#guard ((pairFile.splitOn " := («0», «1»)").length) == 2
+#guard ((pairFile.splitOn "axiom Pair").length) == 1
+-- Both positional projections are emitted, at the first and second component.
+#guard ((pairFile.splitOn "0» (x : Pair_T) := x.1\n").length) == 2
+#guard ((pairFile.splitOn "1» (x : Pair_T) := x.2\n").length) == 2
+end UnitStructs
+
 end Hax.EmitterRegressions

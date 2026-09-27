@@ -58,6 +58,9 @@ def sanitizeName (n : String) : String :=
   -- Lean keywords and names with special chars need quoting
   if n.isEmpty then "«»"
   else if n.any fun c => !c.isAlphanum && c != '_' && c != '\'' then s!"«{n}»"
+  -- A name starting with a digit, such as the positional field `0` of a
+  -- tuple struct, is not an identifier.
+  else if n.front.isDigit then s!"«{n}»"
   else
     match n with
     | "if" | "then" | "else" | "let" | "do" | "match" | "with" | "where"
@@ -3578,7 +3581,9 @@ partial def resolveStructType (structMeta : StructMeta) (name : String)
       | .unknown => if tag == "int" then "Int" else "Array Int"
       -- Use surface types (Int/Array Int) to match the surface code representation
       | ty => ty.toLeanTypeStrSurface lookup
-    if fields.length == 0 then some "Array Int"
+    -- A struct with no fields is a unit struct, declared by `unitStructBlock`
+    -- as the structure `<name>_T`.
+    if fields.length == 0 then some s!"{sanitizeName name}_T"
     else if fields.length == 1 then
       let (fn, tag, ty) := fields.head!
       some (resolveField fn tag ty)
@@ -3618,6 +3623,26 @@ def structTupleType (structs : StructMeta)
       -- Wrap composite types in parens to preserve tuple associativity
       if (s.splitOn " × ").length > 1 then s!"({s})" else s
     " × ".intercalate fieldTypes
+
+/-- The unit structs of `structMeta`, the Rust structs with no fields
+    (`struct X;`, `struct X {}`, `struct X();`), less the names in `skip`. -/
+def unitStructNames (structMeta : StructMeta) (skip : List String := []) : List String :=
+  structMeta.filterMap fun (n, fields) =>
+    if fields.isEmpty && !skip.contains n then some n else none
+
+/-- The Lean declarations of the unit structs of `structMeta`: per unit struct
+    `X`, the fieldless structure `X_T` (the type `resolveStructType` prints for
+    `X`) and the definition `X : X_T` of its one value, the name a construction
+    `.app "X" []` prints as. Empty when there is no unit struct. -/
+def unitStructBlock (structMeta : StructMeta) (skip : List String := []) : String :=
+  let names := unitStructNames structMeta skip
+  if names.isEmpty then ""
+  else
+    let lines := names.map fun n =>
+      let s := sanitizeName n
+      s!"structure {s}_T where\n  deriving Inhabited, BEq, Repr\n\ndef {s} : {s}_T := \{}"
+    "/-- Rust unit structs of the crate: a fieldless structure and its value. -/\n"
+      ++ "\n\n".intercalate lines ++ "\n\n"
 
 /-- Check if a variable bound to a struct constructor call is ever passed
     to a non-projection function (i.e., used externally where Array Int is expected).
@@ -4640,7 +4665,7 @@ def toLeanCertifiedFile (defs : List (String × ImpExpr))
   let axiomsBlock := if allOpaque.isEmpty then ""
     else "/-- Opaque types extracted from the hax JSON. Concrete instances\n    are provided by the protocol's bridge-adapter at the CatCrypt surface. -/\n"
       ++ "\n".intercalate (allOpaque.map fun n => s!"axiom {n} : Type") ++ "\n\n"
-  let header := s!"{headerComment}\n{imports}\n\nset_option linter.unusedVariables false\n\nnamespace {moduleName}\n\nopen Hax\n\n{axiomsBlock}{preamble}\nmutual\n\n"
+  let header := s!"{headerComment}\n{imports}\n\nset_option linter.unusedVariables false\n\nnamespace {moduleName}\n\nopen Hax\n\n{axiomsBlock}{unitStructBlock structMeta}{preamble}\nmutual\n\n"
   let body := "\n".intercalate (defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     let surfaceDef := toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
