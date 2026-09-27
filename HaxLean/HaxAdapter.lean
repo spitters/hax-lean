@@ -2078,10 +2078,84 @@ def tryExtractRange (e : ImpExpr) : Option (ImpExpr × ImpExpr × Bool) :=
   | .tuple [lo, hi] => some (lo, hi, false)  -- Range as tuple
   | _ => none
 
+/-- Strip the "Assign" suffix from a compound op name to get the base op.
+    Returns `none` if not a compound assign op. -/
+def stripAssignSuffix (f : String) : Option String :=
+  let pairs := [
+    ("AddAssign", "Add"), ("SubAssign", "Sub"), ("MulAssign", "Mul"),
+    ("DivAssign", "Div"), ("RemAssign", "Rem"),
+    ("BitXorAssign", "BitXor"), ("BitOrAssign", "BitOr"), ("BitAndAssign", "BitAnd"),
+    ("ShlAssign", "Shl"), ("ShrAssign", "Shr")]
+  pairs.findSome? fun (cmpd, base) => if f == cmpd then some base else none
+
+/-- Strip deref wrappers (references are erased by dropReferences phase). -/
+def stripDeref : ImpExpr → ImpExpr
+  | .deref e => stripDeref e
+  | e => e
+
+/-- Extract the variable name from an lvalue expression. -/
+def extractLValueName : ImpExpr → String
+  | .var n => n
+  | .deref (.var n) => n
+  | .deref (.deref (.var n)) => n
+  | .app "index" (.var n :: _) => n
+  | .app "index" (.deref (.var n) :: _) => n
+  | .app "index" (.deref (.deref (.var n)) :: _) => n
+  | _ => "_assign"
+
 /-- Information about a recognized iterator expression. -/
 inductive IterInfo where
   | range (lo hi : ImpExpr) (reversed inclusive : Bool)
   | collection (coll : ImpExpr)
+  /-- An iterator over the positions of one or two collections: `c.iter_mut()`
+      (`elems = [(c, true)]`), `it.enumerate()` over a collection
+      (`withIndex = true`) and `a.zip(b)` (`elems = [(a, _), (b, _)]`). Each
+      entry is a collection and whether its elements are mutable places
+      (`iter_mut`). -/
+  | positions (elems : List (ImpExpr × Bool)) (withIndex : Bool)
+
+/-- Whether a function name is `iter_mut` (possibly qualified). -/
+def isIterMut (f : String) : Bool := f == "iter_mut" || f.endsWith "::iter_mut"
+
+/-- Whether a function name is `enumerate` (possibly qualified). -/
+def isEnumerate (f : String) : Bool := f == "enumerate" || f.endsWith "::enumerate"
+
+/-- Whether a function name is `zip` (possibly qualified). -/
+def isZip (f : String) : Bool := f == "zip" || f.endsWith "::zip"
+
+/-- The collection an iterator expression walks and whether its elements are
+    mutable places: `c` for `c.iter()`, `c.iter_mut()` (mutable) and
+    `c.into_iter()`, and the expression itself otherwise. -/
+def iterCollection : ImpExpr → ImpExpr × Bool
+  | e@(.app g [c]) =>
+    if isIterMut g then (c, true)
+    else if g == "iter" || g.endsWith "::iter" || isIntoIter g then (c, false)
+    else (e, false)
+  | e => (e, false)
+
+/-- The `positions` iterator of `c.iter_mut()`, `it.enumerate()` and `a.zip(b)`
+    under `into_iter`, and `none` for every other argument of `into_iter`. The
+    walked iterators are collections: `enumerate` or `zip` over a nested
+    `enumerate`, `zip`, `rev` or stepped iterator is `none`. -/
+def tryExtractPositions (arg : ImpExpr) : Option IterInfo :=
+  let plain (e : ImpExpr) : Bool := match e with
+    | .app g _ => !(isEnumerate g || isZip g || isRev g || g == "step_by"
+        || g.endsWith "::step_by")
+    | _ => true
+  match arg with
+  | .app g [inner] =>
+    if isIterMut g then some (.positions [(inner, true)] false)
+    else if isEnumerate g then
+      let (c, m) := iterCollection inner
+      if plain c then some (.positions [(c, m)] true) else none
+    else none
+  | .app g [x, y] =>
+    if isZip g then
+      let (a, ma) := iterCollection x
+      let (b, mb) := iterCollection y
+      if plain a && plain b then some (.positions [(a, ma), (b, mb)] false) else none
+    else none
+  | _ => none
 
 /-- Try to extract iterator info from the scrutinee of the outer match.
     Recognizes: `into_iter(Range(lo, hi))` and `into_iter(rev(Range(lo, hi)))`. -/
@@ -2092,6 +2166,9 @@ def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
       -- Direct range: into_iter(Range(lo, hi))
       match tryExtractRange arg with
       | some (lo, hi, incl) => some (.range lo hi false incl)
+      | none =>
+      match tryExtractPositions arg with
+      | some info => some info
       | none =>
         -- Reversed range: into_iter(rev(Range(lo, hi)))
         match arg with
@@ -2122,10 +2199,13 @@ def tryExtractIterator (e : ImpExpr) : Option IterInfo :=
     else none
   | _ => none
 
-/-- Try to extract the loop variable and body from the inner match on `next()`.
-    Pattern: `match next(&mut iter) { None => break, Some(i) => body }` -/
-def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
-    Option (String × ImpExpr) :=
+/-- Try to extract the element pattern and body from the inner match on `next()`.
+    Pattern: `match next(&mut iter) { None => break, Some(p) => body }`, with `p`
+    a variable, `_` or a tuple pattern (`Some((i, x))` of `enumerate` and
+    `zip`); a `&b` pattern arrives as `b` (`parseHaxPat` unwraps `Deref`). A
+    bare binding arm `v => body` gives the pattern `v`. -/
+def tryExtractNextMatchPat (innerBody : ImpExpr) (iterVar : String) :
+    Option (ImpPat × ImpExpr) :=
   -- The inner body may be wrapped in seq, letBind, or be a direct match
   match innerBody with
   | .match_ scrut arms =>
@@ -2135,16 +2215,17 @@ def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
       | _ => false
     if !isNext then none
     else
-      -- Look for None → break, Some(varPat v) → body pattern
+      -- Look for None → break, Some(p) → body pattern
       -- The arms may be in either order
       let findSome := arms.findSome? fun (pat, body) =>
         match pat with
-        | .somePat (.varPat v) => some (v, body)
-        | .somePat .wildcard => some ("_iter_unused", body)
+        | .somePat (.varPat v) => some (.varPat v, body)
+        | .somePat .wildcard => some (.varPat "_iter_unused", body)
+        | .somePat (.tuplePat ps) => some (.tuplePat ps, body)
         | .varPat v =>
           -- Sometimes hax uses a binding pattern for Some
           -- Check if there's a destructure in the body
-          some (v, body)
+          some (.varPat v, body)
         | _ => none
       let hasBreak := arms.any fun (pat, body) =>
         match pat with
@@ -2153,18 +2234,142 @@ def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
           | _ => false
         | _ => false
       match findSome, hasBreak with
-      | some (v, body), true => some (v, body)
+      | some r, true => some r
       | _, _ => none
   -- Wrapped in letBind: let _ = match ... ; rest
   | .letBind _ inner rest =>
-    match tryExtractNextMatch inner iterVar with
+    match tryExtractNextMatchPat inner iterVar with
     | some r => some r
-    | none => tryExtractNextMatch rest iterVar
+    | none => tryExtractNextMatchPat rest iterVar
   | .seq e1 e2 =>
-    match tryExtractNextMatch e1 iterVar with
+    match tryExtractNextMatchPat e1 iterVar with
     | some r => some r
-    | none => tryExtractNextMatch e2 iterVar
+    | none => tryExtractNextMatchPat e2 iterVar
   | _ => none
+
+/-- Try to extract the loop variable and body from the inner match on `next()`:
+    `tryExtractNextMatchPat` when the element pattern is a variable. -/
+def tryExtractNextMatch (innerBody : ImpExpr) (iterVar : String) :
+    Option (String × ImpExpr) :=
+  match tryExtractNextMatchPat innerBody iterVar with
+  | some (.varPat v, body) => some (v, body)
+  | _ => none
+
+/-- The variable an element pattern of a `positions` loop binds: `some (some v)`
+    for `v`, `some none` for `_`, and `none` for any other pattern. -/
+def elemPatVar : ImpPat → Option (Option String)
+  | .varPat v => some (if v == "_iter_unused" then none else some v)
+  | .wildcard => some none
+  | _ => none
+
+/-- The per-element patterns of a `positions` iterator: the counter pattern
+    (`enumerate` only) and one pattern per collection, each a variable or `_`.
+    `none` when the pattern has another shape. -/
+def positionsPats (elems : List (ImpExpr × Bool)) (withIndex : Bool) (p : ImpPat) :
+    Option (Option (Option String) × List (Option String)) :=
+  match withIndex, elems, p with
+  | true, [_], .tuplePat [pi, pe] => do
+    let i ← elemPatVar pi
+    let e ← elemPatVar pe
+    pure (some i, [e])
+  | false, [_], pe => do
+    let e ← elemPatVar pe
+    pure (none, [e])
+  | false, [_, _], .tuplePat [pa, pb] => do
+    let a ← elemPatVar pa
+    let b ← elemPatVar pb
+    pure (none, [a, b])
+  | _, _, _ => none
+
+/-- The write-back `a := array_update a idx x` of the element variable `x` of an
+    `iter_mut` loop to position `idx` of the collection variable `a`. -/
+def iterMutStore (x a idx : String) : ImpExpr :=
+  .assign a (.app "array_update" [.var a, .var idx, .var x])
+
+/-- The body `e` of an `iter_mut` loop with every write of the element variable
+    `x` followed by its write-back `a := array_update a idx x` to position `idx`
+    of the collection variable `a`. A write is an `assign x _` or a compound
+    assignment call `XAssign` whose target is `x`. The walk stops below a
+    binder that rebinds `x` (a `let`, a loop counter, a closure parameter). -/
+partial def iterMutWriteBack (x a idx : String) : ImpExpr → ImpExpr
+  | .assign n rhs =>
+    let rhs' := iterMutWriteBack x a idx rhs
+    if n == x then .seq (.assign n rhs') (iterMutStore x a idx)
+    else .assign n rhs'
+  | .app f [t, v] =>
+    let e' := ImpExpr.app f [iterMutWriteBack x a idx t, iterMutWriteBack x a idx v]
+    if (stripAssignSuffix f).isSome && extractLValueName t == x then
+      .seq e' (iterMutStore x a idx)
+    else e'
+  | .app f args => .app f (args.map (iterMutWriteBack x a idx))
+  | .letBind n v b =>
+    .letBind n (iterMutWriteBack x a idx v) (if n == x then b else iterMutWriteBack x a idx b)
+  | .lam ps b => if ps.contains x then .lam ps b else .lam ps (iterMutWriteBack x a idx b)
+  | .tuple es => .tuple (es.map (iterMutWriteBack x a idx))
+  | .proj e i => .proj (iterMutWriteBack x a idx e) i
+  | .ifThenElse c t e =>
+    .ifThenElse (iterMutWriteBack x a idx c) (iterMutWriteBack x a idx t)
+      (iterMutWriteBack x a idx e)
+  | .match_ s arms =>
+    .match_ (iterMutWriteBack x a idx s) (arms.map fun (p, e) => (p, iterMutWriteBack x a idx e))
+  | .seq e1 e2 => .seq (iterMutWriteBack x a idx e1) (iterMutWriteBack x a idx e2)
+  | .borrow e => .borrow (iterMutWriteBack x a idx e)
+  | .deref e => .deref (iterMutWriteBack x a idx e)
+  | .forLoop v lo hi b => .forLoop v (iterMutWriteBack x a idx lo) (iterMutWriteBack x a idx hi)
+      (if v == x then b else iterMutWriteBack x a idx b)
+  | .forLoopRev v lo hi b => .forLoopRev v (iterMutWriteBack x a idx lo)
+      (iterMutWriteBack x a idx hi) (if v == x then b else iterMutWriteBack x a idx b)
+  | .whileLoop c b => .whileLoop (iterMutWriteBack x a idx c) (iterMutWriteBack x a idx b)
+  | .break_ (some e) => .break_ (some (iterMutWriteBack x a idx e))
+  | .earlyReturn e => .earlyReturn (iterMutWriteBack x a idx e)
+  | .questionMark e => .questionMark (iterMutWriteBack x a idx e)
+  | .typeAscription e ty => .typeAscription (iterMutWriteBack x a idx e) ty
+  | e => e
+
+/-- The collection variable of an `iter_mut` place: `a` for `a`, `&mut a` and
+    `*a`, and `none` for any other place. -/
+def iterMutRoot : ImpExpr → Option String
+  | .var n => some n
+  | .borrow e => iterMutRoot e
+  | .deref e => iterMutRoot e
+  | _ => none
+
+/-- The counted loop of a `positions` iterator over `elems` with body `body`
+    and element pattern `p`: the loop runs its counter over `0..len` (`min` of
+    the two lengths for `zip`, as `Iterator::zip` stops at the shorter one),
+    binds the `enumerate` counter pattern to the counter, and each element
+    variable to `index c counter`. The counter is the `enumerate` variable when
+    there is one, `_ci_x` for an `iter_mut` element `x` and `_ci` otherwise. An
+    `iter_mut` element whose collection is a variable `a` is written back to
+    position `counter` of `a` after each write (`iterMutWriteBack`). `none` when
+    the pattern does not fit, or an `iter_mut` collection is not a variable. -/
+def positionsLoop (elems : List (ImpExpr × Bool)) (withIndex : Bool) (p : ImpPat)
+    (body : ImpExpr) : Option ImpExpr := do
+  let (ip, eps) ← positionsPats elems withIndex p
+  let pairs := elems.zip eps
+  let mutVar := pairs.findSome? fun ((_, m), v) => if m then v else none
+  let idx := match ip with
+    | some (some i) => i
+    | _ => match mutVar with
+      | some x => "_ci_" ++ x
+      | none => "_ci"
+  -- Mutable elements need a variable collection root.
+  let mutRoots ← pairs.filterMapM fun ((c, m), v) =>
+    if m then
+      match v with
+      | some x => (iterMutRoot c).map fun a => some (x, a)
+      | none => some none
+    else some none
+  let body' := mutRoots.foldl (fun b (x, a) => iterMutWriteBack x a idx b) body
+  let bound := pairs.foldr (fun ((c, _), v) b =>
+    match v with
+    | some x => .letBind x (.app "index" [c, .var idx]) b
+    | none => b) body'
+  let hi := match elems with
+    | [(a, _), (b, _)] => ImpExpr.app "min" [.app "len" [a], .app "len" [b]]
+    | (a, _) :: _ => .app "len" [a]
+    | [] => .lit (.int 0)
+  pure (.forLoop idx (.lit (.int 0)) hi bound)
 
 /-- Reconstruct for-loops from desugared iterator patterns in a single expression.
     Recursively traverses the expression, looking for the characteristic
@@ -2200,6 +2405,16 @@ partial def reconstructForLoops : ImpExpr → ImpExpr
         let idxVar := "_ci"
         let loopBody := .letBind loopVar (.app "index" [coll', .var idxVar]) body'
         .forLoop idxVar (.lit (.int 0)) (.app "len" [coll']) loopBody
+      | none =>
+        .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
+    | some (.positions elems withIndex),
+      [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
+      -- `iter_mut`, `enumerate` and `zip`: a counted loop over the positions
+      let elems' := elems.map fun (c, m) => (reconstructForLoops c, m)
+      let loop := tryExtractNextMatchPat innerBody _iterVar >>= fun (p, body) =>
+        positionsLoop elems' withIndex p (reconstructForLoops body)
+      match loop with
+      | some l => l
       | none =>
         .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
     | _, _ =>
@@ -2247,31 +2462,6 @@ We normalize:
 - `app "XAssign" [var x, rhs]` → `assign x (app "X" [var x, rhs])`
 - `app "XAssign" [index(arr, i), rhs]` → `assign arr (app "array_update" [var arr, i, app "X" [index(arr, i), rhs]])`
 -/
-
-/-- Strip the "Assign" suffix from a compound op name to get the base op.
-    Returns `none` if not a compound assign op. -/
-def stripAssignSuffix (f : String) : Option String :=
-  let pairs := [
-    ("AddAssign", "Add"), ("SubAssign", "Sub"), ("MulAssign", "Mul"),
-    ("DivAssign", "Div"), ("RemAssign", "Rem"),
-    ("BitXorAssign", "BitXor"), ("BitOrAssign", "BitOr"), ("BitAndAssign", "BitAnd"),
-    ("ShlAssign", "Shl"), ("ShrAssign", "Shr")]
-  pairs.findSome? fun (cmpd, base) => if f == cmpd then some base else none
-
-/-- Strip deref wrappers (references are erased by dropReferences phase). -/
-def stripDeref : ImpExpr → ImpExpr
-  | .deref e => stripDeref e
-  | e => e
-
-/-- Extract the variable name from an lvalue expression. -/
-def extractLValueName : ImpExpr → String
-  | .var n => n
-  | .deref (.var n) => n
-  | .deref (.deref (.var n)) => n
-  | .app "index" (.var n :: _) => n
-  | .app "index" (.deref (.var n) :: _) => n
-  | .app "index" (.deref (.deref (.var n)) :: _) => n
-  | _ => "_assign"
 
 /-- Normalize compound assignment ops in an expression.
     Converts `app "XAssign" [target, val]` into proper `assign` nodes
@@ -3524,6 +3714,65 @@ where
       | _ => name
     return .app head fields
 
+/-- `iterMutWriteBack` on a typed body: every write of the element variable `x`
+    is followed by `store`, the write-back of `x` to its collection. -/
+partial def tIterMutWriteBack (x : String) (store : TExpr) (e : TExpr) : TExpr :=
+  let go := tIterMutWriteBack x store
+  match e with
+  | .mk (.assign n rhs) ty =>
+    if n == x then .mk (.seq (.mk (.assign n (go rhs)) ty) store) ty
+    else .mk (.assign n (go rhs)) ty
+  | .mk (.app f [t, v]) ty =>
+    let e' : TExpr := .mk (.app f [go t, go v]) ty
+    if (stripAssignSuffix f).isSome && extractLValueName t.erase == x then
+      .mk (.seq e' store) .unit
+    else e'
+  | .mk (.letBind n v b) ty => .mk (.letBind n (go v) (if n == x then b else go b)) ty
+  | .mk (.lam ps b) ty => if ps.contains x then e else .mk (.lam ps (go b)) ty
+  | .mk (.forLoop v lo hi b) ty =>
+    .mk (.forLoop v (go lo) (go hi) (if v == x then b else go b)) ty
+  | .mk (.forLoopRev v lo hi b) ty =>
+    .mk (.forLoopRev v (go lo) (go hi) (if v == x then b else go b)) ty
+  | e => tMapChildren go e
+
+/-- `positionsLoop` on typed collections and body. The counter and the
+    `enumerate` variable are typed `usize`, each element variable with the
+    element type of its collection, and the write-back of an `iter_mut` element
+    with the collection's type. -/
+def tPositionsLoop (elems : List (TExpr × Bool)) (withIndex : Bool) (p : ImpPat)
+    (body : TExpr) : Option TExpr := do
+  let (ip, eps) ← positionsPats (elems.map fun (c, m) => (c.erase, m)) withIndex p
+  let pairs := elems.zip eps
+  let mutVar := pairs.findSome? fun ((_, m), v) => if m then v else none
+  let idx := match ip with
+    | some (some i) => i
+    | _ => match mutVar with
+      | some x => "_ci_" ++ x
+      | none => "_ci"
+  let usz : ImpType := .uint .wsize
+  let idxE : TExpr := .mk (.var idx) usz
+  let seqTy (c : TExpr) : ImpType := match c.ty with | .ref t _ => t | t => t
+  let mutStores ← pairs.filterMapM fun ((c, m), v) =>
+    if m then
+      match v with
+      | some x => (iterMutRoot c.erase).map fun a =>
+        let aTy := seqTy c
+        some (x, (TExpr.mk (.assign a (.mk (.app "array_update"
+          [.mk (.var a) aTy, idxE, .mk (.var x) (seqElemTy aTy)]) aTy)) .unit : TExpr))
+      | none => some none
+    else some none
+  let body' := mutStores.foldl (fun b (x, st) => tIterMutWriteBack x st b) body
+  let bound := pairs.foldr (fun ((c, _), v) b =>
+    match v with
+    | some x => .mk (.letBind x (.mk (.app "index" [c, idxE]) (seqElemTy (seqTy c))) b) b.ty
+    | none => b) body'
+  let lenOf (c : TExpr) : TExpr := .mk (.app "len" [c]) usz
+  let hi : TExpr := match elems with
+    | [(a, _), (b, _)] => .mk (.app "min" [lenOf a, lenOf b]) usz
+    | (a, _) :: _ => lenOf a
+    | [] => .mk (.lit (.int 0)) usz
+  pure (.mk (.forLoop idx (.mk (.lit (.int 0)) usz) hi bound) .unit)
+
 /-- Whether an iterator scrutinee ranges over a `RangeInclusive`. hax lowers
     `lo..=hi` to a value whose only inclusive marker is its type, so the typed
     tree is where the bound can be told apart from `lo..hi`; the argument of
@@ -3596,6 +3845,20 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
         | none =>
           .mk (.match_ (reconstructForLoopsTExpr scrut)
             (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+      | none =>
+        .mk (.match_ (reconstructForLoopsTExpr scrut)
+          (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
+    | some (.positions elems withIndex),
+      [(.varPat _iterVar, .mk (.whileLoop (.mk (.lit (.bool true)) _) innerBody) _)] =>
+      -- `iter_mut`, `enumerate` and `zip`: the loop `positionsLoop` builds,
+      -- with the typed collections and body
+      let elemsT := elems.map fun (c, m) =>
+        (reconstructForLoopsTExpr (findSubTExprForImp scrut c), m)
+      let loop := tryExtractNextMatchPat innerBody.erase _iterVar >>= fun (p, _) =>
+        extractNextMatchBodyT innerBody _iterVar >>= fun bodyTE =>
+        tPositionsLoop elemsT withIndex p (reconstructForLoopsTExpr bodyTE)
+      match loop with
+      | some l => .mk l.kind ty
       | none =>
         .mk (.match_ (reconstructForLoopsTExpr scrut)
           (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
@@ -3676,6 +3939,7 @@ where
           match pat with
           | .somePat (.varPat _) => some body
           | .somePat .wildcard => some body
+          | .somePat (.tuplePat _) => some body
           | .varPat _ => some body
           | _ => none
         let hasBreak := arms.any fun (pat, body) =>

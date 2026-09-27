@@ -1638,4 +1638,93 @@ def valueArm : ImpExpr :=
 
 end MatchArmMutation
 
+section IteratorLoops
+
+/-! Rust's `for p in it { body }` arrives as
+`match into_iter(it) { iter => loop { match next(&mut iter) { None => break, Some(p) => body } } }`.
+The adapter reads the iterator shapes below as counted loops over positions. -/
+
+open Hax.HaxAdapter (reconstructForLoops reconstructForLoopsTExpr)
+
+/-- The desugared `for p in it { body }`. -/
+def forIn (it : ImpExpr) (p : ImpPat) (body : ImpExpr) : ImpExpr :=
+  .match_ (.app "into_iter" [it])
+    [(.varPat "iter", .whileLoop (.lit (.bool true))
+      (.match_ (.app "next" [.var "iter"])
+        [(.nonePat, .break_ none), (.somePat p, body)]))]
+
+/-- `for (i, x) in a.iter().enumerate() { acc = f(acc, i, x) }`. -/
+def enumerateLoop : ImpExpr :=
+  forIn (.app "enumerate" [.app "iter" [.var "a"]]) (.tuplePat [.varPat "i", .varPat "x"])
+    (.assign "acc" (.app "f" [.var "acc", .var "i", .var "x"]))
+
+-- The counter is `i`; `x` is element `i` of `a`.
+#guard reconstructForLoops enumerateLoop ==
+  .forLoop "i" (.lit (.int 0)) (.app "len" [.var "a"])
+    (.letBind "x" (.app "index" [.var "a", .var "i"])
+      (.assign "acc" (.app "f" [.var "acc", .var "i", .var "x"])))
+
+/-- `for (x, y) in a.iter().zip(b.iter()) { acc = f(acc, x, y) }`. -/
+def zipLoop : ImpExpr :=
+  forIn (.app "zip" [.app "iter" [.var "a"], .app "iter" [.var "b"]])
+    (.tuplePat [.varPat "x", .varPat "y"])
+    (.assign "acc" (.app "f" [.var "acc", .var "x", .var "y"]))
+
+-- The loop stops at the shorter collection.
+#guard reconstructForLoops zipLoop ==
+  .forLoop "_ci" (.lit (.int 0)) (.app "min" [.app "len" [.var "a"], .app "len" [.var "b"]])
+    (.letBind "x" (.app "index" [.var "a", .var "_ci"])
+      (.letBind "y" (.app "index" [.var "b", .var "_ci"])
+        (.assign "acc" (.app "f" [.var "acc", .var "x", .var "y"]))))
+
+/-- `for &b in a.iter() { acc = f(acc, b) }`; the `&b` pattern arrives as `b`. -/
+def derefPatLoop : ImpExpr :=
+  forIn (.app "iter" [.var "a"]) (.varPat "b")
+    (.assign "acc" (.app "f" [.var "acc", .var "b"]))
+
+#guard reconstructForLoops derefPatLoop ==
+  .forLoop "_ci" (.lit (.int 0)) (.app "len" [.var "a"])
+    (.letBind "b" (.app "index" [.var "a", .var "_ci"])
+      (.assign "acc" (.app "f" [.var "acc", .var "b"])))
+
+/-- `for x in a.iter_mut() { *x = g(*x); *x ^= k }`. -/
+def iterMutLoop : ImpExpr :=
+  forIn (.app "iter_mut" [.borrow (.var "a")]) (.varPat "x")
+    (.seq (.assign "x" (.app "g" [.deref (.var "x")]))
+      (.app "BitXorAssign" [.deref (.var "x"), .var "k"]))
+
+-- Each write of `x` is followed by its write-back to position `_ci_x` of `a`.
+#guard reconstructForLoops iterMutLoop ==
+  .forLoop "_ci_x" (.lit (.int 0)) (.app "len" [.borrow (.var "a")])
+    (.letBind "x" (.app "index" [.borrow (.var "a"), .var "_ci_x"])
+      (.seq
+        (.seq (.assign "x" (.app "g" [.deref (.var "x")]))
+          (.assign "a" (.app "array_update" [.var "a", .var "_ci_x", .var "x"])))
+        (.seq (.app "BitXorAssign" [.deref (.var "x"), .var "k"])
+          (.assign "a" (.app "array_update" [.var "a", .var "_ci_x", .var "x"])))))
+
+/-- `for (x, y) in a.iter_mut().zip(b.iter()) { *x ^= *y }`. -/
+def iterMutZipLoop : ImpExpr :=
+  forIn (.app "zip" [.app "iter_mut" [.var "a"], .app "iter" [.var "b"]])
+    (.tuplePat [.varPat "x", .varPat "y"])
+    (.app "BitXorAssign" [.deref (.var "x"), .deref (.var "y")])
+
+#guard reconstructForLoops iterMutZipLoop ==
+  .forLoop "_ci_x" (.lit (.int 0)) (.app "min" [.app "len" [.var "a"], .app "len" [.var "b"]])
+    (.letBind "x" (.app "index" [.var "a", .var "_ci_x"])
+      (.letBind "y" (.app "index" [.var "b", .var "_ci_x"])
+        (.seq (.app "BitXorAssign" [.deref (.var "x"), .deref (.var "y")])
+          (.assign "a" (.app "array_update" [.var "a", .var "_ci_x", .var "x"])))))
+
+-- The typed reconstruction erases to the untyped one.
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr enumerateLoop)).erase ==
+  reconstructForLoops enumerateLoop
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr zipLoop)).erase == reconstructForLoops zipLoop
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr iterMutLoop)).erase ==
+  reconstructForLoops iterMutLoop
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr iterMutZipLoop)).erase ==
+  reconstructForLoops iterMutZipLoop
+
+end IteratorLoops
+
 end Hax.EmitterRegressions
