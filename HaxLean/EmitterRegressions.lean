@@ -933,4 +933,168 @@ def crateSwapCall : TExpr := parseT (derefMutCallJson "swap" "coeffs" "h")
 
 #guard tDroppedMutCalls [] [] [] [] crateSwapCall == [("swap", [0])]
 
+/-! ## `reverse` and `Vec::remove` on a `&mut` place
+
+`path.reverse()` with `path : Vec<u64>` reaches hax as the `core` slice method
+call `reverse(&mut *deref_mut(&mut path))`; the parse reads it as the
+assignment `path := slice_reverse path` (`tSliceReverse`). `self.cells.remove(i)` on
+`Trace` reaches hax as `alloc::vec::Vec::remove(&mut (*self).cells, i)`; the
+parse binds the pair `vec_remove (*self).cells i` of the removed element and the
+shortened vector, rebinds `self` to `self` with `cells` set to the vector, and
+returns the element (`tVecRemove`). Neither form passes a `&mut` argument. -/
+
+open Lean in
+/-- `path.reverse()` for `path : Vec<u64>`: the call
+    `core::slice::<impl [T]>::reverse(&mut *deref_mut(&mut path))`. -/
+def sliceReverseCallJson (v : String) : Json :=
+  let revFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "slice", Json.mkObj [("data", Json.str "Impl")],
+     defIdSeg "ValueNs" "reverse"]
+  haxNode (Json.mkObj [("Call", Json.mkObj [("fun", revFn),
+    ("args", Json.arr #[derefMutVecArgJson v])])])
+
+/-- `path.reverse()` with `path : Vec<u64>`. -/
+def sliceReverseCall : TExpr := parseT (sliceReverseCallJson "path")
+
+-- The call is the rebinding of `path` to its reverse.
+#guard sliceReverseCall.erase == .assign "path" (.app "slice_reverse" [.var "path"])
+
+-- It renders as the runtime function, not as a `Deps` field.
+#guard runtimeName "slice_reverse" == "Hax.slice_reverse" && isAlwaysBuiltin "slice_reverse"
+#guard runtimeName "vec_remove" == "Hax.vec_remove" && isAlwaysBuiltin "vec_remove"
+
+-- Nothing is dropped.
+#guard tDroppedMutCalls [] [] [] [] sliceReverseCall == []
+
+open Lean in
+/-- `self.cells.remove(i)` on `Trace`: the call
+    `alloc::vec::<impl Vec<T>>::remove(&mut (*self).cells, i)`. -/
+def traceRemoveCallJson : Json :=
+  let selfDeref := haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", haxVarRef "self")])])
+  let cellsField := haxNodeT vecTyJson (Json.mkObj [("Field", Json.mkObj [
+    ("field", mkDefIdJson "plonky3_hax"
+      [defIdSeg "TypeNs" "air", defIdSeg "TypeNs" "Trace", defIdSeg "ValueNs" "cells"]),
+    ("lhs", selfDeref)])])
+  let borrowMut := haxNodeT (refMutTyJson vecTyJson)
+    (Json.mkObj [("Borrow", Json.mkObj [("arg", cellsField)])])
+  let removeFn := haxFnJson "alloc"
+    [defIdSeg "TypeNs" "vec", Json.mkObj [("data", Json.str "Impl")],
+     defIdSeg "ValueNs" "remove"]
+  haxNode (Json.mkObj [("Call", Json.mkObj [("fun", removeFn),
+    ("args", Json.arr #[borrowMut, haxVarRef "i"])])])
+
+/-- The parse of `self.cells.remove(i)` under `traceFields`. -/
+def traceRemoveCall : TExpr :=
+  match HaxAdapter.parseHaxTExpr traceRemoveCallJson { structFields := traceFields } with
+  | .ok e => e
+  | .error _ => .mk .unitVal .unit
+
+-- The write to `self` is kept and the value is the removed element.
+#guard traceRemoveCall.erase ==
+  .letBind "_removed" (.app "vec_remove" [.app ".cells" [.deref (.var "self")], .var "i"])
+    (.seq (.assign "self" (.app "struct_update#Trace#2#3"
+        [.var "self", .proj (.var "_removed") 1]))
+      (.proj (.var "_removed") 0))
+
+-- Nothing is dropped.
+#guard tDroppedMutCalls [] traceFields [] [] traceRemoveCall == []
+
+/-- `fn take(&mut self, i: usize) -> u64 { self.cells.remove(i) }`. -/
+def traceTakeSig : FnTypeInfo :=
+  ⟨[("self", .ref (.adt "Trace" []) true), ("i", .int)], .uint .w64⟩
+
+-- `take` is a write-back function of `self` with a value result.
+#guard mutWriteFns traceFields [("Trace_take", traceTakeSig)]
+  [("Trace_take", traceRemoveCall)] == [("Trace_take", [0], ["self"], true)]
+
+/-- `alloc::vec::Vec::remove` applied to a `Vec` variable `v`. -/
+def vecRemoveVarCall : TExpr :=
+  let vTy : ImpType := .adt "Vec" [.uint .w64]
+  let v : TExpr := .mk (.var "v") vTy
+  let arg : TExpr := .mk (.borrow v) (.ref vTy true)
+  match HaxAdapter.tVecRemove [] arg (.mk (.var "i") .int) with
+  | some k => .mk k (.uint .w64)
+  | none => .mk .unitVal .unit
+
+-- `v` is rebound to the vector without the element, which is the value.
+#guard vecRemoveVarCall.erase ==
+  .letBind "_removed" (.app "vec_remove" [.var "v", .var "i"])
+    (.seq (.assign "v" (.proj (.var "_removed") 1)) (.proj (.var "_removed") 0))
+
+/-! ## A write to a field of a `Vec` element of a `&mut` parameter
+
+`state.stash[si].leaf = new_leaf` on `struct Oram { stash: Vec<Entry>, depth }`,
+with `Entry { id, leaf }` and a second struct `Pos { id, leaf }` declaring the
+same field names. hax gives the place as the field `leaf` of
+`*index_mut(&mut (*state).stash, si)`. The parse resolves `leaf` through the
+element's type `Entry` and lowers the write to an assignment of `state`: the
+`stash` field updated at `si` by the element with `leaf` replaced
+(`tElemFieldPlaceAssign`). A place no arm lowers, such as the two-level field
+path `state.a.b`, is refused by the parse. -/
+
+/-- Field layouts of `Oram`, `Entry` and `Pos`. -/
+def oramFields : StructFieldNames :=
+  [("Oram", ["stash", "depth"]), ("Entry", ["id", "leaf"]), ("Pos", ["id", "leaf"])]
+
+open Lean in
+/-- The type `types::Entry`. -/
+def entryTyJson : Json :=
+  Json.mkObj [("Adt", Json.mkObj [
+    ("def_id", mkDefIdJson "pathoram_hax" [defIdSeg "TypeNs" "types", defIdSeg "TypeNs" "Entry"]),
+    ("generic_args", Json.arr #[])])]
+
+open Lean in
+/-- The field `f` of `Oram`/`Entry`, as the `field` of a hax `Field` node. -/
+def oramFieldIdJson (s f : String) : Json :=
+  mkDefIdJson "pathoram_hax" [defIdSeg "TypeNs" "types", defIdSeg "TypeNs" s, defIdSeg "ValueNs" f]
+
+open Lean in
+/-- The statement `state.stash[si].leaf = v`. -/
+def stashLeafAssignJson : Json :=
+  let stateDeref := haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", haxVarRef "state")])])
+  let stashField := haxNodeT vecTyJson (Json.mkObj [("Field", Json.mkObj [
+    ("field", oramFieldIdJson "Oram" "stash"), ("lhs", stateDeref)])])
+  let borrowMut := haxNodeT (refMutTyJson vecTyJson)
+    (Json.mkObj [("Borrow", Json.mkObj [("arg", stashField)])])
+  let indexMutFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "index", defIdSeg "TypeNs" "IndexMut",
+     defIdSeg "ValueNs" "index_mut"]
+  let call := haxNodeT (refMutTyJson entryTyJson) (Json.mkObj [("Call", Json.mkObj [
+    ("fun", indexMutFn), ("args", Json.arr #[borrowMut, haxVarRef "si"])])])
+  let elem := haxNodeT entryTyJson (Json.mkObj [("Deref", Json.mkObj [("arg", call)])])
+  let place := haxNode (Json.mkObj [("Field", Json.mkObj [
+    ("field", oramFieldIdJson "Entry" "leaf"), ("lhs", elem)])])
+  haxNode (Json.mkObj [("Assign", Json.mkObj [("lhs", place), ("rhs", haxVarRef "v")])])
+
+/-- The parse of `state.stash[si].leaf = v` under `oramFields`. -/
+def stashLeafAssign : Except String TExpr :=
+  HaxAdapter.parseHaxTExpr stashLeafAssignJson { structFields := oramFields }
+
+/-- The place `state.stash[si]`, read from the field `stash` of `state`. -/
+def stashElem : ImpExpr := .app "index" [.app ".stash" [.deref (.var "state")], .var "si"]
+
+-- The write is kept: `state` is rebound with element `si` of `stash` updated at
+-- `leaf` (position 1 of `Entry`'s 2 fields).
+#guard match stashLeafAssign with
+  | .ok e => e.erase == .assign "state" (.app "struct_update#Oram#0#2"
+      [.var "state", .app "array_update"
+        [.app ".stash" [.deref (.var "state")], .var "si",
+         .app "struct_update#Entry#1#2" [stashElem, .var "v"]]])
+  | .error _ => false
+
+open Lean in
+/-- The statement `state.a.b = v`: a two-level field path. -/
+def nestedFieldAssignJson : Json :=
+  let stateDeref := haxNode (Json.mkObj [("Deref", Json.mkObj [("arg", haxVarRef "state")])])
+  let aField := haxNode (Json.mkObj [("Field", Json.mkObj [
+    ("field", oramFieldIdJson "Oram" "a"), ("lhs", stateDeref)])])
+  let bField := haxNode (Json.mkObj [("Field", Json.mkObj [
+    ("field", oramFieldIdJson "A" "b"), ("lhs", aField)])])
+  haxNode (Json.mkObj [("Assign", Json.mkObj [("lhs", bField), ("rhs", haxVarRef "v")])])
+
+-- The parse refuses the write rather than drop it.
+#guard match HaxAdapter.parseHaxTExpr nestedFieldAssignJson { structFields := oramFields } with
+  | .ok _ => false
+  | .error _ => true
+
 end Hax.EmitterRegressions

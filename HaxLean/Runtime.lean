@@ -1010,6 +1010,31 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 /-- Push an element onto an array. -/
 @[inline] def push {α : Type} (arr : Array α) (x : α) : Array α := arr.push x
 
+/-- The slice method `reverse`: the array with its elements in reverse order. -/
+@[inline] def slice_reverse {α : Type} (arr : Array α) : Array α := arr.reverse
+
+/-- `slice_reverse` agrees with the `slice_reverse` builtin of the semantics,
+    `List.reverse` on the elements. -/
+theorem slice_reverse_toList {α : Type} (arr : Array α) :
+    (slice_reverse arr).toList = arr.toList.reverse :=
+  Array.toList_reverse
+
+/-- `Vec::remove`: the element at `i` and the array without it. Rust panics when
+    `i` is out of range, where the semantics' `vec_remove` is undefined; there
+    the value is `(default, arr)`. -/
+@[inline] def vec_remove {α : Type} [Inhabited α] (arr : Array α) (i : Int) :
+    α × Array α :=
+  if h : 0 ≤ i ∧ i.toNat < arr.size then (arr[i.toNat], arr.eraseIdx i.toNat h.2)
+  else (default, arr)
+
+/-- In range, `vec_remove` is the element at `i` and the elements with that one
+    erased, the `vec_remove` builtin of the semantics. -/
+theorem vec_remove_of_lt {α : Type} [Inhabited α] (arr : Array α) (i : Int)
+    (h0 : 0 ≤ i) (h : i.toNat < arr.size) :
+    (vec_remove arr i).1 = arr[i.toNat] ∧
+      (vec_remove arr i).2.toList = arr.toList.eraseIdx i.toNat := by
+  simp [vec_remove, h0, h, Array.toList_eraseIdx]
+
 -- Array literal — surface code uses `#[...]` syntax instead.
 -- Not called directly; `array_lit` in ImpExpr maps to `#[...]` in surface Lean.
 

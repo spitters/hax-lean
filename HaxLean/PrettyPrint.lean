@@ -194,6 +194,8 @@ def runtimeName (f : String) : String :=
   | "wrapping_mul" => "Hax.wrapping_mul"
   | "array_update" => "Hax.array_update"
   | "slice_update" => "Hax.slice_update"
+  | "slice_reverse" => "Hax.slice_reverse"
+  | "vec_remove" => "Hax.vec_remove"
   -- Slice/mutation operations
   | "literal" => "Hax.literal"
   | "str_opaque" => "Hax.literal"
@@ -2555,7 +2557,7 @@ def isRuntimeName (f : String) : Bool :=
   | "index" | "array_lit" | "repeat" | "push" | "len"
   | "rotate_right" | "rotate_left"
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
-  | "array_update" | "slice_update" | "cast" | "castVal"
+  | "array_update" | "slice_update" | "slice_reverse" | "vec_remove" | "cast" | "castVal"
   | "Some" | "None" | "Ok" | "Err"
   | "panic" | "literal" | "str_opaque" | "deref" | "deref_mut" | "clone" | "to_vec" | "copy_from_slice"
   | "extend_from_slice" | "truncate" | "sha256"
@@ -2577,7 +2579,8 @@ def isRuntimeName (f : String) : Bool :=
     `engine/backends/lean/lean_refines/lean_refines_backend.ml`. -/
 def builtinTable : List (String × List String) :=
   [ ("array",            ["index", "array_update", "slice_update", "repeat", "array_lit",
-                          "push", "len", "from_elem", "index_mut", "is_empty", "to_vec"])
+                          "push", "len", "from_elem", "index_mut", "is_empty", "to_vec",
+                          "slice_reverse", "vec_remove"])
   , ("collection",       ["copy_from_slice", "extend_from_slice", "truncate",
                           "with_capacity", "into_vec", "into_iter", "iter", "map",
                           "collect", "flat_map", "zip", "next", "new", "enumerate"])

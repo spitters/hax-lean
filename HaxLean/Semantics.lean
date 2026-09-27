@@ -497,6 +497,12 @@ def widthArrayOps : Builtins
     if i < vs.length then some (.array (vs.set i v)) else some (.array vs)
   | "array_update", [.array vs, .int i, v] =>
     if 0 ≤ i && i.toNat < vs.length then some (.array (vs.set i.toNat v)) else some (.array vs)
+  | "slice_reverse", [.array vs] => some (.array vs.reverse)
+  | "vec_remove", [.array vs, .uint _ i] =>
+    vs[i]?.map fun x => .tuple [x, .array (vs.eraseIdx i)]
+  | "vec_remove", [.array vs, .int i] =>
+    if 0 ≤ i then vs[i.toNat]?.map fun x => .tuple [x, .array (vs.eraseIdx i.toNat)]
+    else none
   | _, _ => none
 
 /-- Signed integer modular reduction: maps to [-2^(w-1), 2^(w-1)). -/
@@ -712,7 +718,8 @@ def hax64WordOps : Builtins
   | _, _ => none
 
 /-- The builtin table of `u64` code: `hax64WordOps`, then the array operations
-    `widthArrayOps` (`index`, `array_update` and `array_lit` on `.array`). -/
+    `widthArrayOps` (`index`, `array_update`, `array_lit`, `slice_reverse` and
+    `vec_remove` on `.array`). -/
 def hax64Builtins : Builtins := fun f args =>
   hax64WordOps f args <|> widthArrayOps f args
 
@@ -860,6 +867,17 @@ theorem widthArrayOps_array_update_int (vs : List Value) (v : Value) :
     widthArrayOps "array_update" [.array vs, .int a, v] =
       if 0 ≤ a && a.toNat < vs.length then some (.array (vs.set a.toNat v))
       else some (.array vs) := rfl
+
+/-- `slice_reverse` on a sequence is `List.reverse`. -/
+theorem widthArrayOps_slice_reverse (vs : List Value) :
+    widthArrayOps "slice_reverse" [.array vs] = some (.array vs.reverse) := rfl
+
+/-- `vec_remove v i` is the pair of the element at `i` and `v` with that element
+    erased; it is undefined when `i` is out of range, where `Vec::remove` panics. -/
+theorem widthArrayOps_vec_remove_int (vs : List Value) :
+    widthArrayOps "vec_remove" [.array vs, .int a] =
+      if 0 ≤ a then vs[a.toNat]?.map (fun x => .tuple [x, .array (vs.eraseIdx a.toNat)])
+      else none := rfl
 
 end hax64Arms
 

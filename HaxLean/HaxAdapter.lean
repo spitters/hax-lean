@@ -543,6 +543,117 @@ def tFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
       | none => none
     | none => none
 
+/-- The struct owning field `g` of a value of type `t`, seen through one
+    reference, with the field's position and the struct's field count: the
+    struct `t` names (by the last `::` segment) when `sf` declares it with a
+    field `g`, and otherwise the unique struct of `sf` declaring `g`
+    (`resolveStructField`). -/
+def resolveFieldOfTy (sf : StructFieldNames) (t : ImpType) (g : String) :
+    Option (String × Nat × Nat) :=
+  let byTy : Option (String × Nat × Nat) := match t with
+    | .adt n _ | .ref (.adt n _) _ =>
+      let short := ((n.splitOn "::").getLast?).getD n
+      match sf.lookup short with
+      | some fs => (fs.idxOf? g).map fun k => (short, k, fs.length)
+      | none => none
+    | _ => none
+  byTy <|> resolveStructField sf g
+
+/-- Lower an assignment through the place `a[j].g`, field `g` of element `j` of a
+    sequence place `a` that is a variable or a single-level struct-field place
+    `x.f`. With `e := index a j` and `g` at position `k` of the `m` fields of the
+    element's struct `T` (`resolveFieldOfTy`), the new sequence is
+
+      `array_update a j (struct_update#T#k#m e (mkVal e.g))`,
+
+    stored by `v := …` for a variable `v` and through `tFieldPlaceAssign` for
+    `x.f`. The element may be given as `*index_mut(&mut a, j)`, the form hax
+    exports for an element of a `Vec`. `none` for every other place. -/
+def tElemFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
+    (mkVal : TExpr → TExpr) : Option TExprKind :=
+  match lhs' with
+  | .mk (.app pg [elE]) gTy =>
+    if !pg.startsWith "." || pg == ".0" then none
+    else
+      match tIndexMutPlace (tStripDerefPlace elE) with
+      | .mk (.app "index" [arr, j]) _ =>
+        let elTy := match elE.ty with | .ref t _ => t | t => t
+        match resolveFieldOfTy sf elTy (pg.drop 1).toString with
+        | some (sname, k, m) =>
+          let elRead : TExpr := .mk (.app "index" [arr, j]) elTy
+          let newEl : TExpr := .mk (.app (structUpdateHead sname k m)
+            [elRead, mkVal (.mk (.app pg [elRead]) gTy)]) elTy
+          let newArr : TExpr := .mk (.app "array_update" [arr, j, newEl]) arr.ty
+          match tStripRefPlace arr with
+          | .mk (.var n) _ => some (.assign n newArr)
+          | arrP => tFieldPlaceAssign sf arrP (fun _ => newArr)
+        | none => none
+      | _ => none
+  | _ => none
+
+/-- The refusal of an assignment whose place the parse cannot lower to a
+    threaded write: lowering it would lose the write. -/
+def unsupportedPlaceError (lhsJ : Json) : String :=
+  s!"unsupported assignment place (the write would be lost): {toString (lhsJ.compress.take 400)}"
+
+/-- The value, before a call, of the sequence place a `&mut [T]`, `&mut [T; n]`
+    or `&mut Vec<T>` argument `a` names. For a variable `v` it is `v`, read
+    through a `deref` typed with the referenced type when `v` is itself a
+    reference; for a struct-field place `x.f` it is the field projection. The
+    result is typed with the sequence type. `none` for any other argument. -/
+def tSeqPlaceRead (a : TExpr) : Option TExpr :=
+  if !isMutSeqRef a.ty then none
+  else
+    match tStripRefPlace a with
+    | v@(.mk (.var _) vTy) =>
+      match vTy with
+      | .ref t _ => some (.mk (.deref v) t)
+      | _ => some v
+    | p@(.mk (.app pf [_]) _) => if pf.startsWith "." then some p else none
+    | _ => none
+
+/-- The assignment that stores `new` in the place `a` names: `v := new` for a
+    variable `v`, and the rebinding of `x` to `x` with field `f` set to `new` for
+    a single-level struct-field place `x.f` (`tFieldPlaceAssign`). `none` for
+    any other place. -/
+def tSeqPlaceWrite (sf : StructFieldNames) (a new : TExpr) : Option TExprKind :=
+  match tStripRefPlace a with
+  | .mk (.var n) _ => some (.assign n new)
+  | p => tFieldPlaceAssign sf p (fun _ => new)
+
+/-- The write-back form of the `core` slice method `a.reverse()`: for `a` a
+    `&mut [T]`, `&mut [T; n]` or `&mut Vec<T>` argument naming a variable or a
+    struct-field place with current value `s` (`tSeqPlaceRead`), the assignment
+    of `slice_reverse s` to that place (`tSeqPlaceWrite`). The builtin name
+    `slice_reverse` is distinct from any crate function `reverse`. `none` for
+    any other argument. -/
+def tSliceReverse (sf : StructFieldNames) (a : TExpr) : Option TExprKind := do
+  let s ← tSeqPlaceRead a
+  tSeqPlaceWrite sf a (.mk (.app "slice_reverse" [s]) s.ty)
+
+/-- The name bound to the pair `vec_remove s i` in the write-back form of
+    `Vec::remove`. -/
+def vecRemoveTmp : String := "_removed"
+
+/-- The write-back form of `Vec::remove(a, i)`: for `a` a `&mut Vec<T>` argument
+    naming a variable or a struct-field place with current value `s`, the
+    expression
+
+    `let _removed := vec_remove s i; (a := _removed.1); _removed.0`,
+
+    whose value is the removed element and which rebinds the place to the vector
+    without it. `vec_remove s i` is undefined when `i` is out of range, where
+    Rust panics. `none` for any other argument. -/
+def tVecRemove (sf : StructFieldNames) (a i : TExpr) : Option TExprKind := do
+  guard (isMutVecRef a.ty)
+  let s ← tSeqPlaceRead a
+  let elTy := seqElemTy s.ty
+  let pairTy : ImpType := .tuple [elTy, s.ty]
+  let tmp : TExpr := .mk (.var vecRemoveTmp) pairTy
+  let w ← tSeqPlaceWrite sf a (.mk (.proj tmp 1) s.ty)
+  some (.letBind vecRemoveTmp (.mk (.app "vec_remove" [s, i]) pairTy)
+    (.mk (.seq (.mk w .unit) (.mk (.proj tmp 0) elTy)) elTy))
+
 /-- The last path segment of a hax `DefId`: the item's own short name.
     Each segment's `data` is either a bare string (`"Impl"`) or a one-key
     object tagged with the namespace it lives in (`{"ValueNs": "intt"}`), as
@@ -2783,6 +2894,18 @@ where
         if let [a, i, k] := args then
           if let some e := tSliceSwap a i k then
             return e
+      -- `a.reverse()` (`core`) rebinds the receiver's place to the reversed
+      -- sequence (`tSliceReverse`); `Vec::remove(a, i)` (`alloc`) is the
+      -- removed element and rebinds the receiver's place to the vector without
+      -- it (`tVecRemove`).
+      if funName == "reverse" && callKrate funJ == "core" then
+        if let [a] := args then
+          if let some e := tSliceReverse implMap.structFields a then
+            return e
+      if funName == "remove" && callKrate funJ == "alloc" then
+        if let [a, i] := args then
+          if let some e := tVecRemove implMap.structFields a i then
+            return e
       -- Principled method-call disambiguation via the impl-self-type map.
       --
       -- When the Rust source has `crs.len()` and hax resolves it via
@@ -2904,7 +3027,8 @@ where
       return .app "array_lit" fields
 
     else if let .ok data := j.getObjVal? "Assign" then
-      let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
+      let lhsJ ← data.getObjVal? "lhs"
+      let lhs ← parseHaxTExpr lhsJ implMap
       let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let rec stripD : TExpr → TExpr
         | .mk (.deref e) _ => stripD e
@@ -2914,11 +3038,13 @@ where
         | .mk (.var n) _ => n
         | .mk (.deref (.mk (.var n) _)) _ => n
         | _ => "_assign"
+      -- A place no arm lowers is refused, so that no write is dropped.
       match lhs'.kind with
       | .var n => return .assign n rhs
       -- Nested: arr[i][j] = v → assign arr (array_update arr i (array_update (index arr i) j v))
       | .app "index" [.mk (.app "index" [outerArr, outerIdx]) _, innerIdx] =>
         let outerName := getVarName (stripD outerArr)
+        if outerName == "_assign" then throw (unsupportedPlaceError lhsJ)
         let innerUpdate := TExpr.mk (.app "array_update"
           [TExpr.mk (.app "index" [outerArr, outerIdx]) rhs.ty, innerIdx, rhs]) rhs.ty
         return .assign outerName (TExpr.mk (.app "array_update" [outerArr, outerIdx, innerUpdate]) outerArr.ty)
@@ -2928,14 +3054,18 @@ where
           -- Element of a struct-field place: self.buf[i] = v.
           match tFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
           | some k => return k
-          | none => return .assign "_assign" rhs
+          | none => throw (unsupportedPlaceError lhsJ)
         else
           return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, rhs]) rhs.ty)
       | _ =>
-        -- Struct-field place: self.buf = v.
+        -- Struct-field place `self.buf = v`, or a field of a sequence element
+        -- `self.v[i].g = v`.
         match tFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
         | some k => return k
-        | none => return .assign "_assign" rhs
+        | none =>
+          match tElemFieldPlaceAssign implMap.structFields lhs' (fun _ => rhs) with
+          | some k => return k
+          | none => throw (unsupportedPlaceError lhsJ)
 
     else if let .ok data := j.getObjVal? "AssignOp" then
       let rawOp := match data.getObjVal? "op" with
@@ -2961,16 +3091,20 @@ where
           match tFieldPlaceAssign implMap.structFields lhs'
               (fun read => TExpr.mk (.app op [read, rhs]) lhs.ty) with
           | some k => return k
-          | none => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
+          | none => throw (unsupportedPlaceError lhsJ)
         else
           -- The element read is the place `lhs'`, never an `index_mut` call.
           return .assign arrName (TExpr.mk (.app "array_update" [arr, idx, TExpr.mk (.app op [lhs', rhs]) lhs.ty]) arr.ty)
       | _ =>
-        -- Struct-field place: self.buf_len op= v.
-        match tFieldPlaceAssign implMap.structFields lhs'
-            (fun read => TExpr.mk (.app op [read, rhs]) lhs.ty) with
+        -- Struct-field place `self.buf_len op= v`, or a field of a sequence
+        -- element `self.v[i].g op= v`; any other place is refused.
+        let mkVal := fun read => TExpr.mk (.app op [read, rhs]) lhs.ty
+        match tFieldPlaceAssign implMap.structFields lhs' mkVal with
         | some k => return k
-        | none => return .assign "_assign" (TExpr.mk (.app op [lhs, rhs]) lhs.ty)
+        | none =>
+          match tElemFieldPlaceAssign implMap.structFields lhs' mkVal with
+          | some k => return k
+          | none => throw (unsupportedPlaceError lhsJ)
 
     else if let .ok data := j.getObjVal? "Borrow" then
       let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
