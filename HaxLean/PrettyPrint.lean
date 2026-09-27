@@ -1360,9 +1360,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       let ind := indent lvl
       s!"{ind}let {sanitizeName n} := (sorry : Unit)\n{atLine body lvl}"
   -- `letBind n (cfContinue v) body` — bind `n := v` (the continue payload)
-  -- and render the body. This handles `let fri_proof = match …
-  -- { Some(p) => p, None => return None }` after the explicit-match
-  -- desugar wraps the Some arm in `cfContinue p`.
+  -- and render the body.
   | .letBind n (.cfContinue v) body =>
     -- Drop the binding only when the body does not reference `n`
     -- (e.g. `_iter_unused`). For `_tup` produced by tuple-destructure

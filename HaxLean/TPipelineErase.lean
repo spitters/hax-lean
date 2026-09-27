@@ -93,64 +93,99 @@ theorem wrapArmsWrap_erase (arms : List (ImpPat × TExpr))
     rw [TExpr.maybeWrapContinue_erase, ih (p, e) (by simp),
       ihr (fun pa h => ih pa (List.mem_cons_of_mem _ h))]
 
-/-- Commuting diagram for `tWrapMatchArmsCF`. The prose statement in
-    `Hax/TPhase/WrapMatchArms.lean` is here discharged: every constructor
-    mirrors `wrapMatchArmsCF` structurally; `.ann` erases to its inner and
-    `.namedProj` to an `.app ".0"`, both traversed identically by the untyped
-    pass, and the `match_` arm's `anyCF`/`maybeWrapContinue` decisions commute
-    with erasure via `TExpr.endsInCF_erase` and `TExpr.maybeWrapContinue_erase`. -/
-theorem tWrapMatchArmsCF_erase (e : TExpr) :
-    (tWrapMatchArmsCF e).erase = wrapMatchArmsCF e.erase := by
+/-- `tWrapMatchArmsCF` and its value-position form `tWrapMatchArmsCF.valPos`
+    commute with erasure. -/
+theorem tWrapMatchArmsCF_erase_and (e : TExpr) :
+    (tWrapMatchArmsCF e).erase = wrapMatchArmsCF e.erase ∧
+      (tWrapMatchArmsCF.valPos e).erase = wrapMatchArmsCF.valPos e.erase := by
   induction e using TExpr.ind with
-  | lit | var | unitVal | continue_ | break_none => rfl
-  | letBind _ _ _ _ ih1 ih2 => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2]
-  | lam _ _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | seq _ _ _ ih1 ih2 => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2]
-  | proj _ _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
+  | lit | var | unitVal | continue_ | break_none => exact ⟨rfl, rfl⟩
+  | letBind _ val _ _ ih1 ih2 =>
+    refine ⟨?_, rfl⟩
+    simp only [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ← TExpr.isMatchExpr_erase, ih2.1]
+    split <;> simp [ih1.1, ih1.2]
+  | lam _ _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | seq _ _ _ ih1 ih2 =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1], rfl⟩
+  | proj _ _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
   | ifThenElse _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
-  | borrow _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | deref _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | assign _ _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
+  | borrow _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | deref _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | assign _ _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
   | forLoop _ _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
   | forLoopRev _ _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
-  | whileLoop _ _ _ ih1 ih2 => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2]
-  | break_some _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | earlyReturn _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | questionMark _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
+  | whileLoop _ _ _ ih1 ih2 =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1], rfl⟩
+  | break_some _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | earlyReturn _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | questionMark _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
   | forFold _ _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
   | forFoldRev _ _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
-  | whileFold _ _ _ ih1 ih2 => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
+  | whileFold _ _ _ ih1 ih2 =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1], rfl⟩
   | forFoldReturn _ _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
   | forFoldRevReturn _ _ _ _ _ ih1 ih2 ih3 =>
-    simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2, ih3]
-  | whileFoldReturn _ _ _ ih1 ih2 => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1, ih2]
-  | cfBreak _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | cfContinue _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | cfBreakContinue _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | ann _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
-  | namedProj _ _ _ ih => simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih]
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1, ih3.1], rfl⟩
+  | whileFoldReturn _ _ _ ih1 ih2 =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1, ih2.1], rfl⟩
+  | cfBreak _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | cfContinue _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | cfBreakContinue _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | namedProj _ _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
+  | ann _ _ ih =>
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1],
+      by simp [tWrapMatchArmsCF.valPos, TExpr.erase, ih.2]⟩
   | app _ _ args ih =>
+    refine ⟨?_, rfl⟩
     simp only [tWrapMatchArmsCF, tWrapMatchArmsCF.mapExpr_eq, TExpr.erase, TExpr.eraseList_eq,
       wrapMatchArmsCF, wrapMatchArmsCF.mapExpr_eq, List.map_map, Function.comp_def]
-    congr 1; exact List.map_congr_left (fun a ha => ih a ha)
+    congr 1; exact List.map_congr_left (fun a ha => (ih a ha).1)
   | tuple _ elems ih =>
+    refine ⟨?_, rfl⟩
     simp only [tWrapMatchArmsCF, tWrapMatchArmsCF.mapExpr_eq, TExpr.erase, TExpr.eraseList_eq,
       wrapMatchArmsCF, wrapMatchArmsCF.mapExpr_eq, List.map_map, Function.comp_def]
-    congr 1; exact List.map_congr_left (fun a ha => ih a ha)
+    congr 1; exact List.map_congr_left (fun a ha => (ih a ha).1)
   | match_ _ scrut arms ih1 ih2 =>
-    have ih2' : ∀ pa ∈ arms, (tWrapMatchArmsCF pa.2).erase = wrapMatchArmsCF pa.2.erase := ih2
-    simp only [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1]
-    congr 1
-    rw [wrapAnyCF_erase arms ih2']
-    split
-    · exact wrapArmsWrap_erase arms ih2'
-    · exact wrapArmsId_erase arms ih2'
+    have ih2' : ∀ pa ∈ arms, (tWrapMatchArmsCF pa.2).erase = wrapMatchArmsCF pa.2.erase :=
+      fun pa h => (ih2 pa h).1
+    refine ⟨?_, ?_⟩
+    · simp only [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih1.1]
+      congr 1
+      rw [wrapAnyCF_erase arms ih2']
+      split
+      · exact wrapArmsWrap_erase arms ih2'
+      · exact wrapArmsId_erase arms ih2'
+    · simp only [tWrapMatchArmsCF.valPos, TExpr.erase, wrapMatchArmsCF.valPos, ih1.1]
+      congr 1
+      exact wrapArmsId_erase arms ih2'
+
+/-- Commuting diagram for `tWrapMatchArmsCF`: every constructor mirrors
+    `wrapMatchArmsCF` structurally; `.ann` erases to its inner and `.namedProj`
+    to an `.app ".0"`, both traversed identically by the untyped pass; the
+    `match_` arm's `anyCF`/`maybeWrapContinue` decisions commute with erasure via
+    `TExpr.endsInCF_erase` and `TExpr.maybeWrapContinue_erase`, and the
+    `letBind` value-position decision via `TExpr.isMatchExpr_erase`. -/
+theorem tWrapMatchArmsCF_erase (e : TExpr) :
+    (tWrapMatchArmsCF e).erase = wrapMatchArmsCF e.erase :=
+  (tWrapMatchArmsCF_erase_and e).1
 
 /-! ## Pre-pipeline composition -/
 

@@ -60,15 +60,29 @@ def endsInCF : ImpExpr → Bool
 def maybeWrapContinue (e : ImpExpr) : ImpExpr :=
   if endsInCF e then e else .cfContinue e
 
+/-- Whether an expression is a `match_`. -/
+def isMatchExpr : ImpExpr → Bool
+  | .match_ _ _ => true
+  | _ => false
+
 /-- Phase 4.5 transformation: wrap match arms with cfContinue when
     some sibling arm ends in a control-flow constructor.
 
     Recursive — also descends into other constructors. The
-    "no sibling has CF" case is the identity (preserves the input). -/
+    "no sibling has CF" case is the identity (preserves the input).
+
+    A `match_` bound by a `letBind` keeps its arms unwrapped (`valPos`): there an
+    arm's value is bound to the name and the body runs, while a `cfBreak` arm
+    exits past the body. This is the form of Rust's `let x = o?;`,
+    `letBind x (match_ o [Some p ⇒ p, None ⇒ cfBreak None]) body`, whose
+    `denote'` binds `p` and runs `body` on `Some p` and returns `None` from the
+    function on `None`. -/
 def wrapMatchArmsCF : ImpExpr → ImpExpr
   | .lit v => .lit v
   | .var n => .var n
-  | .letBind n val body => .letBind n (wrapMatchArmsCF val) (wrapMatchArmsCF body)
+  | .letBind n val body =>
+    .letBind n (if isMatchExpr val then valPos val else wrapMatchArmsCF val)
+      (wrapMatchArmsCF body)
   | .lam ps body => .lam ps (wrapMatchArmsCF body)
   | .app f args => .app f (mapExpr args)
   | .tuple elems => .tuple (mapExpr elems)
@@ -122,6 +136,13 @@ where
   mapArmsWrap : List (ImpPat × ImpExpr) → List (ImpPat × ImpExpr)
     | [] => []
     | (p, e) :: rest => (p, maybeWrapContinue e) :: mapArmsWrap rest
+  /-- The transformation of a `match_` at the value position of a `letBind`:
+      the scrutinee and the arm bodies are transformed and the arms are not
+      wrapped. On any other expression it is the identity; `wrapMatchArmsCF`
+      applies it to a `match_` only. -/
+  valPos : ImpExpr → ImpExpr
+    | .match_ scrut arms => .match_ (wrapMatchArmsCF scrut) (mapArms arms)
+    | e => e
 
 @[simp] theorem wrapMatchArmsCF.mapExpr_eq (es : List ImpExpr) :
     wrapMatchArmsCF.mapExpr es = es.map wrapMatchArmsCF := by
@@ -180,6 +201,31 @@ theorem arms_map_preserves_noRefs (arms : List (ImpPat × ImpExpr))
   obtain ⟨⟨p, b⟩, hpb, rfl⟩ := List.mem_map.mp hpa
   exact maybeWrapContinue_preserves_noRefs _ (h (p, b) hpb)
 
+/-- `NoReferences (maybeWrapContinue e)` gives `NoReferences e`. -/
+theorem noRefs_of_maybeWrapContinue {e : ImpExpr} (h : NoReferences (maybeWrapContinue e)) :
+    NoReferences e := by
+  unfold maybeWrapContinue at h
+  split at h
+  · exact h
+  · cases h with | cfContinue he => exact he
+
+/-- On a `match_`, `NoReferences` of the transformed expression gives it for the
+    form with unwrapped arms. -/
+theorem wrapMatchArmsCF.valPos_preserves_noRefs (e : ImpExpr) (hm : isMatchExpr e = true)
+    (h : NoReferences (wrapMatchArmsCF e)) : NoReferences (wrapMatchArmsCF.valPos e) := by
+  cases e with
+  | match_ scrut arms =>
+    simp only [wrapMatchArmsCF, wrapMatchArmsCF.valPos, wrapMatchArmsCF.mapArms_eq,
+      wrapMatchArmsCF.mapArmsWrap_eq] at h ⊢
+    split at h
+    · cases h with | match_ hs harms =>
+      refine .match_ hs (fun pa hpa => ?_)
+      obtain ⟨p, b⟩ := pa
+      exact noRefs_of_maybeWrapContinue (harms (p, maybeWrapContinue b)
+        (List.mem_map.mpr ⟨(p, b), hpa, rfl⟩))
+    · exact h
+  | _ => simp [isMatchExpr] at hm
+
 /-- `wrapMatchArmsCF` preserves `NoReferences`. -/
 theorem wrapMatchArmsCF_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
     NoReferences (wrapMatchArmsCF e) := by
@@ -193,10 +239,13 @@ theorem wrapMatchArmsCF_preserves_noRefs (e : ImpExpr) (h : NoReferences e) :
     cases h with | lam h1 =>
     simp only [wrapMatchArmsCF]
     exact .lam (ih h1)
-  | letBind _ _ _ ih1 ih2 =>
+  | letBind _ val _ ih1 ih2 =>
     cases h with | letBind h1 h2 =>
     simp only [wrapMatchArmsCF]
-    exact .letBind (ih1 h1) (ih2 h2)
+    refine .letBind ?_ (ih2 h2)
+    split
+    · exact wrapMatchArmsCF.valPos_preserves_noRefs val ‹_› (ih1 h1)
+    · exact ih1 h1
   | app _ args ih =>
     cases h with | app hargs =>
     simp only [wrapMatchArmsCF, wrapMatchArmsCF.mapExpr_eq]

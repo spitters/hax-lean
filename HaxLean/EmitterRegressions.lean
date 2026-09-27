@@ -11,13 +11,20 @@ public meta import HaxLean.PrettyPrintT
 public import HaxLean.PrettyPrintT
 public meta import HaxLean.ThreadMutations
 public import HaxLean.ThreadMutations
+public meta import HaxLean.SemanticsCF
+public import HaxLean.SemanticsCF
+public meta import HaxLean.Pipeline
+public import HaxLean.Pipeline
+public meta import HaxLean.Phase.WrapMatchArms
+public import HaxLean.Phase.WrapMatchArms
 
 /-!
 # Emitter regressions
 
 Pins on the emitter's analyses and rendering: the accumulators the analysis
-reports for loop body shapes whose state must be carried, and the projection
-paths of tuple destructuring chains, which follow the tuple's arity.
+reports for loop body shapes whose state must be carried, the projection
+paths of tuple destructuring chains, which follow the tuple's arity, and the
+form and `denote'` of Rust's `?` operator after the match-arm wrap.
 -/
 
 @[expose] public section
@@ -1540,5 +1547,41 @@ def pairFile : String :=
 #guard ((pairFile.splitOn "0» (x : Pair_T) := x.1\n").length) == 2
 #guard ((pairFile.splitOn "1» (x : Pair_T) := x.2\n").length) == 2
 end UnitStructs
+
+namespace QuestionMark
+
+/-- Rust's `let x = o?; Some(x + 1)` as the adapter reads it: a `match_` whose
+    `None` arm is an early return, bound by a `letBind`. -/
+def questionLet : ImpExpr :=
+  .letBind "x" (.match_ (.var "o")
+      [(.somePat (.varPat "p"), .var "p"), (.nonePat, .earlyReturn (.app "None" []))])
+    (.app "Some" [.app "add" [.var "x", .lit (.int 1)]])
+
+/-- `questionLet` after the pipeline and the match-arm wrap. -/
+def questionLetOut : ImpExpr := wrapMatchArmsCF (pipeline questionLet)
+
+-- The `Some` arm of a `match_` bound by a `letBind` stays unwrapped, and the
+-- `None` arm is a `cfBreak`, the function-level early return.
+#guard questionLetOut ==
+  .letBind "x" (.match_ (.var "o")
+      [(.somePat (.varPat "p"), .var "p"), (.nonePat, .cfBreak (.app "None" []))])
+    (.app "Some" [.app "add" [.var "x", .lit (.int 1)]])
+
+-- On `o = Some 4` the body runs on the payload: the result is `Some 5`.
+#guard ((denote' defaultBuiltins 10 questionLetOut).run
+    (Env.empty.extend "o" (.option (some (.int 4))))).1 ==
+  .val (.option (some (.int 5)))
+
+-- On `o = None` the function exits with `None` (a function-level `cfBreak`).
+#guard ((denote' defaultBuiltins 10 questionLetOut).run
+    (Env.empty.extend "o" (.option none))).1 ==
+  .val (.controlFlow true (.option none))
+
+-- The renderer binds the payload in the `Some` arm and returns `none` from the
+-- `None` arm.
+#guard toLean (stripFunctionTailCfBreak questionLetOut) 1 [] ==
+  "  match o with\n  | some (p) =>\n    let x := p\n    some (Hax.add x (1 : Int))\n  | none => none"
+
+end QuestionMark
 
 end Hax.EmitterRegressions

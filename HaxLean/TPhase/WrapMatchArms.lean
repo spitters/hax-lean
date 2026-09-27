@@ -32,12 +32,21 @@ def TExpr.endsInCF : TExpr → Bool
 def TExpr.maybeWrapContinue (e : TExpr) : TExpr :=
   if e.endsInCF then e else .mk (.cfContinue e) (.controlFlow .unknown e.ty)
 
-/-- Typed version of `wrapMatchArmsCF`. -/
+/-- Whether a typed expression is a `match_` under zero or more `.ann` markers,
+    i.e. whether its erasure is a `match_`. -/
+def TExpr.isMatchExpr : TExpr → Bool
+  | .mk (.match_ _ _) _ => true
+  | .mk (.ann e) _ => e.isMatchExpr
+  | _ => false
+
+/-- Typed version of `wrapMatchArmsCF`. A `match_` bound by a `letBind`, under
+    any `.ann` markers, keeps its arms unwrapped (`valPos`). -/
 def tWrapMatchArmsCF : TExpr → TExpr
   | .mk (.lit v) ty => .mk (.lit v) ty
   | .mk (.var n) ty => .mk (.var n) ty
   | .mk (.letBind n val body) ty =>
-      .mk (.letBind n (tWrapMatchArmsCF val) (tWrapMatchArmsCF body)) ty
+      .mk (.letBind n (if val.isMatchExpr then valPos val else tWrapMatchArmsCF val)
+        (tWrapMatchArmsCF body)) ty
   | .mk (.lam ps body) ty => .mk (.lam ps (tWrapMatchArmsCF body)) ty
   | .mk (.app f args) ty => .mk (.app f (mapExpr args)) ty
   | .mk (.tuple elems) ty => .mk (.tuple (mapExpr elems)) ty
@@ -92,6 +101,11 @@ where
   mapArmsWrap : List (ImpPat × TExpr) → List (ImpPat × TExpr)
     | [] => []
     | (p, e) :: rest => (p, e.maybeWrapContinue) :: mapArmsWrap rest
+  /-- Typed version of `wrapMatchArmsCF.valPos`, looking through `.ann`. -/
+  valPos : TExpr → TExpr
+    | .mk (.match_ scrut arms) ty => .mk (.match_ (tWrapMatchArmsCF scrut) (mapArms arms)) ty
+    | .mk (.ann e) ty => .mk (.ann (valPos e)) ty
+    | e => e
 
 @[simp] theorem tWrapMatchArmsCF.mapExpr_eq (es : List TExpr) :
     tWrapMatchArmsCF.mapExpr es = es.map tWrapMatchArmsCF := by
@@ -158,6 +172,13 @@ theorem TExpr.endsInCF_erase (e : TExpr) :
   | forLoop | forLoopRev | whileLoop | break_some | earlyReturn | questionMark
   | forFold | forFoldRev | whileFold | forFoldReturn | forFoldRevReturn | whileFoldReturn =>
     simp [TExpr.endsInCF, TExpr.erase, Hax.endsInCF]
+
+/-- `isMatchExpr` is preserved under erasure. -/
+theorem TExpr.isMatchExpr_erase (e : TExpr) :
+    e.isMatchExpr = Hax.isMatchExpr e.erase := by
+  induction e using TExpr.ind with
+  | ann _ _ ih => simp [TExpr.isMatchExpr, TExpr.erase, ih]
+  | _ => simp [TExpr.isMatchExpr, TExpr.erase, Hax.isMatchExpr]
 
 /-- `maybeWrapContinue` commutes with erasure. -/
 theorem TExpr.maybeWrapContinue_erase (e : TExpr) :
