@@ -1787,8 +1787,12 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       let lowDef := if needsPartial then lowDef.replace "def " "partial def " else lowDef
       s!"{anfDef}\n{lowDef}")
     s!"{ds}\n"
+  -- The `mutual` block holds the surface definitions only. The literals are
+  -- closed terms that name no surface definition, so each is its own command
+  -- with its own heartbeat budget; inside the block they would share one
+  -- budget with every other declaration of the crate.
   let footer :=
-    s!"\n{impExprs}\n{lowCTBlock}{texprBlock}{mutualClose}{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
+    s!"\n{mutualClose}{impExprs}\n{lowCTBlock}{texprBlock}{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax
