@@ -1053,12 +1053,12 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     cases rlo with
     | val vlo =>
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         em_eval_hi
         cases rhi with
         | val vhi =>
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             rw [denoteForLoop'_wrapReturns]
             exact denoteForLoop'_body_congr bi v (explicitMonadic body) body
@@ -1101,12 +1101,12 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     cases rlo with
     | val vlo =>
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         em_eval_hi
         cases rhi with
         | val vhi =>
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             rw [denoteForLoop'Return_wrapReturns]
             exact denoteForLoop'Return_body_congr bi v (explicitMonadic body) body
@@ -1136,12 +1136,12 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     cases rlo with
     | val vlo =>
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         em_eval_hi
         cases rhi with
         | val vhi =>
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             rw [denoteForLoopRev'_wrapReturns]
             exact denoteForLoopRev'_body_congr bi v (explicitMonadic body) body
@@ -1171,12 +1171,12 @@ theorem explicitMonadic_correct (bi : Builtins) (e : ImpExpr)
     cases rlo with
     | val vlo =>
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         em_eval_hi
         cases rhi with
         | val vhi =>
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             rw [denoteForLoopRev'Return_wrapReturns]
             exact denoteForLoopRev'Return_body_congr bi v (explicitMonadic body) body

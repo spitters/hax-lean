@@ -1473,7 +1473,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
         have hvlo := hnc_lo vlo rfl
         cases vlo with
         | controlFlow => simp [Value.deepNoControlFlow] at hvlo
-        | int lo_val =>
+        | int lo_val | uint _ lo_val =>
           -- rlo = val (int lo_val), now case split on rhi
           simp only [Outcome.encodeCF3gen_val]
           fl_eval_hi
@@ -1482,7 +1482,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
             have hvhi := hnc_hi vhi rfl
             cases vhi with
             | controlFlow => simp [Value.deepNoControlFlow] at hvhi
-            | int hi_val =>
+            | int hi_val | uint _ hi_val =>
               -- Both int: denote' dispatches to denoteForLoop' directly
               simp only [Outcome.encodeCF3gen_val, StateT.pure]
               have hbody_inv : FLInv bi body :=
@@ -1553,7 +1553,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
         have hvlo := hnc_lo vlo rfl
         cases vlo with
         | controlFlow => simp [Value.deepNoControlFlow] at hvlo
-        | int lo_val =>
+        | int lo_val | uint _ lo_val =>
           simp only [Outcome.encodeCF3gen_val]
           fl_eval_hi
           cases rhi with
@@ -1561,7 +1561,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
             have hvhi := hnc_hi vhi rfl
             cases vhi with
             | controlFlow => simp [Value.deepNoControlFlow] at hvhi
-            | int hi_val =>
+            | int hi_val | uint _ hi_val =>
               simp only [Outcome.encodeCF3gen_val, StateT.pure]
               obtain ⟨henvfl, hncfl, _, hsimfl⟩ :=
                 denoteForLoop_combined_return bi hbi body (ih_body hbody_ncf true)
@@ -1628,7 +1628,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
         have hvlo := hnc_lo vlo rfl
         cases vlo with
         | controlFlow => simp [Value.deepNoControlFlow] at hvlo
-        | int lo_val =>
+        | int lo_val | uint _ lo_val =>
           -- rlo = val (int lo_val), now case split on rhi
           simp only [Outcome.encodeCF3gen_val]
           fl_eval_hi
@@ -1637,7 +1637,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
             have hvhi := hnc_hi vhi rfl
             cases vhi with
             | controlFlow => simp [Value.deepNoControlFlow] at hvhi
-            | int hi_val =>
+            | int hi_val | uint _ hi_val =>
               -- Both int: denote' dispatches to denoteForLoopRev' directly
               simp only [Outcome.encodeCF3gen_val, StateT.pure]
               have hbody_inv : FLInv bi body :=
@@ -1707,7 +1707,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
         have hvlo := hnc_lo vlo rfl
         cases vlo with
         | controlFlow => simp [Value.deepNoControlFlow] at hvlo
-        | int lo_val =>
+        | int lo_val | uint _ lo_val =>
           simp only [Outcome.encodeCF3gen_val]
           fl_eval_hi
           cases rhi with
@@ -1715,7 +1715,7 @@ theorem FL_combined_gen (bi : Builtins) (hbi : Builtins.DeepNoControlFlow bi)
             have hvhi := hnc_hi vhi rfl
             cases vhi with
             | controlFlow => simp [Value.deepNoControlFlow] at hvhi
-            | int hi_val =>
+            | int hi_val | uint _ hi_val =>
               simp only [Outcome.encodeCF3gen_val, StateT.pure]
               obtain ⟨henvfl, hncfl, _, hsimfl⟩ :=
                 denoteForLoopRev_combined_return bi hbi body (ih_body hbody_ncf true)

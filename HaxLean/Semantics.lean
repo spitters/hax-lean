@@ -95,7 +95,9 @@ mutual
     The `fuel` parameter bounds loop iterations. Non-loop constructs
     do not consume fuel. `bi` provides builtin function implementations.
     A counted loop evaluates its upper bound only when its lower bound is a value;
-    otherwise it returns the lower bound's outcome. -/
+    otherwise it returns the lower bound's outcome. Each bound is an integer or an
+    unsigned word (`Value.uint`), read as the integer it denotes; the counter is
+    bound to integers. -/
 def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
   | .lit v => pure (.val (Value.ofLit v))
   | .var name => do
@@ -167,6 +169,12 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
         denoteForLoop bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoop bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoop bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
+        denoteForLoop bi fuel var lo_val hi_val body
       | _, .val _ => pure (.err "for loop bounds must be integers")
       | _, other => pure other
     | other => pure other
@@ -177,6 +185,12 @@ def denote (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       let rhi ← denote bi fuel hi
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRev bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoopRev bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoopRev bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
         denoteForLoopRev bi fuel var lo_val hi_val body
       | _, .val _ => pure (.err "for loop bounds must be integers")
       | _, other => pure other

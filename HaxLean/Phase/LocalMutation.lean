@@ -340,16 +340,18 @@ theorem localMutation_correct (bi : Builtins) (fuel : Nat)
     unfold denote
     rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext vlo; congr 1; funext rhi
     split
-    · exact denoteForLoop_congr bi fuel v _ _ body (localMutation mvars body) ih3
-    all_goals rfl
+    all_goals first
+      | exact denoteForLoop_congr bi fuel v _ _ body (localMutation mvars body) ih3
+      | rfl
   | forLoopRev v lo hi body ih1 ih2 ih3 =>
     intro fuel
     simp only [localMutation]
     unfold denote
     rw [ih1 fuel, ih2 fuel]; congr 1; funext rlo; congr 1; funext vlo; congr 1; funext rhi
     split
-    · exact denoteForLoopRev_congr bi fuel v _ _ body (localMutation mvars body) ih3
-    all_goals rfl
+    all_goals first
+      | exact denoteForLoopRev_congr bi fuel v _ _ body (localMutation mvars body) ih3
+      | rfl
   | whileLoop c body ih1 ih2 =>
     intro fuel
     simp only [localMutation]

@@ -656,7 +656,7 @@ local macro "er_counted_loop" lem:ident : tactic => `(tactic| (
     cases vlo with
     | controlFlow =>
       simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    | int lo_val =>
+    | int lo_val | uint _ lo_val =>
       try simp only [bind, StateT.bind]
       generalize heqhi : denote' bi fuel hi envlo = phi
       obtain ⟨rhi, envhi⟩ := phi
@@ -664,7 +664,7 @@ local macro "er_counted_loop" lem:ident : tactic => `(tactic| (
       cases rhi with
       | val vhi =>
         cases vhi with
-        | int hi_val => exact $lem bi body ih_body fuel var lo_val hi_val envhi w
+        | int hi_val | uint _ hi_val => exact $lem bi body ih_body fuel var lo_val hi_val envhi w
         | _ => simp only [pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
       | earlyRet w' =>
         simp only [pure, Pure.pure, StateT.pure]; intro h
@@ -1574,13 +1574,13 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     | val vlo =>
       simp only [Outcome.encodeCF4]
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         cf4_eval_hi
         cases rhi with
         | val vhi =>
           simp only [Outcome.encodeCF4]
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             -- Reduce match on LHS (both sides now use denoteForLoop' directly)
             dsimp only []
             -- Since denoteForLoop' never produces earlyRet, encodeCF4 is identity
@@ -1624,13 +1624,13 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     | val vlo =>
       simp only [Outcome.encodeCF4]
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         cf4_eval_hi
         cases rhi with
         | val vhi =>
           simp only [Outcome.encodeCF4]
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             -- Since denoteForLoopRev' never produces earlyRet, encodeCF4 is identity
             have hfl := denoteForLoopRev'_no_earlyRet bi body hbody_no_er fuel v lo_val hi_val envhi
@@ -1684,13 +1684,13 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     | val vlo =>
       simp only [Outcome.encodeCF4]
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         cf4_eval_hi
         cases rhi with
         | val vhi =>
           simp only [Outcome.encodeCF4]
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             exact denoteForLoop'Return_sim bi v body
               (ih_body hlbody hqbody hwbody) hbody_er_not_cf fuel lo_val hi_val envhi
@@ -1725,13 +1725,13 @@ theorem CF4_combined (bi : Builtins) (e : ImpExpr)
     | val vlo =>
       simp only [Outcome.encodeCF4]
       cases vlo with
-      | int lo_val =>
+      | int lo_val | uint _ lo_val =>
         cf4_eval_hi
         cases rhi with
         | val vhi =>
           simp only [Outcome.encodeCF4]
           cases vhi with
-          | int hi_val =>
+          | int hi_val | uint _ hi_val =>
             dsimp only []
             exact denoteForLoopRev'Return_sim bi v body
               (ih_body hlbody hqbody hwbody) hbody_er_not_cf fuel lo_val hi_val envhi

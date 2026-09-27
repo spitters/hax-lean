@@ -250,7 +250,8 @@ mutual
 
 /-- ControlFlow-aware big-step semantics. A counted loop evaluates its upper bound only
     when its lower bound is a value that is not a control-flow value; otherwise it
-    returns the lower bound's outcome. -/
+    returns the lower bound's outcome. Each bound is an integer or an unsigned word
+    (`Value.uint`), read as the integer it denotes; the counter is bound to integers. -/
 def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
   | .lit v => pure (.val (Value.ofLit v))
   | .var name => do
@@ -322,6 +323,12 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
         denoteForLoopOrig' bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoopOrig' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoopOrig' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
+        denoteForLoopOrig' bi fuel var lo_val hi_val body
       | _, .val _ => pure (.err "for loop bounds must be integers")
       | _, other => pure other
     | other => pure other
@@ -333,6 +340,12 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       let rhi ← denote' bi fuel hi
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRevOrig' bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoopRevOrig' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoopRevOrig' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
         denoteForLoopRevOrig' bi fuel var lo_val hi_val body
       | _, .val _ => pure (.err "for loop bounds must be integers")
       | _, other => pure other
@@ -371,6 +384,12 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
         denoteForLoop' bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoop' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoop' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
+        denoteForLoop' bi fuel var lo_val hi_val body
       | _, .val (.controlFlow _ _) => pure rhi
       | _, .val _ => pure (.err "for loop bounds must be integers")
       | _, other => pure other
@@ -383,6 +402,12 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       let rhi ← denote' bi fuel hi
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRev' bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoopRev' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoopRev' bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
         denoteForLoopRev' bi fuel var lo_val hi_val body
       | _, .val (.controlFlow _ _) => pure rhi
       | _, .val _ => pure (.err "for loop bounds must be integers")
@@ -399,6 +424,12 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
         denoteForLoop'Return bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoop'Return bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoop'Return bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
+        denoteForLoop'Return bi fuel var lo_val hi_val body
       | _, .val (.controlFlow _ _) => pure rhi
       | _, .val _ => pure (.err "for loop bounds must be integers")
       | _, other => pure other
@@ -411,6 +442,12 @@ def denote' (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
       let rhi ← denote' bi fuel hi
       match vlo, rhi with
       | .int lo_val, .val (.int hi_val) =>
+        denoteForLoopRev'Return bi fuel var lo_val hi_val body
+      | .int lo_val, .val (.uint _ hi_val) =>
+        denoteForLoopRev'Return bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.int hi_val) =>
+        denoteForLoopRev'Return bi fuel var lo_val hi_val body
+      | .uint _ lo_val, .val (.uint _ hi_val) =>
         denoteForLoopRev'Return bi fuel var lo_val hi_val body
       | _, .val (.controlFlow _ _) => pure rhi
       | _, .val _ => pure (.err "for loop bounds must be integers")
@@ -691,6 +728,27 @@ def denoteForLoopRev'Return (bi : Builtins) (fuel : Nat)
   termination_by (fuel, sizeOf body + 1)
 
 end
+
+/-! ## Counted loops with an unsigned upper bound -/
+
+/-- A `forFold` from an integer literal to a variable holding the unsigned word `n`
+    runs as `denoteForLoop'` up to `n`. -/
+theorem denote'_forFold_lit_var_uint (bi : Builtins) (fuel : Nat) (var h : String) (lo : Int)
+    (body : ImpExpr) (env : Env) (w : IntWidth) (n : Nat) (hh : env h = some (.uint w n)) :
+    (denote' bi fuel (.forFold var (.lit (.int lo)) (.var h) body)).run env =
+      (denoteForLoop' bi fuel var lo n body).run env := by
+  simp [denote', StateT.run, bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get,
+    pure, StateT.pure, hh, Value.ofLit]
+
+/-- A `forFoldReturn` from an integer literal to a variable holding the unsigned
+    word `n` runs as `denoteForLoop'Return` up to `n`. -/
+theorem denote'_forFoldReturn_lit_var_uint (bi : Builtins) (fuel : Nat) (var h : String)
+    (lo : Int) (body : ImpExpr) (env : Env) (w : IntWidth) (n : Nat)
+    (hh : env h = some (.uint w n)) :
+    (denote' bi fuel (.forFoldReturn var (.lit (.int lo)) (.var h) body)).run env =
+      (denoteForLoop'Return bi fuel var lo n body).run env := by
+  simp [denote', StateT.run, bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get,
+    pure, StateT.pure, hh, Value.ofLit]
 
 /-! ## ControlFlow-free invariant -/
 
