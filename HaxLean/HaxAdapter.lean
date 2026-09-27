@@ -235,7 +235,20 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
         | _ :: parent :: _ => s!"{parent}_{base}"
         | _ => base
       let krateName : String := (inner.getObjValAs? String "krate").toOption.getD ""
-      if collisions.contains n || shadowsLocalFn lc krateName n then qualified
+      -- A method declared by a trait (`kind: AssocFn` under a `Trait` parent),
+      -- called on a type parameter, has no body in the export; when a local
+      -- function has the same short name, the trait method is qualified with
+      -- the trait's name so the call does not reach that function.
+      let parentKind : Option String := do
+        let p ← (inner.getObjVal? "parent").toOption
+        let pc ← (p.getObjVal? "contents").toOption
+        let pv ← (pc.getObjVal? "value").toOption
+        (pv.getObjValAs? String "kind").toOption
+      let traitMethodShadow :=
+        (inner.getObjValAs? String "kind").toOption == some "AssocFn"
+          && parentKind == some "Trait" && lc.fnNames.contains n
+      if collisions.contains n || shadowsLocalFn lc krateName n || traitMethodShadow then
+        qualified
       else base
     | none =>
       match inner.getObjValAs? String "krate" with
@@ -245,6 +258,21 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
     match inner.getObjValAs? String "krate" with
     | .ok k => k
     | _ => "unknown"
+
+/-- The short name of the enum a variant `DefId` belongs to: the name
+    `extractDefIdName` gives its parent, when the `DefId` has kind `Variant` and
+    its parent kind `Enum`. `none` for any other `DefId`. -/
+def variantEnumName (j : Json) : Option String := do
+  let inner := match j.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with
+      | .ok v => v
+      | _ => c
+    | _ => j
+  guard ((inner.getObjValAs? String "kind").toOption == some "Variant")
+  let p ← (inner.getObjVal? "parent").toOption
+  let pv ← (p.getObjVal? "contents" >>= (·.getObjVal? "value")).toOption
+  guard ((pv.getObjValAs? String "kind").toOption == some "Enum")
+  pure (extractDefIdName pv)
 
 /-- Extract a name from a hax `LocalIdent`.
     LocalIdent JSON: `{"name": "x", "id": ...}` -/
@@ -397,21 +425,23 @@ def tStripRefPlace : TExpr → TExpr
   | e => e
 
 /-- One level of `tIndexMutPlace`: `index_mut a i` read as `index a' i`, where
-    `a'` is `a` without its `borrow`/`deref` wrappers. -/
+    `a'` is `a` without its `borrow`/`deref` wrappers, typed with the element
+    type the call's `&mut` result points to. -/
 def tIndexMutPlace1 : TExpr → TExpr
-  | .mk (.app "index_mut" [a, i]) ty => .mk (.app "index" [tStripRefPlace a, i]) ty
+  | .mk (.app "index_mut" [a, i]) ty => .mk (.app "index" [tStripRefPlace a, i]) ty.pointee
   | e => e
 
 /-- The element place of an overloaded `IndexMut::index_mut` call. For a `Vec`
     (or any other `IndexMut` implementor) hax gives the left-hand side `a[i]` of
     an assignment as `*index_mut(&mut a, i)`; with the outer `deref` stripped this
     is `index_mut (borrow a) i`, which this function reads as the place
-    `index a i`, the `borrow`/`deref` wrappers of `a` removed. A nested place
-    `a[i][j]` is normalised at both levels. Every other expression is returned
+    `index a i`, the `borrow`/`deref` wrappers of `a` removed, typed with the
+    element type (the call's type is a `&mut` to it). A nested place `a[i][j]`
+    is normalised at both levels. Every other expression is returned
     unchanged. -/
 def tIndexMutPlace : TExpr → TExpr
   | .mk (.app "index_mut" [a, i]) ty =>
-    .mk (.app "index" [tIndexMutPlace1 (tStripRefPlace a), i]) ty
+    .mk (.app "index" [tIndexMutPlace1 (tStripRefPlace a), i]) ty.pointee
   | e => e
 
 /-- Whether `t` is the type `&mut Vec<_>`. -/
@@ -580,7 +610,8 @@ def tElemFieldPlaceAssign (sf : StructFieldNames) (lhs' : TExpr)
     itself). `index` and field projections are normalised below the top; every
     other node is kept. -/
 partial def tPlaceRead : TExpr → TExpr
-  | .mk (.app "index_mut" [a, i]) ty => .mk (.app "index" [tPlaceRead (tStripRefPlace a), i]) ty
+  | .mk (.app "index_mut" [a, i]) ty =>
+    .mk (.app "index" [tPlaceRead (tStripRefPlace a), i]) ty.pointee
   | .mk (.app "index" [a, i]) ty => .mk (.app "index" [tPlaceRead a, i]) ty
   | e@(.mk (.app pf [s]) ty) =>
     if pf.startsWith "." then .mk (.app pf [tPlaceRead s]) ty else e
@@ -3477,7 +3508,21 @@ where
         | .ok v => parseHaxTExpr v implMap
         | _ => pure (TExpr.mk .unitVal .unit)
       | _ => pure []
-    return .app name fields
+    -- An enum variant named like a struct of the crate (the typestate form
+    -- `enum E { V(V) }`) is written `E::V`, which renders as the constructor
+    -- `E.V`; the bare name would resolve to the struct.
+    let variantDefId := (j.getObjVal? "info" >>= (·.getObjVal? "variant")).toOption
+    let head := match variantDefId.map variantEnumName with
+      | some (some enumName) =>
+        let shortOf : ImpType → Option String
+          | .adt n _ => (n.splitOn "::").getLast?
+          | _ => none
+        if (implMap.structFields.lookup name).isSome
+            || fields.any (fun f => shortOf f.ty == some name) then
+          s!"{enumName}::{name}"
+        else name
+      | _ => name
+    return .app head fields
 
 /-- Whether an iterator scrutinee ranges over a `RangeInclusive`. hax lowers
     `lo..=hi` to a value whose only inclusive marker is its type, so the typed

@@ -1275,4 +1275,156 @@ def compressField : TExpr :=
   .assign "state" (.app "struct_update#Sha#0#2" [.var "state",
     .app "compress" [.borrow (.app "Sha.h" [.var "state"]), .var "block"]])
 
+/-! ## A `Vec` element compound assignment, a `return` in a write-back function,
+    and a trait method named like a local function
+
+* `data[k] ^= v` for `data : Vec<u8>` (SoftSpoken `xor_reduce`): the place
+  `*index_mut(&mut data, k)` is read as `index data k` typed `u8`, not with the
+  call's type `&mut u8`, so the combined value `BitXor#8(data[k], v)` passes no
+  `&mut` argument.
+* `return e` in a value-returning write-back function (`hkdf_sha256_expand`,
+  which returns `Err` early) returns `(e, okm)`, as its tail does
+  (`tReturnMutParamsAtReturns`).
+* `ops.finish_login()` on `ops : O` with `O: OpaqueLoginOps`, in a crate that
+  also defines a function `finish_login` (OPAQUE): the trait method is named
+  `OpaqueLoginOps_finish_login`, so the call does not reach the function. -/
+
+open Lean in
+/-- `data[k] ^= v` for `data : Vec<u8>`, with the `index_mut` call typed
+    `&mut u8`. -/
+def vecByteXorAssign : TExpr :=
+  let u8Ty := Json.mkObj [("Uint", Json.str "U8")]
+  let borrowData := haxNodeT (refMutTyJson vecTyJson)
+    (Json.mkObj [("Borrow", Json.mkObj [("arg", haxVarRef "data")])])
+  let indexMutFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "index", defIdSeg "TypeNs" "IndexMut",
+     defIdSeg "ValueNs" "index_mut"]
+  let call := haxNodeT (refMutTyJson u8Ty) (Json.mkObj [("Call", Json.mkObj [
+    ("fun", indexMutFn), ("args", Json.arr #[borrowData, haxVarRef "k"])])])
+  let elem := haxNodeT u8Ty (Json.mkObj [("Deref", Json.mkObj [("arg", call)])])
+  parseOram (assignOpJson "BitXorAssign" elem (haxVarRef "v"))
+
+-- The write rebinds `data`, and no call passes a `&mut` argument.
+#guard match vecByteXorAssign.erase with
+  | .assign "data" (.app "array_update" [.var "data", .var "k", _]) => true
+  | _ => false
+#guard tDroppedMutCalls [] [] [] [] vecByteXorAssign == []
+
+/-- `if bad { return err }; tail` in a function writing back `okm`. -/
+def earlyErrBody : TExpr :=
+  .mk (.seq
+    (.mk (.ifThenElse (.mk (.var "bad") .bool)
+      (.mk (.earlyReturn (.mk (.var "err") .unknown)) .unknown) (.mk .unitVal .unit)) .unit)
+    (.mk (.var "ok") .unknown)) .unknown
+
+-- Both exits carry `okm`: the `return` by `tReturnMutParamsAtReturns`, the tail
+-- by `tReturnMutParams`.
+#guard (tReturnMutParams ["okm"] true (tReturnMutParamsAtReturns ["okm"] true earlyErrBody)).erase
+  == .seq (.ifThenElse (.var "bad") (.earlyReturn (.tuple [.var "err", .var "okm"])) .unitVal)
+      (.tuple [.var "ok", .var "okm"])
+
+open Lean in
+/-- The `DefId` of the method `finish_login` declared by the trait
+    `typestate_fsm::OpaqueLoginOps`. -/
+def traitMethodDefIdJson : Json :=
+  let segs := [defIdSeg "TypeNs" "typestate_fsm", defIdSeg "TypeNs" "OpaqueLoginOps",
+    defIdSeg "ValueNs" "finish_login"]
+  let parent := Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+    ("krate", Json.str "opaque_hax"), ("kind", Json.str "Trait"),
+    ("path", Json.arr (segs.take 2).toArray)])])]
+  Json.mkObj [("krate", Json.str "opaque_hax"), ("kind", Json.str "AssocFn"),
+    ("path", Json.arr segs.toArray), ("parent", parent)]
+
+-- With a local function `finish_login`, the trait method is qualified by its
+-- trait; without one, it keeps its short name.
+#guard HaxAdapter.extractDefIdName traitMethodDefIdJson []
+    { krates := ["opaque_hax"], fnNames := ["finish_login"] } == "OpaqueLoginOps_finish_login"
+#guard HaxAdapter.extractDefIdName traitMethodDefIdJson []
+    { krates := ["opaque_hax"], fnNames := [] } == "finish_login"
+
+/-! ## Enum variants named like structs, write-back tuple bindings, tail loops
+    of a different accumulator shape, and builtin writes of a parameter
+
+* `LoginOutcome::Aborted(Aborted)` (OPAQUE typestate): the variant is written
+  `LoginOutcome::Aborted`, which renders as the constructor
+  `LoginOutcome.Aborted`, not the struct `Aborted`.
+* `let v := _wb.2; let r := _wb.1` after a tuple-form call (SLH-DSA
+  `let sig = wots_sign(…, &mut wots_adrs)`) binds the components out of order;
+  it is not collapsed to the pattern `let (v, r) := call`, which would swap
+  them.
+* A `while` loop, or a `for` loop carrying more accumulators, at the tail of a
+  `for` body with one accumulator (SoftSpoken `xor_reduce`,
+  `pprf_reconstruct`): the tail returns the outer accumulator.
+* A parameter written only by `copy_from_slice` into a range of it
+  (`hkdf_sha256_expand`'s `okm`): with the builtin table in the write-back
+  analysis its function is a write-back function. -/
+
+open Lean in
+/-- `LoginOutcome::Aborted(Aborted)`: the variant of the enum
+    `typestate_fsm::LoginOutcome` applied to a value of the struct `Aborted`. -/
+def abortedVariantJson : Json :=
+  let segs := [defIdSeg "TypeNs" "typestate_fsm", defIdSeg "TypeNs" "LoginOutcome"]
+  let parent := Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+    ("krate", Json.str "opaque_hax"), ("kind", Json.str "Enum"),
+    ("path", Json.arr segs.toArray)])])]
+  let variant := Json.mkObj [("krate", Json.str "opaque_hax"), ("kind", Json.str "Variant"),
+    ("path", Json.arr (segs ++ [defIdSeg "TypeNs" "Aborted"]).toArray), ("parent", parent)]
+  let abortedTy := Json.mkObj [("Adt", Json.mkObj [
+    ("def_id", mkDefIdJson "opaque_hax" [defIdSeg "TypeNs" "typestate_fsm",
+      defIdSeg "TypeNs" "Aborted"]),
+    ("generic_args", Json.arr #[])])]
+  let inner := haxNodeT abortedTy (Json.mkObj [("VarRef", Json.mkObj [
+    ("id", Json.mkObj [("name", Json.str "a")])])])
+  haxNode (Json.mkObj [("Adt", Json.mkObj [("info", Json.mkObj [("variant", variant)]),
+    ("fields", Json.arr #[Json.mkObj [("value", inner)]])])])
+
+-- The construction's head is the qualified variant.
+#guard (parseT abortedVariantJson).erase == .app "LoginOutcome::Aborted" [.var "a"]
+
+/-- The write-back binding chain `let v := _wb.2; let r := _wb.0; body`. -/
+def wbChain : ImpExpr :=
+  .letBind "v" (.app "::proj::.2" [.var "_wb"]) (.letBind "r" (.proj (.var "_wb") 0) (.var "body"))
+
+-- Out of order: no tuple pattern. In order: the pattern `(r, v)`.
+#guard (extractTupleDestr "_wb" wbChain).isNone
+#guard extractTupleDestr "_wb"
+    (.letBind "r" (.proj (.var "_wb") 0) (.letBind "v" (.app "::proj::.2" [.var "_wb"]) (.var "b")))
+  == some (["r", "v"], .var "b")
+
+-- A tail `while` loop is followed by the outer accumulator.
+#guard wrapTailFoldForOuterAccs ["data"] (.whileFold (.lit (.bool true)) (.var "w")) ==
+  .seq (.whileFold (.lit (.bool true)) (.var "w")) (.var "data")
+
+/-- A `for` loop carrying `sib_idx` and `leaves`. -/
+def twoAccFold : ImpExpr :=
+  .forFold "i" (.lit (.int 0)) (.var "q")
+    (.seq (.seq (.letBind "sib_idx" (.app "Add" [.var "sib_idx", .lit (.int 1)]) (.var "sib_idx"))
+        .unitVal)
+      (.seq (.letBind "leaves" (.app "array_update" [.var "leaves", .var "i", .var "s"])
+        (.var "leaves")) .unitVal))
+
+-- At the tail of a `for` body carrying `leaves` alone, it is destructured and
+-- `leaves` is returned.
+#guard match wrapTailFoldForOuterAccs ["leaves"] twoAccFold with
+  | .letBind "_innerTuple" _ _ => true
+  | _ => false
+
+/-- `fn fill(okm: &mut [u8], src: &[u8], n: usize)`. -/
+def fillSig : FnTypeInfo :=
+  ⟨[("okm", .ref (.slice (.uint .w8)) true), ("src", .unknown), ("n", .int)], .unit⟩
+
+/-- `okm[0..n].copy_from_slice(src)`. -/
+def fillBody : TExpr :=
+  let okm : TExpr := .mk (.var "okm") (.ref (.slice (.uint .w8)) true)
+  let range : TExpr := .mk (.app "Range" [.mk (.lit (.int 0)) .int, .mk (.var "n") .int]) .unknown
+  let place : TExpr := .mk (.app "index_mut" [.mk (.borrow (.mk (.deref okm) .unknown)) .unknown,
+    range]) .unknown
+  .mk (.app "copy_from_slice" [.mk (.borrow (.mk (.deref place) .unknown))
+    (.ref (.slice (.uint .w8)) true), .mk (.var "src") .unknown]) .unit
+
+-- With the builtin table, `fill` writes back `okm`; without it, it does not.
+#guard mutWriteFnsExt [] [("fill", fillSig)] [("fill", fillBody)] builtinWriteTable ==
+  [("fill", [0], ["okm"], false)]
+#guard mutWriteFns [] [("fill", fillSig)] [("fill", fillBody)] == []
+
 end Hax.EmitterRegressions

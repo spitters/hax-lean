@@ -394,20 +394,35 @@ partial def exprContainsVar (name : String) : ImpExpr → Bool
     the entire tuple value. A refusal here is not a print failure: the
     caller falls back to `markProjChain`'s rendering of each binding as its
     own individually correct projection. -/
-def extractTupleDestr (tmpName : String) : ImpExpr → Option (List String × ImpExpr)
-  | .letBind n (.proj (.var v) _) rest =>
+def extractTupleDestrIdx (tmpName : String) :
+    ImpExpr → Option (List (String × Nat) × ImpExpr)
+  | .letBind n (.proj (.var v) i) rest =>
     if v == tmpName then
-      match extractTupleDestr tmpName rest with
-      | some (names, body) => some (n :: names, body)
-      | none => if exprContainsVar tmpName rest then none else some ([n], rest)
+      match extractTupleDestrIdx tmpName rest with
+      | some (names, body) => some ((n, i) :: names, body)
+      | none => if exprContainsVar tmpName rest then none else some ([(n, i)], rest)
     else none
   | .letBind n (.app f [.var v]) rest =>
     if v == tmpName && f.startsWith "::proj::" then
-      match extractTupleDestr tmpName rest with
-      | some (names, body) => some (n :: names, body)
-      | none => if exprContainsVar tmpName rest then none else some ([n], rest)
+      -- The component a projection path selects in a right-nested tuple is
+      -- the number of `.2` steps in the path (`.1` ↦ 0, `.2.1` ↦ 1, `.2.2` ↦ 2).
+      let i := ((f.drop "::proj::".length).toString.splitOn ".2").length - 1
+      match extractTupleDestrIdx tmpName rest with
+      | some (names, body) => some ((n, i) :: names, body)
+      | none => if exprContainsVar tmpName rest then none else some ([(n, i)], rest)
     else none
   | _ => none
+
+/-- `extractTupleDestrIdx` when the chain binds the components in order,
+    `0, 1, …`, so that its names form the tuple pattern; `none` otherwise. A
+    chain binding a later component first (the write-back form
+    `let v := _wb.2; let r := _wb.1`) is left to the per-binding rendering. -/
+def extractTupleDestr (tmpName : String) (e : ImpExpr) : Option (List String × ImpExpr) :=
+  match extractTupleDestrIdx tmpName e with
+  | some (named, body) =>
+    if named.map (·.2) == List.range named.length then some (named.map (·.1), body)
+    else none
+  | none => none
 
 /-- Generate the projection path for field index i out of N fields.
     0-indexed. Right-associated tuples: (A × B × C) = (A × (B × C)). -/
@@ -783,6 +798,11 @@ def buildDestructureAndTuple (fold : ImpExpr) (innerAccs outerAccs : List String
     where an inner fold's result type (e.g. `(result, b, word)`) doesn't
     match the outer's expected accumulator type (e.g. `(result, b)`).
 
+    A tail-position `whileFold`, whose value is a `ControlFlow` rather than
+    the accumulators, becomes the statement `whileFold …` followed by the
+    outer accumulators (the `seq` form, which binds the loop's accumulators
+    through `.merge`).
+
     Recurses through let-chains, seq-tails, and if/match arms. Inner
     folds NOT in tail position are left untouched. -/
 partial def wrapTailFoldForOuterAccs (outerAccs : List String) :
@@ -795,16 +815,22 @@ partial def wrapTailFoldForOuterAccs (outerAccs : List String) :
                    (wrapTailFoldForOuterAccs outerAccs e)
   | .match_ scrut arms =>
     .match_ scrut (arms.map fun (p, b) => (p, wrapTailFoldForOuterAccs outerAccs b))
+  | .whileFold c body =>
+    if outerAccs.isEmpty then .whileFold c body
+    else
+      let outerTuple : ImpExpr :=
+        if outerAccs.length == 1 then .var outerAccs.head! else .tuple (outerAccs.map .var)
+      .seq (.whileFold c body) outerTuple
   | .forFold v lo hi body =>
     let innerAccs := extractAccumulators body
-    if innerAccs == outerAccs || outerAccs.length <= 1 ||
+    if innerAccs == outerAccs || outerAccs.isEmpty || innerAccs.isEmpty ||
        hasSurfaceControlFlow body then
       .forFold v lo hi body
     else
       buildDestructureAndTuple (.forFold v lo hi body) innerAccs outerAccs
   | .forFoldRev v lo hi body =>
     let innerAccs := extractAccumulators body
-    if innerAccs == outerAccs || outerAccs.length <= 1 ||
+    if innerAccs == outerAccs || outerAccs.isEmpty || innerAccs.isEmpty ||
        hasSurfaceControlFlow body then
       .forFoldRev v lo hi body
     else

@@ -194,7 +194,10 @@ def main (args : List String) : IO UInt32 := do
       (n, tQualifyWritebackFields structFields (tHoistMutCalls fnTypes te))
     let extWriters := externalWriteTable procTdefs
     let procTdefs := procTdefs.map fun (n, te) => (n, tRetypeExtWriters extWriters te)
-    let writeFns := mutWriteFnsExt structFields fnTypes procTdefs extWriters
+    -- A parameter written only through a builtin write (`copy_from_slice`
+    -- into `okm[a..b]`) makes its function a write-back function too.
+    let writeFns :=
+      mutWriteFnsExt structFields fnTypes procTdefs (extWriters ++ builtinWriteTable)
     -- The builtin and external tables are appended to the call-site rebind
     -- table only, not to `writeReturns`: `tReturnMutParams` rewrites a callee
     -- to return its written parameters, and these callees have no body in the
@@ -216,8 +219,8 @@ def main (args : List String) : IO UInt32 := do
       return 1
     let postPipelineTdefs := procTdefs.map fun (n, te) =>
       let ret := (writeReturns.lookup n).getD ([], false)
-      let te := tReturnMutParams ret.1 ret.2
-        (tRebindMutCalls structFields writers tupWriters te)
+      let te := tReturnMutParams ret.1 ret.2 (tReturnMutParamsAtReturns ret.1 ret.2
+        (tRebindMutCalls structFields writers tupWriters te))
       (n, tUnqualifyFieldHeads
         (tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te))))
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"

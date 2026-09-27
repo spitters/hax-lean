@@ -396,6 +396,12 @@ partial def toLeanTypeStrPrecise (ty : ImpType)
     | _ => s!"Array ({inner.toLeanTypeStrSurface structLookup})"
   | _ => ty.toLeanTypeStrSurface structLookup
 
+/-- The type a reference points to: `t` for `&t` and `&mut t`, else the type
+    itself. -/
+def pointee : ImpType → ImpType
+  | .ref t _ => t
+  | t => t
+
 end ImpType
 
 /-- Type information for a Rust function (parameter names+types, return type).

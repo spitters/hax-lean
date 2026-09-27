@@ -734,6 +734,35 @@ where
     | [] => false
     | (_, e) :: rest => tContainsEarlyReturn e || goA rest
 
+/-- Whether `e` contains a `?`. Its early exit returns the error value itself,
+    which `tReturnMutParamsAtReturns` cannot pair with the write-back
+    parameters. -/
+partial def tContainsQuestionMark (e : TExpr) : Bool :=
+  match e with
+  | .mk (.questionMark _) _ => true
+  | _ => (tChildren e).any tContainsQuestionMark
+
+/-- The write-back form of every `return e` of a write-back function's body
+    outside a closure: `return (e, v₁, …, v_k)` when the Rust result carries a
+    value (`hasRes`), and `return (v₁, …, v_k)` otherwise, the value
+    `tReturnMutParams` gives the body's tail. A body without write-back
+    parameters is unchanged. -/
+partial def tReturnMutParamsAtReturns (names : List String) (hasRes : Bool) (body : TExpr) :
+    TExpr :=
+  match names with
+  | [] => body
+  | _ => go body
+where
+  /-- The rewrite below the body. -/
+  go : TExpr → TExpr
+    | .mk (.earlyReturn e) ty =>
+      let e' := go e
+      let v := if hasRes then .mk (.tuple (e' :: names.map (fun n => .mk (.var n) .unknown))) .unknown
+        else tVarTuple names
+      .mk (.earlyReturn v) ty
+    | e@(.mk (.lam _ _) _) => e
+    | e => tMapChildren go e
+
 /-- End a write-back function's body with its write-back parameters, keeping
     every statement of the body ahead of them: the single parameter, the tuple
     of several, or the tuple of the body's own value and the parameters when
@@ -756,8 +785,8 @@ def tReturnMutParams (names : List String) (hasRes : Bool) (body : TExpr) : TExp
     assigned nothing.
 
     A candidate whose Rust result carries a value is kept only when the tuple
-    its body must end in is reachable: no `return` or `?` anywhere, and a tail
-    `tTupleTail` accepts. The calls to a dropped candidate are then reported by
+    its body must end in is reachable: no `?` anywhere (a `return` is rewritten
+    by `tReturnMutParamsAtReturns`), and a tail `tTupleTail` accepts. The calls to a dropped candidate are then reported by
     `tDroppedMutCalls` rather than rewritten. -/
 def mutWriteStep (sf : StructFieldNames) (defs : List (String × TExpr))
     (prev : List (String × Nat)) (prevTup : List (String × List Nat × Bool))
@@ -772,7 +801,7 @@ def mutWriteStep (sf : StructFieldNames) (defs : List (String × TExpr))
       let kept := (c.2.1.zip c.2.2.1).filter fun pv => assigned.contains pv.2
       let names := kept.map (·.2)
       if kept.isEmpty then none
-      else if c.2.2.2 && (tContainsEarlyReturn body || (tTupleTail names rebound).isNone) then none
+      else if c.2.2.2 && (tContainsQuestionMark body || (tTupleTail names rebound).isNone) then none
       else some (c.1, kept.map (·.1), names, c.2.2.2)
 
 /-- Iterate `mutWriteStep` from `cur` until it is stationary or `fuel` runs
@@ -1178,19 +1207,13 @@ def externalWriteTable (defs : List (String × TExpr)) :
     | some p :: rest => if rest.all (· == some p) then some (f, p) else none
     | _ => none
 
-/-- The pointee type of a `&mut` argument: `t` for `&mut t`, else the type
-    itself. -/
-def tPointee : ImpType → ImpType
-  | .ref t _ => t
-  | t => t
-
 /-- Give each call of an `ext` callee the type of the variable it writes back,
     the type of the call's value under the write-back rewrite. -/
 partial def tRetypeExtWriters (ext : List (String × Nat)) : TExpr → TExpr
   | .mk (.app f args) ty =>
     let args' := args.map (tRetypeExtWriters ext)
     match ext.lookup f, args[(ext.lookup f).getD 0]? with
-    | some _, some a => .mk (.app f args') (tPointee a.ty)
+    | some _, some a => .mk (.app f args') a.ty.pointee
     | _, _ => .mk (.app f args') ty
   | e => tMapChildren (tRetypeExtWriters ext) e
 
