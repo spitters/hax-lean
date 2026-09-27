@@ -1584,4 +1584,58 @@ def questionLetOut : ImpExpr := wrapMatchArmsCF (pipeline questionLet)
 
 end QuestionMark
 
+namespace MatchArmMutation
+
+/-- The body of Rust's
+    `for col in 0..w { let p = f(col); match p { Some(x) => out.push(x),
+    None => { failed = true; out.push(d()); } } }` after local mutation: the
+    loop state `out` and `failed` is rebound only inside the arms of a `match`
+    at the tail of the body. -/
+def pushMatchBody : ImpExpr :=
+  .letBind "p" (.app "f" [.var "col"])
+    (.match_ (.var "p")
+      [(.somePat (.varPat "x"),
+          .seq (.letBind "out" (.app "push" [.var "out", .var "x"]) (.var "out")) .unitVal),
+       (.nonePat,
+          .seq (.seq (.letBind "failed" (.lit (.bool true)) (.var "failed")) .unitVal)
+            (.seq (.seq (.letBind "out" (.app "push" [.var "out", .app "d" []])
+              (.var "out")) .unitVal) .unitVal))])
+
+#guard extractAccumulators pushMatchBody == ["out", "failed"]
+
+/-- The loop over `pushMatchBody`. -/
+def pushMatchLoop : ImpExpr :=
+  .seq (.forFold "col" (.lit (.int 0)) (.var "w") pushMatchBody)
+    (.tuple [.var "out", .var "failed"])
+
+-- The fold carries both variables and each arm returns both.
+#guard ((toLean pushMatchLoop 1 []).splitOn
+  "Hax.foldRange (0 : Int) w (out, failed) fun col (out, failed) =>").length == 2
+#guard ((toLean pushMatchLoop 1 []).splitOn "(out, failed)\n").length == 3
+
+/-- The same `match` as a statement outside a loop, followed by a read of
+    both variables. -/
+def pushMatchStmt : ImpExpr :=
+  .letBind "p" (.app "f" [.var "col"])
+    (.seq (match pushMatchBody with
+        | .letBind _ _ m => m
+        | e => e)
+      (.tuple [.var "out", .var "failed"]))
+
+-- The match returns the tuple of the variables its arms rebind, and the
+-- tuple is rebound.
+#guard ((toLean pushMatchStmt 1 []).splitOn "let (out, failed) :=").length == 2
+
+/-- A match used as a value whose arm is a block `{ let t = g(v); t }`: `t`
+    is local to the arm, not a rebind. -/
+def valueArm : ImpExpr :=
+  .letBind "y" (.match_ (.var "o")
+      [(.somePat (.varPat "v"), .letBind "t" (.app "g" [.var "v"]) (.var "t")),
+       (.nonePat, .lit (.int 0))])
+    (.seq (.letBind "acc" (.app "add" [.var "acc", .var "y"]) (.var "acc")) .unitVal)
+
+#guard extractAccumulators valueArm == ["acc"]
+
+end MatchArmMutation
+
 end Hax.EmitterRegressions

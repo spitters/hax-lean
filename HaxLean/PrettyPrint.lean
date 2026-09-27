@@ -319,6 +319,15 @@ def litIntTyped (n : Int) (ty : ImpType) : String :=
   | .sint _ => s!"({numStr} : Int)"
   | _ => numStr
 
+/-- Collect names bound by an `ImpPat`: the binders of a match arm, which are
+    local to the arm body. -/
+partial def patBindersImp : ImpPat → List String
+  | .varPat n => [n]
+  | .tuplePat pats => pats.foldl (fun acc p => acc ++ patBindersImp p) []
+  | .somePat p | .okPat p | .errPat p => patBindersImp p
+  | .ctorPat _ args => args.foldl (fun acc p => acc ++ patBindersImp p) []
+  | .wildcard | .litPat _ | .nonePat => []
+
 /-- Pretty-print a pattern. -/
 partial def patToLean : ImpPat → String
   | .wildcard => "_"
@@ -489,6 +498,20 @@ partial def patchMatchUnitArmsInBody (accVar : String) : ImpExpr → ImpExpr
     else .match_ scrut arms
   | e => e
 
+/-- A match arm body whose value is `()`: its tail, through `let`/`seq` chains
+    and the branches of a nested `if` or `match`, is `unitVal` or a loop. Such an
+    arm is a statement, so a `let n := rhs; n` inside it is a rebind of `n`. An
+    arm whose tail is a variable or a call is a value block, and a
+    `let t := rhs; t` there is a local. -/
+partial def armIsStatement : ImpExpr → Bool
+  | .unitVal => true
+  | .letBind _ _ body => armIsStatement body
+  | .seq _ b => armIsStatement b
+  | .ifThenElse _ t e => armIsStatement t && armIsStatement e
+  | .match_ _ arms => arms.all fun (_, b) => armIsStatement b
+  | .forFold .. | .forFoldRev .. | .whileFold .. => true
+  | _ => false
+
 /-- Extract mutation variable names and their RHS from a conditional then-branch.
     Returns list of (name, rhs) for patterns like `seq (letBind n rhs (var n)) rest`. -/
 partial def extractCondAllBindings : ImpExpr → List (String × ImpExpr)
@@ -531,6 +554,14 @@ partial def extractCondMutationsAux (locals readBefore : List String) :
   | .seq (.whileFold _ body) rest =>
     extractCondMutationsAux locals readBefore body
       ++ extractCondMutationsAux locals (readBefore ++ freeVars body) rest
+  -- A `match` in statement position: every statement arm is searched, with the
+  -- arm's pattern binders local to it.
+  | .seq (.match_ s arms) rest =>
+    let rb := readBefore ++ freeVars s
+    (arms.flatMap fun (p, b) =>
+        if armIsStatement b then extractCondMutationsAux (patBindersImp p ++ locals) rb b
+        else [])
+      ++ extractCondMutationsAux locals (rb ++ arms.flatMap (fun (_, b) => freeVars b)) rest
   -- A `letBind` in statement position whose continuation is not the bare
   -- variable (`let r := s; continue ()` as one statement of a branch): classify
   -- the binding as the standalone arm below does, then continue into both its
@@ -555,6 +586,11 @@ partial def extractCondMutationsAux (locals readBefore : List String) :
     extractCondMutationsAux locals rb t ++ extractCondMutationsAux locals rb e
   | .forFold _ _ _ body | .forFoldRev _ _ _ body | .whileFold _ body =>
     extractCondMutationsAux locals readBefore body
+  | .match_ s arms =>
+    let rb := readBefore ++ freeVars s
+    arms.flatMap fun (p, b) =>
+      if armIsStatement b then extractCondMutationsAux (patBindersImp p ++ locals) rb b
+      else []
   -- A `letBind` whose continuation is not the bare variable is a mutation when
   -- the name's value entered the branch: its right-hand side reads it, or an
   -- earlier statement did. The conditional-subtract shape
@@ -577,6 +613,16 @@ partial def extractCondMutationsAux (locals readBefore : List String) :
 /-- Top-level wrapper. -/
 partial def extractCondMutations (e : ImpExpr) : List (String × ImpExpr) :=
   extractCondMutationsAux [] [] e
+
+/-- The variables the statement arms of a `match` rebind, without duplicates and
+    without `_assign` temporaries or names in `locals`. Each arm's pattern
+    binders are local to that arm. -/
+def matchArmMutations (locals readBefore : List String)
+    (arms : List (ImpPat × ImpExpr)) : List String :=
+  ((arms.flatMap fun (p, b) =>
+      if armIsStatement b then
+        (extractCondMutationsAux (patBindersImp p ++ locals) readBefore b).map (·.1)
+      else []).filter fun n => !n.startsWith "_assign" && !locals.contains n).eraseDups
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
     bindings. An `if` or `match` at the tail distributes `newTail` into its
@@ -712,6 +758,13 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
   | .seq (.whileFold _ body) rest =>
     (extractAccumulatorsAux locals readBefore body
       ++ extractAccumulatorsAux locals (readBefore ++ freeVars body) rest).eraseDups
+  -- A `match` in statement position: a variable any statement arm rebinds is
+  -- loop-carried, since the other arms keep its value.
+  | .seq (.match_ s arms) rest =>
+    let rb := readBefore ++ freeVars s
+    (matchArmMutations locals rb arms
+      ++ extractAccumulatorsAux locals (rb ++ arms.flatMap (fun (_, b) => freeVars b)) rest
+      ).eraseDups
   -- A `letBind` in statement position whose continuation is not the bare
   -- variable: a loop-carried rebind when its value entered the iteration,
   -- else a local; continue into both its body and the rest.
@@ -758,6 +811,7 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
   | .forFold _ _ _ body => extractAccumulatorsAux locals readBefore body
   | .forFoldRev _ _ _ body => extractAccumulatorsAux locals readBefore body
   | .whileFold _ body => extractAccumulatorsAux locals readBefore body
+  | .match_ s arms => matchArmMutations locals (readBefore ++ freeVars s) arms
   | _ => []
 
 /-- Top-level wrapper. -/
@@ -1991,7 +2045,16 @@ where
     | .match_ scrut arms, _ =>
       let hasUnitArm := arms.any fun (_, b) => b == .unitVal
       let hasNonUnitArm := arms.any fun (_, b) => b != .unitVal
-      if hasUnitArm && hasNonUnitArm then
+      let armMuts := matchArmMutations [] (freeVars scrut) arms
+      if !armMuts.isEmpty && !arms.any (fun (_, b) => hasSurfaceControlFlow b) then
+        -- Statement arms rebind variables of the enclosing scope. The match
+        -- returns the tuple of every variable an arm rebinds, and the tuple is
+        -- rebound:
+        --   let (v₁, …, vₙ) := match s with | p => <arm; (v₁, …, vₙ)> | …
+        let tup := accTuple armMuts
+        let m : ImpExpr := .match_ scrut (arms.map fun (p, b) => (p, replaceTail tup b))
+        s!"{ind}let {toLean tup 0} :=\n{atLine m (lvl + 1)}\n{atLine e2 lvl}"
+      else if hasUnitArm && hasNonUnitArm then
         -- Heterogeneous arms: wrap all in `let _ := body; ()` for uniform Unit type
         let armLvl := max lvl 1 + 1
         let armInd := indent armLvl
@@ -2641,15 +2704,6 @@ def isAlwaysBuiltin (f : String) : Bool :=
 /-- Check if a name looks like a struct field projection (starts with "." or is "Struct.field"). -/
 def isFieldProjection (f : String) : Bool :=
   f.startsWith "." || f.contains '.'
-
-/-- Collect names bound by an `ImpPat`. Used to extend the `bound`
-    list when traversing match-arm bodies in `collectFreeVars`. -/
-partial def patBindersImp : ImpPat → List String
-  | .varPat n => [n]
-  | .tuplePat pats => pats.foldl (fun acc p => acc ++ patBindersImp p) []
-  | .somePat p | .okPat p | .errPat p => patBindersImp p
-  | .ctorPat _ args => args.foldl (fun acc p => acc ++ patBindersImp p) []
-  | .wildcard | .litPat _ | .nonePat => []
 
 /-- Collect free variables: `.var` names not bound by enclosing `letBind`.
     Returns (name, 0) pairs so they can be merged with `collectAppCalls` results. -/
