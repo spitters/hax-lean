@@ -26,8 +26,10 @@ not occur.
 The predicate is syntactic and states no scoping or typing condition. A loop body
 is checked with the loop context `il`: `true` inside the body of a
 `whileFoldReturn`, `forFoldReturn` or `forFoldRevReturn`, where a `cfBreak`,
-`cfContinue` or `cfBreakContinue` of an atom or `unitVal` is an exit; `false`
-elsewhere, and the body of any other loop resets it to `false`.
+`cfContinue` or `cfBreakContinue` of an atom or `unitVal` is an exit, and inside
+the body of a `forFold` or `whileFold`, where such an exit ends or continues that
+loop; `false` elsewhere, and the bodies of `whileLoop` and `forFoldRev` reset it to
+`false`.
 
 ## Main definitions
 
@@ -41,6 +43,7 @@ elsewhere, and the body of any other loop resets it to `false`.
 ## Main results
 
 * `isNFK_mono` — a normal form in loop context `il₀` is one in `il₀ || il`
+* `isNFK_true_of_false` — a normal form outside every exit loop is one inside
 * `isNFK_of_isNF` — a normal form outside every exit loop is one in every loop
   context
 -/
@@ -108,12 +111,12 @@ def nfAssignRhs (e : ImpExpr) : Bool := nfRhs e
       normal form in the same context;
     * `match_ (app _ args) [(tuplePat [varPat _, varPat _], b)]` with atom arguments
       and `b` in normal form in the same context;
-    * `whileLoop (var _) b`, `whileFold (var _) b`, `forFold _ lo hi b` with `lo` a
-      literal and `hi` a bound, and `forFoldRev _ lo hi b` with literal bounds, the
+    * `whileLoop (var _) b` and `forFoldRev _ lo hi b` with literal bounds, the
       body `b` in normal form outside every exit loop;
-    * `whileFoldReturn (var _) b`, `forFoldReturn _ lo hi b` with `lo` a literal and
-      `hi` a bound, and `forFoldRevReturn _ lo hi b` with literal bounds, the body
-      inside an exit loop;
+    * `whileFold (var _) b`, `whileFoldReturn (var _) b`, `forFold _ lo hi b` and
+      `forFoldReturn _ lo hi b` with `lo` a literal and `hi` a bound, and
+      `forFoldRevReturn _ lo hi b` with literal bounds, the body inside an exit
+      loop;
     * inside an exit loop, `cfBreak`, `cfContinue` and `cfBreakContinue` of an atom
       or `unitVal`;
     * `assign _ r` with `nfAssignRhs r`;
@@ -130,9 +133,9 @@ def isNFK : Bool → ImpExpr → Bool
   | il, .match_ (.app _ args) [(.tuplePat [.varPat _, .varPat _], b)] =>
       args.all nfAtom && isNFK il b
   | _, .tuple es => es.all nfVar
-  | _, .forFold _ lo hi b => nfLit lo && nfBound hi && isNFK false b
+  | _, .forFold _ lo hi b => nfLit lo && nfBound hi && isNFK true b
   | _, .forFoldRev _ lo hi b => nfLit lo && nfLit hi && isNFK false b
-  | _, .whileFold (.var _) b => isNFK false b
+  | _, .whileFold (.var _) b => isNFK true b
   | _, .whileFoldReturn (.var _) b => isNFK true b
   | _, .forFoldReturn _ lo hi b => nfLit lo && nfBound hi && isNFK true b
   | _, .forFoldRevReturn _ lo hi b => nfLit lo && nfLit hi && isNFK true b
@@ -161,6 +164,10 @@ instance : DecidablePred NF := fun e => inferInstanceAs (Decidable (isNF e = tru
 theorem isNFK_mono (il₀ il : Bool) (e : ImpExpr) (h : isNFK il₀ e = true) :
     isNFK (il₀ || il) e = true := by
   fun_induction isNFK il₀ e <;> simp_all [isNFK]
+
+/-- A normal form outside every exit loop is a normal form inside one. -/
+theorem isNFK_true_of_false {e : ImpExpr} (h : isNFK false e = true) : isNFK true e = true :=
+  isNFK_mono false true e h
 
 /-- A normal form outside every exit loop is a normal form in every loop context. -/
 theorem isNFK_of_isNF (e : ImpExpr) (il : Bool) (h : NF e) : isNFK il e = true :=

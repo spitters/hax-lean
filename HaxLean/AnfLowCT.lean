@@ -373,9 +373,9 @@ def anfSrc : Bool → ImpExpr → Bool
   | il, .match_ (.app _ args) [(.tuplePat [.varPat _, .varPat _], b)] =>
       anfValSrcs args && anfSrc il b
   | _, .whileLoop (.var _) b => anfSrc false b
-  | _, .whileFold (.var _) b => anfSrc false b
+  | _, .whileFold (.var _) b => anfSrc true b
   | _, .whileFoldReturn (.var _) b => anfSrc true b
-  | _, .forFold _ lo hi b => nfLit lo && nfBound hi && anfSrc false b
+  | _, .forFold _ lo hi b => nfLit lo && nfBound hi && anfSrc true b
   | _, .forFoldRev _ lo hi b => nfLit lo && nfLit hi && anfSrc false b
   | _, .forFoldReturn _ lo hi b => nfLit lo && nfBound hi && anfSrc true b
   | _, .forFoldRevReturn _ lo hi b => nfLit lo && nfLit hi && anfSrc true b
