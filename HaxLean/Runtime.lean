@@ -1246,11 +1246,11 @@ field for them. -/
 
 /-! ### Uninterpreted conversions -/
 
-/-- Zip — pairs two iterables element-wise. Polymorphic in both element
-    types so that `Hax.zip (xs : Array A) (ys : Array B) : Array (A × B)`
-    typechecks for any A, B. Returns the empty array in the untyped
-    extraction. -/
-@[inline] def zip {α β : Type} (_xs : Array α) (_ys : Array β) : Array (α × β) := #[]
+/-- Zip — pairs two iterables element-wise, stopping at the shorter one, as
+    Rust's `Iterator::zip` does. Polymorphic in both element types so that
+    `Hax.zip (xs : Array A) (ys : Array B) : Array (A × B)` typechecks for any
+    A, B. -/
+@[inline] def zip {α β : Type} (xs : Array α) (ys : Array β) : Array (α × β) := xs.zip ys
 
 /-- `Into::into`: identity. The typed extraction emits
     `Hax.into x` for Rust `x.into()` calls where the target type is
