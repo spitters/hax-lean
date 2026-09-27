@@ -20,6 +20,7 @@ public import HaxLean.Tests
 public import HaxLean.TestCompile
 -- Typed layer
 public import HaxLean.ImpType
+public import HaxLean.ScalarOp
 public import HaxLean.TExpr
 public import HaxLean.TFeatures
 public import HaxLean.TPhase.DropReferences
