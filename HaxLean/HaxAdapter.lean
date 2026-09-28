@@ -1456,6 +1456,27 @@ def stmtsToSeq (stmts : List ImpExpr) (tail : ImpExpr) : ImpExpr :=
   | [s] => replaceDeepestUnit s tail
   | s :: rest => replaceDeepestUnit s (stmtsToSeq rest tail)
 
+/-- The parameter names of a hax `Closure` payload, in order: `some names` when every
+    parameter with a pattern binds a variable or is a wildcard (named `_`) and at least one
+    does, `none` otherwise. A parameter whose `pat` is `null` or missing is the implicit
+    environment slot and names nothing. -/
+def closureParams? (cdata : Json) : Option (List String) :=
+  match cdata.getObjValAs? (Array Json) "params" with
+  | .ok paramsArr =>
+    let step (acc : Option (List String)) (p : Json) : Option (List String) :=
+      acc.bind fun ns =>
+        match p.getObjVal? "pat" with
+        | .ok .null => some ns
+        | .ok patJ => match parseHaxPat patJ with
+          | .varPat nm => some (ns ++ [nm])
+          | .wildcard => some (ns ++ ["_"])
+          | _ => none
+        | .error _ => some ns
+    match paramsArr.toList.foldl step (some []) with
+    | some [] => none
+    | r => r
+  | .error _ => none
+
 open Hax.JsonSize
 
 /-! ### `parseHaxExpr` and friends (mutually recursive on JSON sub-tree). -/
@@ -1846,9 +1867,13 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
   | .error _ =>
   match h_Closure : j.getObjVal? "Closure" with
   | .ok data =>
-    -- Approximate: just use the body
+    -- A closure with named parameters is a `.lam`; the capture list is not kept.
     match h_Cl_body : data.getObjVal? "body" with
-    | .ok bodyJ => parseHaxExpr bodyJ
+    | .ok bodyJ =>
+      let body ← parseHaxExpr bodyJ
+      match closureParams? data with
+      | some names => pure (.lam names body)
+      | none => pure body
     | .error e => throw e
   | .error _ =>
   match h_Repeat : j.getObjVal? "Repeat" with
@@ -3519,7 +3544,10 @@ where
       parseTAdtExpr data
 
     else if let .ok data := j.getObjVal? "Closure" then
-      return (← parseHaxTExpr (← data.getObjVal? "body") implMap).kind
+      let body ← parseHaxTExpr (← data.getObjVal? "body") implMap
+      match closureParams? data with
+      | some names => return .lam names body
+      | none => return body.kind
 
     else if let .ok data := j.getObjVal? "Repeat" then
       let value ← parseHaxTExpr (← data.getObjVal? "value") implMap

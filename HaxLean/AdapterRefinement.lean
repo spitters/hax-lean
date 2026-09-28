@@ -420,7 +420,7 @@ inductive JsonRefinesExpr : Json → ImpExpr → Prop where
       parent JSON refines `e`. The clients (the strong-IH step lemma's
       `Adt` tag case) only invoke this clause when they actually have
       a `parseAdtExpr` parse result in hand. The conclusion is
-      therefore constrained to genuine `parseAdtExpr` outputs (the
+      therefore constrained to `parseAdtExpr` outputs (the
       drop/rewire bug class is preserved: a parser bug that emits the
       wrong adt expression cannot package `parseAdtExpr data = .ok e`
       for the wrong `e`).
@@ -454,6 +454,12 @@ inductive JsonRefinesExpr : Json → ImpExpr → Prop where
   | loop_any {j j_body : Json} {body : ImpExpr}
       (h_body : JsonRefinesExpr j_body body) :
       JsonRefinesExpr j (.whileLoop (.lit (.bool true)) body)
+  /-- Tag-agnostic `.lam` witness for a hax `Closure` with named parameters: the
+      parameter names are unconstrained and the body carries a recursive
+      sub-refinement. -/
+  | lam_any {j j_body : Json} (names : List String) {body : ImpExpr}
+      (h_body : JsonRefinesExpr j_body body) :
+      JsonRefinesExpr j (.lam names body)
   /-- Tag-agnostic `.earlyReturn .unitVal` witness. Mirrors
       `earlyReturn_unit` but drops the `Return`-tag and `null`-payload
       witnesses. -/
@@ -582,7 +588,7 @@ inductive JsonRefinesExpr : Json → ImpExpr → Prop where
     this into a structural inductive analogous to `JsonRefinesExpr`,
     so that `parsePat` itself can be proven to preserve structure.
 
-    The body of a match arm is the high-leverage piece — a missing or
+    The body of a match arm carries the check: a missing or
     swapped body (FAEST/FRI failure category) is what the pointwise
     premise on `JsonRefinesArm` actually catches. -/
 inductive JsonRefinesPat : Json → ImpPat → Prop where
@@ -606,7 +612,7 @@ inductive JsonRefinesPat : Json → ImpPat → Prop where
       of an arm/let JSON) **and** the equation
       `Hax.HaxAdapter.parseHaxPat data = p` — clients can only invoke it
       when they actually have a `parseHaxPat` parse result in hand. The
-      conclusion is therefore constrained to genuine `parseHaxPat`
+      conclusion is therefore constrained to `parseHaxPat`
       outputs (the parser bug class is preserved: a drop/rewire bug
       cannot package `parseHaxPat data = p` for the wrong `p`).
 
@@ -622,7 +628,7 @@ inductive JsonRefinesPat : Json → ImpPat → Prop where
     (see `parseArm` in `HaxAdapter.lean`). The relation requires:
 
     * the JSON arm has a `pattern` field refining the arm's pattern
-      (witness-form for now, see `JsonRefinesPat`),
+      (witness-form, see `JsonRefinesPat`),
     * the JSON arm has a `body` field refining the arm's body via the
       mutually recursive `JsonRefinesExpr`.
 
@@ -647,7 +653,7 @@ inductive JsonRefinesArm : Json → (ImpPat × ImpExpr) → Prop where
       parent JSON refines `a`. The clients (the strong-IH step lemma's
       `Match` case) only invoke this clause when they actually have a
       `parseArm` parse result in hand. The conclusion is therefore
-      constrained to genuine `parseArm` outputs (the drop/rewire bug
+      constrained to `parseArm` outputs (the drop/rewire bug
       class is preserved: a parser bug that emits the wrong arm cannot
       package `parseArm data = .ok a` for the wrong `a`).
 
@@ -675,11 +681,11 @@ inductive JsonRefinesArm : Json → (ImpPat × ImpExpr) → Prop where
 
     The `stmt_expr` clause is *structural*: it carries a recursive
     `JsonRefinesExpr` premise on the wrapped sub-expression, which is
-    the high-leverage piece — a parser bug that drops or rewires a
+    the check: a parser bug that drops or rewires a
     statement body (Bug class 2) cannot be witnessed without that
     premise.
 
-    The `stmt_let_witness` clause is *witness-form* for now: pattern
+    The `stmt_let_witness` clause is *witness-form*: pattern
     refinement remains opaque (cf. `JsonRefinesPat`), and the let-body
     is parser-shaped via `replaceDeepestUnit`/`stmtsToSeq` rather than
     a direct sub-Decorated node. Tightening this clause is a
@@ -722,7 +728,7 @@ inductive JsonRefinesStmt : Json → ImpExpr → Prop where
       parent JSON refines `s`. The clients (the strong-IH step lemma's
       `Block`/`Let` cases) only invoke this clause when they actually
       have a `parseStmt` parse result in hand. The conclusion is
-      therefore constrained to genuine `parseStmt` outputs (the
+      therefore constrained to `parseStmt` outputs (the
       drop/rewire bug class is preserved: a parser bug that emits the
       wrong stmt cannot package `parseStmt data = .ok s` for the wrong
       `s`).
@@ -829,7 +835,7 @@ theorem refines_lit
     step lemma: after extracting `data` via `JsonExprKindData`, the step
     closes the goal by `refines_literal_payload data rfl`.
 
-    The conclusion is constrained to genuine `parseLiteral` outputs: the
+    The conclusion is constrained to `parseLiteral` outputs: the
     `hp` premise carries the structural witness that the parser actually
     produced `e` from `data`, so a parser bug that emits the wrong shape
     cannot package this lemma. -/
@@ -848,7 +854,7 @@ theorem refines_literal_payload
     after extracting `data` via `JsonExprKindData`/`JsonObjGet`, the step
     closes the goal by `refines_adt_payload data rfl`.
 
-    The conclusion is constrained to genuine `parseAdtExpr` outputs: the
+    The conclusion is constrained to `parseAdtExpr` outputs: the
     `hp` premise carries the structural witness that the parser actually
     produced `e` from `data` (via the `.ok` branch of the `Except String
     ImpExpr` return type), so a parser bug that emits the wrong adt
@@ -873,9 +879,8 @@ theorem refines_tuple_empty
     lemma packages that base case via the tightened `block` constructor
     with an empty stmts list.
 
-    Note: under the tightened `block` constructor (Task A5), there is
-    no longer a witness-form `refines_block` accepting an arbitrary
-    output `ImpExpr`. The pointwise version is `refines_block_pointwise`
+    The `block` constructor admits no witness-form `refines_block`
+    accepting an arbitrary output `ImpExpr`. The pointwise version is `refines_block_pointwise`
     below. The conclusion is phrased against the parser's actual output
     `stmtsToSeq [] tail` (rather than `tail`) because
     `stmtsToSeq` is `partial def`-emitted and therefore
@@ -958,11 +963,9 @@ theorem refines_earlyReturn_unit
 
     When the hax JSON has `Return {value: vj}` with `vj` a real JSON
     sub-expression, `parseHaxExpr` recurses into `vj` to obtain `e` and
-    produces `.earlyReturn e`. The tightened constructor
-    `earlyReturn_value` enforces the recursive refinement on the
-    `value` slot, so the `hvr` hypothesis is now genuinely consumed by
-    the constructor application (rather than being discarded as in the
-    earlier weak form).
+    produces `.earlyReturn e`. The constructor `earlyReturn_value`
+    requires the recursive refinement on the `value` slot, which the
+    `hvr` hypothesis supplies.
 
     The hypothesis `hvr` is the analogue of an induction hypothesis on
     the JSON sub-tree at the `value` field. -/
@@ -1021,7 +1024,7 @@ theorem refines_pat_any (j : Json) (p : ImpPat) :
     tag cases in the strong-IH step lemma: after extracting `data` via
     `JsonObjGet`, the step closes the goal by `refines_pat_payload data rfl`.
 
-    The conclusion is constrained to genuine `parseHaxPat` outputs: the
+    The conclusion is constrained to `parseHaxPat` outputs: the
     `hp` premise carries the structural witness that the parser actually
     produced `p` from `data`, so a parser bug that emits the wrong
     pattern shape cannot package this lemma. -/
@@ -1056,7 +1059,7 @@ theorem refines_arm
     lemma: after extracting `data` via `JsonObjGet`/array indexing,
     the step closes the goal by `refines_arm_payload data rfl`.
 
-    The conclusion is constrained to genuine `parseArm` outputs: the
+    The conclusion is constrained to `parseArm` outputs: the
     `hp` premise carries the structural witness that the parser
     actually produced `a` from `data` (via the `.ok` branch of the
     `Except String (ImpPat × ImpExpr)` return type), so a parser bug
@@ -1104,7 +1107,7 @@ theorem refines_stmt_unitVal (j : Json) :
     `data` via `JsonObjGet`/array indexing, the step closes the goal
     by `refines_stmt_payload data rfl`.
 
-    The conclusion is constrained to genuine `parseStmt` outputs: the
+    The conclusion is constrained to `parseStmt` outputs: the
     `hp` premise carries the structural witness that the parser
     actually produced `s` from `data` (via the `.ok` branch of the
     `Except String ImpExpr` return type), so a parser bug that emits
@@ -1122,7 +1125,7 @@ theorem refines_stmt_payload
     refine `stmts : List ImpExpr` via `JsonRefinesStmt`, the parent
     JSON refines `stmtsToSeq stmts tail` for any tail expression.
 
-    The pointwise premise `hpw` is the high-leverage piece (mirroring
+    The pointwise premise `hpw` carries the check (mirroring
     the `tuple` and `match_` clauses): a parser bug that drops a
     statement cannot be packaged as a witness for this lemma, so the
     failure surfaces at the refinement obligation. This catches the
@@ -1149,7 +1152,7 @@ theorem refines_block_pointwise
     `arms : List (ImpPat × ImpExpr)` via `JsonRefinesArm`, the parent
     JSON refines `.match_ scrut arms`.
 
-    The pointwise premise `har` is the high-leverage piece: a parser
+    The pointwise premise `har` carries the check: a parser
     bug that drops or swaps an arm body cannot be packaged as a witness
     for this lemma, so the failure surfaces at the refinement
     obligation. This is the FAEST/FRI failure category from the plan. -/
@@ -1218,7 +1221,7 @@ theorem refines_forLoopRev_via_match
     statement requires induction on the partial-def's call tree (a known
     follow-up — `reconstructForLoops` is `partial def`, so its equational
     lemmas are not available to the kernel). The targeted form below covers
-    the high-leverage case: when the post-pass *does* rewrite into a
+    the case where the post-pass rewrites into a
     `forLoop`, the refinement is preserved. -/
 theorem reconstructForLoops_refines_forLoop
     {j : Json} {matchExpr : ImpExpr} {var : String} {lo hi body : ImpExpr}
@@ -1483,8 +1486,7 @@ theorem JsonContents_decreases (j j' : Json)
     Concretely, `parseHaxExprUnfoldsAs j e` is the proposition
     "`parseHaxExpr j = .ok e` *and* `JsonRefinesExpr j e` is exhibited".
     The conjunction shape makes the theorem statement total over `e`
-    while keeping the relation honest: only outputs that genuinely
-    refine the JSON node satisfy it. -/
+    and only outputs that refine the JSON node satisfy it. -/
 def parseHaxExprUnfoldsAs (j : Json) (e : ImpExpr) : Prop :=
   parseHaxExpr j = .ok e ∧ JsonRefinesExpr j e
 
@@ -1789,10 +1791,17 @@ theorem refines_box {j j_inner : Json} {e : ImpExpr}
     JsonRefinesExpr j e :=
   .transparent_wrap h_inner
 
-/-- Introduction lemma for the `Closure` tag.
-    Parser output: result of `parseHaxExpr` on the `body` slot
-    (approximation — the parser drops parameter and capture lists). -/
-theorem refines_closure {j j_inner : Json} {e : ImpExpr}
+/-- Introduction lemma for the `Closure` tag with named parameters.
+    Parser output: `.lam names body`, with `body` the result of `parseHaxExpr` on the
+    `body` slot; the capture list is not kept. -/
+theorem refines_closure {j j_body : Json} (names : List String) {body : ImpExpr}
+    (h_body : JsonRefinesExpr j_body body) :
+    JsonRefinesExpr j (.lam names body) :=
+  .lam_any names h_body
+
+/-- Introduction lemma for the `Closure` tag without named parameters.
+    Parser output: result of `parseHaxExpr` on the `body` slot. -/
+theorem refines_closure_body {j j_inner : Json} {e : ImpExpr}
     (h_inner : JsonRefinesExpr j_inner e) :
     JsonRefinesExpr j e :=
   .transparent_wrap h_inner
@@ -1941,7 +1950,7 @@ theorem refines_repeat {j j_val j_count : Json} {e_val e_count : ImpExpr}
 
     The `n` is parser-derived from the lhs JSON via `getVarName` (a
     pure name-extraction pass on the parsed lhs `ImpExpr`). The rhs
-    refinement is the high-leverage piece — a parser bug that drops the
+    refinement carries the check: a parser bug that drops the
     rhs expression cannot package this witness. -/
 theorem refines_assign {j j_rhs : Json} (n : String) {e_rhs : ImpExpr}
     (h_rhs : JsonRefinesExpr j_rhs e_rhs) :
@@ -3338,8 +3347,9 @@ theorem parseHaxExpr_step_for_Box
 
 /-- **Step lemma for `Closure`** (cascade position 29).
 
-    Parser output: `parseHaxExpr bodyJ` where `bodyJ = data.body`.
-    Witnessed by `transparent_wrap`. -/
+    Parser output: `.lam names body` when `closureParams? data = some names`, and `body`
+    otherwise, where `body` is the parse of `bodyJ = data.body`. Witnessed by `lam_any` and
+    `transparent_wrap`. -/
 theorem parseHaxExpr_step_for_Closure
     {j contents data bodyJ : Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
@@ -3423,7 +3433,21 @@ theorem parseHaxExpr_step_for_Closure
   rw [h_Cls] at h
   dsimp only [pure, bind] at h
   rw [h_body] at h
-  exact .transparent_wrap (ih e h)
+  cases hp : parseHaxExpr bodyJ with
+  | error msg => rw [hp] at h; cases h
+  | ok b =>
+    rw [hp] at h
+    cases hn : closureParams? data with
+    | none =>
+      rw [hn] at h
+      injection h with h_eq
+      subst h_eq
+      exact .transparent_wrap (ih b hp)
+    | some names =>
+      rw [hn] at h
+      injection h with h_eq
+      subst h_eq
+      exact .lam_any names (ih b hp)
 
 /-- **Step lemma for `PlaceTypeAscription`** (cascade position 31).
 

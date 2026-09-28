@@ -1550,7 +1550,10 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
 
   -- Function application
   -- Iterator map: map(iter_expr, func_expr) → (iter_expr).map (fun v => func_expr)
-  -- The func_expr typically contains a free variable (the iterator element).
+  -- The func_expr is a one-parameter `.lam`, or an expression in a free variable
+  -- (the iterator element).
+  | .app "map" [iterExpr, .lam [p] b] =>
+    s!"({toLean iterExpr 0}).map (fun {sanitizeName p} => {toLean b 0})"
   | .app "map" [iterExpr, funcExpr] =>
     -- Detect the free variable: typically .app ".field" [.var name] or .app "Struct.field" [.var name]
     let param := match funcExpr with
@@ -1558,6 +1561,8 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       | _ => "_el"
     s!"({toLean iterExpr 0}).map (fun {sanitizeName param} => {toLean funcExpr 0})"
   -- Iterator flat_map: flat_map(iter_expr, func_expr) → (iter_expr).flatMap (fun v => func_expr)
+  | .app "flat_map" [iterExpr, .lam [p] b] =>
+    s!"Hax.concatMap ({toLean iterExpr 0}) (fun {sanitizeName p} => {toLean b 0})"
   | .app "flat_map" [iterExpr, funcExpr] =>
     let param := match funcExpr with
       | .app _ [.var v] => v
