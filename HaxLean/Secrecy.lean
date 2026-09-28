@@ -24,15 +24,29 @@ Two families of secret nominal newtype are recognized:
   Without the feature the aliases are the plain integers and carry no secrecy, so
   a crate is extracted with the feature for its secret bindings to be recovered.
 
-`secrecyOfBindings` produces exactly the `List String` of secret binding names
-that the compiler-side consumer wraps — `SourceSecrecy.secret` in
-`CatCrypt/Crypto/SecureCompilation/SourceSecrecyTransfer.lean` (SSProve) — so the
-producer↔consumer contract across the two repos is a plain list of names.
+`secrecyOfBindings` gives the secret names of a list of typed bindings.
 
-Wiring point (`MainT.lean`): the per-function parameter types
-(`FnTypeInfo.paramTypes`, pre-newtype-unwrap) carry a secret `U8` (or a
-`[U8; n]`/`&[U8]` buffer, or a `Scalar`) as an `.adt`; `secrecyOfBindings` keeps
-those names and `MainT` emits them as an additive `<name>_secrecy` def.
+## Per-function secrecy
+
+`FnSecrecy` is the secrecy of one function: each parameter with its
+`BindingSecrecy`, and the secrecy of the result. `bindingSecrecy` reads it off the
+Rust type (`FnTypeInfo.paramTypes`, before newtype unwrapping) and the field types
+of the crate's structs (`FieldTypes`):
+
+* a type that `isSecretValue` recognizes is `secret`;
+* a struct, or a reference to one, that is not a secret newtype and has a field
+  holding a secret value (`holdsSecret`: the field's type is secret, or is an
+  array, reference, option or tuple of a type holding a secret, or a struct with
+  such a field) is `fields fs`, `fs` the fields holding a secret; this is the
+  level of `self` in a method of a struct with a secret field;
+* any other type holding a secret (an array of such structs, a tuple) is `secret`;
+* every other type is `pub`.
+
+`crateSecrecy` lists the functions of a crate with a non-public parameter or
+result; `FnSecrecy.lookup` gives a listed function's record and, for any other
+name, the record with no secret binding. `MainT` emits the list as
+`<name>_fnSecrecy`, and the compiler maps a record to a level table over the slots
+of the lowered body.
 -/
 
 @[expose] public section
@@ -85,6 +99,107 @@ def ImpType.isSecretInteger (t : ImpType) : Bool := t.isSecretValue
     list is passed to that gate yet. -/
 def secrecyOfBindings (bindings : List (String × ImpType)) : List String :=
   bindings.filterMap fun (name, ty) => if ty.isSecretValue then some name else none
+
+/-! ## Per-function secrecy -/
+
+/-- The field types of the structs of a crate: struct name to its fields, each with
+    its type, in declaration order. -/
+abbrev FieldTypes := List (String × List (String × ImpType))
+
+/-- A type holds a secret value: it is one (`isSecretValue`), or it is an array,
+    slice, reference, option, result or tuple of a type holding one, or a struct of
+    `st` with a field holding one. `fuel` bounds the struct unfoldings and the type
+    depth; at fuel `0` only `isSecretValue` is read. -/
+def ImpType.holdsSecret (st : FieldTypes) : Nat → ImpType → Bool
+  | 0, t => t.isSecretValue
+  | n + 1, t =>
+      t.isSecretValue ||
+        match t with
+        | .adt s _ => ((st.lookup s).getD []).any fun p => ImpType.holdsSecret st n p.2
+        | .array i _ => ImpType.holdsSecret st n i
+        | .slice i => ImpType.holdsSecret st n i
+        | .ref i _ => ImpType.holdsSecret st n i
+        | .option i => ImpType.holdsSecret st n i
+        | .result a b => ImpType.holdsSecret st n a || ImpType.holdsSecret st n b
+        | .tuple ts => ts.any (ImpType.holdsSecret st n)
+        | _ => false
+
+/-- The fuel `bindingSecrecy` gives `holdsSecret`: one unfolding per struct of `st`
+    and sixteen further type constructors. -/
+def secrecyFuel (st : FieldTypes) : Nat := st.length + 16
+
+/-- The secrecy of a binding. -/
+inductive BindingSecrecy where
+  /-- Every value the binding holds is public. -/
+  | pub
+  /-- The binding is secret as a whole. -/
+  | secret
+  /-- A struct binding whose listed fields are secret and whose other fields are
+      public. -/
+  | fields (fs : List String)
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The secrecy of a binding of type `t` (see the module docstring): `secret` for a
+    secret value; for a struct, or a reference to one, that is not a secret newtype
+    and holds a secret, `fields` of its fields holding a secret (`secret` when that
+    list is empty); `secret` for any other type holding a secret; `pub` otherwise. -/
+def bindingSecrecy (st : FieldTypes) (t : ImpType) : BindingSecrecy :=
+  let fuel := secrecyFuel st
+  if t.isSecretValue then .secret
+  else if !t.holdsSecret st fuel then .pub
+  else
+    match t.pointee with
+    | .adt s _ =>
+        match st.lookup s with
+        | some fs =>
+            match fs.filterMap fun p => if p.2.holdsSecret st fuel then some p.1 else none with
+            | [] => .secret
+            | f :: fs' => .fields (f :: fs')
+        | none => .secret
+    | _ => .secret
+
+/-- The secrecy of one function: each parameter, in order, with its secrecy, and
+    the secrecy of the result. -/
+structure FnSecrecy where
+  /-- The function's name, as in the `<fn>_impExpr` literal of its body. -/
+  fn : String
+  /-- The parameters in order, each with its secrecy. -/
+  params : List (String × BindingSecrecy)
+  /-- The secrecy of the result. -/
+  ret : BindingSecrecy
+  deriving DecidableEq, Repr, Inhabited
+
+/-- The secrecy of the function `fn` with type information `ti`. -/
+def fnSecrecyOf (st : FieldTypes) (fn : String) (ti : FnTypeInfo) : FnSecrecy where
+  fn := fn
+  params := ti.paramTypes.map fun p => (p.1, bindingSecrecy st p.2)
+  ret := bindingSecrecy st ti.retType
+
+/-- A function has a parameter or a result that is not public. -/
+def FnSecrecy.hasSecret (s : FnSecrecy) : Bool :=
+  s.ret != .pub || s.params.any fun p => p.2 != .pub
+
+/-- The records of the functions of a crate with a parameter or a result that is not
+    public, in the order of `fns`. -/
+def crateSecrecy (st : FieldTypes) (fns : List (String × FnTypeInfo)) : List FnSecrecy :=
+  (fns.map fun p => fnSecrecyOf st p.1 p.2).filter FnSecrecy.hasSecret
+
+/-- The record of `fn` in `tbl`; for a name `tbl` does not list, the record with no
+    parameter and a public result. -/
+def FnSecrecy.lookup (tbl : List FnSecrecy) (fn : String) : FnSecrecy :=
+  (tbl.find? (·.fn == fn)).getD { fn := fn, params := [], ret := .pub }
+
+/-- A `BindingSecrecy` as a Lean term. -/
+def BindingSecrecy.toLean : BindingSecrecy → String
+  | .pub => "Hax.BindingSecrecy.pub"
+  | .secret => "Hax.BindingSecrecy.secret"
+  | .fields fs => "Hax.BindingSecrecy.fields [" ++ ", ".intercalate (fs.map String.quote) ++ "]"
+
+/-- A `FnSecrecy` as a Lean term. -/
+def FnSecrecy.toLean (s : FnSecrecy) : String :=
+  let ps := s.params.map fun p => "(" ++ p.1.quote ++ ", " ++ p.2.toLean ++ ")"
+  "{ fn := " ++ s.fn.quote ++ ", params := [" ++ ", ".intercalate ps ++ "], ret := " ++
+    s.ret.toLean ++ " }"
 
 /-! ## Verification of the recognizer -/
 
@@ -148,5 +263,33 @@ example :
       [("sk", .ref (.slice (.adt "Secret" [.uint .w8])) false),
        ("msg", .ref (.slice (.uint .w8)) false), ("r", .adt "Secret" [.uint .w64])]
       = ["sk", "r"] := by decide
+
+/-- The structs of a method-carrying crate: a point of public coordinates and a key
+    pair with a public `pk` and a secret `sk`. -/
+private def keyStructs : FieldTypes :=
+  [("Point", [("x", .array (.uint .w64) 4), ("y", .array (.uint .w64) 4)]),
+   ("KeyPair", [("pk", .adt "Point" []), ("sk", .adt "Scalar" [])])]
+
+/-- `self : &Scalar` in a method of the secret newtype is secret as a whole. -/
+example : bindingSecrecy keyStructs (.ref (.adt "Scalar" []) false) = .secret := by decide
+
+/-- `self : Point` of public coordinates is public. -/
+example : bindingSecrecy keyStructs (.adt "Point" []) = .pub := by decide
+
+/-- `self : &KeyPair` has its field `sk` secret and its field `pk` public. -/
+example : bindingSecrecy keyStructs (.ref (.adt "KeyPair" []) false) = .fields ["sk"] := by
+  decide
+
+/-- An array of key pairs is secret as a whole. -/
+example : bindingSecrecy keyStructs (.array (.adt "KeyPair" []) 2) = .secret := by decide
+
+/-- A point method taking a secret scalar: the per-function record marks `k` and not
+    `self`. -/
+example :
+    fnSecrecyOf keyStructs "scalar_mul"
+        { paramTypes := [("self", .adt "Point" []), ("k", .adt "Scalar" [])],
+          retType := .adt "Point" [] } =
+      { fn := "scalar_mul", params := [("self", .pub), ("k", .secret)], ret := .pub } := by
+  decide
 
 end Hax
