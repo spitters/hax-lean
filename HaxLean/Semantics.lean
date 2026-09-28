@@ -647,6 +647,79 @@ def u64BinOp (a b : Int) (g : Nat → Nat → Option Nat) : Option Value :=
     (g a.toNat b.toNat).map fun r => Value.int r
   else none
 
+/-- A unary operation on an `int` value in `[0, 2^64)`, read as a natural
+    number; `none` for any other operand. -/
+def u64UnOp (a : Int) (g : Nat → Nat) : Option Value :=
+  if 0 ≤ a ∧ a < 2 ^ 64 then some (.int (g a.toNat : Nat)) else none
+
+/-- Rotation right of `x` read modulo `2^w` by `n` modulo `w` bits, the Rust
+    `rotate_right` on `u<w>` (`Hax.rotate_right_w`). -/
+def rotrNat (w x n : Nat) : Nat :=
+  (((x % 2 ^ w) >>> (n % w)) ||| ((x % 2 ^ w) <<< (w - n % w))) % 2 ^ w
+
+/-- Rotation left of `x` read modulo `2^w` by `n` modulo `w` bits, the Rust
+    `rotate_left` on `u<w>` (`Hax.rotate_left_w`). -/
+def rotlNat (w x n : Nat) : Nat :=
+  (((x % 2 ^ w) <<< (n % w)) ||| ((x % 2 ^ w) >>> (w - n % w))) % 2 ^ w
+
+/-- The narrow calls of `u64` code beside the arms of `hax64WordOps`, on `int`
+    values in `[0, 2^64)`:
+    * the `u16` and `usize` operations `wrapping_add#w`, `wrapping_sub#w`,
+      `wrapping_mul#w`, `BitAnd#w`, `BitOr#w`, `BitXor#w`, `Shl#w`, `Shr#w` for
+      `w ∈ {16, size}`, read modulo `2^w` with `usize` `64` bits wide, the
+      shifts `none` for an amount of `w` or more, and the truncations `cast#16`,
+      `cast#size` of a non-negative value;
+    * the rotations `rotate_right#w` (`rotrNat`) and `rotate_left#w`
+      (`rotlNat`) and the complement `Not#w`, `2^w - 1 - x mod 2^w`, for
+      `w ∈ {8, 16, 32, 64, size}`. -/
+def hax64NarrowOps : Builtins
+  | "cast#16", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 16 : Nat)) else none
+  | "cast#size", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
+  | "wrapping_add#16", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 16)
+  | "wrapping_sub#16", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 16 + 2 ^ 16 - y % 2 ^ 16) % 2 ^ 16)
+  | "wrapping_mul#16", [.int a, .int b] => u64BinOp a b fun x y => some ((x * y) % 2 ^ 16)
+  | "BitAnd#16", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 16) &&& (y % 2 ^ 16))
+  | "BitOr#16", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 16) ||| (y % 2 ^ 16))
+  | "BitXor#16", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 16) ^^^ (y % 2 ^ 16))
+  | "Shl#16", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 16 then some (((x % 2 ^ 16) <<< y) % 2 ^ 16) else none
+  | "Shr#16", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 16 then some ((x % 2 ^ 16) >>> y) else none
+  | "wrapping_add#size", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
+  | "wrapping_sub#size", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 64 + 2 ^ 64 - y % 2 ^ 64) % 2 ^ 64)
+  | "wrapping_mul#size", [.int a, .int b] => u64BinOp a b fun x y => some ((x * y) % 2 ^ 64)
+  | "BitAnd#size", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 64) &&& (y % 2 ^ 64))
+  | "BitOr#size", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 64) ||| (y % 2 ^ 64))
+  | "BitXor#size", [.int a, .int b] => u64BinOp a b fun x y =>
+      some ((x % 2 ^ 64) ^^^ (y % 2 ^ 64))
+  | "Shl#size", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 64 then some (((x % 2 ^ 64) <<< y) % 2 ^ 64) else none
+  | "Shr#size", [.int a, .int b] => u64BinOp a b fun x y =>
+      if y < 64 then some ((x % 2 ^ 64) >>> y) else none
+  | "rotate_right#8", [.int a, .int b] => u64BinOp a b fun x y => some (rotrNat 8 x y)
+  | "rotate_right#16", [.int a, .int b] => u64BinOp a b fun x y => some (rotrNat 16 x y)
+  | "rotate_right#32", [.int a, .int b] => u64BinOp a b fun x y => some (rotrNat 32 x y)
+  | "rotate_right#64", [.int a, .int b] => u64BinOp a b fun x y => some (rotrNat 64 x y)
+  | "rotate_right#size", [.int a, .int b] => u64BinOp a b fun x y => some (rotrNat 64 x y)
+  | "rotate_left#8", [.int a, .int b] => u64BinOp a b fun x y => some (rotlNat 8 x y)
+  | "rotate_left#16", [.int a, .int b] => u64BinOp a b fun x y => some (rotlNat 16 x y)
+  | "rotate_left#32", [.int a, .int b] => u64BinOp a b fun x y => some (rotlNat 32 x y)
+  | "rotate_left#64", [.int a, .int b] => u64BinOp a b fun x y => some (rotlNat 64 x y)
+  | "rotate_left#size", [.int a, .int b] => u64BinOp a b fun x y => some (rotlNat 64 x y)
+  | "Not#8", [.int a] => u64UnOp a fun x => 2 ^ 8 - 1 - x % 2 ^ 8
+  | "Not#16", [.int a] => u64UnOp a fun x => 2 ^ 16 - 1 - x % 2 ^ 16
+  | "Not#32", [.int a] => u64UnOp a fun x => 2 ^ 32 - 1 - x % 2 ^ 32
+  | "Not#64", [.int a] => u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64
+  | "Not#size", [.int a] => u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64
+  | _, _ => none
+
 /-- The Rust `u64` operations on `int` values in `[0, 2^64)`:
     * `wrapping_add#64`, `wrapping_sub#64`, `wrapping_mul#64` modulo `2^64`;
     * `mulhi#64`, the high 64 bits of the 128-bit product;
@@ -666,7 +739,8 @@ def u64BinOp (a b : Int) (g : Nat → Nat → Option Nat) : Option Value :=
       `wrapping_mul#w`, `BitAnd#w`, `BitOr#w`, `BitXor#w`, `Shl#w`, `Shr#w` for
       `w ∈ {8, 32}` on `int` values in `[0, 2^64)` read modulo `2^w` (on operands
       below `2^w` the Rust operation), the shifts `none` for an amount of `w` or
-      more, and the truncations `cast#8`, `cast#32` of a non-negative value. -/
+      more, and the truncations `cast#8`, `cast#32` of a non-negative value;
+    * every other call as `hax64NarrowOps`. -/
 def hax64WordOps : Builtins
   | "wrapping_add#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
   | "wrapping_sub#64", [.int a, .int b] => u64BinOp a b fun x y =>
@@ -729,7 +803,7 @@ def hax64WordOps : Builtins
       if y < 32 then some (((x % 2 ^ 32) <<< y) % 2 ^ 32) else none
   | "Shr#32", [.int a, .int b] => u64BinOp a b fun x y =>
       if y < 32 then some ((x % 2 ^ 32) >>> y) else none
-  | _, _ => none
+  | f, args => hax64NarrowOps f args
 
 /-- The builtin table of `u64` code: `hax64WordOps`, then the array operations
     `widthArrayOps` (`index`, `array_update`, `array_lit`, `slice_reverse` and
@@ -745,6 +819,12 @@ theorem u64BinOp_natCast {n m : Nat} (hn : n < 2 ^ 64) (hm : m < 2 ^ 64)
   have hn' : (n : Int) < 2 ^ 64 := by exact_mod_cast hn
   have hm' : (m : Int) < 2 ^ 64 := by exact_mod_cast hm
   rw [u64BinOp, if_pos ⟨by omega, hn', by omega, hm'⟩, Int.toNat_natCast, Int.toNat_natCast]
+
+/-- On a word below `2^64`, `u64UnOp` is the operation on its natural number. -/
+theorem u64UnOp_natCast {n : Nat} (hn : n < 2 ^ 64) (g : Nat → Nat) :
+    u64UnOp n g = some (.int (g n : Nat)) := by
+  have hn' : (n : Int) < 2 ^ 64 := by exact_mod_cast hn
+  rw [u64UnOp, if_pos ⟨by omega, hn'⟩, Int.toNat_natCast]
 
 /-- Where `hax64WordOps` is undefined, `hax64Builtins` is `widthArrayOps`. -/
 theorem hax64Builtins_of_none {f : String} {args : List Value}
@@ -864,6 +944,107 @@ theorem hax64WordOps_shl32 : hax64WordOps "Shl#32" [.int a, .int b] =
 
 theorem hax64WordOps_shr32 : hax64WordOps "Shr#32" [.int a, .int b] =
     u64BinOp a b fun x y => if y < 32 then some ((x % 2 ^ 32) >>> y) else none := rfl
+
+theorem hax64WordOps_cast16 : hax64WordOps "cast#16" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 16 : Nat)) else none := rfl
+
+theorem hax64WordOps_castSize : hax64WordOps "cast#size" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none := rfl
+
+theorem hax64WordOps_wrapping_add16 : hax64WordOps "wrapping_add#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x + y) % 2 ^ 16) := rfl
+
+theorem hax64WordOps_wrapping_sub16 : hax64WordOps "wrapping_sub#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 16 + 2 ^ 16 - y % 2 ^ 16) % 2 ^ 16) := rfl
+
+theorem hax64WordOps_wrapping_mul16 : hax64WordOps "wrapping_mul#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x * y) % 2 ^ 16) := rfl
+
+theorem hax64WordOps_bitAnd16 : hax64WordOps "BitAnd#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 16) &&& (y % 2 ^ 16)) := rfl
+
+theorem hax64WordOps_bitOr16 : hax64WordOps "BitOr#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 16) ||| (y % 2 ^ 16)) := rfl
+
+theorem hax64WordOps_bitXor16 : hax64WordOps "BitXor#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 16) ^^^ (y % 2 ^ 16)) := rfl
+
+theorem hax64WordOps_shl16 : hax64WordOps "Shl#16" [.int a, .int b] =
+    u64BinOp a b fun x y => if y < 16 then some (((x % 2 ^ 16) <<< y) % 2 ^ 16) else none :=
+  rfl
+
+theorem hax64WordOps_shr16 : hax64WordOps "Shr#16" [.int a, .int b] =
+    u64BinOp a b fun x y => if y < 16 then some ((x % 2 ^ 16) >>> y) else none := rfl
+
+theorem hax64WordOps_wrapping_addSize : hax64WordOps "wrapping_add#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x + y) % 2 ^ 64) := rfl
+
+theorem hax64WordOps_wrapping_subSize : hax64WordOps "wrapping_sub#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64 + 2 ^ 64 - y % 2 ^ 64) % 2 ^ 64) := rfl
+
+theorem hax64WordOps_wrapping_mulSize : hax64WordOps "wrapping_mul#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x * y) % 2 ^ 64) := rfl
+
+theorem hax64WordOps_bitAndSize : hax64WordOps "BitAnd#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64) &&& (y % 2 ^ 64)) := rfl
+
+theorem hax64WordOps_bitOrSize : hax64WordOps "BitOr#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64) ||| (y % 2 ^ 64)) := rfl
+
+theorem hax64WordOps_bitXorSize : hax64WordOps "BitXor#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some ((x % 2 ^ 64) ^^^ (y % 2 ^ 64)) := rfl
+
+theorem hax64WordOps_shlSize : hax64WordOps "Shl#size" [.int a, .int b] =
+    u64BinOp a b fun x y => if y < 64 then some (((x % 2 ^ 64) <<< y) % 2 ^ 64) else none :=
+  rfl
+
+theorem hax64WordOps_shrSize : hax64WordOps "Shr#size" [.int a, .int b] =
+    u64BinOp a b fun x y => if y < 64 then some ((x % 2 ^ 64) >>> y) else none := rfl
+
+theorem hax64WordOps_rotr8 : hax64WordOps "rotate_right#8" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotrNat 8 x y) := rfl
+
+theorem hax64WordOps_rotr16 : hax64WordOps "rotate_right#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotrNat 16 x y) := rfl
+
+theorem hax64WordOps_rotr32 : hax64WordOps "rotate_right#32" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotrNat 32 x y) := rfl
+
+theorem hax64WordOps_rotr64 : hax64WordOps "rotate_right#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotrNat 64 x y) := rfl
+
+theorem hax64WordOps_rotrSize : hax64WordOps "rotate_right#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotrNat 64 x y) := rfl
+
+theorem hax64WordOps_rotl8 : hax64WordOps "rotate_left#8" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotlNat 8 x y) := rfl
+
+theorem hax64WordOps_rotl16 : hax64WordOps "rotate_left#16" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotlNat 16 x y) := rfl
+
+theorem hax64WordOps_rotl32 : hax64WordOps "rotate_left#32" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotlNat 32 x y) := rfl
+
+theorem hax64WordOps_rotl64 : hax64WordOps "rotate_left#64" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotlNat 64 x y) := rfl
+
+theorem hax64WordOps_rotlSize : hax64WordOps "rotate_left#size" [.int a, .int b] =
+    u64BinOp a b fun x y => some (rotlNat 64 x y) := rfl
+
+theorem hax64WordOps_not8 : hax64WordOps "Not#8" [.int a] =
+    u64UnOp a fun x => 2 ^ 8 - 1 - x % 2 ^ 8 := rfl
+
+theorem hax64WordOps_not16 : hax64WordOps "Not#16" [.int a] =
+    u64UnOp a fun x => 2 ^ 16 - 1 - x % 2 ^ 16 := rfl
+
+theorem hax64WordOps_not32 : hax64WordOps "Not#32" [.int a] =
+    u64UnOp a fun x => 2 ^ 32 - 1 - x % 2 ^ 32 := rfl
+
+theorem hax64WordOps_not64 : hax64WordOps "Not#64" [.int a] =
+    u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64 := rfl
+
+theorem hax64WordOps_notSize : hax64WordOps "Not#size" [.int a] =
+    u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64 := rfl
 
 theorem hax64WordOps_index (vs : List Value) :
     hax64WordOps "index" [.array vs, .int a] = none := rfl

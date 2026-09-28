@@ -108,52 +108,6 @@ def isLimbRead (f : String) (args : List ImpExpr) : Bool :=
     | [.var _, .lit (.int i)] => 0 ≤ i
     | _ => false
 
-mutual
-
-/-- Normalise an expression in *value* position, so that it can stand as the
-    right-hand side of a `letBind`: the head is kept and each argument is
-    reduced to a variable. Returns the next counter, a wrapper prepending the
-    hoisted bindings in evaluation order, and the rewritten right-hand side. -/
-def anfRhs (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
-  match e with
-  | .app f args =>
-      if isLimbRead f args then (n, id, .app f args)
-      else
-        let (n₁, w, args') := anfArgs n args
-        (n₁, w, .app f args')
-  | .proj b i =>
-      let (n₁, w, b') := anfArg n b
-      (n₁, w, .proj b' i)
-  | .typeAscription b _ => anfRhs n b
-  | _ => (n, id, e)
-termination_by (sizeOf e, 0)
-
-/-- Normalise an expression in *argument* position, where `haxToLowCT` requires
-    a variable: a variable passes through, anything else is normalised as a
-    right-hand side and bound to a fresh `_anf<n>`. -/
-def anfArg (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
-  match e with
-  | .var x => (n, id, .var x)
-  | e' =>
-      let (n₁, w, rhs) := anfRhs n e'
-      let t := anfName n₁
-      (n₁ + 1, fun body => w (.letBind t rhs body), .var t)
-termination_by (sizeOf e, 1)
-
-/-- Normalise an argument list left to right, so the hoisted bindings appear in
-    the order the arguments were evaluated. -/
-def anfArgs (n : Nat) (es : List ImpExpr) :
-    Nat × (ImpExpr → ImpExpr) × List ImpExpr :=
-  match es with
-  | [] => (n, id, [])
-  | a :: rest =>
-      let (n₁, w₁, a') := anfArg n a
-      let (n₂, w₂, rest') := anfArgs n₁ rest
-      (n₂, fun body => w₁ (w₂ body), a' :: rest')
-termination_by (sizeOf es, 0)
-
-end
-
 /-- A right-hand side `haxToLowCT` binds directly. -/
 def bindableRhs : ImpExpr → Bool
   | .app _ _ => true
@@ -221,6 +175,76 @@ def normWhileTrue (c body : ImpExpr) : ImpExpr :=
   | _, _ => .whileFold c body
 
 mutual
+
+/-- Normalise an expression in *value* position, so that it can stand as the
+    right-hand side of a `letBind`: the head is kept and each argument is
+    reduced to a variable. A block in value position, a `letBind` with a bindable
+    right-hand side or a `seq`, is flattened: its binding or its first statement,
+    normalised, joins the wrapper, and the rest of the block is normalised in value
+    position. Returns the next counter, a wrapper prepending the hoisted bindings in
+    evaluation order, and the rewritten right-hand side. -/
+def anfRhs (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
+  match e with
+  | .app f args =>
+      if isLimbRead f args then (n, id, .app f args)
+      else
+        let (n₁, w, args') := anfArgs n args
+        (n₁, w, .app f args')
+  | .proj b i =>
+      let (n₁, w, b') := anfArg n b
+      (n₁, w, .proj b' i)
+  | .typeAscription b _ => anfRhs n b
+  | .letBind x v b =>
+      if bindableRhs v then
+        let (n₁, w₁, v') := anfRhs n v
+        let (n₂, w₂, b') := anfRhs n₁ b
+        (n₂, fun k => w₁ (.letBind x v' (w₂ k)), b')
+      else (n, id, e)
+  | .seq a b =>
+      let (n₁, a') := anfStmt n a
+      let (n₂, w₂, b') := anfRhs n₁ b
+      (n₂, fun k => .seq a' (w₂ k), b')
+  | _ => (n, id, e)
+termination_by (sizeOf e, 0)
+
+/-- Normalise an expression in *argument* position, where `haxToLowCT` requires
+    a variable: a variable passes through, a block whose value normalises to a
+    variable is flattened and that variable passes through, and anything else is
+    normalised as a right-hand side and bound to a fresh `_anf<n>`. The variable
+    ending a flattened block is read at the statement that uses it, after every
+    hoisted binding: it holds the value of the block when no argument to the right of
+    the block binds it, and an argument to the left that is a variable reads the same
+    value when the block does not bind it. -/
+def anfArg (n : Nat) (e : ImpExpr) : Nat × (ImpExpr → ImpExpr) × ImpExpr :=
+  match e with
+  | .var x => (n, id, .var x)
+  | .letBind x v b =>
+      let (n₁, w, rhs) := anfRhs n (.letBind x v b)
+      match rhs with
+      | .var y => (n₁, w, .var y)
+      | _ => (n₁ + 1, fun body => w (.letBind (anfName n₁) rhs body), .var (anfName n₁))
+  | .seq a b =>
+      let (n₁, w, rhs) := anfRhs n (.seq a b)
+      match rhs with
+      | .var y => (n₁, w, .var y)
+      | _ => (n₁ + 1, fun body => w (.letBind (anfName n₁) rhs body), .var (anfName n₁))
+  | e' =>
+      let (n₁, w, rhs) := anfRhs n e'
+      let t := anfName n₁
+      (n₁ + 1, fun body => w (.letBind t rhs body), .var t)
+termination_by (sizeOf e, 1)
+
+/-- Normalise an argument list left to right, so the hoisted bindings appear in
+    the order the arguments were evaluated. -/
+def anfArgs (n : Nat) (es : List ImpExpr) :
+    Nat × (ImpExpr → ImpExpr) × List ImpExpr :=
+  match es with
+  | [] => (n, id, [])
+  | a :: rest =>
+      let (n₁, w₁, a') := anfArg n a
+      let (n₂, w₂, rest') := anfArgs n₁ rest
+      (n₂, fun body => w₁ (w₂ body), a' :: rest')
+termination_by (sizeOf es, 0)
 
 /-- Normalise an expression in *statement* position. -/
 def anfStmt (n : Nat) (e : ImpExpr) : Nat × ImpExpr :=
@@ -309,7 +333,7 @@ def anfStmt (n : Nat) (e : ImpExpr) : Nat × ImpExpr :=
       let t := anfName n₁
       (n₁ + 1, w (.letBind t rhs (.var t)))
   | _ => (n, e)
-termination_by sizeOf e
+termination_by (sizeOf e, 2)
 
 /-- Normalise the bodies of the arms of a `match_`. -/
 def anfArms (n : Nat) (arms : List (ImpPat × ImpExpr)) :
@@ -320,7 +344,7 @@ def anfArms (n : Nat) (arms : List (ImpPat × ImpExpr)) :
       let (n₁, b') := anfStmt n b
       let (n₂, rest') := anfArms n₁ rest
       (n₂, (p, b') :: rest')
-termination_by sizeOf arms
+termination_by (sizeOf arms, 2)
 
 end
 
