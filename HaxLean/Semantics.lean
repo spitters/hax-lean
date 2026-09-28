@@ -770,8 +770,8 @@ def hax64NarrowOps : Builtins
       `cast#128` and `cast#64` on a non-negative value modulo `2^128` and `2^64`,
       `Mul` on non-negative values with product below `2^128`, and `Shr#128` on a
       value below `2^128` by an amount below `128`;
-    * `Rem` on a value below `2^128` by a positive modulus below `2^128`, `none`
-      for a zero modulus, where Rust panics;
+    * `Rem` and `Div` on a value below `2^128` by a positive divisor below `2^128`,
+      `none` for a zero divisor, where Rust panics;
     * `mulmod#64`, the product of two words modulo a positive modulus below
       `2^64`: the value of `((a as u128) * (b as u128) % (p as u128)) as u64`;
     * the `u8` and `u32` operations `wrapping_add#w`, `wrapping_sub#w`,
@@ -812,6 +812,10 @@ def hax64WordOps : Builtins
   | "Rem", [.int a, .int b] =>
       if 0 ≤ a ∧ a < 2 ^ 128 ∧ 0 < b ∧ b < 2 ^ 128 then
         some (.int (a.toNat % b.toNat : Nat))
+      else none
+  | "Div", [.int a, .int b] =>
+      if 0 ≤ a ∧ a < 2 ^ 128 ∧ 0 < b ∧ b < 2 ^ 128 then
+        some (.int (a.toNat / b.toNat : Nat))
       else none
   | "mulmod#64", [.int a, .int b, .int p] =>
       if 0 < p ∧ p < 2 ^ 64 then u64BinOp a b fun x y => some ((x * y) % p.toNat) else none
@@ -924,6 +928,10 @@ theorem hax64WordOps_shr128 : hax64WordOps "Shr#128" [.int a, .int b] =
 theorem hax64WordOps_rem : hax64WordOps "Rem" [.int a, .int b] =
     if 0 ≤ a ∧ a < 2 ^ 128 ∧ 0 < b ∧ b < 2 ^ 128 then
       some (.int (a.toNat % b.toNat : Nat)) else none := rfl
+
+theorem hax64WordOps_div : hax64WordOps "Div" [.int a, .int b] =
+    if 0 ≤ a ∧ a < 2 ^ 128 ∧ 0 < b ∧ b < 2 ^ 128 then
+      some (.int (a.toNat / b.toNat : Nat)) else none := rfl
 
 theorem hax64WordOps_mulmod (p : Int) : hax64WordOps "mulmod#64" [.int a, .int b, .int p] =
     if 0 < p ∧ p < 2 ^ 64 then u64BinOp a b fun x y => some ((x * y) % p.toNat) else none :=
