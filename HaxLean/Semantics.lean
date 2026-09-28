@@ -669,6 +669,7 @@ def rotlNat (w x n : Nat) : Nat :=
       also on two `bool` values;
     * `&&`, `and` and `||`, `or` on two `bool` values, the Boolean conjunction and
       disjunction (both operands evaluated, as `denote'` evaluates call arguments);
+    * `Not` on a `bool` value, the Boolean negation;
     * `add` on two `int` values in `[0, 2^64)`, the sum, `none` when it is `2^64` or
       more, where Rust panics (the arm `Add` of `hax64WordOps`);
     * `Sub` and `sub` on two `int` values in `[0, 2^64)`, the difference, `none` when
@@ -694,6 +695,7 @@ def hax64CmpOps : Builtins
   | "and", [.bool a, .bool b] => some (.bool (a && b))
   | "||", [.bool a, .bool b] => some (.bool (a || b))
   | "or", [.bool a, .bool b] => some (.bool (a || b))
+  | "Not", [.bool b] => some (.bool !b)
   | "add", [.int a, .int b] => u64BinOp a b fun x y =>
       if x + y < 2 ^ 64 then some (x + y) else none
   | "Sub", [.int a, .int b] => u64BinOp a b fun x y => if y ≤ x then some (x - y) else none
@@ -707,6 +709,9 @@ def hax64CmpOps : Builtins
       `w ∈ {16, size}`, read modulo `2^w` with `usize` `64` bits wide, the
       shifts `none` for an amount of `w` or more, and the truncations `cast#16`,
       `cast#size` of a non-negative value;
+    * the truncations `cast#u32`, `cast#u64`, `cast#usize` of a non-negative value modulo
+      `2^32`, `2^64`, `2^64`, and the negation `wrapping_neg#64`, `(2^64 - x mod 2^64) mod
+      2^64`;
     * the rotations `rotate_right#w` (`rotrNat`) and `rotate_left#w`
       (`rotlNat`) and the complement `Not#w`, `2^w - 1 - x mod 2^w`, for
       `w ∈ {8, 16, 32, 64, size}`;
@@ -714,6 +719,10 @@ def hax64CmpOps : Builtins
 def hax64NarrowOps : Builtins
   | "cast#16", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 16 : Nat)) else none
   | "cast#size", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
+  | "cast#u32", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 32 : Nat)) else none
+  | "cast#u64", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
+  | "cast#usize", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
+  | "wrapping_neg#64", [.int a] => u64UnOp a fun x => (2 ^ 64 - x % 2 ^ 64) % 2 ^ 64
   | "wrapping_add#16", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 16)
   | "wrapping_sub#16", [.int a, .int b] => u64BinOp a b fun x y =>
       some ((x % 2 ^ 16 + 2 ^ 16 - y % 2 ^ 16) % 2 ^ 16)
@@ -779,8 +788,12 @@ def hax64NarrowOps : Builtins
       `w ∈ {8, 32}` on `int` values in `[0, 2^64)` read modulo `2^w` (on operands
       below `2^w` the Rust operation), the shifts `none` for an amount of `w` or
       more, and the truncations `cast#8`, `cast#32` of a non-negative value;
+    * `none` on the array constructors `array_lit` and `repeat`, which `hax64Builtins`
+      reads from `widthArrayOps`;
     * every other call as `hax64NarrowOps`. -/
 def hax64WordOps : Builtins
+  | "array_lit", _ => none
+  | "repeat", _ => none
   | "wrapping_add#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
   | "wrapping_sub#64", [.int a, .int b] => u64BinOp a b fun x y =>
       some ((x % 2 ^ 64 + 2 ^ 64 - y % 2 ^ 64) % 2 ^ 64)
@@ -1093,6 +1106,21 @@ theorem hax64WordOps_not64 : hax64WordOps "Not#64" [.int a] =
 theorem hax64WordOps_notSize : hax64WordOps "Not#size" [.int a] =
     u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64 := rfl
 
+theorem hax64WordOps_wrappingNeg : hax64WordOps "wrapping_neg#64" [.int a] =
+    u64UnOp a fun x => (2 ^ 64 - x % 2 ^ 64) % 2 ^ 64 := rfl
+
+theorem hax64WordOps_castU32 : hax64WordOps "cast#u32" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 32 : Nat)) else none := rfl
+
+theorem hax64WordOps_castU64 : hax64WordOps "cast#u64" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none := rfl
+
+theorem hax64WordOps_castUsize : hax64WordOps "cast#usize" [.int a] =
+    if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none := rfl
+
+theorem hax64WordOps_notBool (b : Bool) : hax64WordOps "Not" [.bool b] = some (.bool !b) :=
+  rfl
+
 theorem hax64WordOps_Lt : hax64WordOps "Lt" [.int a, .int b] = some (.bool (decide (a < b))) :=
   rfl
 
@@ -1160,6 +1188,10 @@ theorem hax64WordOps_sub : hax64WordOps "sub" [.int a, .int b] =
 
 theorem hax64WordOps_index (vs : List Value) :
     hax64WordOps "index" [.array vs, .int a] = none := rfl
+
+theorem hax64WordOps_arrayLit (vals : List Value) : hax64WordOps "array_lit" vals = none := rfl
+
+theorem hax64WordOps_repeat (vals : List Value) : hax64WordOps "repeat" vals = none := rfl
 
 theorem hax64WordOps_array_update (vs : List Value) (v : Value) :
     hax64WordOps "array_update" [.array vs, .int a, v] = none := rfl
