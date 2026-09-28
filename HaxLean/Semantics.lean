@@ -667,6 +667,8 @@ def rotlNat (w x n : Nat) : Nat :=
     * `Lt`, `Gt`, `Le`, `Ge`, `Eq`, `Ne` and `lt`, `gt`, `le`, `ge`, `eq`, `ne` on two
       `int` values, the Boolean `bool` of the integer comparison; `Eq`, `eq`, `Ne`, `ne`
       also on two `bool` values;
+    * `&&`, `and` and `||`, `or` on two `bool` values, the Boolean conjunction and
+      disjunction (both operands evaluated, as `denote'` evaluates call arguments);
     * `add` on two `int` values in `[0, 2^64)`, the sum, `none` when it is `2^64` or
       more, where Rust panics (the arm `Add` of `hax64WordOps`);
     * `Sub` and `sub` on two `int` values in `[0, 2^64)`, the difference, `none` when
@@ -688,6 +690,10 @@ def hax64CmpOps : Builtins
   | "eq", [.bool a, .bool b] => some (.bool (a == b))
   | "Ne", [.bool a, .bool b] => some (.bool (a != b))
   | "ne", [.bool a, .bool b] => some (.bool (a != b))
+  | "&&", [.bool a, .bool b] => some (.bool (a && b))
+  | "and", [.bool a, .bool b] => some (.bool (a && b))
+  | "||", [.bool a, .bool b] => some (.bool (a || b))
+  | "or", [.bool a, .bool b] => some (.bool (a || b))
   | "add", [.int a, .int b] => u64BinOp a b fun x y =>
       if x + y < 2 ^ 64 then some (x + y) else none
   | "Sub", [.int a, .int b] => u64BinOp a b fun x y => if y ≤ x then some (x - y) else none
@@ -1122,6 +1128,18 @@ theorem hax64WordOps_Ne_bool (x y : Bool) :
 
 theorem hax64WordOps_ne_bool (x y : Bool) :
     hax64WordOps "ne" [.bool x, .bool y] = some (.bool (x != y)) := rfl
+
+theorem hax64WordOps_andand (x y : Bool) :
+    hax64WordOps "&&" [.bool x, .bool y] = some (.bool (x && y)) := rfl
+
+theorem hax64WordOps_and_bool (x y : Bool) :
+    hax64WordOps "and" [.bool x, .bool y] = some (.bool (x && y)) := rfl
+
+theorem hax64WordOps_oror (x y : Bool) :
+    hax64WordOps "||" [.bool x, .bool y] = some (.bool (x || y)) := rfl
+
+theorem hax64WordOps_or_bool (x y : Bool) :
+    hax64WordOps "or" [.bool x, .bool y] = some (.bool (x || y)) := rfl
 
 theorem hax64WordOps_add_lower : hax64WordOps "add" [.int a, .int b] =
     u64BinOp a b fun x y => if x + y < 2 ^ 64 then some (x + y) else none := rfl
