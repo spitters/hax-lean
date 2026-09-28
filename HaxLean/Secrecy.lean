@@ -80,8 +80,9 @@ def ImpType.isSecretValue : ImpType → Bool
 def ImpType.isSecretInteger (t : ImpType) : Bool := t.isSecretValue
 
 /-- The phase-2 producer: from the per-binding types of an extracted function,
-    the names whose source type is a secret value. This is precisely the
-    `SourceSecrecy.secret` list the SSProve-side `cmdCT` gate consumes. -/
+    the names whose source type is a secret value. The result has the type of
+    `SourceSecrecy.secret`, the input of the CatCrypt `cmdCT` gate; no emitted
+    list is passed to that gate yet. -/
 def secrecyOfBindings (bindings : List (String × ImpType)) : List String :=
   bindings.filterMap fun (name, ty) => if ty.isSecretValue then some name else none
 

@@ -244,14 +244,15 @@ def main (args : List String) : IO UInt32 := do
     -- additive `<name>_secrecy` def, recognized from secret-integer newtypes
     -- (`HaxLean/Secrecy.lean`). The source is the per-function parameter types
     -- (`FnTypeInfo.paramTypes`, pre-newtype-unwrap), which carry a secret `U8`
-    -- (or a `[U8; n]`/`&[U8]` buffer of them) as an `.adt "U8"`. Consumed by
-    -- `SourceSecrecy` on the CatCrypt side; empty until a kernel adopts the
+    -- (or a `[U8; n]`/`&[U8]` buffer of them) as an `.adt "U8"`. The list is
+    -- crate-wide (no per-function scoping, no locals, no return levels), and no
+    -- CatCrypt module consumes it yet; it is empty until a kernel adopts the
     -- secret-integer discipline. Additive, so it does not disturb the existing
     -- `_haxpipe.lean` format.
     let paramBindings := fnTypes.flatMap (fun p => p.2.paramTypes)
     let secretNames := (secrecyOfBindings paramBindings).eraseDups
     let secrecyLit := "[" ++ ", ".intercalate (secretNames.map (fun s => "\"" ++ s ++ "\"")) ++ "]"
-    let secrecyDef := s!"\n/-- Source-declared secret bindings (IF/CT transfer): binding names whose Rust\ntype is a secret integer. Consumed by `SourceSecrecy` on the CatCrypt side. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
+    let secrecyDef := s!"\n/-- Source-declared secret bindings: the crate-wide list of parameter names whose\nRust type is a secret integer. No CatCrypt module consumes this list yet. -/\ndef {opts.name}_secrecy : List String := {secrecyLit}\n"
     -- The crate the export was taken from: the directory holding
     -- `hax_frontend_export.json`, which is the crate root `cargo hax json` ran
     -- in. Empty when the export arrives on stdin, and then the module docstring
