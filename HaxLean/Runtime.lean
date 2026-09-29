@@ -126,6 +126,23 @@ theorem foldRange_rel {α β : Type} {R : α → β → Prop} {lo hi : Int}
 -- never relied on for definitional equality outside `Hax/Runtime.lean`.
 attribute [irreducible] foldRange foldRangeRev
 
+unseal foldRange in
+/-- Peel the first iteration off a non-empty range. -/
+theorem foldRange_step {α : Type} (lo hi : Int) (init : α) (f : Int → α → α) (h : lo < hi) :
+    Hax.foldRange lo hi init f = Hax.foldRange (lo + 1) hi (f lo init) f := by
+  show foldRange.go f (hi - lo).toNat lo init
+      = foldRange.go f (hi - (lo + 1)).toNat (lo + 1) (f lo init)
+  have hc : (hi - lo).toNat = (hi - (lo + 1)).toNat + 1 := by omega
+  rw [hc, foldRange.go]
+
+unseal foldRange in
+/-- An empty range returns the initial accumulator. -/
+theorem foldRange_stop {α : Type} (lo hi : Int) (init : α) (f : Int → α → α)
+    (h : ¬ lo < hi) : Hax.foldRange lo hi init f = init := by
+  show foldRange.go f (hi - lo).toNat lo init = init
+  have hc : (hi - lo).toNat = 0 := by omega
+  rw [hc, foldRange.go]
+
 /-- Total fold over `[lo, hi)` with ControlFlow accumulator. -/
 def forFold {α β : Type} (lo hi : Int) (init : α)
     (f : Int → α → ControlFlow β α) : ControlFlow β α :=
@@ -1281,6 +1298,278 @@ noncomputable opaque sha256 : Array Int → Array Int
     ascription pins β to `Aes256`, the inner `into key : α` keeps
     `α = Array Int`. -/
 @[no_expose] noncomputable def «new» {α β : Type} [Nonempty β] (x : α) : β := bridgeCast x
+
+/-! ### Rewriting lemmas for `grind` and `simp`
+
+Equations for the unsigned width operations, the comparisons and the array
+operations, stated with `%`, `/`, `2 ^ w`, `Int.toNat` and `decide`, so that
+`grind` reasons about extracted code without unfolding the runtime. The
+unconditional equations (`mod2w_eq_ite`, `castVal_w_eq_mod2w`, `shr_w_eq_div`,
+`wrapping_add_w_eq_mod2w`, …) are `grind` rewrites into that vocabulary; the
+conditional ones on in-range arguments (`castVal_w_of_lt`, `shr_w_of_lt`, …) are
+rewrites for `rw` and `simp only`. The range facts `mod2w_nonneg` and
+`mod2w_lt_two_pow` fire on every `mod2w w n` term. -/
+
+/-- `mod2w w n` is `n % 2 ^ w` on non-negative `n` and `0` on negative `n`. -/
+@[grind =] theorem mod2w_eq_ite (w : Nat) (n : Int) :
+    mod2w w n = if 0 ≤ n then n % 2 ^ w else 0 := by
+  unfold mod2w
+  split
+  · rename_i h
+    rw [Int.natCast_emod, Int.toNat_of_nonneg h]
+    simp
+  · simp only [Int.toNat_of_nonpos (by omega : n ≤ 0), Nat.zero_mod, Int.natCast_zero]
+
+/-- `mod2w w n` is non-negative. -/
+theorem mod2w_nonneg (w : Nat) (n : Int) : 0 ≤ mod2w w n := by
+  unfold mod2w; exact Int.natCast_nonneg _
+
+grind_pattern mod2w_nonneg => mod2w w n
+
+/-- `mod2w w n` is below `2 ^ w`. -/
+theorem mod2w_lt_two_pow (w : Nat) (n : Int) : mod2w w n < 2 ^ w := by
+  unfold mod2w
+  have := Nat.mod_lt n.toNat (Nat.two_pow_pos w)
+  exact_mod_cast this
+
+grind_pattern mod2w_lt_two_pow => mod2w w n
+
+/-- On a non-negative argument, `mod2w w` is reduction modulo `2 ^ w`. -/
+theorem mod2w_eq_emod {w : Nat} {n : Int} (h0 : 0 ≤ n) : mod2w w n = n % 2 ^ w := by
+  rw [mod2w_eq_ite, if_pos h0]
+
+/-- `mod2w w` is the identity on `[0, 2 ^ w)`. -/
+theorem mod2w_of_lt {w : Nat} {n : Int} (h0 : 0 ≤ n) (h : n < 2 ^ w) :
+    mod2w w n = n := by
+  rw [mod2w_eq_emod h0]; exact Int.emod_eq_of_lt h0 h
+
+/-- Truncating to `w` bits and then to `v ≤ w` bits is truncating to `v` bits. -/
+@[grind =] theorem mod2w_mod2w_of_le {v w : Nat} (h : v ≤ w) (n : Int) :
+    mod2w v (mod2w w n) = mod2w v n := by
+  unfold mod2w
+  rw [Int.toNat_natCast, Nat.mod_mod_of_dvd _ (Nat.pow_dvd_pow 2 h)]
+
+/-- Truncating to `w` bits and then to `v ≥ w` bits is truncating to `w` bits. -/
+@[grind =] theorem mod2w_mod2w_of_ge {v w : Nat} (h : w ≤ v) (n : Int) :
+    mod2w v (mod2w w n) = mod2w w n :=
+  mod2w_of_lt (mod2w_nonneg w n)
+    (Int.lt_of_lt_of_le (mod2w_lt_two_pow w n)
+      (by exact_mod_cast Nat.pow_le_pow_right (by decide) h))
+
+/-- `castVal_w w` is `mod2w w`. -/
+@[grind =] theorem castVal_w_eq_mod2w (w : Nat) (x : Int) : castVal_w w x = mod2w w x := rfl
+
+/-- A width cast of a non-negative value is reduction modulo `2 ^ w`. -/
+theorem castVal_w_eq_emod {w : Nat} {x : Int} (h0 : 0 ≤ x) :
+    castVal_w w x = x % 2 ^ w :=
+  mod2w_eq_emod h0
+
+/-- A width cast of a value in `[0, 2 ^ w)` is the value. -/
+theorem castVal_w_of_lt {w : Nat} {x : Int} (h0 : 0 ≤ x) (h : x < 2 ^ w) :
+    castVal_w w x = x :=
+  mod2w_of_lt h0 h
+
+/-- Casting to `w` bits and then to `v ≤ w` bits is casting to `v` bits. -/
+theorem castVal_w_castVal_w_of_le {v w : Nat} (h : v ≤ w) (x : Int) :
+    castVal_w v (castVal_w w x) = castVal_w v x :=
+  mod2w_mod2w_of_le h x
+
+/-- Casting to `w` bits and then to `v ≥ w` bits is casting to `w` bits. -/
+theorem castVal_w_castVal_w_of_ge {v w : Nat} (h : w ≤ v) (x : Int) :
+    castVal_w v (castVal_w w x) = castVal_w w x :=
+  mod2w_mod2w_of_ge h x
+
+/-- The width right shift is division of the `w`-bit truncation by `2 ^ b`. -/
+@[grind =] theorem shr_w_eq_div (w : Nat) (a b : Int) :
+    shr_w w a b = mod2w w a / 2 ^ b.toNat := by
+  unfold shr_w mod2w
+  rw [Nat.shiftRight_eq_div_pow, Int.natCast_ediv, Int.natCast_pow, Int.cast_ofNat_Int]
+
+/-- A width right shift of a value in `[0, 2 ^ w)` is division by `2 ^ b`. -/
+theorem shr_w_of_lt {w : Nat} {x : Int} (b : Int) (h0 : 0 ≤ x) (h : x < 2 ^ w) :
+    shr_w w x b = x / 2 ^ b.toNat := by
+  rw [shr_w_eq_div, mod2w_of_lt h0 h]
+
+/-- A width right shift by a natural amount `b` of a value in `[0, 2 ^ w)` is
+    division by `2 ^ b`. -/
+theorem shr_w_natCast_of_lt {w : Nat} {x : Int} (b : Nat) (h0 : 0 ≤ x) (h : x < 2 ^ w) :
+    shr_w w x (b : Int) = x / 2 ^ b := by
+  rw [shr_w_of_lt _ h0 h, Int.toNat_natCast]
+
+/-- A width left shift of a non-negative value is multiplication by `2 ^ b`
+    reduced modulo `2 ^ w`. -/
+theorem shl_w_of_nonneg {w : Nat} {x : Int} (b : Int) (h0 : 0 ≤ x) :
+    shl_w w x b = x * 2 ^ b.toNat % 2 ^ w := by
+  unfold shl_w
+  rw [mod2w_eq_emod (Int.natCast_nonneg _), Nat.shiftLeft_eq, Int.natCast_mul,
+    Int.toNat_of_nonneg h0, Int.natCast_pow, Int.cast_ofNat_Int]
+
+/-- Wrapping addition at width `w` is `mod2w w` of the sum. -/
+@[grind =] theorem wrapping_add_w_eq_mod2w (w : Nat) (a b : Int) :
+    wrapping_add_w w a b = mod2w w (a + b) := rfl
+
+/-- Wrapping subtraction at width `w` is `mod2w w` of the difference plus `2 ^ w`. -/
+@[grind =] theorem wrapping_sub_w_eq_mod2w (w : Nat) (a b : Int) :
+    wrapping_sub_w w a b = mod2w w (a - b + 2 ^ w) := by
+  unfold wrapping_sub_w; rfl
+
+/-- Wrapping multiplication at width `w` is `mod2w w` of the product. -/
+@[grind =] theorem wrapping_mul_w_eq_mod2w (w : Nat) (a b : Int) :
+    wrapping_mul_w w a b = mod2w w (a * b) := rfl
+
+/-- Wrapping addition of non-negative values is the sum modulo `2 ^ w`. -/
+theorem wrapping_add_w_eq_emod {w : Nat} {a b : Int} (ha : 0 ≤ a) (hb : 0 ≤ b) :
+    wrapping_add_w w a b = (a + b) % 2 ^ w :=
+  mod2w_eq_emod (Int.add_nonneg ha hb)
+
+/-- Wrapping subtraction with `b ≤ a + 2 ^ w` is the difference modulo `2 ^ w`. -/
+theorem wrapping_sub_w_eq_emod {w : Nat} {a b : Int} (h : b ≤ a + 2 ^ w) :
+    wrapping_sub_w w a b = (a - b) % 2 ^ w := by
+  rw [wrapping_sub_w_eq_mod2w, mod2w_eq_emod (by omega), Int.add_emod_right]
+
+/-- Wrapping multiplication of non-negative values is the product modulo `2 ^ w`. -/
+@[grind =] theorem wrapping_mul_w_eq_emod {w : Nat} {a b : Int} (ha : 0 ≤ a) (hb : 0 ≤ b) :
+    wrapping_mul_w w a b = a * b % 2 ^ w :=
+  mod2w_eq_emod (Int.mul_nonneg ha hb)
+
+/-- `Hax.lt` is the decision of `<`. -/
+@[grind =] theorem lt_eq_decide {α : Type} [LT α] [DecidableRel (α := α) (· < ·)] (a b : α) :
+    lt a b = decide (a < b) := rfl
+
+/-- `Hax.le` is the decision of `≤`. -/
+@[grind =] theorem le_eq_decide {α : Type} [LE α] [DecidableRel (α := α) (· ≤ ·)] (a b : α) :
+    le a b = decide (a ≤ b) := rfl
+
+/-- `Hax.gt` is the decision of `>`. -/
+@[grind =] theorem gt_eq_decide {α : Type} [LT α] [DecidableRel (α := α) (· < ·)] (a b : α) :
+    gt a b = decide (b < a) := rfl
+
+/-- `Hax.ge` is the decision of `≥`. -/
+@[grind =] theorem ge_eq_decide {α : Type} [LE α] [DecidableRel (α := α) (· ≤ ·)] (a b : α) :
+    ge a b = decide (b ≤ a) := rfl
+
+/-- `Hax.beq` on a type with decidable equality is the decision of `=`. -/
+@[grind =] theorem beq_def_decide {α : Type} [DecidableEq α] (a b : α) :
+    beq a b = decide (a = b) := rfl
+
+/-- `Hax.bne` on a type with decidable equality is the decision of `≠`. -/
+@[grind =] theorem bne_def_decide {α : Type} [DecidableEq α] (a b : α) :
+    bne a b = decide (a ≠ b) := by
+  unfold bne; cases h : decide (a = b) <;> simp_all
+
+/-- `Hax.boolToInt b` is `1` on `true` and `0` on `false`. -/
+@[grind =] theorem boolToInt_eq_ite (b : Bool) : boolToInt b = if b = true then 1 else 0 := by
+  cases b <;> rfl
+
+/-- `Hax.repeat_ v n` has `n.toNat` entries. -/
+@[grind =] theorem size_repeat_ {α : Type} (v : α) (n : Int) :
+    (repeat_ v n).size = n.toNat := by
+  simp [repeat_]
+
+/-- `Hax.array_len` is the size as an integer. -/
+@[grind =] theorem array_len_eq_size {α : Type} (a : Array α) :
+    array_len a = (a.size : Int) := rfl
+
+/-- `Hax.array_update` preserves the size. -/
+@[grind =] theorem size_array_update_eq {α : Type} (a : Array α) (i : Int) (v : α) :
+    (array_update a i v).size = a.size := by
+  unfold array_update; dsimp only; split <;> simp
+
+/-- `Hax.array_update` at an index `i` with `a.size ≤ i.toNat` returns the array. -/
+@[grind =] theorem array_update_of_size_le {α : Type} {a : Array α} {i : Int} (v : α)
+    (h : a.size ≤ i.toNat) : array_update a i v = a := by
+  unfold array_update; rw [dif_neg (by omega)]
+
+/-- `Hax.index` at an in-bounds index is the entry at `i.toNat`. -/
+@[grind =] theorem index_eq_getElem {α : Type} [Inhabited α] {a : Array α} {i : Int}
+    (h : i.toNat < a.size) : index a i = a[i.toNat] := by
+  unfold index; rw [dif_pos h]
+
+/-- `Hax.index` at an out-of-bounds index of a non-empty array is the first entry. -/
+@[grind =] theorem index_of_size_le {α : Type} [Inhabited α] {a : Array α} {i : Int}
+    (h : a.size ≤ i.toNat) (h0 : 0 < a.size) : index a i = a[0] := by
+  unfold index; rw [dif_neg (by omega), dif_pos h0]
+
+/-- `Hax.index` into an empty array is `default`. -/
+@[grind =] theorem index_of_size_eq_zero {α : Type} [Inhabited α] {a : Array α} (i : Int)
+    (h : a.size = 0) : index a i = default := by
+  unfold index; rw [dif_neg (by omega), dif_neg (by omega)]
+
+/-- Reading back an in-bounds `Hax.array_update` at the same index gives the value
+    written. -/
+@[grind =] theorem index_array_update_same {α : Type} [Inhabited α] {a : Array α}
+    {i : Int} (v : α) (h : i.toNat < a.size) : index (array_update a i v) i = v := by
+  unfold array_update
+  rw [dif_pos h, index_eq_getElem (by simpa using h)]
+  simp
+
+/-- Reading an in-bounds index `j` of `Hax.array_update a i v` with
+    `i.toNat ≠ j.toNat` gives the entry of `a` at `j`. -/
+@[grind =] theorem index_array_update_of_ne {α : Type} [Inhabited α] {a : Array α}
+    {i j : Int} (v : α) (hj : j.toNat < a.size) (hij : i.toNat ≠ j.toNat) :
+    index (array_update a i v) j = index a j := by
+  rw [index_eq_getElem hj, index_eq_getElem (by rw [size_array_update_eq]; exact hj)]
+  unfold array_update
+  dsimp only
+  split
+  · simp [Array.getElem_set, hij]
+  · rfl
+
+/-! ### `grind` on the runtime operations
+
+Each example closes by `grind` with no hint, through the annotations above. -/
+
+section GrindExamples
+
+example : (repeat_ (0 : Int) 4).size = 4 := by grind
+
+example : (Array.replicate 4 (0 : Int)).size = 4 := by grind
+
+example (a : Array Int) (i v : Int) : array_len (array_update a i v) = array_len a := by grind
+
+example (a : Array Int) (i v : Int) (h0 : 0 ≤ i) (h : i < a.size) :
+    index (array_update a i v) i = v := by grind
+
+example (a : Array Int) (i j v : Int) (hi : 0 ≤ i) (hj : 0 ≤ j) (hja : j < a.size)
+    (hij : i ≠ j) : index (array_update a i v) j = index a j := by grind
+
+example (a : Array Int) (i v : Int) (h : a.size ≤ i) : array_update a i v = a := by grind
+
+example (x : Int) (h0 : 0 ≤ x) (h : x < 2 ^ 64) : castVal_w 64 x = x := by grind
+
+example (x : Int) : 0 ≤ castVal_w 64 x ∧ castVal_w 64 x < 2 ^ 64 := by grind
+
+example (w : Nat) (x : Int) : 0 ≤ castVal_w w x ∧ castVal_w w x < 2 ^ w := by
+  grind
+
+example (x : Int) : castVal_w 32 (castVal_w 64 x) = castVal_w 32 x := by grind
+
+example (x : Int) (h0 : 0 ≤ x) (h : x < 2 ^ 128) : shr_w 128 x 64 = x / 2 ^ 64 := by grind
+
+example (a b : Int) (ha : 0 ≤ a) (hb : 0 ≤ b) :
+    wrapping_add_w 64 a b = (a + b) % 2 ^ 64 := by grind
+
+example (a b : Int) (ha : 0 ≤ a) (hb : b < 2 ^ 64) :
+    wrapping_sub_w 64 a b = (a - b) % 2 ^ 64 := by grind
+
+example (a b : Int) (ha : 0 ≤ a) (hb : 0 ≤ b) :
+    wrapping_mul_w 32 a b = a * b % 2 ^ 32 := by grind
+
+example (a b : Int) (h : a < b) : lt a b = true := by grind
+
+example (a b : Int) : beq a b = true ↔ a = b := by grind
+
+/-- One word of an add-with-carry chain: the low word and the carry of
+    `x + y + c` at width 64, computed through a 128-bit sum. -/
+example {x y c : Int} (hx0 : 0 ≤ x) (hx : x < 2 ^ 64) (hy0 : 0 ≤ y) (hy : y < 2 ^ 64)
+    (hc0 : 0 ≤ c) (hc : c ≤ 1) :
+    castVal_w 64 (castVal_w 128 x + castVal_w 128 y + c)
+        + 2 ^ 64 * shr_w 128 (castVal_w 128 x + castVal_w 128 y + c) 64 = x + y + c ∧
+      0 ≤ shr_w 128 (castVal_w 128 x + castVal_w 128 y + c) 64 ∧
+      shr_w 128 (castVal_w 128 x + castVal_w 128 y + c) 64 ≤ 1 := by
+  grind
+
+end GrindExamples
 
 end Hax
 
