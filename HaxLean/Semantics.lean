@@ -703,6 +703,20 @@ def sintSubOp (w : Nat) (a b : Int) : Option Value :=
       -2 ^ (w - 1) ≤ a - b ∧ a - b < 2 ^ (w - 1) then some (.int (a - b))
   else none
 
+/-- The checked addition of Rust `i<w>` on `int` values: `a + b` when `a`, `b` and
+    `a + b` lie in `[-2^(w-1), 2^(w-1))`, `none` otherwise, where Rust panics. -/
+def sintAddOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ -2 ^ (w - 1) ≤ b ∧ b < 2 ^ (w - 1) ∧
+      -2 ^ (w - 1) ≤ a + b ∧ a + b < 2 ^ (w - 1) then some (.int (a + b))
+  else none
+
+/-- The checked multiplication of Rust `i<w>` on `int` values: `a * b` when `a`, `b` and
+    `a * b` lie in `[-2^(w-1), 2^(w-1))`, `none` otherwise, where Rust panics. -/
+def sintMulOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ -2 ^ (w - 1) ≤ b ∧ b < 2 ^ (w - 1) ∧
+      -2 ^ (w - 1) ≤ a * b ∧ a * b < 2 ^ (w - 1) then some (.int (a * b))
+  else none
+
 /-- The checked subtraction of Rust `u<w>` on `int` values: `a - b` when
     `0 ≤ b ≤ a < 2^w`, `none` otherwise, where Rust panics. -/
 def uintSubOp (w : Nat) (a b : Int) : Option Value :=
@@ -741,7 +755,9 @@ def sintShrOp (w : Nat) (a b : Int) : Option Value :=
       the subtrahend exceeds the minuend, where Rust panics;
     * `Sub#i8`, `Sub#i16`, `Sub#i32`, `Sub#i64`, `Sub#i128`, `Sub#isize` the checked
       subtraction `sintSubOp` of the signed type (`isize` `64` bits wide), and `Sub#u128`
-      the checked subtraction `uintSubOp 128`. -/
+      the checked subtraction `uintSubOp 128`;
+    * `Add#i<w>` and `Mul#i<w>` for the same widths, the checked addition `sintAddOp` and
+      multiplication `sintMulOp` of the signed type. -/
 def hax64CmpOps : Builtins
   | "Lt", [.int a, .int b] => some (.bool (decide (a < b)))
   | "lt", [.int a, .int b] => some (.bool (decide (a < b)))
@@ -764,6 +780,18 @@ def hax64CmpOps : Builtins
   | "Sub#i128", [.int a, .int b] => sintSubOp 128 a b
   | "Sub#isize", [.int a, .int b] => sintSubOp 64 a b
   | "Sub#u128", [.int a, .int b] => uintSubOp 128 a b
+  | "Add#i8", [.int a, .int b] => sintAddOp 8 a b
+  | "Add#i16", [.int a, .int b] => sintAddOp 16 a b
+  | "Add#i32", [.int a, .int b] => sintAddOp 32 a b
+  | "Add#i64", [.int a, .int b] => sintAddOp 64 a b
+  | "Add#i128", [.int a, .int b] => sintAddOp 128 a b
+  | "Add#isize", [.int a, .int b] => sintAddOp 64 a b
+  | "Mul#i8", [.int a, .int b] => sintMulOp 8 a b
+  | "Mul#i16", [.int a, .int b] => sintMulOp 16 a b
+  | "Mul#i32", [.int a, .int b] => sintMulOp 32 a b
+  | "Mul#i64", [.int a, .int b] => sintMulOp 64 a b
+  | "Mul#i128", [.int a, .int b] => sintMulOp 128 a b
+  | "Mul#isize", [.int a, .int b] => sintMulOp 64 a b
   | "&&", [.bool a, .bool b] => some (.bool (a && b))
   | "and", [.bool a, .bool b] => some (.bool (a && b))
   | "||", [.bool a, .bool b] => some (.bool (a || b))
