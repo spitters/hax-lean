@@ -705,6 +705,42 @@ def assocConstReadJson (atom : String) : Lean.Json :=
     { localBoundConstCalls := true } with
   | .ok (.mk (.var "ZERO") _) => true | _ => false
 
+/-- A read of `F::ZERO` through the bound `F: Field`, whose `in_trait` carries the
+    trait reference with the type variable `F` as its self argument. -/
+def boundConstReadJson : Lean.Json :=
+  let seg (k v : String) : Lean.Json := Lean.Json.mkObj [("data", Lean.Json.mkObj [(k, .str v)])]
+  let traitRef := Lean.Json.mkObj [("value", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+    ("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("krate", "k"), ("path", Lean.Json.arr #[seg "TypeNs" "Field"]), ("kind", "Trait")])])]),
+    ("generic_args", Lean.Json.arr #[Lean.Json.mkObj [("Type", Lean.Json.mkObj [
+      ("value", Lean.Json.mkObj [("TypeVar", "F")])])]])])])]
+  Lean.Json.mkObj [("contents", Lean.Json.mkObj [("NamedConst", Lean.Json.mkObj [
+    ("item", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+        ("krate", "k"), ("path", Lean.Json.arr #[seg "TypeNs" "Field", seg "ValueNs" "ZERO"]),
+        ("kind", "AssocConst")])])]),
+      ("in_trait", Lean.Json.mkObj [("trait", traitRef),
+        ("impl", Lean.Json.mkObj [("LocalBound", Lean.Json.mkObj [])])])])])])])]
+
+-- In the class mode such a read is the class item at the bound's type.
+#guard match HaxAdapter.parseHaxTExpr boundConstReadJson { localBoundConstCalls := true } with
+  | .ok (.mk (.app f []) _) => f == HaxAdapter.classItemHead "Field" "ZERO" "F" | _ => false
+
+/-- `fun a => add a F::ZERO` over a type parameter `F`, with its parameter bound
+    to itself. -/
+def classItemReadDef : TExpr :=
+  let fTy : ImpType := .typeVar "F"
+  .mk (.letBind "a" (.mk (.var "a") fTy)
+    (.mk (.app "add" [.mk (.var "a") fTy,
+      .mk (.app (HaxAdapter.classItemHead "Field" "ZERO" "F") []) fTy]) fTy)) fTy
+
+-- The surface text names the class item qualified at its type, and no
+-- `clsitem` marker reaches it.
+#guard ((toLeanDefTyped "f" classItemReadDef classItemReadDef.erase).splitOn
+  "(Field.ZERO (Self := F))").length == 2
+#guard ((toLeanDefTyped "f" classItemReadDef classItemReadDef.erase).splitOn "clsitem").length == 1
+#guard ((toLean (.app (HaxAdapter.classItemHead "PolyRing" "N" "R") [])).splitOn "clsitem").length == 1
+
 /-! ## A `&mut self` setter writing an element of a `Vec` field
 
 `fn set(&mut self, i: usize, val: u64) { self.cells[i] = val; }` on

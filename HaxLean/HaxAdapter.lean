@@ -928,17 +928,59 @@ def localBoundAssocConst (globalName : Json) : Bool :=
     pure ()
   r.isSome
 
+/-- The trait and the self type of a read through a trait bound: the short
+    name of the trait of the node's `in_trait` reference and its first generic
+    argument, when that argument is a type variable of an export rewritten by
+    `ClassEmit.keepTypeParams` (a type parameter `R`, or a projection on one
+    spelled `(PolyRing.Coeff R)`). -/
+def localBoundTraitSelf (globalName : Json) : Option (String × String) := do
+  let item ← (globalName.getObjVal? "item").toOption
+  let v ← (item.getObjVal? "value").toOption
+  let inTrait ← (v.getObjVal? "in_trait").toOption
+  let tr ← (inTrait.getObjVal? "trait").toOption
+  let tv ← (tr.getObjVal? "value").toOption
+  let tvv := (tv.getObjVal? "value").toOption.getD tv
+  let defId ← (tvv.getObjVal? "def_id").toOption
+  let tn ← defIdLeafName defId
+  let args ← (tvv.getObjValAs? (Array Json) "generic_args").toOption
+  let a0 ← args[0]?
+  let ty ← (a0.getObjVal? "Type").toOption
+  let tyv := (ty.getObjVal? "value").toOption.getD ty
+  let s ← (tyv.getObjValAs? String "TypeVar").toOption
+  pure (tn, s)
+
+/-- The head `::clsitem::T::c::S` of a read of the item `c` of the class `T`
+    at the type `S`. The renderer prints it as `(T.c (Self := S))`
+    (`classItemRef?`); a head starting with `::` is never a `Deps` field. -/
+def classItemHead (trait item selfTy : String) : String :=
+  s!"::clsitem::{trait}::{item}::{selfTy}"
+
+/-- The Lean term `(T.c (Self := S))` of a `classItemHead`, or `none` for any
+    other head. -/
+def classItemRef? (f : String) : Option String :=
+  match f.splitOn "::" with
+  | "" :: "clsitem" :: t :: c :: rest =>
+    if rest.isEmpty then none
+    else some s!"({t}.{c} (Self := {"::".intercalate rest}))"
+  | _ => none
+
 /-- The typed-expression kind of a read of a constant named `name` from its
     `NamedConst` or `GlobalName` node: the emitted name of a constant of a trait
     `impl` of the crate (`resolveTraitImplConstRef`); a nullary call of an
     associated constant read through a trait bound when
-    `m.localBoundConstCalls` is set (`localBoundAssocConst`); a variable
-    otherwise. -/
+    `m.localBoundConstCalls` is set (`localBoundAssocConst`), qualified by its
+    class and taken at the bound's type (`classItemHead`) when the bound's
+    self type is a type variable, since a nullary class item does not
+    determine its instance and two classes may declare an item of one name; a
+    variable otherwise. -/
 def constReadKind (globalName : Json) (m : ImplSelfTypeMap) (name : String) : TExprKind :=
   match resolveTraitImplConstRef globalName m with
   | some n => .var n
   | none =>
-    if m.localBoundConstCalls && localBoundAssocConst globalName then .app name []
+    if m.localBoundConstCalls && localBoundAssocConst globalName then
+      match localBoundTraitSelf globalName with
+      | some (t, s) => .app (classItemHead t name s) []
+      | none => .app name []
     else .var name
 
 /-- Disambiguate a method-call name using the impl map. Given the

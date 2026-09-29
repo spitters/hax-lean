@@ -233,7 +233,7 @@ def runtimeName (f : String) : String :=
   | "cast" => "Hax.castVal"
   -- Width-annotated variants (from HaxAdapter, e.g. wrapping_add#32)
   -- or everything else: sanitize and pass through
-  | f => widthAwareRuntime f
+  | f => (HaxAdapter.classItemRef? f).getD (widthAwareRuntime f)
 
 /-- Render a resolved struct-field update — field `i` of an `n`-field
     tuple-encoded struct — as the `Hax.struct_update_fst`/`_snd` composition
@@ -253,9 +253,13 @@ def renderStructUpdate (i n : Nat) (sStr vStr : String) : String :=
 /-- Render a `Namespace::Ctor` app head as the qualified Lean constructor
     `Namespace.Ctor`. The adapter emits this head for a user enum-variant
     construction, whose bare variant name could also resolve to a same-named
-    struct constructor def in the extraction namespace. -/
+    struct constructor def in the extraction namespace. A class-item head
+    `::clsitem::T::c::S` renders as `(T.c (Self := S))`
+    (`HaxAdapter.classItemRef?`). -/
 def renderQualifiedCtor (f : String) : String :=
-  ".".intercalate ((f.splitOn "::").map sanitizeName)
+  match HaxAdapter.classItemRef? f with
+  | some s => s
+  | none => ".".intercalate ((f.splitOn "::").map sanitizeName)
 
 /-- Map an operator name and result type to a width-specific runtime function.
     Falls back to `runtimeName` when the type is not a fixed-width integer. -/
