@@ -163,6 +163,9 @@ structure TraitDef where
       carries a `BEq Self` instance field, through which `==` on a type
       parameter bounded by the trait resolves. -/
   beq : Bool := false
+  /-- The associated types with a `core::cmp::PartialEq` (or `Eq`) bound. The
+      class carries a `BEq` instance field for each. -/
+  beqAssoc : List String := []
   deriving Inhabited
 
 /-- The short names of the traits outside `core`, `alloc` and `std` among a
@@ -237,7 +240,9 @@ def addTraitItem (td : TraitDef) (it : Json) : TraitDef :=
       { td with methods := td.methods ++ [(name, traitFnSig f)] }
     else if let .ok (.arr ty) := k.getObjVal? "Type" then
       let bounds := (ty[0]?.map localTraitsOfClauses).getD []
-      { td with assocTypes := td.assocTypes ++ [(name, bounds)] }
+      let beq := (ty[0]?.map hasPartialEqClause).getD false
+      { td with assocTypes := td.assocTypes ++ [(name, bounds)],
+                beqAssoc := if beq then td.beqAssoc ++ [name] else td.beqAssoc }
     else td
   | _ => td
 
@@ -517,9 +522,14 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
     -- emitted supertrait already carries one.
     let ownBeq := td.beq && !supers.any (h.traitHasBeq ·)
     let beqField := if ownBeq then ["  [instBEq : BEq Self]"] else []
+    -- An associated type with a `PartialEq` bound carries a `BEq` instance
+    -- field, unless one of its emitted trait bounds already supplies one.
+    let assocBeq (a : String) (bs : List String) : Bool :=
+      td.beqAssoc.contains a && !(bs.filter known.contains).any (h.traitHasBeq ·)
     let assoc := td.assocTypes.flatMap fun (a, bs) =>
       s!"  {sanitizeName a} : Type" ::
-        (bs.filter known.contains).map fun b => s!"  [inst{b}_{a} : {b} {sanitizeName a}]"
+        ((bs.filter known.contains).map fun b => s!"  [inst{b}_{a} : {b} {sanitizeName a}]")
+        ++ (if assocBeq a bs then [s!"  [instBEq_{a} : BEq {sanitizeName a}]"] else [])
     let consts := td.consts.map fun (c, ty) =>
       s!"  {sanitizeName c} : {ty.toLeanTypeStrSurface sl}"
     let methods := td.methods.map fun (m, ps, r) =>
@@ -534,8 +544,10 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
       [s!"  {sanitizeName m}_pre{binders} : Prop",
        s!"  {sanitizeName m}_post{binders} ({res} : {r.toLeanTypeStrSurface sl}) : Prop"]
     let attrs := td.assocTypes.flatMap fun (a, bs) =>
-      (bs.filter known.contains).map fun b =>
-        s!"\nattribute [instance_reducible, instance] {td.name}.inst{b}_{a}"
+      ((bs.filter known.contains).map fun b =>
+        s!"\nattribute [instance_reducible, instance] {td.name}.inst{b}_{a}")
+      ++ (if assocBeq a bs then
+            [s!"\nattribute [instance_reducible, instance] {td.name}.instBEq_{a}"] else [])
     let beqAttr := if ownBeq then
         s!"\nattribute [instance_reducible, instance] {td.name}.instBEq" else ""
     s!"/-- The Rust trait `{td.name}` of the crate `{td.krate}`, as a class over its `Self` type. -/\nclass {td.name} (Self : Type){ext} where\n"

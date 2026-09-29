@@ -609,6 +609,32 @@ def ringHooks : ClassEmit.ClassHooks :=
   "class Ring (Self : Type) extends Base Self where\n  ZERO : Self\n  add (self : Self) (rhs : Self) : Self").length == 2
 #guard ((ringHooks.renderClasses (fun _ => none)).splitOn "export Ring (add)").length == 2
 
+open ClassEmit in
+/-- `trait Poly: PartialEq { type NttForm: PartialEq; }` in the export form of a
+    hax `Trait` item: a `core::cmp::PartialEq` supertrait and an associated type
+    with a `PartialEq` bound. -/
+def polyEqTraitJson : Lean.Json :=
+  let partialEq : Lean.Json := Lean.Json.mkObj [("kind", Lean.Json.mkObj [("value",
+    Lean.Json.mkObj [("Trait", Lean.Json.mkObj [("trait_ref", Lean.Json.mkObj [("value",
+      Lean.Json.mkObj [("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value",
+        Lean.Json.mkObj [("krate", "core"), ("path", Lean.Json.arr #[Lean.Json.mkObj
+          [("data", Lean.Json.mkObj [("TypeNs", "PartialEq")])]])])])])])])])])])]
+  let ntt := Lean.Json.mkObj [("ident", Lean.Json.arr #["NttForm", .null]),
+    ("kind", Lean.Json.mkObj [("Type", Lean.Json.arr #[Lean.Json.arr #[partialEq], .null])])]
+  keepTypeParams (Lean.Json.arr #[Lean.Json.mkObj [
+    ("kind", Lean.Json.mkObj [("Trait", Lean.Json.arr #["NotConst", "No", "Safe",
+      Lean.Json.arr #["Poly", .null], Lean.Json.mkObj [], Lean.Json.arr #[partialEq],
+      Lean.Json.arr #[ntt]])]),
+    ("owner_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value",
+      Lean.Json.mkObj [("krate", "k")])])])]])
+
+-- A `PartialEq` supertrait is a `BEq Self` instance field of the class, and a
+-- `PartialEq` bound of an associated type a `BEq` instance field on that type,
+-- each declared an instance.
+#guard (((({ traits := ClassEmit.parseTraitDefs polyEqTraitJson } : ClassEmit.ClassHooks).renderClasses
+  (fun _ => none)).splitOn
+  "class Poly (Self : Type) where\n  [instBEq : BEq Self]\n  NttForm : Type\n  [instBEq_NttForm : BEq NttForm]\nattribute [instance_reducible, instance] Poly.instBEq\nattribute [instance_reducible, instance] Poly.instBEq_NttForm").length == 2)
+
 /-- The `Alias` node of the projection `P::NttForm` of the trait `PolyRing` on
     the type parameter `P`. -/
 def nttFormProjJson (param : String) : Lean.Json :=
