@@ -159,6 +159,10 @@ structure TraitDef where
   consts : List (String × ImpType) := []
   /-- Methods with their named parameters and result type. -/
   methods : List (String × List (String × ImpType) × ImpType) := []
+  /-- Whether `core::cmp::PartialEq` (or `Eq`) is a supertrait. The class then
+      carries a `BEq Self` instance field, through which `==` on a type
+      parameter bounded by the trait resolves. -/
+  beq : Bool := false
   deriving Inhabited
 
 /-- The short names of the traits outside `core`, `alloc` and `std` among a
@@ -175,6 +179,23 @@ def localTraitsOfClauses (clauses : Json) : List String :=
     guard (!builtinKrates.contains (defIdKrate defId))
     defIdLeafName defId
   | _ => []
+
+/-- Whether a list of hax clauses holds a trait bound `PartialEq` or `Eq` of
+    `core`. -/
+def hasPartialEqClause (clauses : Json) : Bool :=
+  match clauses with
+  | .arr cs => cs.toList.any fun c => (do
+      let k ← (c.getObjVal? "kind").toOption
+      let v ← (k.getObjVal? "value").toOption
+      let tr ← (v.getObjVal? "Trait").toOption
+      let tref ← (tr.getObjVal? "trait_ref").toOption
+      let tv ← (tref.getObjVal? "value").toOption
+      let defId ← (tv.getObjVal? "def_id").toOption
+      guard (builtinKrates.contains (defIdKrate defId))
+      let n ← defIdLeafName defId
+      guard (n == "PartialEq" || n == "Eq")
+      pure ()).isSome
+  | _ => false
 
 /-- The parameter names and types and the result type of a trait method,
     from the `[signature, parameter idents]` payload of a `RequiredFn` or
@@ -236,10 +257,11 @@ def parseTraitDefs (j : Json) : List TraitDef :=
       | .ok oid => defIdKrate oid
       | _ => ""
     let supers := (tr[5]?.map localTraitsOfClauses).getD []
+    let beq := (tr[5]?.map hasPartialEqClause).getD false
     let items := match tr[6]? with
       | some (.arr xs) => xs.toList
       | _ => []
-    some (items.foldl addTraitItem { name, krate, supers })
+    some (items.foldl addTraitItem { name, krate, supers, beq })
   dedupTraits defs
 
 /-- Order trait definitions so that each follows its supertraits. -/
@@ -261,6 +283,9 @@ structure GenericFn where
   name : String
   typeParams : List String
   bounds : List (String × String)
+  /-- The type parameters with a `PartialEq` or `Eq` bound of their own, which
+      are bound with a `BEq` instance. -/
+  beqParams : List String := []
   deriving Inhabited
 
 /-- The type-parameter names of a hax `generics` node. -/
@@ -305,7 +330,9 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     let g ← (f.getObjVal? "generics").toOption
     let ps := typeParamNames g
     guard (!ps.isEmpty)
-    some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g }
+    let beqParams := ((typeParamBounds ["PartialEq", "Eq"] g).map (·.2)).eraseDups
+    some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
+           beqParams }
   fs.foldl (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
 
 /-- The generic structs of an export, with their type-parameter names. A
@@ -458,6 +485,13 @@ def argTypeStr (sl : String → Option String) (ty : ImpType) : String :=
   let s := ty.toLeanTypeStrSurface sl
   if s.any (· == ' ') then s!"({s})" else s
 
+/-- Whether the class of a trait carries a `BEq Self` instance, its own or a
+    supertrait's (`TraitDef.beq`). -/
+partial def ClassHooks.traitHasBeq (h : ClassHooks) (t : String) : Bool :=
+  match h.traits.find? (·.name == t) with
+  | some td => td.beq || td.supers.any (h.traitHasBeq ·)
+  | none => false
+
 /-- The binder name of a method's result in its postcondition: `result`, or
     `result` followed by primes when a parameter already has that name. -/
 def resultBinderName (params : List String) : String :=
@@ -479,6 +513,10 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
     let supers := td.supers.filter known.contains
     let ext := if supers.isEmpty then ""
       else " extends " ++ ", ".intercalate (supers.map fun s => s!"{s} Self")
+    -- A `PartialEq` supertrait is a `BEq Self` instance field, unless an
+    -- emitted supertrait already carries one.
+    let ownBeq := td.beq && !supers.any (h.traitHasBeq ·)
+    let beqField := if ownBeq then ["  [instBEq : BEq Self]"] else []
     let assoc := td.assocTypes.flatMap fun (a, bs) =>
       s!"  {sanitizeName a} : Type" ::
         (bs.filter known.contains).map fun b => s!"  [inst{b}_{a} : {b} {sanitizeName a}]"
@@ -498,8 +536,11 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
     let attrs := td.assocTypes.flatMap fun (a, bs) =>
       (bs.filter known.contains).map fun b =>
         s!"\nattribute [instance_reducible, instance] {td.name}.inst{b}_{a}"
+    let beqAttr := if ownBeq then
+        s!"\nattribute [instance_reducible, instance] {td.name}.instBEq" else ""
     s!"/-- The Rust trait `{td.name}` of the crate `{td.krate}`, as a class over its `Self` type. -/\nclass {td.name} (Self : Type){ext} where\n"
-      ++ "\n".intercalate (assoc ++ consts ++ methods ++ prePost) ++ String.join attrs
+      ++ "\n".intercalate (beqField ++ assoc ++ consts ++ methods ++ prePost)
+      ++ beqAttr ++ String.join attrs
   let exports := h.exports.map fun (t, items) =>
     s!"export {t} ({" ".intercalate (items.map sanitizeName)})"
   "\n\n".intercalate classes ++ "\n\n" ++ "\n".intercalate exports ++ "\n\n"
@@ -535,6 +576,7 @@ def ClassHooks.renderGenericStructs (h : ClassHooks) (structMeta : StructMeta)
     values (`Hax.index`, `Hax.repeat_`) ask of an element type. -/
 def GenericFn.binders (g : GenericFn) : String :=
   " ".intercalate (g.typeParams.map (fun p => s!"\{{p} : Type} [Inhabited {p}]")
+    ++ g.beqParams.map (fun p => s!"[BEq {p}]")
     ++ g.bounds.map fun (t, p) => s!"[{t} {p}]")
 
 /-- A rendered definition with the binders of its generic function inserted

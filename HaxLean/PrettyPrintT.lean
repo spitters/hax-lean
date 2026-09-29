@@ -300,6 +300,21 @@ partial def markDepOperators : TExpr → TExpr
 def unmarkDepOperators (e : ImpExpr) : ImpExpr :=
   depOperatorNames.foldl (fun acc op => rewriteAppName s!"{op}#{depOpTag}" op acc) e
 
+/-- Remove the `#dep` tag from the equality heads (`eq`, `ne`, `Eq`, `Ne`) of a
+    body. Under the trait-to-class emission an equality on a type parameter is
+    `PartialEq`, which the class of a bound with a `PartialEq` supertrait, or a
+    `PartialEq` bound of the parameter itself, supplies as a `BEq` instance
+    (`ClassEmit.TraitDef.beq`, `ClassEmit.GenericFn.beqParams`); the untagged
+    head renders as `Hax.beq`/`Hax.bne` over that instance rather than as a
+    `Deps` field. -/
+partial def unmarkDepEq (e : TExpr) : TExpr :=
+  match e with
+  | .mk (.app f args) ty =>
+    let f' := if ["eq", "ne", "Eq", "Ne"].any (fun op => f == s!"{op}#{depOpTag}")
+      then depOpBaseName f else f
+    .mk (.app f' (args.map unmarkDepEq)) ty
+  | e => tMapChildren unmarkDepEq e
+
 set_option linter.unusedVariables false in
 /-- Walk a (post-pipeline) `TExpr` and collect `(varName, annType)` pairs
     from every `.ann (.var v) ty` pattern. These are the type ascriptions
@@ -1432,8 +1447,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Operator calls on a type parameter are tagged `#dep` in both TExpr
   -- families: the raw one supplies the `Deps` signature, the processed one
   -- the rendered body. The literal below is emitted untagged.
-  let rawTdefs := rawTdefs.map fun (n, te) => (n, markDepOperators te)
-  let procTdefs := procTdefs.map fun (n, te) => (n, markDepOperators te)
+  let markDep (te : TExpr) : TExpr :=
+    if classHooks.enabled then unmarkDepEq (markDepOperators te) else markDepOperators te
+  let rawTdefs := rawTdefs.map fun (n, te) => (n, markDep te)
+  let procTdefs := procTdefs.map fun (n, te) => (n, markDep te)
   -- Build struct-new mapping from rawTdefs (which have types from hax JSON)
   let newStructMap := buildNewStructMap rawTdefs structMeta
   -- TCB pre-process: rewrite `.namedProj T x` in the post-pipeline TExpr

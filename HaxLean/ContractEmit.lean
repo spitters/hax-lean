@@ -281,10 +281,47 @@ def kindTag : TExprKind → String
   | .questionMark .. => "`?`"
   | _ => "expression form"
 
-/-- The body of a predicate as Lean text. `callable` holds the definitions a
-    call may name. An expression outside the language the module docstring
-    lists is an error. -/
-partial def renderExpr (callable : List String) (e : TExpr) : Except String Rendered := do
+/-- The names a predicate body may call or read besides its parameters. -/
+structure Scope where
+  /-- The emitted definitions a call or a read may name. -/
+  callable : List String := []
+  /-- The trait items a call or a read may name, each with the class that
+      declares it: in a clause of a trait, the trait's own methods and
+      constants and those of its supertraits. -/
+  classItems : List (String × String) := []
+  /-- The type a class item is taken at, `(Self := selfTy)`. -/
+  selfTy : String := "Self_"
+  deriving Inhabited
+
+/-- Whether a type is an integer the predicate language reads as `Int`: a
+    machine integer, the hax-lib mathematical integer `Int`, or a reference
+    to one. -/
+def isPrimInt : ImpType → Bool
+  | .int | .uint _ | .sint _ => true
+  | .ref t _ => isPrimInt t
+  | .adt n _ => ImpType.sanitizeAdtShortName n == "Int"
+  | _ => false
+
+/-- Whether equality at a type is read as `=`: an integer, `bool` or `()`.
+    Equality at any other type is `PartialEq`, read through `BEq`. -/
+def isPrimScalar : ImpType → Bool
+  | .bool | .unit => true
+  | .tuple [] => true
+  | .ref t _ => isPrimScalar t
+  | t => isPrimInt t
+
+/-- A class item applied to arguments: `(T.m (Self := S) a₁ … aₙ)`. -/
+def classItemApp (owner item selfTy : String) (args : List String) : String :=
+  let head := s!"{owner}.{sanitizeName item} (Self := {selfTy})"
+  if args.isEmpty then s!"({head})" else s!"({head} {" ".intercalate args})"
+
+/-- The body of a predicate as Lean text. `scope` holds the definitions and
+    class items a call or a read may name. A binary-operator node is an
+    operation on primitive values; a method call named after an operator
+    (`add`, `lt`, …) is read as the operator only at an integer type, and an
+    equality method call at a non-scalar type is `BEq`. An expression outside
+    the language the module docstring lists is an error. -/
+partial def renderExpr (scope : Scope) (e : TExpr) : Except String Rendered := do
   match e.kind with
   | .lit (.bool true) => pure (.prop "True")
   | .lit (.bool false) => pure (.prop "False")
@@ -292,77 +329,100 @@ partial def renderExpr (callable : List String) (e : TExpr) : Except String Rend
   | .lit (.uintLit _ n) => pure (.term s!"{n}" e.ty)
   | .lit (.sintLit _ n) => pure (.term (if n < 0 then s!"({n})" else s!"{n}") e.ty)
   | .lit .unit | .unitVal | .tuple [] => pure (.term "()" .unit)
-  | .var n => pure (.term (sanitizeName n) e.ty)
-  | .deref a | .borrow a | .ann a => renderExpr callable a
+  | .var n =>
+    match scope.classItems.lookup n with
+    | some owner => pure (.term (classItemApp owner n scope.selfTy []) e.ty)
+    | none => pure (.term (sanitizeName n) e.ty)
+  | .deref a | .borrow a | .ann a => renderExpr scope a
   | .seq a b =>
     match a.kind with
-    | .unitVal => renderExpr callable b
+    | .unitVal => renderExpr scope b
     | _ => throw "a statement sequence"
   | .letBind n v b =>
-    let v ← renderExpr callable v
-    match ← renderExpr callable b with
+    let v ← renderExpr scope v
+    match ← renderExpr scope b with
     | .prop s => pure (.prop s!"(let {sanitizeName n} := {v.asTerm}; {s})")
     | .term s ty => pure (.term s!"(let {sanitizeName n} := {v.asTerm}; {s})" ty)
   | .ifThenElse c t f =>
-    let c ← (← renderExpr callable c).asProp
-    match ← renderExpr callable t, ← renderExpr callable f with
+    let c ← (← renderExpr scope c).asProp
+    match ← renderExpr scope t, ← renderExpr scope f with
     | .prop t, .prop f => pure (.prop s!"(({c} → {t}) ∧ (¬{c} → {f}))")
     | t, f => pure (.term s!"(if {c} then {t.asTerm} else {f.asTerm})" e.ty)
   | .app f args => renderApp (baseOp f) args e.ty
   | k => throw s!"unsupported {kindTag k}"
 where
-  /-- A call or an operator application. -/
+  /-- A call or an operator application. The capitalized heads are the
+      binary- and unary-operator nodes of the export, which Rust gives only to
+      primitive operands; the lowercase heads are method calls. -/
   renderApp (f : String) (args : List TExpr) (ty : ImpType) : Except String Rendered := do
-    let arith : List (List String × String) :=
-      [(["Add", "add"], "+"), (["Sub", "sub"], "-"), (["Mul", "mul"], "*"),
-       (["Div", "div"], "/"), (["Rem", "rem"], "%")]
-    let cmp : List (List String × String) :=
-      [(["Lt", "lt"], "<"), (["Le", "le"], "≤"), (["Gt", "gt"], ">"), (["Ge", "ge"], "≥")]
+    let arith : List (String × String) :=
+      [("add", "+"), ("sub", "-"), ("mul", "*"), ("div", "/"), ("rem", "%")]
+    let cmp : List (String × String) :=
+      [("lt", "<"), ("le", "≤"), ("gt", ">"), ("ge", "≥")]
     let conn : List (List String × String) :=
       [(["&&", "and", "BitAnd", "bitand"], "∧"), (["||", "or", "BitOr", "bitor"], "∨"),
        (["implies"], "→")]
     let identity := ["lift", "to_int", "into", "from", "from_bool", "to_prop", "clone"]
-    if callable.contains f then
-      let as ← args.mapM (renderExpr callable)
+    -- The operator an operator node or an integer method call stands for.
+    let lower := f.decapitalize
+    let isNode := f != lower
+    let intOperand : Bool := match args.head? with
+      | some a => isPrimInt a.ty
+      | none => false
+    if let some owner := scope.classItems.lookup f then
+      let as ← args.mapM (renderExpr scope)
+      return .term (classItemApp owner f scope.selfTy (as.map (·.asTerm))) ty
+    if scope.callable.contains f then
+      let as ← args.mapM (renderExpr scope)
       if as.isEmpty then return .term (sanitizeName f) ty
       return .term s!"({sanitizeName f} {" ".intercalate (as.map (·.asTerm))})" ty
     match args with
     | [a, b] =>
-      if let some (_, op) := arith.find? (·.1.contains f) then
-        let a ← renderExpr callable a
-        let b ← renderExpr callable b
+      if let some (_, op) := arith.find? (·.1 == lower) then
+        if !isNode && !intOperand then
+          throw s!"call of `{f}` at a type other than an integer"
+        let a ← renderExpr scope a
+        let b ← renderExpr scope b
         return .term s!"({a.asTerm} {op} {b.asTerm})" ty
-      if let some (_, op) := cmp.find? (·.1.contains f) then
-        let a ← renderExpr callable a
-        let b ← renderExpr callable b
+      if let some (_, op) := cmp.find? (·.1 == lower) then
+        if !isNode && !intOperand then
+          throw s!"call of `{f}` at a type other than an integer"
+        let a ← renderExpr scope a
+        let b ← renderExpr scope b
         return .prop s!"({a.asTerm} {op} {b.asTerm})"
-      if f == "Eq" || f == "eq" || f == "Ne" || f == "ne" then
-        let a ← renderExpr callable a
-        let b ← renderExpr callable b
-        let isEq := f == "Eq" || f == "eq"
+      if lower == "eq" || lower == "ne" then
+        let isEq := lower == "eq"
+        let scalar := isNode || isPrimScalar a.ty
+        let a ← renderExpr scope a
+        let b ← renderExpr scope b
         match a, b with
         | .prop p, .prop q =>
           return .prop (if isEq then s!"({p} ↔ {q})" else s!"(¬({p} ↔ {q}))")
         | _, _ =>
-          return .prop s!"({a.asTerm} {if isEq then "=" else "≠"} {b.asTerm})"
+          if scalar then
+            return .prop s!"({a.asTerm} {if isEq then "=" else "≠"} {b.asTerm})"
+          else
+            return .prop s!"(({a.asTerm} {if isEq then "==" else "!="} {b.asTerm}) = true)"
       if let some (_, op) := conn.find? (·.1.contains f) then
-        let a ← (← renderExpr callable a).asProp
-        let b ← (← renderExpr callable b).asProp
+        let a ← (← renderExpr scope a).asProp
+        let b ← (← renderExpr scope b).asProp
         return .prop s!"({a} {op} {b})"
       throw s!"call of `{f}`"
     | [a] =>
-      if identity.contains f then return ← renderExpr callable a
-      if f == "Not" || f == "not" then
-        let a ← (← renderExpr callable a).asProp
+      if identity.contains f then return ← renderExpr scope a
+      if lower == "not" then
+        let a ← (← renderExpr scope a).asProp
         return .prop s!"(¬{a})"
-      if f == "Neg" || f == "neg" then
-        let a ← renderExpr callable a
+      if lower == "neg" then
+        if !isNode && !intOperand then
+          throw s!"call of `{f}` at a type other than an integer"
+        let a ← renderExpr scope a
         return .term s!"(-{a.asTerm})" ty
       if f == "forall" || f == "exists" then
         match a.kind with
         | .lam [x] body =>
           let q := if f == "forall" then "∀" else "∃"
-          let b ← (← renderExpr callable body).asProp
+          let b ← (← renderExpr scope body).asProp
           return .prop s!"({q} {sanitizeName x}, {b})"
         | _ => throw s!"`{f}` over an argument that is not a one-parameter closure"
       throw s!"call of `{f}`"
@@ -401,15 +461,17 @@ structure Pred where
 
 /-- The predicate item with a given uid, parsed and rendered. -/
 def renderPred (preds : List (String × Json)) (implMap : ImplSelfTypeMap)
-    (callable : List String) (uid : String) : Except String Pred := do
+    (scope : Scope) (uid : String) : Except String Pred := do
   let some item := preds.lookup uid | throw s!"no predicate item has the uid {uid}"
   let some (generics, params, body) := fnParts item | throw "the predicate item is not a function"
   let te ← parseHaxTExpr (rewriteIntLits body) implMap
   let ps := expandParams params
-  let unknown := ((freeNames (ps.map (·.1)) te).1.filter (!callable.contains ·)).eraseDups
+  let known (n : String) : Bool :=
+    scope.callable.contains n || (scope.classItems.lookup n).isSome
+  let unknown := ((freeNames (ps.map (·.1)) te).1.filter (!known ·)).eraseDups
   if !unknown.isEmpty then
     throw s!"reads {unknown}, which the extraction does not emit"
-  let r ← renderExpr callable te
+  let r ← renderExpr scope te
   let s ← r.asProp
   pure { typeParams := typeParamNames generics, params := ps, body := s }
 
@@ -479,11 +541,12 @@ def predArgs (p : Pred) (lead extra : List String) : Except String (List String)
 def appStr (f : String) (args : List String) : String :=
   if args.isEmpty then f else s!"({f} {" ".intercalate args})"
 
-/-- The type parameter binders of a predicate that its parameter types
-    mention, `{T : Type}`. -/
+/-- The type parameters of a predicate that its parameter types or its body
+    mention, each bound as `{T : Type}`. -/
 def predTypeBinders (p : Pred) : List String :=
-  p.typeParams.filter fun t => p.params.any fun (_, ty) =>
-    ((ty.toLeanTypeStrSurface).splitOn t).length > 1
+  p.typeParams.filter fun t =>
+    (p.body.splitOn t).length > 1 || p.params.any fun (_, ty) =>
+      ((ty.toLeanTypeStrSurface).splitOn t).length > 1
 
 /-- A predicate definition. -/
 def renderPredDef (sl : String → Option String) (doc name extraBinders : String)
@@ -565,14 +628,18 @@ def renderTraitContract (sl : String → Option String) (td : TraitDef)
     let predCall (p : Pred) (name : String) (args : List String) : String :=
       let tyArgs := (predTypeBinders p).map fun tv => s!"({tv} := Self)"
       appStr name (tyArgs ++ args)
+    -- A clause over the trait's `Self_` holds under an instance of the trait
+    -- at `Self_`, through which it names the trait's items.
+    let inst (p : Pred) : String :=
+      if (predTypeBinders p).contains "Self_" then s!" [{t} Self_]" else ""
     if let some p := mc.requires then
       defs := defs ++ [renderPredDef sl s!"The `requires` clause of the method `{m}` of the trait `{t}`."
-        s!"{t}.{mn}_requires" "" p]
+        s!"{t}.{mn}_requires" (inst p) p]
       let args ← predArgs p names []
       fields := fields ++ [s!"  {mn}_pre_of_requires : {q binders}{predCall p s!"{t}.{mn}_requires" args} → {field s!"{mn}_pre" names}"]
     if let some p := mc.ensures then
       defs := defs ++ [renderPredDef sl s!"The `ensures` clause of the method `{m}` of the trait `{t}`."
-        s!"{t}.{mn}_ensures" "" p]
+        s!"{t}.{mn}_ensures" (inst p) p]
       let args ← predArgs p names [res]
       let bs := binders ++ s!" ({res} : {r.toLeanTypeStrSurface sl})"
       fields := fields ++ [s!"  {mn}_ensures_of_post : {q bs}{field s!"{mn}_post" (names ++ [res])} → {predCall p s!"{t}.{mn}_ensures" args}"]
@@ -675,9 +742,18 @@ def ownerId (it : Json) : Option Nat := do
   let c ← (oid.getObjVal? "contents").toOption
   (c.getObjValAs? Nat "id").toOption
 
+/-- The methods and constants of a trait and of its supertraits among `tds`,
+    each with the trait that declares it. -/
+partial def traitItemOwners (tds : List TraitDef) (t : String) : List (String × String) :=
+  match tds.find? (·.name == t) with
+  | none => []
+  | some td =>
+    (td.methods.map (·.1) ++ td.consts.map (·.1)).map (·, t)
+      ++ td.supers.flatMap (traitItemOwners tds)
+
 /-- The contract clauses of the methods of a trait or `impl` item list. -/
 def methodContracts (preds : List (String × Json)) (implMap : ImplSelfTypeMap)
-    (callable : List String) (ctx : String) (items : List Json) :
+    (scope : Scope) (ctx : String) (items : List Json) :
     List MethodContract × List String :=
   items.foldl (init := ([], [])) fun (acc, errs) it =>
     let m := match it.getObjVal? "ident" with
@@ -686,7 +762,7 @@ def methodContracts (preds : List (String × Json)) (implMap : ImplSelfTypeMap)
     let one (role : String) : Option Pred × List String :=
       match assocUid it role with
       | none => (none, [])
-      | some uid => match renderPred preds implMap callable uid with
+      | some uid => match renderPred preds implMap scope uid with
         | .ok p => (some p, [])
         | .error e => (none, [s!"{ctx}::{m} {role.toLower}: {e}"])
     let (r, e1) := one "Requires"
@@ -715,6 +791,7 @@ def build (srcs : List Json) (collisions : List String)
     let uid ← (itemPayloads it).findSome? payloadUid
     pure (uid, it)
   let implMap : ImplSelfTypeMap := { collisions, localCrate }
+  let fnScope : Scope := { callable := emitted }
   let mut errs : List String := []
   let mut fns : List FnContract := []
   let mut lemmas : List LemmaStmt := []
@@ -731,12 +808,12 @@ def build (srcs : List Json) (collisions : List String)
       seen := name :: seen
       if !selected name then continue
       let some uid := assocUid it "Ensures" | continue
-      match renderPred preds implMap emitted uid with
+      match renderPred preds implMap fnScope uid with
       | .error e => errs := errs ++ [s!"lemma `{name}`: {e}"]
       | .ok p =>
         let req : Except String (Option String) := match assocUid it "Requires" with
           | none => pure none
-          | some u => (renderPred preds implMap emitted u).map (some ·.body)
+          | some u => (renderPred preds implMap fnScope u).map (some ·.body)
         match req with
         | .error e => errs := errs ++ [s!"lemma `{name}` requires: {e}"]
         | .ok r =>
@@ -751,10 +828,10 @@ def build (srcs : List Json) (collisions : List String)
     if !emitted.contains name then continue
     let r : Except String (Option Pred) := match rU with
       | none => pure none
-      | some u => (renderPred preds implMap emitted u).map some
+      | some u => (renderPred preds implMap fnScope u).map some
     let e : Except String (Option Pred) := match eU with
       | none => pure none
-      | some u => (renderPred preds implMap emitted u).map some
+      | some u => (renderPred preds implMap fnScope u).map some
     match r, e with
     | .error m, _ => errs := errs ++ [s!"`{name}` requires: {m}"]
     | _, .error m => errs := errs ++ [s!"`{name}` ensures: {m}"]
@@ -809,7 +886,10 @@ def build (srcs : List Json) (collisions : List String)
         let tItems := match (tr[6]? : Option Json) with
           | some (.arr xs) => xs.toList
           | _ => []
-        let (ms, es) := methodContracts preds implMap [] tn tItems
+        -- A trait's clause may name the trait's own items and those of its
+        -- supertraits, taken at the clause's type parameter `Self_`.
+        let traitScope : Scope := { classItems := traitItemOwners hooks.traits tn }
+        let (ms, es) := methodContracts preds implMap traitScope tn tItems
         errs := errs ++ es
         if !ms.isEmpty then traitMs := traitMs ++ [(tn, ms)]
       else if let .ok impl := k.getObjVal? "Impl" then
@@ -820,7 +900,7 @@ def build (srcs : List Json) (collisions : List String)
         let iItems := match impl.getObjValAs? (Array Json) "items" with
           | .ok xs => xs.toList
           | _ => []
-        let (ms, es) := methodContracts preds implMap emitted s!"impl {tn}" iItems
+        let (ms, es) := methodContracts preds implMap fnScope s!"impl {tn}" iItems
         errs := errs ++ es
         if !ms.isEmpty then implMs := implMs ++ [(iid, tn, ms)]
   -- A trait carries contract fields when it or one of its `impl`s states a
