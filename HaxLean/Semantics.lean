@@ -662,18 +662,69 @@ def rotrNat (w x n : Nat) : Nat :=
 def rotlNat (w x n : Nat) : Nat :=
   (((x % 2 ^ w) <<< (n % w)) ||| ((x % 2 ^ w) >>> (w - n % w))) % 2 ^ w
 
+/-- The Rust equality `==` of two scalar values of `u64` code: of two `int` values and of
+    two `bool` values; `none` on any other pair. -/
+def hax64EqScalar : Value → Value → Option Bool
+  | .int a, .int b => some (a == b)
+  | .bool a, .bool b => some (a == b)
+  | _, _ => none
+
+/-- The Rust equality `==` of two arrays of scalar values: `true` when they have the same
+    length and `hax64EqScalar` holds at every position, `none` when a pair of elements is not
+    comparable by `hax64EqScalar`. -/
+def hax64EqList : List Value → List Value → Option Bool
+  | [], [] => some true
+  | x :: xs, y :: ys =>
+      match hax64EqScalar x y, hax64EqList xs ys with
+      | some c, some d => some (c && d)
+      | _, _ => none
+  | _, _ => some false
+
+/-- The Rust equality `==` of two values of `u64` code: `hax64EqList` on two arrays and
+    `hax64EqScalar` on any other pair. -/
+def hax64EqVal : Value → Value → Option Bool
+  | .array a, .array b => hax64EqList a b
+  | x, y => hax64EqScalar x y
+
+/-- An integer word: an `int` value in `[0, 2^64)`. -/
+def hax64IntWordB : Value → Bool
+  | .int n => decide (0 ≤ n) && decide (n < 2 ^ 64)
+  | _ => false
+
+/-- The natural number of an `int` value, `0` for any other value. -/
+def hax64WordNat : Value → Nat
+  | .int n => n.toNat
+  | _ => 0
+
+/-- The checked subtraction of Rust `i<w>` on `int` values: `a - b` when `a`, `b` and
+    `a - b` lie in `[-2^(w-1), 2^(w-1))`, `none` otherwise, where Rust panics. -/
+def sintSubOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ -2 ^ (w - 1) ≤ b ∧ b < 2 ^ (w - 1) ∧
+      -2 ^ (w - 1) ≤ a - b ∧ a - b < 2 ^ (w - 1) then some (.int (a - b))
+  else none
+
+/-- The checked subtraction of Rust `u<w>` on `int` values: `a - b` when
+    `0 ≤ b ≤ a < 2^w`, `none` otherwise, where Rust panics. -/
+def uintSubOp (w : Nat) (a b : Int) : Option Value :=
+  if 0 ≤ b ∧ b ≤ a ∧ a < 2 ^ w then some (.int (a - b)) else none
+
 /-- The comparisons and the checked additions and subtractions of `u64` code, the
     calls after the arms of `hax64WordOps` and `hax64NarrowOps`:
-    * `Lt`, `Gt`, `Le`, `Ge`, `Eq`, `Ne` and `lt`, `gt`, `le`, `ge`, `eq`, `ne` on two
-      `int` values, the Boolean `bool` of the integer comparison; `Eq`, `eq`, `Ne`, `ne`
-      also on two `bool` values;
+    * `Lt`, `Gt`, `Le`, `Ge` and `lt`, `gt`, `le`, `ge` on two `int` values, the Boolean
+      `bool` of the integer comparison;
+    * `Eq`, `eq`, `Ne`, `ne` on two `int` values, two `bool` values or two arrays of such
+      values, the equality `hax64EqVal` and its negation; `eq#arr` and `ne#arr`, the
+      equality and the disequality of two arrays, on two arrays only;
     * `&&`, `and` and `||`, `or` on two `bool` values, the Boolean conjunction and
       disjunction (both operands evaluated, as `denote'` evaluates call arguments);
     * `Not` on a `bool` value, the Boolean negation;
     * `add` on two `int` values in `[0, 2^64)`, the sum, `none` when it is `2^64` or
       more, where Rust panics (the arm `Add` of `hax64WordOps`);
     * `Sub` and `sub` on two `int` values in `[0, 2^64)`, the difference, `none` when
-      the subtrahend exceeds the minuend, where Rust panics. -/
+      the subtrahend exceeds the minuend, where Rust panics;
+    * `Sub#i8`, `Sub#i16`, `Sub#i32`, `Sub#i64`, `Sub#i128`, `Sub#isize` the checked
+      subtraction `sintSubOp` of the signed type (`isize` `64` bits wide), and `Sub#u128`
+      the checked subtraction `uintSubOp 128`. -/
 def hax64CmpOps : Builtins
   | "Lt", [.int a, .int b] => some (.bool (decide (a < b)))
   | "lt", [.int a, .int b] => some (.bool (decide (a < b)))
@@ -683,14 +734,19 @@ def hax64CmpOps : Builtins
   | "le", [.int a, .int b] => some (.bool (decide (a ≤ b)))
   | "Ge", [.int a, .int b] => some (.bool (decide (b ≤ a)))
   | "ge", [.int a, .int b] => some (.bool (decide (b ≤ a)))
-  | "Eq", [.int a, .int b] => some (.bool (a == b))
-  | "eq", [.int a, .int b] => some (.bool (a == b))
-  | "Ne", [.int a, .int b] => some (.bool (a != b))
-  | "ne", [.int a, .int b] => some (.bool (a != b))
-  | "Eq", [.bool a, .bool b] => some (.bool (a == b))
-  | "eq", [.bool a, .bool b] => some (.bool (a == b))
-  | "Ne", [.bool a, .bool b] => some (.bool (a != b))
-  | "ne", [.bool a, .bool b] => some (.bool (a != b))
+  | "Eq", [a, b] => (hax64EqVal a b).map Value.bool
+  | "eq", [a, b] => (hax64EqVal a b).map Value.bool
+  | "eq#arr", [.array a, .array b] => (hax64EqList a b).map Value.bool
+  | "Ne", [a, b] => (hax64EqVal a b).map fun c => .bool !c
+  | "ne", [a, b] => (hax64EqVal a b).map fun c => .bool !c
+  | "ne#arr", [.array a, .array b] => (hax64EqList a b).map fun c => .bool !c
+  | "Sub#i8", [.int a, .int b] => sintSubOp 8 a b
+  | "Sub#i16", [.int a, .int b] => sintSubOp 16 a b
+  | "Sub#i32", [.int a, .int b] => sintSubOp 32 a b
+  | "Sub#i64", [.int a, .int b] => sintSubOp 64 a b
+  | "Sub#i128", [.int a, .int b] => sintSubOp 128 a b
+  | "Sub#isize", [.int a, .int b] => sintSubOp 64 a b
+  | "Sub#u128", [.int a, .int b] => uintSubOp 128 a b
   | "&&", [.bool a, .bool b] => some (.bool (a && b))
   | "and", [.bool a, .bool b] => some (.bool (a && b))
   | "||", [.bool a, .bool b] => some (.bool (a || b))
@@ -709,9 +765,11 @@ def hax64CmpOps : Builtins
       `w ∈ {16, size}`, read modulo `2^w` with `usize` `64` bits wide, the
       shifts `none` for an amount of `w` or more, and the truncations `cast#16`,
       `cast#size` of a non-negative value;
-    * the truncations `cast#u32`, `cast#u64`, `cast#usize` of a non-negative value modulo
-      `2^32`, `2^64`, `2^64`, and the negation `wrapping_neg#64`, `(2^64 - x mod 2^64) mod
-      2^64`;
+    * the conversions `cast#u32`, `cast#u64`, `cast#usize` of an `int` value, its residue
+      modulo `2^32`, `2^64`, `2^64` (Rust `as` truncates to the target width, a negative
+      value in two's complement), the conversion `cast#i128`, the residue modulo `2^128`
+      in `[-2^127, 2^127)` (`Int.bmod`), and the negation `wrapping_neg#64`,
+      `(2^64 - x mod 2^64) mod 2^64`;
     * the rotations `rotate_right#w` (`rotrNat`) and `rotate_left#w`
       (`rotlNat`) and the complement `Not#w`, `2^w - 1 - x mod 2^w`, for
       `w ∈ {8, 16, 32, 64, size}`;
@@ -719,9 +777,10 @@ def hax64CmpOps : Builtins
 def hax64NarrowOps : Builtins
   | "cast#16", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 16 : Nat)) else none
   | "cast#size", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
-  | "cast#u32", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 32 : Nat)) else none
-  | "cast#u64", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
-  | "cast#usize", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none
+  | "cast#u32", [.int a] => some (.int (a % 2 ^ 32))
+  | "cast#u64", [.int a] => some (.int (a % 2 ^ 64))
+  | "cast#usize", [.int a] => some (.int (a % 2 ^ 64))
+  | "cast#i128", [.int a] => some (.int (a.bmod (2 ^ 128)))
   | "wrapping_neg#64", [.int a] => u64UnOp a fun x => (2 ^ 64 - x % 2 ^ 64) % 2 ^ 64
   | "wrapping_add#16", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 16)
   | "wrapping_sub#16", [.int a, .int b] => u64BinOp a b fun x y =>
@@ -1109,14 +1168,115 @@ theorem hax64WordOps_notSize : hax64WordOps "Not#size" [.int a] =
 theorem hax64WordOps_wrappingNeg : hax64WordOps "wrapping_neg#64" [.int a] =
     u64UnOp a fun x => (2 ^ 64 - x % 2 ^ 64) % 2 ^ 64 := rfl
 
-theorem hax64WordOps_castU32 : hax64WordOps "cast#u32" [.int a] =
-    if 0 ≤ a then some (.int (a.toNat % 2 ^ 32 : Nat)) else none := rfl
+theorem hax64WordOps_castU32 : hax64WordOps "cast#u32" [.int a] = some (.int (a % 2 ^ 32)) :=
+  rfl
 
-theorem hax64WordOps_castU64 : hax64WordOps "cast#u64" [.int a] =
-    if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none := rfl
+theorem hax64WordOps_castU64 : hax64WordOps "cast#u64" [.int a] = some (.int (a % 2 ^ 64)) :=
+  rfl
 
 theorem hax64WordOps_castUsize : hax64WordOps "cast#usize" [.int a] =
-    if 0 ≤ a then some (.int (a.toNat % 2 ^ 64 : Nat)) else none := rfl
+    some (.int (a % 2 ^ 64)) := rfl
+
+theorem hax64WordOps_castI128 : hax64WordOps "cast#i128" [.int a] =
+    some (.int (a.bmod (2 ^ 128))) := rfl
+
+theorem hax64WordOps_subI128 : hax64WordOps "Sub#i128" [.int a, .int b] = sintSubOp 128 a b :=
+  rfl
+
+theorem hax64WordOps_subU128 : hax64WordOps "Sub#u128" [.int a, .int b] = uintSubOp 128 a b :=
+  rfl
+
+theorem hax64WordOps_eq_array (a b : List Value) :
+    hax64WordOps "eq" [.array a, .array b] = (hax64EqList a b).map Value.bool := rfl
+
+theorem hax64WordOps_ne_array (a b : List Value) :
+    hax64WordOps "ne" [.array a, .array b] = (hax64EqList a b).map fun c => .bool !c := rfl
+
+/-- On two arrays `eq#arr` answers as `eq`. -/
+theorem hax64Builtins_eqArr_array (a b : List Value) :
+    hax64Builtins "eq#arr" [.array a, .array b] = hax64Builtins "eq" [.array a, .array b] :=
+  rfl
+
+/-- On two arrays `ne#arr` answers as `ne`. -/
+theorem hax64Builtins_neArr_array (a b : List Value) :
+    hax64Builtins "ne#arr" [.array a, .array b] = hax64Builtins "ne" [.array a, .array b] :=
+  rfl
+
+/-- An integer word is an `int` value in `[0, 2^64)`. -/
+theorem hax64IntWordB_int {v : Value} (h : hax64IntWordB v = true) :
+    ∃ n : Int, v = .int n ∧ 0 ≤ n ∧ n < 2 ^ 64 := by
+  cases v with
+  | int n =>
+    simp only [hax64IntWordB, Bool.and_eq_true, decide_eq_true_eq] at h
+    exact ⟨n, rfl, h.1, h.2⟩
+  | _ => simp [hax64IntWordB] at h
+
+/-- On two arrays of integer words, `hax64EqList` is the equality of their lists of natural
+    numbers. -/
+theorem hax64EqList_words {a b : List Value} (ha : a.all hax64IntWordB = true)
+    (hb : b.all hax64IntWordB = true) :
+    hax64EqList a b = some (a.map hax64WordNat == b.map hax64WordNat) := by
+  induction a generalizing b with
+  | nil => cases b <;> rfl
+  | cons x xs ih =>
+    cases b with
+    | nil => rfl
+    | cons y ys =>
+      simp only [List.all_cons, Bool.and_eq_true] at ha hb
+      obtain ⟨n, rfl, hn0, -⟩ := hax64IntWordB_int ha.1
+      obtain ⟨m, rfl, hm0, -⟩ := hax64IntWordB_int hb.1
+      simp only [hax64EqList, hax64EqScalar, ih ha.2 hb.2, List.map_cons, List.cons_beq_cons,
+        hax64WordNat, Option.some.injEq]
+      congr 1
+      rw [Bool.eq_iff_iff]
+      simp only [beq_iff_eq]
+      omega
+
+/-- `eq#arr` on two arrays of integer words is the equality of their lists of natural
+    numbers. -/
+theorem hax64Builtins_eqArr_words {a b : List Value} (ha : a.all hax64IntWordB = true)
+    (hb : b.all hax64IntWordB = true) :
+    hax64Builtins "eq#arr" [.array a, .array b] =
+      some (.bool (a.map hax64WordNat == b.map hax64WordNat)) := by
+  show (hax64WordOps "eq#arr" [.array a, .array b] <|>
+    widthArrayOps "eq#arr" [.array a, .array b]) = _
+  rw [show hax64WordOps "eq#arr" [.array a, .array b] = (hax64EqList a b).map Value.bool
+    from rfl, hax64EqList_words ha hb]
+  rfl
+
+/-- `ne#arr` on two arrays of integer words is the disequality of their lists of natural
+    numbers. -/
+theorem hax64Builtins_neArr_words {a b : List Value} (ha : a.all hax64IntWordB = true)
+    (hb : b.all hax64IntWordB = true) :
+    hax64Builtins "ne#arr" [.array a, .array b] =
+      some (.bool !(a.map hax64WordNat == b.map hax64WordNat)) := by
+  show (hax64WordOps "ne#arr" [.array a, .array b] <|>
+    widthArrayOps "ne#arr" [.array a, .array b]) = _
+  rw [show hax64WordOps "ne#arr" [.array a, .array b] =
+    (hax64EqList a b).map (fun c => Value.bool !c) from rfl, hax64EqList_words ha hb]
+  rfl
+
+/-- `eq#arr` is undefined on an argument list with no array. -/
+theorem hax64Builtins_eqArr_none (vals : List Value) (h : ∀ v ∈ vals, ∀ ws, v ≠ .array ws) :
+    hax64Builtins "eq#arr" vals = none := by
+  rcases vals with _ | ⟨a, _ | ⟨b, _ | ⟨c, rest⟩⟩⟩
+  all_goals first
+    | rfl
+    | (cases a <;> first
+        | rfl
+        | exact (h _ List.mem_cons_self _ rfl).elim
+        | (cases b <;> first | rfl | exact (h _ List.mem_cons_self _ rfl).elim))
+
+/-- `ne#arr` is undefined on an argument list with no array. -/
+theorem hax64Builtins_neArr_none (vals : List Value) (h : ∀ v ∈ vals, ∀ ws, v ≠ .array ws) :
+    hax64Builtins "ne#arr" vals = none := by
+  rcases vals with _ | ⟨a, _ | ⟨b, _ | ⟨c, rest⟩⟩⟩
+  all_goals first
+    | rfl
+    | (cases a <;> first
+        | rfl
+        | exact (h _ List.mem_cons_self _ rfl).elim
+        | (cases b <;> first | rfl | exact (h _ List.mem_cons_self _ rfl).elim))
 
 theorem hax64WordOps_notBool (b : Bool) : hax64WordOps "Not" [.bool b] = some (.bool !b) :=
   rfl
