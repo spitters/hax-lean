@@ -708,6 +708,23 @@ def sintSubOp (w : Nat) (a b : Int) : Option Value :=
 def uintSubOp (w : Nat) (a b : Int) : Option Value :=
   if 0 ≤ b ∧ b ≤ a ∧ a < 2 ^ w then some (.int (a - b)) else none
 
+/-- The left shift `<<` of Rust `i<w>` on `int` values: for `a` in `[-2^(w-1), 2^(w-1))`
+    and an amount `0 ≤ b < w`, the product `a · 2^b` in two's complement modulo `2^w`
+    (`Int.bmod`), the bits shifted out discarded; `none` otherwise, where the operand is
+    outside `i<w>` or Rust panics. -/
+def sintShlOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ 0 ≤ b ∧ b < w then
+    some (.int ((a * 2 ^ b.toNat).bmod (2 ^ w)))
+  else none
+
+/-- The arithmetic right shift `>>` of Rust `i<w>` on `int` values: for `a` in
+    `[-2^(w-1), 2^(w-1))` and an amount `0 ≤ b < w`, `a` divided by `2^b` rounded
+    towards negative infinity (`Int.shiftRight`); `none` otherwise, where the operand is
+    outside `i<w>` or Rust panics. -/
+def sintShrOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ 0 ≤ b ∧ b < w then some (.int (a >>> b.toNat))
+  else none
+
 /-- The comparisons and the checked additions and subtractions of `u64` code, the
     calls after the arms of `hax64WordOps` and `hax64NarrowOps`:
     * `Lt`, `Gt`, `Le`, `Ge` and `lt`, `gt`, `le`, `ge` on two `int` values, the Boolean
@@ -773,6 +790,12 @@ def hax64CmpOps : Builtins
     * the rotations `rotate_right#w` (`rotrNat`) and `rotate_left#w`
       (`rotlNat`) and the complement `Not#w`, `2^w - 1 - x mod 2^w`, for
       `w ∈ {8, 16, 32, 64, size}`;
+    * the signed conversions `cast#i8`, `cast#i16`, `cast#i32`, `cast#i64`, `cast#isize`
+      of an `int` value, its residue modulo `2^w` in `[-2^(w-1), 2^(w-1))` (`Int.bmod`,
+      `isize` `64` bits wide); the wrapping operations `wrapping_add#iw`,
+      `wrapping_sub#iw`, `wrapping_mul#iw` for `w ∈ {32, 64}`, the residue of the sum,
+      difference and product in the same range; the shifts `Shl#iw` (`sintShlOp`) and
+      `Shr#iw` (`sintShrOp`) for `w ∈ {32, 64}`;
     * every other call as `hax64CmpOps`. -/
 def hax64NarrowOps : Builtins
   | "cast#16", [.int a] => if 0 ≤ a then some (.int (a.toNat % 2 ^ 16 : Nat)) else none
@@ -825,6 +848,21 @@ def hax64NarrowOps : Builtins
   | "Not#32", [.int a] => u64UnOp a fun x => 2 ^ 32 - 1 - x % 2 ^ 32
   | "Not#64", [.int a] => u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64
   | "Not#size", [.int a] => u64UnOp a fun x => 2 ^ 64 - 1 - x % 2 ^ 64
+  | "cast#i8", [.int a] => some (.int (a.bmod (2 ^ 8)))
+  | "cast#i16", [.int a] => some (.int (a.bmod (2 ^ 16)))
+  | "cast#i32", [.int a] => some (.int (a.bmod (2 ^ 32)))
+  | "cast#i64", [.int a] => some (.int (a.bmod (2 ^ 64)))
+  | "cast#isize", [.int a] => some (.int (a.bmod (2 ^ 64)))
+  | "wrapping_add#i32", [.int a, .int b] => some (.int ((a + b).bmod (2 ^ 32)))
+  | "wrapping_add#i64", [.int a, .int b] => some (.int ((a + b).bmod (2 ^ 64)))
+  | "wrapping_sub#i32", [.int a, .int b] => some (.int ((a - b).bmod (2 ^ 32)))
+  | "wrapping_sub#i64", [.int a, .int b] => some (.int ((a - b).bmod (2 ^ 64)))
+  | "wrapping_mul#i32", [.int a, .int b] => some (.int ((a * b).bmod (2 ^ 32)))
+  | "wrapping_mul#i64", [.int a, .int b] => some (.int ((a * b).bmod (2 ^ 64)))
+  | "Shl#i32", [.int a, .int b] => sintShlOp 32 a b
+  | "Shl#i64", [.int a, .int b] => sintShlOp 64 a b
+  | "Shr#i32", [.int a, .int b] => sintShrOp 32 a b
+  | "Shr#i64", [.int a, .int b] => sintShrOp 64 a b
   | f, args => hax64CmpOps f args
 
 /-- The Rust `u64` operations on `int` values in `[0, 2^64)`:
@@ -1182,6 +1220,47 @@ theorem hax64WordOps_castI128 : hax64WordOps "cast#i128" [.int a] =
 
 theorem hax64WordOps_subI128 : hax64WordOps "Sub#i128" [.int a, .int b] = sintSubOp 128 a b :=
   rfl
+
+theorem hax64WordOps_castI8 : hax64WordOps "cast#i8" [.int a] = some (.int (a.bmod (2 ^ 8))) :=
+  rfl
+
+theorem hax64WordOps_castI16 : hax64WordOps "cast#i16" [.int a] =
+    some (.int (a.bmod (2 ^ 16))) := rfl
+
+theorem hax64WordOps_castI32 : hax64WordOps "cast#i32" [.int a] =
+    some (.int (a.bmod (2 ^ 32))) := rfl
+
+theorem hax64WordOps_castI64 : hax64WordOps "cast#i64" [.int a] =
+    some (.int (a.bmod (2 ^ 64))) := rfl
+
+theorem hax64WordOps_castIsize : hax64WordOps "cast#isize" [.int a] =
+    some (.int (a.bmod (2 ^ 64))) := rfl
+
+theorem hax64WordOps_wrappingAddI32 : hax64WordOps "wrapping_add#i32" [.int a, .int b] =
+    some (.int ((a + b).bmod (2 ^ 32))) := rfl
+
+theorem hax64WordOps_wrappingAddI64 : hax64WordOps "wrapping_add#i64" [.int a, .int b] =
+    some (.int ((a + b).bmod (2 ^ 64))) := rfl
+
+theorem hax64WordOps_wrappingSubI32 : hax64WordOps "wrapping_sub#i32" [.int a, .int b] =
+    some (.int ((a - b).bmod (2 ^ 32))) := rfl
+
+theorem hax64WordOps_wrappingSubI64 : hax64WordOps "wrapping_sub#i64" [.int a, .int b] =
+    some (.int ((a - b).bmod (2 ^ 64))) := rfl
+
+theorem hax64WordOps_wrappingMulI32 : hax64WordOps "wrapping_mul#i32" [.int a, .int b] =
+    some (.int ((a * b).bmod (2 ^ 32))) := rfl
+
+theorem hax64WordOps_wrappingMulI64 : hax64WordOps "wrapping_mul#i64" [.int a, .int b] =
+    some (.int ((a * b).bmod (2 ^ 64))) := rfl
+
+theorem hax64WordOps_shlI32 : hax64WordOps "Shl#i32" [.int a, .int b] = sintShlOp 32 a b := rfl
+
+theorem hax64WordOps_shlI64 : hax64WordOps "Shl#i64" [.int a, .int b] = sintShlOp 64 a b := rfl
+
+theorem hax64WordOps_shrI32 : hax64WordOps "Shr#i32" [.int a, .int b] = sintShrOp 32 a b := rfl
+
+theorem hax64WordOps_shrI64 : hax64WordOps "Shr#i64" [.int a, .int b] = sintShrOp 64 a b := rfl
 
 theorem hax64WordOps_subU128 : hax64WordOps "Sub#u128" [.int a, .int b] = uintSubOp 128 a b :=
   rfl
