@@ -177,15 +177,30 @@ def main (args : List String) : IO UInt32 := do
     IO.eprintln s!"INFO defs={procTdefs.length} trait-impl-defs={traitImplNames.length} dep-type-conflicts={depTypeConflicts.length}"
     let t ← phaseTick "adapter-to-texpr" t
 
-    -- Filter if requested
+    -- Filter if requested. Under `--emit-contracts` the filter also keeps the
+    -- definitions the selected contracts name (`ContractEmit.referencedNames`).
+    let selected : String → Bool := fun n => match opts.filterFns with
+      | some fns => fns.any (fun f => n.endsWith f || n == f)
+      | none => true
+    let contractRefs : List String :=
+      if contractSrcs.isEmpty || opts.filterFns.isNone then []
+      else ContractEmit.referencedNames contractSrcs contractNaming.1 contractNaming.2 selected
     let rawTdefs := match opts.filterFns with
-      | some fns => rawTdefs.filter fun (p : String × TExpr) =>
-          fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | some _ => rawTdefs.filter fun (p : String × TExpr) =>
+          selected p.1 || contractRefs.contains p.1
       | none => rawTdefs
     let procTdefs := match opts.filterFns with
-      | some fns => procTdefs.filter fun (p : String × TExpr) =>
-          fns.any (fun f => p.1.endsWith f || p.1 == f)
+      | some _ => procTdefs.filter fun (p : String × TExpr) =>
+          selected p.1 || contractRefs.contains p.1
       | none => procTdefs
+    -- Under a filter, an instance whose fields name a definition the filter
+    -- left out is left out too.
+    let classHooks := match opts.filterFns with
+      | some _ =>
+        let kept := rawTdefs.map (·.1)
+        { classHooks with instances := classHooks.instances.filter fun inst =>
+            inst.fields.all fun (_, d) => kept.contains d }
+      | none => classHooks
 
     -- Apply typed pipeline to processed TExprs (for rendering).
     -- `tPipelineFull` composes:
@@ -274,9 +289,6 @@ def main (args : List String) : IO UInt32 := do
     -- `--emit-contracts`: the contracts of the emitted definitions, and the
     -- contract fields of the classes and instances. A clause outside the
     -- predicate language stops the run.
-    let selected : String → Bool := fun n => match opts.filterFns with
-      | some fns => fns.any (fun f => n.endsWith f || n == f)
-      | none => true
     let (contractPlan, classHooks) ←
       if contractSrcs.isEmpty then pure (({} : ContractEmit.Plan), classHooks)
       else

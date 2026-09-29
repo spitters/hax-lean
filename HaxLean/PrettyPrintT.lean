@@ -47,6 +47,14 @@ heuristic analysis.
 
 namespace Hax
 
+/-- The Lean keywords and core type names an emitted type may not take as its
+    own name: an opaque Rust type or newtype of that name is emitted as
+    `<Name>_T`. -/
+def leanReservedTypeNames : List String :=
+  ["Prop", "Type", "Sort", "Int", "Nat", "String", "Bool", "Char", "Unit", "Float",
+   "Array", "List", "Option", "Fin", "Vector", "UInt8", "UInt16", "UInt32", "UInt64",
+   "USize", "IO", "Except", "Id", "True", "False"]
+
 /-! ## TExpr Type Utilities -/
 
 /-- Collect all app calls in a TExpr: (functionName, argCount, argTypes, returnType). -/
@@ -449,7 +457,13 @@ def generatePreambleTyped (tdefs : List (String × TExpr))
           ++ ti.retType.collectOpaqueAdtNames baseStructLookup) ([] : List String)
     (fromCalls ++ fromFnTypes).eraseDups
   let clashDepsNames := allTCallsForClash.map (·.1) |>.eraseDups |>.map sanitizeName
-  let clashSet : List String := allOpaqueForClash.filter (clashDepsNames.contains)
+  -- An opaque or newtype name that is a Lean keyword or core type (`Prop`,
+  -- `Int`, `String`, …) or the name of an emitted class clashes the same way
+  -- and takes the same `<Name>_T` rename.
+  let reservedTypeNames := leanReservedTypeNames ++ classHooks.traits.map (·.name)
+  let clashSet : List String :=
+    (allOpaqueForClash.filter (clashDepsNames.contains)
+      ++ (allOpaqueForClash ++ newtypes.map (·.1)).filter reservedTypeNames.contains).eraseDups
   -- Augmented lookup: clash names resolve to their `_T` alias (a fresh
   -- axiom or abbrev emitted at the top of the file). For non-clash names,
   -- delegate to a clash-aware version of mkStructLookup so that struct

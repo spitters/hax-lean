@@ -368,6 +368,29 @@ where
       throw s!"call of `{f}`"
     | _ => throw s!"call of `{f}`"
 
+/-- The names an expression reads and calls that `bound` does not bind: the
+    variables (a read of a crate constant is one) and the call heads. -/
+partial def freeNames (bound : List String) (e : TExpr) : List String × List String :=
+  match e.kind with
+  | .var n => (if bound.contains n then [] else [n], [])
+  | .app f args =>
+    let r := many bound args
+    (r.1, (if bound.contains f then [] else [f]) ++ r.2)
+  | .letBind n v b =>
+    let a := freeNames bound v
+    let c := freeNames (n :: bound) b
+    (a.1 ++ c.1, a.2 ++ c.2)
+  | .lam ps b => freeNames (ps ++ bound) b
+  | .deref a | .borrow a | .ann a | .proj a _ => freeNames bound a
+  | .seq a b => many bound [a, b]
+  | .ifThenElse c t f => many bound [c, t, f]
+  | .tuple es => many bound es
+  | _ => ([], [])
+where
+  /-- The free names of a list of expressions. -/
+  many (bound : List String) (es : List TExpr) : List String × List String :=
+    es.foldl (fun (vs, fs) e => let r := freeNames bound e; (vs ++ r.1, fs ++ r.2)) ([], [])
+
 /-- A parsed and rendered predicate: its type parameters, its parameters and
     its body as a proposition. -/
 structure Pred where
@@ -382,9 +405,26 @@ def renderPred (preds : List (String × Json)) (implMap : ImplSelfTypeMap)
   let some item := preds.lookup uid | throw s!"no predicate item has the uid {uid}"
   let some (generics, params, body) := fnParts item | throw "the predicate item is not a function"
   let te ← parseHaxTExpr (rewriteIntLits body) implMap
+  let ps := expandParams params
+  let unknown := ((freeNames (ps.map (·.1)) te).1.filter (!callable.contains ·)).eraseDups
+  if !unknown.isEmpty then
+    throw s!"reads {unknown}, which the extraction does not emit"
   let r ← renderExpr callable te
   let s ← r.asProp
-  pure { typeParams := typeParamNames generics, params := expandParams params, body := s }
+  pure { typeParams := typeParamNames generics, params := ps, body := s }
+
+/-- The names the predicate with a given uid reads or calls outside its
+    parameters; empty when the item is missing or does not parse. -/
+def predRefs (preds : List (String × Json)) (implMap : ImplSelfTypeMap) (uid : String) :
+    List String :=
+  match preds.lookup uid >>= fnParts with
+  | none => []
+  | some (_, params, body) =>
+    match parseHaxTExpr (rewriteIntLits body) implMap with
+    | .error _ => []
+    | .ok te =>
+      let r := freeNames ((expandParams params).map (·.1)) te
+      r.1 ++ r.2
 
 /-! ## The plan -/
 
@@ -478,7 +518,9 @@ def renderFnContract (sl : String → Option String) (hooks : ClassHooks)
     let concl := s!"let out := {call}; {appStr s!"{f}_ensures" c.ensArgs}"
     let binders := gb ++ bindersStr sl c.params
     let q := if binders.isEmpty then "" else s!"∀{binders}, "
-    pure s!"/-- The contract of `{c.fn}`: every input satisfying `{f}_requires` gives a\n    result of `{c.fn}` satisfying `{f}_ensures`. -/\ndef {f}_contract : Prop :=\n  {q}{hyp}{concl}\n"
+    let inputs := if c.requires.isSome then s!"every input satisfying `{f}_requires`"
+      else "every input"
+    pure s!"/-- The contract of `{c.fn}`: {inputs} gives a\n    result of `{c.fn}` satisfying `{f}_ensures`. -/\ndef {f}_contract : Prop :=\n  {q}{hyp}{concl}\n"
   reqDef ++ ensDef ++ stmt.getD ""
 
 /-- The statement of a lemma. -/
@@ -568,18 +610,70 @@ def instanceContractFields (td : TraitDef) (ms : List MethodContract) :
 
 /-! ## Building the plan -/
 
-/-- The interning id of an item's `owner_id`. -/
-def ownerId (it : Json) : Option Nat := do
-  let oid ← (it.getObjVal? "owner_id").toOption
-  let c ← (oid.getObjVal? "contents").toOption
-  (c.getObjValAs? Nat "id").toOption
-
 /-- The short name of the trait an `impl` item implements. -/
 def implTraitName (impl : Json) : Option String := do
   let tr ← (impl.getObjVal? "of_trait").toOption
   let tv ← (tr.getObjVal? "value").toOption
   let defId ← (tv.getObjVal? "def_id").toOption
   defIdLeafName defId
+
+/-- The name the adapter gives a top-level function item: its identifier,
+    qualified by its module path when the identifier collides across modules
+    (`HaxAdapter.parseHaxItemTExpr`). -/
+def fnItemName (collisions : List String) (it : Json) : String :=
+  let baseName := match (it.getObjVal? "kind").toOption >>= (·.getObjVal? "Fn" |>.toOption) with
+    | some fnData => match fnData.getObjVal? "ident" with
+      | .ok i => extractFnName i
+      | _ => "unknown_fn"
+    | none => "unknown_fn"
+  if collisions.contains baseName then
+    match it.getObjVal? "def_id" with
+    | .ok d => extractDefIdName d collisions
+    | _ => baseName
+  else baseName
+
+/-- The names the contracts of the selected items read or call outside their
+    parameters: the clauses of each selected function and lemma, and of the
+    methods of each selected trait and of its `impl`s. `--filter` keeps the
+    definitions of these names beside the selected ones, so that a contract
+    naming a crate constant or function finds its definition. -/
+def referencedNames (srcs : List Json) (collisions : List String)
+    (localCrate : HaxAdapter.LocalCrate) (selected : String → Bool) : List String :=
+  let items := (srcs.foldl (fun acc j => payloadItems j acc) #[]).toList
+  let preds : List (String × Json) := items.filterMap fun it => do
+    let uid ← (itemPayloads it).findSome? payloadUid
+    pure (uid, it)
+  let implMap : ImplSelfTypeMap := { collisions, localCrate }
+  let uidRefs (it : Json) : List String :=
+    (["Requires", "Ensures"].filterMap (assocUid it)).flatMap (predRefs preds implMap)
+  let fromFns := items.flatMap fun it =>
+    if (it.getObjVal? "visibility").toOption.isNone || (fnParts it).isNone then []
+    else if selected (fnItemName collisions it) then uidRefs it else []
+  let fromTraits := srcs.flatMap fun j => (ClassEmit.allItems j).flatMap fun it =>
+    match (it.getObjVal? "kind").toOption with
+    | none => []
+    | some k =>
+      if let .ok (.arr tr) := k.getObjVal? "Trait" then
+        if !selected (extractFnName (tr[3]?.getD .null)) then [] else
+        match (tr[6]? : Option Json) with
+        | some (.arr xs) => xs.toList.flatMap uidRefs
+        | _ => []
+      else if let .ok impl := k.getObjVal? "Impl" then
+        match implTraitName impl with
+        | some tn =>
+          if !selected tn then [] else
+          match impl.getObjValAs? (Array Json) "items" with
+          | .ok xs => xs.toList.flatMap uidRefs
+          | _ => []
+        | none => []
+      else []
+  (fromFns ++ fromTraits).eraseDups
+
+/-- The interning id of an item's `owner_id`. -/
+def ownerId (it : Json) : Option Nat := do
+  let oid ← (it.getObjVal? "owner_id").toOption
+  let c ← (oid.getObjVal? "contents").toOption
+  (c.getObjValAs? Nat "id").toOption
 
 /-- The contract clauses of the methods of a trait or `impl` item list. -/
 def methodContracts (preds : List (String × Json)) (implMap : ImplSelfTypeMap)
@@ -630,16 +724,7 @@ def build (srcs : List Json) (collisions : List String)
     if (it.getObjVal? "visibility").toOption.isNone then continue
     let some (_, params, _) := fnParts it | continue
     let pls := itemPayloads it
-    let baseName := match (it.getObjVal? "kind").toOption >>= (·.getObjVal? "Fn" |>.toOption) with
-      | some fnData => match fnData.getObjVal? "ident" with
-        | .ok i => extractFnName i
-        | _ => "unknown_fn"
-      | none => "unknown_fn"
-    let name := if collisions.contains baseName then
-        match it.getObjVal? "def_id" with
-        | .ok d => extractDefIdName d collisions
-        | _ => baseName
-      else baseName
+    let name := fnItemName collisions it
     if seen.contains name then continue
     let fparams := expandParams params
     if pls.any payloadIsLemma then
