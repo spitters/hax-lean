@@ -17,6 +17,7 @@ public import HaxLean.TPhase.RewriteNewToStructCtor
 public import HaxLean.TPhase.RewriteStructFromElem
 public import HaxLean.TPhase.FixProjectionPaths
 public import HaxLean.ClassEmit
+public import HaxLean.ContractEmit
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -1392,7 +1393,10 @@ def toLeanLowCTDef (name : String) : String :=
     module docstring and is omitted from it when empty.
     `emitLowCT` adds, beside each verbatim `_impExpr` literal, its
     `anfLowCT`-normalised form and the `haxToLowCT` lowering of that form; the
-    file then imports the CatCrypt modules those two definitions name. -/
+    file then imports the CatCrypt modules those two definitions name.
+    `contracts` holds the function contracts and lemma statements of
+    `--emit-contracts` (`Hax.ContractEmit`), rendered after the definitions and
+    instances. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1404,7 +1408,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (mutWriteRets : List (String × List String × Bool) := [])
     (crateName : String := "")
     (emitLowCT : Bool := false)
-    (classHooks : ClassEmit.ClassHooks := {}) : String :=
+    (classHooks : ClassEmit.ClassHooks := {})
+    (contracts : ContractEmit.Plan := {}) : String :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
@@ -1791,8 +1796,11 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- closed terms that name no surface definition, so each is its own command
   -- with its own heartbeat budget; inside the block they would share one
   -- budget with every other declaration of the crate.
+  -- The contracts of `--emit-contracts` name the surface definitions and the
+  -- instances, so they follow both.
+  let contractBlock := ContractEmit.renderPlan structLookup classHooks contracts
   let footer :=
-    s!"\n{mutualClose}{impExprs}\n{lowCTBlock}{texprBlock}{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
+    s!"\n{mutualClose}{contractBlock}{impExprs}\n{lowCTBlock}{texprBlock}{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax

@@ -351,6 +351,11 @@ structure ImplInstance where
   trait : String
   selfTy : ImpType
   fields : List (String × String)
+  /-- The interning id of the `impl` block's `owner_id`. -/
+  implId : Nat := 0
+  /-- The pre- and postcondition fields of the instance under
+      `--emit-contracts`, as (field name, rendered value). -/
+  contractFields : List (String × String) := []
   deriving Inhabited
 
 /-- The trait `impl`s of the extracted crate whose trait is among `traits`,
@@ -376,7 +381,7 @@ def implInstances (traits : List String) (j : Json) : List ImplInstance :=
       | _ => .unknown
     let fields := ((items.filter (·.1 == implId)).map fun (_, item, emitted) =>
       (item, emitted)).eraseDups
-    some (implId, { trait := tn, selfTy, fields : ImplInstance })
+    some (implId, { trait := tn, selfTy, fields, implId : ImplInstance })
   (found.foldl (fun acc p => if acc.any (·.1 == p.1) then acc else acc ++ [p]) []).map (·.2)
 
 /-! ## The plan handed to the renderer -/
@@ -395,6 +400,12 @@ structure ClassHooks where
   genericStructs : List (String × List String) := []
   /-- The trait `impl`s emitted as instances. -/
   instances : List ImplInstance := []
+  /-- Per trait, the methods that carry a pre- and a postcondition field
+      (`--emit-contracts`). -/
+  contractMethods : List (String × List String) := []
+  /-- The trait-level contract definitions and the `Contract` classes, rendered
+      under a struct lookup; they follow the classes. -/
+  contractText : (String → Option String) → String := fun _ => ""
   deriving Inhabited
 
 /-- Whether the class mode is on. -/
@@ -447,7 +458,21 @@ def argTypeStr (sl : String → Option String) (ty : ImpType) : String :=
   let s := ty.toLeanTypeStrSurface sl
   if s.any (· == ' ') then s!"({s})" else s
 
-/-- The class declarations and the `export` lines. -/
+/-- The binder name of a method's result in its postcondition: `result`, or
+    `result` followed by primes when a parameter already has that name. -/
+def resultBinderName (params : List String) : String :=
+  go params.length "result"
+where
+  /-- Add primes until the name is free, at most `fuel` times. -/
+  go : Nat → String → String
+    | 0, n => n
+    | fuel + 1, n => if params.contains n then go fuel (n ++ "'") else n
+
+/-- The class declarations and the `export` lines, followed by the contract
+    text of `--emit-contracts` (`ClassHooks.contractText`). A method listed in
+    `ClassHooks.contractMethods` also carries a precondition field `m_pre` over
+    its parameters and a postcondition field `m_post` over its parameters and
+    result. -/
 def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : String :=
   let known := h.traits.map (·.name)
   let classes := h.traits.map fun td =>
@@ -462,14 +487,23 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
     let methods := td.methods.map fun (m, ps, r) =>
       let binders := ps.map fun (p, ty) => s!" ({sanitizeName p} : {ty.toLeanTypeStrSurface sl})"
       s!"  {sanitizeName m}{String.join binders} : {r.toLeanTypeStrSurface sl}"
+    let contractMs := ((h.contractMethods.find? (·.1 == td.name)).map (·.2)).getD []
+    let prePost := td.methods.flatMap fun (m, ps, r) =>
+      if !contractMs.contains m then [] else
+      let binders := String.join (ps.map fun (p, ty) =>
+        s!" ({sanitizeName p} : {ty.toLeanTypeStrSurface sl})")
+      let res := resultBinderName (ps.map (·.1))
+      [s!"  {sanitizeName m}_pre{binders} : Prop",
+       s!"  {sanitizeName m}_post{binders} ({res} : {r.toLeanTypeStrSurface sl}) : Prop"]
     let attrs := td.assocTypes.flatMap fun (a, bs) =>
       (bs.filter known.contains).map fun b =>
         s!"\nattribute [instance_reducible, instance] {td.name}.inst{b}_{a}"
     s!"/-- The Rust trait `{td.name}` of the crate `{td.krate}`, as a class over its `Self` type. -/\nclass {td.name} (Self : Type){ext} where\n"
-      ++ "\n".intercalate (assoc ++ consts ++ methods) ++ String.join attrs
+      ++ "\n".intercalate (assoc ++ consts ++ methods ++ prePost) ++ String.join attrs
   let exports := h.exports.map fun (t, items) =>
     s!"export {t} ({" ".intercalate (items.map sanitizeName)})"
   "\n\n".intercalate classes ++ "\n\n" ++ "\n".intercalate exports ++ "\n\n"
+    ++ h.contractText sl
 
 /-- The generic structs: a type-parametric tuple abbreviation, constructor and
     projections for each, rendered from its fields in `structMeta`. -/
@@ -524,8 +558,9 @@ def ClassHooks.renderInstance (h : ClassHooks) (sl : String → Option String)
     | none => []
   let superFields := supers.map fun s => s!"  to{s} := inferInstance"
   let fields := inst.fields.map fun (item, d) => s!"  {sanitizeName item} := {d}"
+  let contractFields := inst.contractFields.map fun (f, v) => s!"  {f} := {v}"
   s!"instance : {inst.trait} {argTypeStr sl inst.selfTy} where\n"
-    ++ "\n".intercalate (superFields ++ fields) ++ "\n"
+    ++ "\n".intercalate (superFields ++ fields ++ contractFields) ++ "\n"
 
 /-- The rendered definitions and instances in dependency order, or `none` when
     the call graph of the definitions has a cycle other than self-recursion.

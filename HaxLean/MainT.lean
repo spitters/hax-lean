@@ -108,15 +108,30 @@ def main (args : List String) : IO UInt32 := do
     -- type variables and plan the classes, instances and generic binders
     -- (`Hax.ClassEmit`). Without the flag the plan is empty and nothing below
     -- consults it.
-    let (inputJson, classHooks) ← match opts.emitClasses with
-      | none => pure (inputJson, ({} : ClassEmit.ClassHooks))
+    -- The predicate items of hax-lib contracts are never ordinary definitions
+    -- (`ContractEmit.dropContractItems`); under `--emit-contracts` the
+    -- contracts are read from the exports before the items are dropped, and
+    -- the lemma functions are dropped too.
+    let (inputJson, classHooks, contractSrcs) ← match opts.emitClasses with
+      | none =>
+        pure (ContractEmit.dropContractItems opts.emitContracts inputJson,
+          ({} : ClassEmit.ClassHooks),
+          if opts.emitContracts then [inputJson] else [])
       | some traitFile => do
         let traitJson ← IO.ofExcept (Json.parseVerified (← IO.FS.readFile traitFile))
-        let inputJson := ClassEmit.keepTypeParams inputJson
-        let hooks := ClassEmit.plan (ClassEmit.keepTypeParams traitJson) inputJson
+        let inputKept := ClassEmit.keepTypeParams inputJson
+        let traitKept := ClassEmit.keepTypeParams traitJson
+        let inputJson := ContractEmit.dropContractItems opts.emitContracts inputKept
+        let hooks := ClassEmit.plan
+          (ContractEmit.dropContractItems opts.emitContracts traitKept) inputJson
         IO.eprintln s!"INFO classes={hooks.traits.length} class-items={hooks.classItemNames.length} generic-fns={hooks.genericFns.length} generic-structs={hooks.genericStructs.length} instances={hooks.instances.length}"
-        pure (inputJson, hooks)
+        pure (inputJson, hooks, if opts.emitContracts then [inputKept, traitKept] else [])
     let classMode := classHooks.enabled
+    -- The naming context of the contracts' calls and definitions, taken here
+    -- so the export need not outlive the parse.
+    let contractNaming : List String × HaxAdapter.LocalCrate :=
+      if contractSrcs.isEmpty then ([], {})
+      else (HaxAdapter.fnNameCollisions inputJson, HaxAdapter.localCrateOfExport inputJson)
     let structMeta := structMetaOfJson inputJson
     let newtypes := HaxAdapter.buildNewtypeMap inputJson
     let enumMeta := HaxAdapter.parseEnumDefsFromJson inputJson
@@ -256,11 +271,29 @@ def main (args : List String) : IO UInt32 := do
     let crateName := match opts.inputFile with
       | some p => ((System.FilePath.mk p).parent.bind (·.fileName)).getD ""
       | none => ""
+    -- `--emit-contracts`: the contracts of the emitted definitions, and the
+    -- contract fields of the classes and instances. A clause outside the
+    -- predicate language stops the run.
+    let selected : String → Bool := fun n => match opts.filterFns with
+      | some fns => fns.any (fun f => n.endsWith f || n == f)
+      | none => true
+    let (contractPlan, classHooks) ←
+      if contractSrcs.isEmpty then pure (({} : ContractEmit.Plan), classHooks)
+      else
+        match ContractEmit.build contractSrcs contractNaming.1 contractNaming.2
+            (rawTdefs.map (·.1)) selected writeReturns classHooks with
+        | .ok r => pure r
+        | .error errs => do
+          for e in errs do
+            IO.eprintln s!"ERROR contract: {e}"
+          IO.eprintln "haxpipeT: no output; a contract clause is outside the predicate language"
+          return 1
+    IO.eprintln s!"INFO contracts={contractPlan.fns.length} lemmas={contractPlan.lemmas.length} contract-traits={classHooks.contractMethods.length}"
     let rendered :=
       toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
         newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns)
         (crateName := crateName) (emitLowCT := opts.emitLowCT)
-        (classHooks := classHooks) ++ secrecyDef
+        (classHooks := classHooks) (contracts := contractPlan) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered

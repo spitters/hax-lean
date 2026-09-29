@@ -89,6 +89,12 @@ structure Options where
       each trait `impl` as an instance, and each generic function with its
       type parameters and trait bounds as binders (`Hax.ClassEmit`). -/
   emitClasses : Option String := none
+  /-- Emit the hax-lib contracts of the crate (`Hax.ContractEmit`): the
+      `requires`/`ensures` clauses of each function with a contract statement,
+      each `#[hax_lib::lemma]` as a statement, and, with `--emit-classes`, the
+      pre- and postcondition fields of each trait method with the `Contract`
+      class of refinement obligations. -/
+  emitContracts : Bool := false
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -114,6 +120,7 @@ where
     | "--emit-lowct" :: rest, opts => go rest { opts with emitLowCT := true }
     | "--emit-classes" :: file :: rest, opts =>
       go rest { opts with emitClasses := some file }
+    | "--emit-contracts" :: rest, opts => go rest { opts with emitContracts := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -140,7 +147,11 @@ OPTIONS:
                     from the hax export FILE; emit each trait as a class, each
                     trait impl as an instance, and each generic function with
                     its type parameters and trait bounds as binders
-  --help            Show this help message
+  --emit-contracts  With --emit-certified --hax: emit the hax-lib contracts
+                    (requires/ensures, lemmas; trait method pre- and
+                    postconditions and their Contract class with
+                    --emit-classes) as Prop definitions
+  --help           Show this help message
 
 INPUT:
   JSON-encoded ImpExpr (default) or hax Decorated<ExprKind> (with --hax).
