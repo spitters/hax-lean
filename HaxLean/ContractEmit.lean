@@ -65,7 +65,7 @@ open Lean (Json)
 open Hax.HaxAdapter (parseHaxType parseHaxTExpr parseHaxPat extractFnName
   extractDefIdName defIdLeafName ImplSelfTypeMap)
 open Hax.ClassEmit (ClassHooks TraitDef ImplInstance argTypeStr resultBinderName
-  typeParamNames)
+  typeParamNames selfInvField)
 
 /-! ## Payloads -/
 
@@ -488,6 +488,88 @@ def predRefs (preds : List (String × Json)) (implMap : ImplSelfTypeMap) (uid : 
       let r := freeNames ((expandParams params).map (·.1)) te
       r.1 ++ r.2
 
+/-! ## Type invariants
+
+The surface encoding erases the range of a Rust type: every machine integer is
+an `Int` and every array an `Array`. A contract quantifies only over the values
+the Rust type admits, so each obligation takes the invariant of the Rust type
+of every quantified argument and result as a hypothesis (`tyInv`). -/
+
+/-- What `tyInv` reads the Rust types through: the inner type of each newtype,
+    the field types of each struct (by short name), and the invariant, as a
+    predicate term, of the type variables that have one (`Self` in a trait's
+    `Contract` class). -/
+structure TyEnv where
+  newtypes : List (String × ImpType) := []
+  structs : List (String × List ImpType) := []
+  typeVarInv : List (String × String) := []
+  deriving Inhabited
+
+/-- The conjunction of the parts that are not trivial; `none` when all are. -/
+def conjAll (ps : List (Option String)) : Option String :=
+  match ps.filterMap id with
+  | [] => none
+  | [p] => some p
+  | qs => some s!"({" ∧ ".intercalate qs})"
+
+/-- The components of a right-nested product value `x` of `n` components:
+    `x.1`, `x.2.1`, …, `x.2.….2`. -/
+def productComponents (x : String) (n : Nat) : List String :=
+  (List.range n).map fun i =>
+    let pre := String.join (List.replicate i ".2")
+    if n == 1 then x else if i + 1 < n then s!"({x}{pre}.1)" else s!"({x}{pre})"
+
+/-- The invariant of the Rust type `ty` at the surface value `x`, or `none`
+    when the surface type admits exactly the Rust values:
+    * a machine integer of `w` bits is in `[0, 2^w)` (unsigned) or
+      `[-2^(w-1), 2^(w-1))` (signed), `usize` and `isize` at 64 bits;
+    * an array `[τ; n]` has size `n` and every element satisfies the invariant
+      of `τ`; every element of a slice or a `Vec` satisfies it;
+    * a tuple and a struct satisfy it componentwise, a newtype as its inner
+      type;
+    * a type variable with an entry in `TyEnv.typeVarInv` satisfies that
+      predicate.
+    Other types (`bool`, `()`, enums, the mathematical `Int`) carry none. The
+    bound variables are `e0`, `e1`, … by nesting depth. -/
+partial def tyInv (env : TyEnv) (ty : ImpType) (x : String) (depth : Nat := 0) :
+    Option String :=
+  match ty with
+  | .uint w => some s!"(0 ≤ {x} ∧ {x} < 2 ^ {w.bits})"
+  | .sint w => some s!"(-(2 ^ {w.bits - 1}) ≤ {x} ∧ {x} < 2 ^ {w.bits - 1})"
+  | .ref t _ => tyInv env t x depth
+  | .array t n =>
+    let e := s!"e{depth}"
+    match tyInv env t e (depth + 1) with
+    | some p => some s!"({x}.size = {n} ∧ ∀ {e} ∈ {x}, {p})"
+    | none => some s!"({x}.size = {n})"
+  | .slice t => elems t
+  | .tuple ts =>
+    conjAll ((ts.zip (productComponents x ts.length)).map fun (t, c) => tyInv env t c depth)
+  | .typeVar n => (env.typeVarInv.lookup n).map fun p => s!"({p} {x})"
+  | .adt name args =>
+    let short := ImpType.sanitizeAdtShortName name
+    if name == "Vec" || name.endsWith "::Vec" then
+      match args with
+      | t :: _ => elems t
+      | [] => none
+    else match env.newtypes.lookup short with
+    | some inner => tyInv env inner x depth
+    | none => match env.structs.lookup short with
+      | some [t] => tyInv env t x depth
+      | some fs =>
+        conjAll ((fs.zip (productComponents x fs.length)).map fun (t, c) => tyInv env t c depth)
+      | none => none
+  | _ => none
+where
+  /-- Every element of the sequence `x` satisfies the invariant of `t`. -/
+  elems (t : ImpType) : Option String :=
+    let e := s!"e{depth}"
+    (tyInv env t e (depth + 1)).map fun p => s!"(∀ {e} ∈ {x}, {p})"
+
+/-- The hypotheses `inv₁ → … → ` of the invariants of the given binders. -/
+def invHyps (env : TyEnv) (ps : List (String × ImpType)) : String :=
+  String.join (ps.filterMap fun (p, ty) => (tyInv env ty (sanitizeName p)).map (· ++ " → "))
+
 /-! ## The plan -/
 
 /-- The contract of a free function. -/
@@ -502,6 +584,10 @@ structure FnContract where
       final values of the `&mut` parameters and the result, read from `out`,
       the value of the surface definition. -/
   ensArgs : List String := []
+  /-- The outputs among `ensArgs` (the final values of the `&mut` parameters
+      and the result) with their Rust types; the contract concludes their type
+      invariants. -/
+  outInvs : List (String × ImpType) := []
   deriving Inhabited
 
 /-- A `#[hax_lib::lemma]` function. -/
@@ -516,6 +602,8 @@ structure LemmaStmt where
 structure Plan where
   fns : List FnContract := []
   lemmas : List LemmaStmt := []
+  /-- The Rust types the invariant hypotheses are read through. -/
+  env : TyEnv := {}
   deriving Inhabited
 
 /-- Binders `(x : T)` for parameters under a struct lookup. -/
@@ -556,7 +644,7 @@ def renderPredDef (sl : String → Option String) (doc name extraBinders : Strin
 
 /-- The definitions of a function contract: `f_requires`, `f_ensures` and the
     statement `f_contract`. `generic` holds the binders of a generic function. -/
-def renderFnContract (sl : String → Option String) (hooks : ClassHooks)
+def renderFnContract (sl : String → Option String) (hooks : ClassHooks) (env : TyEnv)
     (c : FnContract) : String :=
   let g := hooks.genericFns.find? (·.name == c.fn)
   let gb := match g with
@@ -575,29 +663,33 @@ def renderFnContract (sl : String → Option String) (hooks : ClassHooks)
   let stmt : Option String := do
     let _ ← c.ensures
     let call := appStr f names
-    let hyp := match c.requires with
+    let hyp := invHyps env c.params ++ match c.requires with
       | some _ => s!"{appStr s!"{f}_requires" names} → "
       | none => ""
-    let concl := s!"let out := {call}; {appStr s!"{f}_ensures" c.ensArgs}"
+    let ens := appStr s!"{f}_ensures" c.ensArgs
+    let outInv := conjAll (c.outInvs.map fun (x, ty) => tyInv env ty x)
+    let concl := match outInv with
+      | some p => s!"let out := {call}; ({ens} ∧ {p})"
+      | none => s!"let out := {call}; {ens}"
     let binders := gb ++ bindersStr sl c.params
     let q := if binders.isEmpty then "" else s!"∀{binders}, "
-    let inputs := if c.requires.isSome then s!"every input satisfying `{f}_requires`"
-      else "every input"
-    pure s!"/-- The contract of `{c.fn}`: {inputs} gives a\n    result of `{c.fn}` satisfying `{f}_ensures`. -/\ndef {f}_contract : Prop :=\n  {q}{hyp}{concl}\n"
+    let inputs := if c.requires.isSome then s!"every input of its Rust types satisfying `{f}_requires`"
+      else "every input of its Rust types"
+    pure s!"/-- The contract of `{c.fn}`: {inputs} gives a\n    result of `{c.fn}` satisfying `{f}_ensures` and the invariants of its Rust types. -/\ndef {f}_contract : Prop :=\n  {q}{hyp}{concl}\n"
   reqDef ++ ensDef ++ stmt.getD ""
 
 /-- The statement of a lemma. -/
-def renderLemma (sl : String → Option String) (l : LemmaStmt) : String :=
+def renderLemma (sl : String → Option String) (env : TyEnv) (l : LemmaStmt) : String :=
   let binders := bindersStr sl l.params
   let q := if binders.isEmpty then "" else s!"∀{binders}, "
-  let hyp := match l.requires with
+  let hyp := invHyps env l.params ++ match l.requires with
     | some r => s!"{r} → "
     | none => ""
   s!"/-- The statement of the lemma `{l.name}`. -/\ndef {sanitizeName l.name}_stmt : Prop :=\n  {q}{hyp}{l.formula}\n"
 
 /-- The contracts of a plan, rendered after the definitions. -/
 def renderPlan (sl : String → Option String) (hooks : ClassHooks) (p : Plan) : String :=
-  let parts := p.fns.map (renderFnContract sl hooks) ++ p.lemmas.map (renderLemma sl)
+  let parts := p.fns.map (renderFnContract sl hooks p.env) ++ p.lemmas.map (renderLemma sl p.env)
   if parts.isEmpty then "" else "\n".intercalate parts ++ "\n"
 
 /-! ## Traits -/
@@ -609,10 +701,18 @@ structure MethodContract where
   ensures : Option Pred := none
   deriving Inhabited
 
-/-- The trait-level definitions and the `Contract` class of a trait. -/
-def renderTraitContract (sl : String → Option String) (td : TraitDef)
+/-- The trait-level definitions and the `Contract` class of a trait. Every
+    obligation quantifies over the arguments (and the result) under their
+    Rust type invariants (`tyInv`); the invariant of `Self` is the class field
+    `T_inv`, which each instance fills from its `impl`'s self type. A method
+    without a trait `requires` clause has the precondition `True`, so its
+    `_pre_of_requires` obligation states that the instance's precondition holds
+    on every valid input. -/
+def renderTraitContract (sl : String → Option String) (env : TyEnv) (td : TraitDef)
     (ms : List MethodContract) : Except String String := do
   let t := td.name
+  let env := { env with
+    typeVarInv := ("Self", s!"{t}.{selfInvField t} (Self := Self)") :: env.typeVarInv }
   let mut defs : List String := []
   let mut fields : List String := []
   for (m, ps, r) in td.methods do
@@ -632,27 +732,45 @@ def renderTraitContract (sl : String → Option String) (td : TraitDef)
     -- at `Self_`, through which it names the trait's items.
     let inst (p : Pred) : String :=
       if (predTypeBinders p).contains "Self_" then s!" [{t} Self_]" else ""
-    if let some p := mc.requires then
+    let argInv := invHyps env ps
+    let resInv := invHyps env [(res, r)]
+    match mc.requires with
+    | some p =>
       defs := defs ++ [renderPredDef sl s!"The `requires` clause of the method `{m}` of the trait `{t}`."
         s!"{t}.{mn}_requires" (inst p) p]
       let args ← predArgs p names []
-      fields := fields ++ [s!"  {mn}_pre_of_requires : {q binders}{predCall p s!"{t}.{mn}_requires" args} → {field s!"{mn}_pre" names}"]
+      fields := fields ++ [s!"  {mn}_pre_of_requires : {q binders}{argInv}{predCall p s!"{t}.{mn}_requires" args} → {field s!"{mn}_pre" names}"]
+    | none =>
+      fields := fields ++ [s!"  {mn}_pre_of_requires : {q binders}{argInv}{field s!"{mn}_pre" names}"]
     if let some p := mc.ensures then
       defs := defs ++ [renderPredDef sl s!"The `ensures` clause of the method `{m}` of the trait `{t}`."
         s!"{t}.{mn}_ensures" (inst p) p]
       let args ← predArgs p names [res]
       let bs := binders ++ s!" ({res} : {r.toLeanTypeStrSurface sl})"
-      fields := fields ++ [s!"  {mn}_ensures_of_post : {q bs}{field s!"{mn}_post" (names ++ [res])} → {predCall p s!"{t}.{mn}_ensures" args}"]
-    fields := fields ++ [s!"  {mn}_sound : {q binders}{field s!"{mn}_pre" names} → {field s!"{mn}_post" (names ++ [field mn names])}"]
-  let cls := s!"/-- The contract obligations of an instance of `{t}`: each method's\n    precondition field is implied by the trait's `requires` clause, its\n    postcondition field implies the trait's `ensures` clause, and the method\n    satisfies its precondition and postcondition fields. -/\nclass {t}.Contract (Self : Type) [{t} Self] : Prop where\n" ++ "\n".intercalate fields ++ "\n"
+      fields := fields ++ [s!"  {mn}_ensures_of_post : {q bs}{argInv}{resInv}{field s!"{mn}_post" (names ++ [res])} → {predCall p s!"{t}.{mn}_ensures" args}"]
+    -- The method's result satisfies the postcondition field and the invariant
+    -- of its Rust type.
+    let call := field mn names
+    let callTerm := if names.isEmpty then s!"({call})" else call
+    let post := field s!"{mn}_post" (names ++ [call])
+    let concl := match tyInv env r callTerm with
+      | some p => s!"({post} ∧ {p})"
+      | none => post
+    fields := fields ++ [s!"  {mn}_sound : {q binders}{argInv}{field s!"{mn}_pre" names} → {concl}"]
+  let cls := s!"/-- The contract obligations of an instance of `{t}`, over the arguments and\n    results that satisfy the invariants of their Rust types (`{selfInvField t}` for the\n    self type): each method's precondition field is implied by the trait's\n    `requires` clause (`True` when the trait states none), its postcondition\n    field implies the trait's `ensures` clause, and under its precondition\n    field the method returns a result satisfying its postcondition field and\n    the invariant of its Rust type. -/\nclass {t}.Contract (Self : Type) [{t} Self] : Prop where\n" ++ "\n".intercalate fields ++ "\n"
   pure ("\n".intercalate defs ++ (if defs.isEmpty then "" else "\n") ++ cls)
 
-/-- The precondition and postcondition fields of an instance of a trait with
-    contract methods, from the `impl`'s own clauses of each method (`True` for
-    a clause the `impl` does not state). -/
-def instanceContractFields (td : TraitDef) (ms : List MethodContract) :
-    Except String (List (String × String)) := do
-  let mut out : List (String × String) := []
+/-- The contract fields of an instance of a trait with contract methods: the
+    invariant `T_inv` of the `impl`'s Rust self type `selfTy` (`tyInv`, `True`
+    when it has none), and the precondition and postcondition fields from the
+    `impl`'s own clauses of each method (`True` for a clause the `impl` does not
+    state). -/
+def instanceContractFields (env : TyEnv) (td : TraitDef) (selfTy : ImpType)
+    (ms : List MethodContract) : Except String (List (String × String)) := do
+  let inv := match tyInv env selfTy "x" with
+    | some p => s!"fun x => {p}"
+    | none => "fun _ => True"
+  let mut out : List (String × String) := [(selfInvField td.name, inv)]
   for (m, ps, _) in td.methods do
     let mc := (ms.find? (·.method == m)).getD { method := m }
     let mn := sanitizeName m
@@ -779,13 +897,14 @@ def methodContracts (preds : List (String × Json)) (implMap : ImplSelfTypeMap)
     the names of the emitted definitions, `selected`
     the `--filter` predicate on names, `writeReturns` the write-back table
     (`ThreadMutations.mutWriteReturns`: per function, the `&mut` parameters it
-    returns and whether it returns a Rust result besides) and `hooks` the class
-    plan. Returns the plan and the class plan with its contract fields, or the
-    list of clauses outside the predicate language. -/
+    returns and whether it returns a Rust result besides), `hooks` the class
+    plan and `env` the newtypes and structs the type invariants are read
+    through. Returns the plan and the class plan with its contract fields, or
+    the list of clauses outside the predicate language. -/
 def build (srcs : List Json) (collisions : List String)
     (localCrate : HaxAdapter.LocalCrate) (emitted : List String)
     (selected : String → Bool) (writeReturns : List (String × List String × Bool))
-    (hooks : ClassHooks) : Except (List String) (Plan × ClassHooks) := do
+    (hooks : ClassHooks) (env : TyEnv := {}) : Except (List String) (Plan × ClassHooks) := do
   let items := (srcs.foldl (fun acc j => payloadItems j acc) #[]).toList
   let preds : List (String × Json) := items.filterMap fun it => do
     let uid ← (itemPayloads it).findSome? payloadUid
@@ -861,15 +980,24 @@ def build (srcs : List Json) (collisions : List String)
           if p.params.length == fparams.length then pure ()
           else throw s!"`{name}` requires: {p.params.length} parameters for {fparams.length} inputs"
         | none => pure ()
-      let ensArgs : Except String (List String) := match e with
-        | none => pure []
+      -- The arguments of `fn_ensures`, and the outputs among them (the final
+      -- values of the `&mut` parameters and the result) with their Rust types,
+      -- read from the trailing parameters of the `ensures` predicate.
+      let ensArgs : Except String (List String × List (String × ImpType)) := match e with
+        | none => pure ([], [])
         | some p =>
-          predArgs p names futures <|> predArgs p names (futures ++ [result])
+          let outs (extra : List String) (args : List String) :
+              List String × List (String × ImpType) :=
+            (args, (args.drop (args.length - extra.length)).zip
+              ((p.params.drop (p.params.length - extra.length)).map (·.2)))
+          ((predArgs p names futures).map (outs futures))
+            <|> ((predArgs p names (futures ++ [result])).map (outs (futures ++ [result])))
             |>.mapError fun _ => s!"`{name}` ensures: {p.params.length} parameters for {fparams.length} inputs and {muts.length} `&mut` inputs"
       match reqOk, ensArgs with
       | .error m, _ | _, .error m => errs := errs ++ [m]
-      | .ok (), .ok ensArgs =>
-        fns := fns ++ [{ fn := name, params := fparams, requires := r, ensures := e, ensArgs }]
+      | .ok (), .ok (ensArgs, outInvs) =>
+        let c : FnContract := { fn := name, params := fparams, requires := r, ensures := e }
+        fns := fns ++ [{ c with ensArgs := ensArgs, outInvs := outInvs }]
   -- Traits and their `impl`s, under `--emit-classes`.
   let traitNames := hooks.traits.map (·.name)
   let mut traitMs : List (String × List MethodContract) := []
@@ -913,14 +1041,14 @@ def build (srcs : List Json) (collisions : List String)
     | none => instances := instances ++ [inst]
     | some td =>
       let ms := ((implMs.find? (·.1 == inst.implId)).map (·.2.2)).getD []
-      match instanceContractFields td ms with
+      match instanceContractFields env td inst.selfTy ms with
       | .ok fs => instances := instances ++ [{ inst with contractFields := fs }]
       | .error e =>
         errs := errs ++ [s!"impl {inst.trait}: {e}"]
         instances := instances ++ [inst]
   let texts : (String → Option String) → Except String String := fun sl => do
     let parts ← tds.mapM fun td =>
-      renderTraitContract sl td (((traitMs.find? (·.1 == td.name)).map (·.2)).getD [])
+      renderTraitContract sl env td (((traitMs.find? (·.1 == td.name)).map (·.2)).getD [])
     pure ("\n".intercalate parts)
   -- The trait texts are checked once under the identity lookup; their errors
   -- come from the predicate shapes, which do not depend on the lookup.
@@ -932,6 +1060,6 @@ def build (srcs : List Json) (collisions : List String)
     contractText := fun sl => match texts sl with
       | .ok s => if s.isEmpty then "" else s ++ "\n"
       | .error _ => "" }
-  pure ({ fns, lemmas }, hooks)
+  pure ({ fns, lemmas, env }, hooks)
 
 end Hax.ContractEmit

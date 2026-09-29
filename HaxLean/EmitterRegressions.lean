@@ -1789,4 +1789,69 @@ def iterMutZipLoop : ImpExpr :=
 
 end IteratorLoops
 
+/-! ### Contract obligations under the Rust type invariants
+
+The surface encoding reads `[u64; 4]` as `Array Int`, so a `Contract`
+obligation over it quantifies under the invariant of the Rust type: size 4 and
+every limb in `[0, 2^64)`. A method without a trait `requires` clause still has
+its `_pre_of_requires` obligation, with the trait precondition `True`. -/
+
+section ContractInvariants
+
+open ContractEmit
+
+/-- The environment of a crate with the newtype `Fp([u64; 4])`. -/
+def fpEnv : TyEnv := { newtypes := [("Fp", .array (.uint .w64) 4)] }
+
+#guard tyInv {} (.array (.uint .w64) 4) "x" ==
+  some "(x.size = 4 ∧ ∀ e0 ∈ x, (0 ≤ e0 ∧ e0 < 2 ^ 64))"
+#guard tyInv fpEnv (.adt "Fp" []) "x" == tyInv {} (.array (.uint .w64) 4) "x"
+#guard tyInv {} (.sint .w8) "y" == some "(-(2 ^ 7) ≤ y ∧ y < 2 ^ 7)"
+#guard tyInv {} .bool "b" == none
+
+/-- `trait CtField { fn is_zero(&self) -> u8; }` with no clause on the trait. -/
+def ctFieldDef : ClassEmit.TraitDef :=
+  { name := "CtField", krate := "k",
+    methods := [("is_zero", [("self", .typeVar "Self")], .uint .w8)] }
+
+#guard match renderTraitContract (fun _ => none) {} ctFieldDef [] with
+  | .ok s => (s.splitOn
+      "  is_zero_pre_of_requires : ∀ (self : Self), (CtField.CtField_inv (Self := Self) self) → (CtField.is_zero_pre (Self := Self) self)").length == 2
+  | .error _ => false
+#guard match renderTraitContract (fun _ => none) {} ctFieldDef [] with
+  | .ok s => (s.splitOn
+      "  is_zero_sound : ∀ (self : Self), (CtField.CtField_inv (Self := Self) self) → (CtField.is_zero_pre (Self := Self) self) → ").length == 2
+  | .error _ => false
+
+-- The instance fills the invariant field from its `impl`'s self type.
+#guard match instanceContractFields fpEnv ctFieldDef (.adt "Fp" []) [] with
+  | .ok fs => fs.head? ==
+      some ("CtField_inv", "fun x => (x.size = 4 ∧ ∀ e0 ∈ x, (0 ≤ e0 ∧ e0 < 2 ^ 64))")
+  | .error _ => false
+
+-- The class of a trait with contract methods carries the invariant field.
+#guard ((({ traits := [ctFieldDef], contractMethods := [("CtField", ["is_zero"])] } :
+    ClassEmit.ClassHooks).renderClasses (fun _ => none)).splitOn
+  "  CtField_inv (x : Self) : Prop\n  is_zero_pre (self : Self) : Prop").length == 2
+
+-- The soundness obligation concludes the postcondition field and the invariant
+-- of the result's Rust type.
+#guard match renderTraitContract (fun _ => none) {} ctFieldDef [] with
+  | .ok s => (s.splitOn
+      "→ ((CtField.is_zero_post (Self := Self) self (CtField.is_zero (Self := Self) self)) ∧ (0 ≤ (CtField.is_zero (Self := Self) self) ∧ (CtField.is_zero (Self := Self) self) < 2 ^ 8))").length == 2
+  | .error _ => false
+
+/-- The contract of `fn neg(x: Fp) -> Fp` with an `ensures` clause. -/
+def negContract : FnContract :=
+  { fn := "neg", params := [("x", .adt "Fp" [])],
+    ensures := some { params := [("x", .adt "Fp" []), ("result", .adt "Fp" [])], body := "True" },
+    ensArgs := ["x", "out"], outInvs := [("out", .adt "Fp" [])] }
+
+-- A function contract quantifies under the argument's invariant and concludes
+-- the `ensures` clause and the result's invariant.
+#guard ((renderFnContract (fun _ => none) {} fpEnv negContract).splitOn
+  "∀ (x : Fp), (x.size = 4 ∧ ∀ e0 ∈ x, (0 ≤ e0 ∧ e0 < 2 ^ 64)) → let out := (neg x); ((neg_ensures x out) ∧ (out.size = 4 ∧ ∀ e0 ∈ out, (0 ≤ e0 ∧ e0 < 2 ^ 64)))").length == 2
+
+end ContractInvariants
+
 end Hax.EmitterRegressions

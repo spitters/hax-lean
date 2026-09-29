@@ -292,8 +292,13 @@ def main (args : List String) : IO UInt32 := do
     let (contractPlan, classHooks) ←
       if contractSrcs.isEmpty then pure (({} : ContractEmit.Plan), classHooks)
       else
+        -- The type invariants of the contracts are read through the crate's
+        -- newtypes and struct field types.
+        let tyEnv : ContractEmit.TyEnv :=
+          { newtypes := newtypes,
+            structs := structMeta.map fun (s, fs) => (s, fs.map (·.2.2)) }
         match ContractEmit.build contractSrcs contractNaming.1 contractNaming.2
-            (rawTdefs.map (·.1)) selected writeReturns classHooks with
+            (rawTdefs.map (·.1)) selected writeReturns classHooks tyEnv with
         | .ok r => pure r
         | .error errs => do
           for e in errs do

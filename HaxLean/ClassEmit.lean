@@ -497,6 +497,10 @@ partial def ClassHooks.traitHasBeq (h : ClassHooks) (t : String) : Bool :=
   | some td => td.beq || td.supers.any (h.traitHasBeq ·)
   | none => false
 
+/-- The name of the class field of a trait with contract methods that holds the
+    invariant of the Rust self type of an instance: `T_inv`. -/
+def selfInvField (t : String) : String := s!"{t}_inv"
+
 /-- The binder name of a method's result in its postcondition: `result`, or
     `result` followed by primes when a parameter already has that name. -/
 def resultBinderName (params : List String) : String :=
@@ -511,7 +515,8 @@ where
     text of `--emit-contracts` (`ClassHooks.contractText`). A method listed in
     `ClassHooks.contractMethods` also carries a precondition field `m_pre` over
     its parameters and a postcondition field `m_post` over its parameters and
-    result. -/
+    result, and the class of a trait with such methods the invariant field
+    `T_inv : Self → Prop` (`selfInvField`). -/
 def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : String :=
   let known := h.traits.map (·.name)
   let classes := h.traits.map fun td =>
@@ -536,7 +541,12 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
       let binders := ps.map fun (p, ty) => s!" ({sanitizeName p} : {ty.toLeanTypeStrSurface sl})"
       s!"  {sanitizeName m}{String.join binders} : {r.toLeanTypeStrSurface sl}"
     let contractMs := ((h.contractMethods.find? (·.1 == td.name)).map (·.2)).getD []
-    let prePost := td.methods.flatMap fun (m, ps, r) =>
+    -- A trait with contract methods carries the invariant of the Rust self
+    -- type of its instance (`selfInvField`), under which its `Contract`
+    -- obligations quantify.
+    let invField := if contractMs.isEmpty then []
+      else [s!"  {selfInvField td.name} (x : Self) : Prop"]
+    let prePost := invField ++ td.methods.flatMap fun (m, ps, r) =>
       if !contractMs.contains m then [] else
       let binders := String.join (ps.map fun (p, ty) =>
         s!" ({sanitizeName p} : {ty.toLeanTypeStrSurface sl})")
