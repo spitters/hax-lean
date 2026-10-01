@@ -498,8 +498,7 @@ def callKrate (funJ : Json) : String :=
           else v`,
 
     whose two reads are of the value of `v` before the call. When an index is out
-    of range Rust panics; the model then leaves `v` unchanged, the out-of-range
-    convention of `array_update`, so no partially swapped array is produced. The
+    of range Rust panics, while the guarded form leaves `v` unchanged. The
     reads of `v` are through a `deref` typed with the referenced sequence type, so
     no operand of the rewritten form is a `&mut` argument. `none` when `a` is not
     such a place. -/

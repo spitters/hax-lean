@@ -381,7 +381,7 @@ theorem widthArrayOps_noControlFlow :
       · rename_i val _
         cases val <;> simp at h
     · exact absurd h (by intro hc; cases hc)
-  all_goals (intro h; first | cases h | (split at h <;> cases h))
+  all_goals (intro h; first | cases h | ((repeat' split at h) <;> simp_all))
 
 theorem signedArithOps_noControlFlow :
     Hax.Builtins.NoControlFlow Hax.signedArithOps := by
@@ -522,6 +522,13 @@ theorem widthOps_deepNoControlFlow :
          have := hargs.1 a (List.mem_of_getElem? ha)
          split at hm <;> cases hm
          assumption)
+      | (simp only [Option.map_eq_some_iff] at h
+         obtain ⟨a, ha, rfl⟩ := h
+         simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq,
+           Value.deepNoControlFlow, deepNoControlFlowList_iff] at hargs
+         simp_all [Value.deepNoControlFlow, deepNoControlFlowList_iff]
+         exact ⟨hargs a (List.mem_of_getElem? ha),
+           fun x hx => hargs x (List.mem_of_mem_eraseIdx hx)⟩)
   · simp only [Hax.signedArithOps, Hax.wrapSint]
     split <;> intro h <;> (repeat' split at h) <;> cases h <;>
       simp_all [Value.deepNoControlFlow]

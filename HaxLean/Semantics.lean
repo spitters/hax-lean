@@ -489,7 +489,9 @@ def widthCastOps : Builtins
   | "cast", [.unit] => some .unit
   | _, _ => none
 
-/-- Array operations (guarded: only return data values, not controlFlow). -/
+/-- Array operations (guarded: only return data values, not controlFlow).
+    `index`, `array_update` and `vec_remove` are undefined at an index outside
+    the array, where Rust panics. -/
 def widthArrayOps : Builtins
   | "index", [.array vs, .uint _ i] => vs[i]?.bind fun
     | .controlFlow _ _ => none
@@ -508,9 +510,9 @@ def widthArrayOps : Builtins
     let shift := b % 64
     some (.uint .w64 (((a >>> shift) ||| (a <<< (64 - shift))) % IntWidth.w64.modulus))
   | "array_update", [.array vs, .uint _ i, v] =>
-    if i < vs.length then some (.array (vs.set i v)) else some (.array vs)
+    if i < vs.length then some (.array (vs.set i v)) else none
   | "array_update", [.array vs, .int i, v] =>
-    if 0 ≤ i && i.toNat < vs.length then some (.array (vs.set i.toNat v)) else some (.array vs)
+    if 0 ≤ i && i.toNat < vs.length then some (.array (vs.set i.toNat v)) else none
   | "slice_reverse", [.array vs] => some (.array vs.reverse)
   | "vec_remove", [.array vs, .uint _ i] =>
     vs[i]?.map fun x => .tuple [x, .array (vs.eraseIdx i)]
@@ -1472,7 +1474,7 @@ theorem widthArrayOps_index_int (vs : List Value) :
 theorem widthArrayOps_array_update_int (vs : List Value) (v : Value) :
     widthArrayOps "array_update" [.array vs, .int a, v] =
       if 0 ≤ a && a.toNat < vs.length then some (.array (vs.set a.toNat v))
-      else some (.array vs) := rfl
+      else none := rfl
 
 /-- `slice_reverse` on a sequence is `List.reverse`. -/
 theorem widthArrayOps_slice_reverse (vs : List Value) :
