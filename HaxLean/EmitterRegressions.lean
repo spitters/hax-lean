@@ -1854,4 +1854,68 @@ def negContract : FnContract :=
 
 end ContractInvariants
 
+/-! ## Standard-library constants and conversions
+
+An integer limit of `core` (`u64::MAX`, `i8::MIN`, …) is read as its value, and
+`as_slice` on an array as the array; neither reaches the `Deps` class. A
+constant `MAX` of another crate, and `as_slice` on a value that is not an
+array, are left as they are. -/
+
+open Lean in
+/-- The integer type `{kind: tag}`, as `{"Uint": "U64"}` or `{"Int": "I8"}`. -/
+def intTyJson (kind tag : String) : Json := Json.mkObj [(kind, Json.str tag)]
+
+open Lean in
+/-- A read of the associated constant `c` of an inherent `impl` in the module
+    `num` of `krate`, at the type `ty`, by a node with the kind `node`
+    (`NamedConst` or `GlobalName`). -/
+def numConstReadJson (node krate c : String) (ty : Json) : Json :=
+  haxNodeT ty (Json.mkObj [(node, Json.mkObj [("item", Json.mkObj [
+    ("def_id", mkDefIdJson krate
+      [defIdSeg "TypeNs" "num", Json.mkObj [("data", Json.str "Impl")],
+       defIdSeg "ValueNs" c])])])])
+
+#guard (parseT (numConstReadJson "NamedConst" "core" "MAX" (intTyJson "Uint" "U64"))).erase
+  == .lit (.int (2 ^ 64 - 1))
+#guard (parseT (numConstReadJson "NamedConst" "core" "MAX" (intTyJson "Uint" "Usize"))).erase
+  == .lit (.int (2 ^ 64 - 1))
+#guard (parseT (numConstReadJson "NamedConst" "core" "MIN" (intTyJson "Uint" "U8"))).erase
+  == .lit (.int 0)
+#guard (parseT (numConstReadJson "NamedConst" "core" "MIN" (intTyJson "Int" "I8"))).erase
+  == .lit (.int (-128))
+#guard (parseT (numConstReadJson "GlobalName" "core" "MAX" (intTyJson "Int" "I128"))).erase
+  == .lit (.int (2 ^ 127 - 1))
+#guard (parseT (numConstReadJson "NamedConst" "k" "MAX" (intTyJson "Uint" "U64"))).erase
+  == .var "MAX"
+
+open Lean in
+/-- The type `[u8; N]`. -/
+def byteArrayTyJson : Json :=
+  Json.mkObj [("Array", Json.mkObj [
+    ("generic_args", Json.arr #[Json.mkObj [("Type", intTyJson "Uint" "U8")]])])]
+
+open Lean in
+/-- `&x` for a variable `x : t`, typed `&t`. -/
+def borrowVarJson (t : Json) (x : String) : Json :=
+  haxNodeT (Json.mkObj [("Ref", Json.arr #[Json.mkObj [("kind", Json.str "ReErased")], t,
+      Json.bool false])])
+    (Json.mkObj [("Borrow", Json.mkObj [("arg", haxNodeT t
+      (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str x)])])]))])])
+
+open Lean in
+/-- `x.as_slice()` for `x : t`: the call `core::array::<impl [T; N]>::as_slice(&x)`. -/
+def asSliceCallJson (t : Json) (x : String) : Json :=
+  let asSliceFn := haxFnJson "core"
+    [defIdSeg "TypeNs" "array", Json.mkObj [("data", Json.str "Impl")],
+     defIdSeg "ValueNs" "as_slice"]
+  haxNode (Json.mkObj [("Call", Json.mkObj [("fun", asSliceFn),
+    ("args", Json.arr #[borrowVarJson t x])])])
+
+-- On an array the call is its argument.
+#guard (parseT (asSliceCallJson byteArrayTyJson "x")).erase
+  == (parseT (borrowVarJson byteArrayTyJson "x")).erase
+-- On a slice the call is kept.
+#guard match (parseT (asSliceCallJson sliceTyJson "x")).erase with
+  | .app "as_slice" [_] => true | _ => false
+
 end Hax.EmitterRegressions

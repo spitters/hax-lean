@@ -982,6 +982,33 @@ def constReadKind (globalName : Json) (m : ImplSelfTypeMap) (name : String) : TE
       | none => .app name []
     else .var name
 
+/-- The value of an integer limit (`u64::MAX`, `i32::MIN`, …) read by a
+    `NamedConst` or `GlobalName` node of type `ty`: the node names an
+    associated constant `MAX` or `MIN` of an inherent `impl` in the module
+    `core::num`, and `ty` is a fixed-width integer type. The unsigned limits
+    are `2 ^ w - 1` and `0`, the signed ones `2 ^ (w - 1) - 1` and
+    `-2 ^ (w - 1)`, for the width `w` of `IntWidth.bits` (64 for `usize` and
+    `isize`). `none` for any other node. -/
+def coreIntLimit? (globalName : Json) (ty : ImpType) : Option Int := do
+  let item ← (globalName.getObjVal? "item").toOption
+  let defId ← ((item.getObjVal? "value" >>= (·.getObjVal? "def_id")) <|>
+    item.getObjVal? "def_id").toOption
+  let inner := match defId.getObjVal? "contents" with
+    | .ok c => (c.getObjVal? "value").toOption.getD c
+    | _ => defId
+  guard ((inner.getObjValAs? String "krate").toOption == some "core")
+  let segs ← (inner.getObjValAs? (Array Json) "path").toOption
+  let seg0 ← segs[0]?
+  guard ((seg0.getObjVal? "data" >>= (·.getObjValAs? String "TypeNs")).toOption == some "num")
+  let segN ← segs.back?
+  let leaf ← (segN.getObjVal? "data" >>= (·.getObjValAs? String "ValueNs")).toOption
+  match leaf, ty with
+  | "MAX", .uint w => some ((2 : Int) ^ w.bits - 1)
+  | "MIN", .uint _ => some 0
+  | "MAX", .sint w => some ((2 : Int) ^ (w.bits - 1) - 1)
+  | "MIN", .sint w => some (-(2 : Int) ^ (w.bits - 1))
+  | _, _ => none
+
 /-- Disambiguate a method-call name using the impl map. Given the
     Call's `fun` JSON (a GlobalName) and the base method name, walk
     the function's DefId.parent chain to find an Impl ancestor. If
@@ -3150,7 +3177,10 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "global" [] implMap.localCrate
         | _ => "global"
-      return constReadKind data implMap name
+      -- An integer limit of `core` is its value (`coreIntLimit?`).
+      match coreIntLimit? data (extractNodeType _parentJ) with
+      | some n => return .lit (.int n)
+      | none => return constReadKind data implMap name
 
     else if let .ok data := j.getObjVal? "Literal" then
       -- ByteStr and Str can't be represented as ImpLit; handle before parseTLiteral
@@ -3238,6 +3268,14 @@ where
         if let [a, i] := args then
           if let some e := tVecRemove implMap.structFields a i then
             return e
+      -- `a.as_slice()` on an array (`core`) is its argument: arrays and slices
+      -- have one carrier, `Array`, in the emitted signatures
+      -- (`ImpType.toLeanTypeStrSurface`).
+      if funName == "as_slice" && callKrate funJ == "core" then
+        if let [a] := args then
+          match a.ty with
+          | .array _ _ | .ref (.array _ _) _ => return a.kind
+          | _ => pure ()
       -- Principled method-call disambiguation via the impl-self-type map.
       --
       -- When the Rust source has `crs.len()` and hax resolves it via
@@ -3613,7 +3651,9 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "const" [] implMap.localCrate
         | _ => "const"
-      return constReadKind data implMap name
+      match coreIntLimit? data (extractNodeType _parentJ) with
+      | some n => return .lit (.int n)
+      | none => return constReadKind data implMap name
 
     else if let .ok _data := j.getObjVal? "ConstParam" then
       return .var "const_param"
