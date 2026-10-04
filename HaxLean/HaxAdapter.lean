@@ -2626,7 +2626,79 @@ The `kind` field is an externally-tagged enum:
   where `body` is a `Decorated<ExprKind>` that `parseHaxExpr` handles.
 - `"Const"`: `[ident_pair, generics, ty, body]` where `body` is `Decorated<ExprKind>`.
 - `"TyAlias"`, `"Mod"`, `"Use"`, `"ExternCrate"`: skipped.
+
+A `Mod` item carries the items of its module as a sub-item list (`kind.Mod =
+[name_data, sub_items]`, or an object with an `items` field), and the export
+also lists each of those items at the top level, so a module's contents occur
+once per enclosing module plus once at the top level. `flattenModItems` turns
+an export into the list of its distinct items with every `Mod` sub-item list
+emptied.
 -/
+
+/-- The sub-item list of a `Mod` item, in either the array form
+    `[name_data, sub_items]` or the object form with an `items` field, and
+    `#[]` for any other item. -/
+def modSubItems (item : Json) : Array Json :=
+  match item.getObjVal? "kind" with
+  | .ok kind =>
+    match kind.getObjVal? "Mod" with
+    | .ok (.arr modData) =>
+      match (modData[1]? : Option Json) with
+      | some (.arr sub) => sub
+      | _ => #[]
+    | .ok modData =>
+      match modData.getObjValAs? (Array Json) "items" with
+      | .ok sub => sub
+      | _ => #[]
+    | _ => #[]
+  | _ => #[]
+
+/-- `item` with the sub-item list of its `Mod` kind replaced by `[]`; every
+    other item is returned unchanged. -/
+def clearModSubItems (item : Json) : Json :=
+  match item.getObjVal? "kind" with
+  | .ok kind =>
+    match kind.getObjVal? "Mod" with
+    | .ok (.arr modData) =>
+      match (modData[1]? : Option Json) with
+      | some (.arr _) =>
+        item.setObjVal! "kind" (kind.setObjVal! "Mod" (.arr (modData.set! 1 (.arr #[]))))
+      | _ => item
+    | .ok modData =>
+      match modData.getObjValAs? (Array Json) "items" with
+      | .ok _ =>
+        item.setObjVal! "kind" (kind.setObjVal! "Mod" (modData.setObjVal! "items" (.arr #[])))
+      | _ => item
+    | _ => item
+  | _ => item
+
+/-- The identity of an export item: its `def_id`, or its `owner_id` and `span`
+    when the `def_id` is `null` (an `impl` or `use` item). -/
+def haxItemKey (item : Json) : String :=
+  match item.getObjVal? "def_id" with
+  | .ok .null | .error _ =>
+    "S" ++ (Json.arr #[(item.getObjVal? "owner_id").toOption.getD .null,
+                       (item.getObjVal? "span").toOption.getD .null]).compress
+  | .ok d => "D" ++ d.compress
+
+/-- The pre-order walk behind `flattenModItems`: each item of `items` whose key
+    is not in `seen` is appended with its `Mod` sub-item list emptied, followed
+    by the walk of that sub-item list. -/
+partial def flattenModItemsAux (items : Array Json)
+    (acc : Array Json × Std.HashSet String) : Array Json × Std.HashSet String :=
+  items.foldl (init := acc) fun (out, seen) item =>
+    let k := haxItemKey item
+    if seen.contains k then (out, seen)
+    else flattenModItemsAux (modSubItems item) (out.push (clearModSubItems item), seen.insert k)
+
+/-- The items of an export in pre-order (an item, then the items of its `Mod`
+    sub-item list), each item once by `haxItemKey` at its first occurrence, with
+    every `Mod` sub-item list emptied. A value other than an array is returned
+    unchanged. -/
+def flattenModItems (j : Json) : Json :=
+  match j with
+  | .arr items => .arr (flattenModItemsAux items (#[], {})).1
+  | _ => j
 
 /-- Extract the function name from a hax `Fn` item's `ident` field.
     Format: `[name_string, span_object]`. -/

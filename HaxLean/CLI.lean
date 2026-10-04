@@ -18,6 +18,12 @@ open Lean (Json ToJson FromJson toJson fromJson?)
 def Json.parseVerified (s : String) : Except String Json :=
   Hax.resolveIds <$> Hax.Json.parseJsonString s
 
+/-- A hax frontend export parsed by `Json.parseVerified`, with its items listed
+    once each and every `Mod` sub-item list emptied
+    (`HaxAdapter.flattenModItems`). -/
+def parseHaxExport (s : String) : Except String Json :=
+  HaxAdapter.flattenModItems <$> Json.parseVerified s
+
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do
   match path with

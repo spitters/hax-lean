@@ -63,12 +63,10 @@ def parseHaxInputTyped (input : String) :
 
 /-- Keep the first entry for each name, in first-occurrence order.
 
-A hax export lists every function twice over: once as a top-level `Fn` item
-and once inside each enclosing `Mod` item, whose sub-item list repeats the
-whole module. The adapter walks both, so a function nested `d` modules deep
-arrives `d + 1` times. `toLeanCertifiedFileTyped` drops the repeats by name
-before rendering, so they contribute nothing to the output; applying the same
-rule here keeps them out of the pipeline, the erasure and the validator. -/
+The export is read through `parseHaxExport`, which lists each item once, but
+two items can still define the same name. `toLeanCertifiedFileTyped` keeps the
+first definition of each name before rendering; applying the same rule here
+keeps the later ones out of the pipeline, the erasure and the validator. -/
 def dedupByName {α : Type} (xs : List (String × α)) : List (String × α) :=
   let step (acc : Array (String × α) × List String) (p : String × α) :
       Array (String × α) × List String :=
@@ -102,7 +100,7 @@ def main (args : List String) : IO UInt32 := do
     -- immutable, so the parse is hoisted here. The small metadata tables are
     -- derived first; `parseHaxFileWithTExpr` is the last use of `inputJson`,
     -- so the JSON tree is released before the pipeline runs.
-    let inputJson ← IO.ofExcept (Json.parseVerified input)
+    let inputJson ← IO.ofExcept (parseHaxExport input)
     let t ← phaseTick "json-parse" t
     -- `--emit-classes`: keep the type parameters of both exports as named
     -- type variables and plan the classes, instances and generic binders
@@ -118,7 +116,7 @@ def main (args : List String) : IO UInt32 := do
           ({} : ClassEmit.ClassHooks),
           if opts.emitContracts then [inputJson] else [])
       | some traitFile => do
-        let traitJson ← IO.ofExcept (Json.parseVerified (← IO.FS.readFile traitFile))
+        let traitJson ← IO.ofExcept (parseHaxExport (← IO.FS.readFile traitFile))
         let inputKept := ClassEmit.keepTypeParams inputJson
         let traitKept := ClassEmit.keepTypeParams traitJson
         let inputJson := ContractEmit.dropContractItems opts.emitContracts inputKept

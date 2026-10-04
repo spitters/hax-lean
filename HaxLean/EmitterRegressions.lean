@@ -406,6 +406,57 @@ def shadowCrate : Hax.HaxAdapter.LocalCrate :=
 #guard Hax.HaxAdapter.extractDefIdName coreSliceLen [] shadowCrate == "len"
 #guard Hax.HaxAdapter.extractDefIdName depScalarAdd == "scalar_add"
 
+/-! ## Items nested in `Mod` items
+
+An export lists the items of a module both at the top level and inside the
+module's `Mod` item, once per enclosing module. `Hax.HaxAdapter.flattenModItems`
+lists each item once, in pre-order at its first occurrence, with every `Mod`
+sub-item list emptied. These pins fix the order, the emptied lists, that the
+flattening is idempotent and that the crate names read off the export agree
+with those of the unflattened export. -/
+
+open Lean in
+/-- A `Fn` item of `krate` at the module path `mods`, named `nm`. -/
+def nestedFnItem (krate : String) (mods : List String) (nm : String) : Json :=
+  Json.mkObj
+    [("kind", Json.mkObj [("Fn", Json.mkObj [])]),
+     ("def_id", mkDefIdJson krate (mods.map (defIdSeg "TypeNs" ·) ++ [defIdSeg "ValueNs" nm]))]
+
+open Lean in
+/-- A `Mod` item of `krate` at the module path `mods` with sub-items `sub`. -/
+def nestedModItem (krate : String) (mods : List String) (sub : Array Json) : Json :=
+  Json.mkObj
+    [("kind", Json.mkObj [("Mod", Json.arr #[Json.str (mods.getLastD ""), Json.arr sub])]),
+     ("def_id", mkDefIdJson krate (mods.map (defIdSeg "TypeNs" ·)))]
+
+/-- `outer::f_a` and `outer::inner::f_b`. -/
+def nestedFnA : Lean.Json := nestedFnItem "nest_hax" ["outer"] "f_a"
+def nestedFnB : Lean.Json := nestedFnItem "nest_hax" ["outer", "inner"] "f_b"
+/-- The module `outer::inner`, holding `f_b`. -/
+def nestedInner : Lean.Json := nestedModItem "nest_hax" ["outer", "inner"] #[nestedFnB]
+/-- The module `outer`, holding `f_a` and `outer::inner`. -/
+def nestedOuter : Lean.Json := nestedModItem "nest_hax" ["outer"] #[nestedFnA, nestedInner]
+
+/-- An export in the layout `cargo hax json` writes: both modules and both
+    functions at the top level, and each module's contents repeated in it. -/
+def nestedModExport : Lean.Json :=
+  Lean.Json.arr #[nestedOuter, nestedInner, nestedFnA, nestedFnB]
+
+/-- The items of `nestedModExport` after `flattenModItems`. -/
+def nestedModFlat : Array Lean.Json :=
+  ((Hax.HaxAdapter.flattenModItems nestedModExport).getArr?.toOption).getD #[]
+
+#guard nestedModFlat.map Hax.HaxAdapter.haxItemKey ==
+  #[nestedOuter, nestedFnA, nestedInner, nestedFnB].map Hax.HaxAdapter.haxItemKey
+#guard nestedModFlat.all fun it => (Hax.HaxAdapter.modSubItems it).isEmpty
+#guard (Hax.HaxAdapter.modSubItems nestedOuter).size == 2
+#guard (Hax.HaxAdapter.flattenModItems (Lean.Json.arr nestedModFlat)).compress ==
+  (Lean.Json.arr nestedModFlat).compress
+#guard
+  let flat := (Hax.HaxAdapter.localCrateOfExport (Lean.Json.arr nestedModFlat)).fnNames
+  let full := (Hax.HaxAdapter.localCrateOfExport nestedModExport).fnNames
+  flat.length == 2 && flat.all full.contains && full.all flat.contains
+
 /-! ## A trait `impl` resolved against a `Deps` field of one type
 
 A trait `impl` the crate defines is emitted at the concrete self type, and its
