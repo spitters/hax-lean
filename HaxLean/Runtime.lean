@@ -746,126 +746,12 @@ instance : HaxCond Int where toBool := fun n => n != 0
 
 /-- Generic cast (identity in untyped mode).
     Named `castVal` to avoid conflict with Lean's kernel `cast`.
-    For width-specific casts, use `cast_u8_u64` etc. -/
+    The width-specific cast is `castVal_w`. -/
 @[inline] def castVal (a : Int) : Int := a  -- identity; width-specific casts use castVal_w
 
 /-- Bool → Int cast: `true → 1`, `false → 0`.
     Used for Rust's `b as u64` when `b : Bool`. -/
 @[inline] def boolToInt (b : Bool) : Int := if b then 1 else 0
-
-/-! ## Width-Aware Operations
-
-These use Lean's built-in fixed-width integer types (`UInt8`, `UInt16`, `UInt32`,
-`UInt64`), which are `BitVec n` under the hood. This ensures exact agreement
-with Rust's wrapping semantics for unsigned integers.
-
-The naming convention is `op_uN` where `op` is the operation and `N` is the
-bit width (e.g., `shl_u32`, `bitxor_u64`). -/
-
--- UInt8 operations
-@[inline] def add_u8  (a b : UInt8)  : UInt8  := a + b
-@[inline] def sub_u8  (a b : UInt8)  : UInt8  := a - b
-@[inline] def mul_u8  (a b : UInt8)  : UInt8  := a * b
-@[inline] def div_u8  (a b : UInt8)  : UInt8  := a / b
-@[inline] def rem_u8  (a b : UInt8)  : UInt8  := a % b
-@[inline] def shl_u8  (a b : UInt8)  : UInt8  := a <<< b
-@[inline] def shr_u8  (a b : UInt8)  : UInt8  := a >>> b
-@[inline] def bitand_u8  (a b : UInt8) : UInt8 := a &&& b
-@[inline] def bitor_u8   (a b : UInt8) : UInt8 := a ||| b
-@[inline] def bitxor_u8  (a b : UInt8) : UInt8 := a ^^^ b
-@[inline] def bitnot_u8  (a : UInt8)   : UInt8 := ~~~a
-@[inline] def eq_u8  (a b : UInt8)  : Bool := a == b
-@[inline] def ne_u8  (a b : UInt8)  : Bool := a != b
-@[inline] def lt_u8  (a b : UInt8)  : Bool := a < b
-@[inline] def le_u8  (a b : UInt8)  : Bool := a ≤ b
-@[inline] def gt_u8  (a b : UInt8)  : Bool := a > b
-@[inline] def ge_u8  (a b : UInt8)  : Bool := a ≥ b
-
--- UInt16 operations
-@[inline] def add_u16 (a b : UInt16) : UInt16 := a + b
-@[inline] def sub_u16 (a b : UInt16) : UInt16 := a - b
-@[inline] def mul_u16 (a b : UInt16) : UInt16 := a * b
-@[inline] def div_u16 (a b : UInt16) : UInt16 := a / b
-@[inline] def rem_u16 (a b : UInt16) : UInt16 := a % b
-@[inline] def shl_u16 (a b : UInt16) : UInt16 := a <<< b
-@[inline] def shr_u16 (a b : UInt16) : UInt16 := a >>> b
-@[inline] def bitand_u16 (a b : UInt16) : UInt16 := a &&& b
-@[inline] def bitor_u16  (a b : UInt16) : UInt16 := a ||| b
-@[inline] def bitxor_u16 (a b : UInt16) : UInt16 := a ^^^ b
-@[inline] def bitnot_u16 (a : UInt16)   : UInt16 := ~~~a
-@[inline] def eq_u16 (a b : UInt16) : Bool := a == b
-@[inline] def ne_u16 (a b : UInt16) : Bool := a != b
-@[inline] def lt_u16 (a b : UInt16) : Bool := a < b
-@[inline] def le_u16 (a b : UInt16) : Bool := a ≤ b
-@[inline] def gt_u16 (a b : UInt16) : Bool := a > b
-@[inline] def ge_u16 (a b : UInt16) : Bool := a ≥ b
-
--- UInt32 operations
-@[inline] def add_u32 (a b : UInt32) : UInt32 := a + b
-@[inline] def sub_u32 (a b : UInt32) : UInt32 := a - b
-@[inline] def mul_u32 (a b : UInt32) : UInt32 := a * b
-@[inline] def div_u32 (a b : UInt32) : UInt32 := a / b
-@[inline] def rem_u32 (a b : UInt32) : UInt32 := a % b
-@[inline] def shl_u32 (a b : UInt32) : UInt32 := a <<< b
-@[inline] def shr_u32 (a b : UInt32) : UInt32 := a >>> b
-@[inline] def bitand_u32 (a b : UInt32) : UInt32 := a &&& b
-@[inline] def bitor_u32  (a b : UInt32) : UInt32 := a ||| b
-@[inline] def bitxor_u32 (a b : UInt32) : UInt32 := a ^^^ b
-@[inline] def bitnot_u32 (a : UInt32)   : UInt32 := ~~~a
-@[inline] def eq_u32 (a b : UInt32) : Bool := a == b
-@[inline] def ne_u32 (a b : UInt32) : Bool := a != b
-@[inline] def lt_u32 (a b : UInt32) : Bool := a < b
-@[inline] def le_u32 (a b : UInt32) : Bool := a ≤ b
-@[inline] def gt_u32 (a b : UInt32) : Bool := a > b
-@[inline] def ge_u32 (a b : UInt32) : Bool := a ≥ b
-
--- UInt64 operations
-@[inline] def add_u64 (a b : UInt64) : UInt64 := a + b
-@[inline] def sub_u64 (a b : UInt64) : UInt64 := a - b
-@[inline] def mul_u64 (a b : UInt64) : UInt64 := a * b
-@[inline] def div_u64 (a b : UInt64) : UInt64 := a / b
-@[inline] def rem_u64 (a b : UInt64) : UInt64 := a % b
-@[inline] def shl_u64 (a b : UInt64) : UInt64 := a <<< b
-@[inline] def shr_u64 (a b : UInt64) : UInt64 := a >>> b
-@[inline] def bitand_u64 (a b : UInt64) : UInt64 := a &&& b
-@[inline] def bitor_u64  (a b : UInt64) : UInt64 := a ||| b
-@[inline] def bitxor_u64 (a b : UInt64) : UInt64 := a ^^^ b
-@[inline] def bitnot_u64 (a : UInt64)   : UInt64 := ~~~a
-@[inline] def eq_u64 (a b : UInt64) : Bool := a == b
-@[inline] def ne_u64 (a b : UInt64) : Bool := a != b
-@[inline] def lt_u64 (a b : UInt64) : Bool := a < b
-@[inline] def le_u64 (a b : UInt64) : Bool := a ≤ b
-@[inline] def gt_u64 (a b : UInt64) : Bool := a > b
-@[inline] def ge_u64 (a b : UInt64) : Bool := a ≥ b
-
-/-! ### Cast operations
-
-Widening casts preserve the value; narrowing casts truncate (mod 2^target_bits),
-matching Rust's `as` semantics for unsigned integers. -/
-
--- Widening: u8 → larger
-@[inline] def cast_u8_u16  (x : UInt8) : UInt16 := x.toUInt16
-@[inline] def cast_u8_u32  (x : UInt8) : UInt32 := x.toUInt32
-@[inline] def cast_u8_u64  (x : UInt8) : UInt64 := x.toUInt64
-
--- Widening: u16 → larger
-@[inline] def cast_u16_u32 (x : UInt16) : UInt32 := x.toUInt32
-@[inline] def cast_u16_u64 (x : UInt16) : UInt64 := x.toUInt64
-
--- Widening: u32 → u64
-@[inline] def cast_u32_u64 (x : UInt32) : UInt64 := x.toUInt64
-
--- Narrowing: u64 → smaller (truncates)
-@[inline] def cast_u64_u32 (x : UInt64) : UInt32 := x.toUInt32
-@[inline] def cast_u64_u16 (x : UInt64) : UInt16 := x.toUInt16
-@[inline] def cast_u64_u8  (x : UInt64) : UInt8  := x.toUInt8
-
--- Narrowing: u32 → smaller
-@[inline] def cast_u32_u16 (x : UInt32) : UInt16 := x.toUInt16
-@[inline] def cast_u32_u8  (x : UInt32) : UInt8  := x.toUInt8
-
--- Narrowing: u16 → u8
-@[inline] def cast_u16_u8  (x : UInt16) : UInt8  := x.toUInt8
 
 /-! ### Signed Integer Operations
 
@@ -954,10 +840,6 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 @[inline] def cast_u8_i16  (x : UInt8)  : Int := bmod_signed 16 (x.toBitVec.toNat : Int)
 @[inline] def cast_u16_i32 (x : UInt16) : Int := bmod_signed 32 (x.toBitVec.toNat : Int)
 @[inline] def cast_u32_i64 (x : UInt32) : Int := bmod_signed 64 (x.toBitVec.toNat : Int)
-@[inline] def cast_i8_u8   (x : Int) : UInt8  := UInt8.ofNat (x % 2 ^ 8).toNat
-@[inline] def cast_i16_u16 (x : Int) : UInt16 := UInt16.ofNat (x % 2 ^ 16).toNat
-@[inline] def cast_i32_u32 (x : Int) : UInt32 := UInt32.ofNat (x % 2 ^ 32).toNat
-@[inline] def cast_i64_u64 (x : Int) : UInt64 := UInt64.ofNat (x % 2 ^ 64).toNat
 
 /-! ### Collection operations -/
 
@@ -968,40 +850,17 @@ on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. 
 /-- Array length. -/
 @[inline] def array_len {α : Type} (arr : Array α) : Int := arr.size
 
-/-- Rotate a UInt64 right by `n` bits. -/
-@[inline] def rotate_right_u64 (x : UInt64) (n : UInt32) : UInt64 :=
-  let shift := n.toUInt64 % 64
-  (x >>> shift) ||| (x <<< (64 - shift))
-
 /-- Rotate right (Int version for untyped mode). -/
 @[inline] def rotate_right (x n : Int) : Int :=
   let xn := x.toNat
   let shift := n.toNat % 64
   (((xn >>> shift) ||| (xn <<< (64 - shift))) % (2 ^ 64) : Nat)
 
-/-- Rotate a UInt32 left by `n` bits. -/
-@[inline] def rotate_left_u32 (x : UInt32) (n : UInt32) : UInt32 :=
-  let shift := n % 32
-  (x <<< shift) ||| (x >>> (32 - shift))
-
-/-- Rotate a UInt64 left by `n` bits. -/
-@[inline] def rotate_left_u64 (x : UInt64) (n : UInt32) : UInt64 :=
-  let shift := n.toUInt64 % 64
-  (x <<< shift) ||| (x >>> (64 - shift))
-
 /-- Rotate left (Int version for untyped mode). -/
 @[inline] def rotate_left (x n : Int) : Int :=
   let xn := x.toNat
   let shift := n.toNat % 64
   (((xn <<< shift) ||| (xn >>> (64 - shift))) % (2 ^ 64) : Nat)
-
-/-- Wrapping add — alias for width-aware addition. -/
-@[inline] def wrapping_add_u32 (a b : UInt32) : UInt32 := a + b
-@[inline] def wrapping_add_u64 (a b : UInt64) : UInt64 := a + b
-@[inline] def wrapping_sub_u32 (a b : UInt32) : UInt32 := a - b
-@[inline] def wrapping_sub_u64 (a b : UInt64) : UInt64 := a - b
-@[inline] def wrapping_mul_u32 (a b : UInt32) : UInt32 := a * b
-@[inline] def wrapping_mul_u64 (a b : UInt64) : UInt64 := a * b
 
 /-- Wrapping arithmetic (polymorphic for untyped mode). -/
 @[inline] def wrapping_add {α : Type} [_root_.Add α] (a b : α) : α := a + b
@@ -1118,7 +977,6 @@ theorem vec_remove_of_lt {α : Type} [Inhabited α] (arr : Array α) (i : Int)
 @[inline] def from_val {α : Type} (x : α) : α := x
 
 -- USize casts
-@[inline] def cast_usize_u64 (x : USize) : UInt64 := UInt64.ofNat x.toNat
 @[inline] def cast_u64_usize (x : UInt64) : USize := USize.ofNat x.toBitVec.toNat
 
 /-- Slice: take first n elements (arr[..n]). -/

@@ -99,7 +99,7 @@ def widthAwareRuntime (f : String) : String :=
       -- word size; the runtime names it `Hax.usizeBits`.
       let widthTok : String → String := fun t => if t == "size" then "Hax.usizeBits" else t
       let w := widthTok w₀
-      if w₀.length > 0 && w₀.get 0 == 'i' then
+      if w₀.length > 0 && String.Pos.Raw.get w₀ 0 == 'i' then
         let iw := widthTok (w₀.drop 1).toString
         match op with
         | "wrapping_add" => s!"Hax.wrapping_add_iw {iw}"
@@ -124,7 +124,7 @@ def widthAwareRuntime (f : String) : String :=
         | "overflowing_add"    => s!"Hax.overflowing_add_iw {iw}"
         | "overflowing_sub"    => s!"Hax.overflowing_sub_iw {iw}"
         | _ => s!"Hax.{op}"
-      else if op == "cast" && w₀.length > 0 && w₀.get 0 == 'u' then
+      else if op == "cast" && w₀.length > 0 && String.Pos.Raw.get w₀ 0 == 'u' then
         s!"Hax.cast_uw {widthTok (w₀.drop 1).toString}"
       else match op with
       | "wrapping_add" => s!"Hax.wrapping_add_w {w}"
@@ -260,60 +260,6 @@ def renderQualifiedCtor (f : String) : String :=
   match HaxAdapter.classItemRef? f with
   | some s => s
   | none => ".".intercalate ((f.splitOn "::").map sanitizeName)
-
-/-- Map an operator name and result type to a width-specific runtime function.
-    Falls back to `runtimeName` when the type is not a fixed-width integer. -/
-def runtimeNameTyped (f : String) (ty : ImpType) : String :=
-  match ty.intWidth? with
-  | some w =>
-    let suffix := if ty.isSigned then w.toSignedSuffix else w.toSuffix
-    match f with
-    -- Arithmetic
-    | "Add" | "add" => s!"Hax.add_{suffix}"
-    | "Sub" | "sub" => s!"Hax.sub_{suffix}"
-    | "Mul" | "mul" => s!"Hax.mul_{suffix}"
-    | "Div" | "div" => s!"Hax.div_{suffix}"
-    | "Rem" | "rem" => s!"Hax.rem_{suffix}"
-    | "Neg" | "neg" => s!"Hax.neg_{suffix}"
-    -- Bitwise (only for unsigned; signed falls through to untyped)
-    | "Shl" | "shl" => if ty.isSigned then runtimeName f else s!"Hax.shl_{suffix}"
-    | "Shr" | "shr" => if ty.isSigned then runtimeName f else s!"Hax.shr_{suffix}"
-    | "BitAnd" | "bitand" => if ty.isSigned then runtimeName f else s!"Hax.bitand_{suffix}"
-    | "BitOr"  | "bitor"  => if ty.isSigned then runtimeName f else s!"Hax.bitor_{suffix}"
-    | "BitXor" | "bitxor" => if ty.isSigned then runtimeName f else s!"Hax.bitxor_{suffix}"
-    | "Not"    | "not"    => if ty.isSigned then runtimeName f else s!"Hax.bitnot_{suffix}"
-    -- Wrapping arithmetic (Rust methods → same as regular width ops)
-    | "wrapping_add" => s!"Hax.wrapping_add_{suffix}"
-    | "wrapping_sub" => s!"Hax.wrapping_sub_{suffix}"
-    | "wrapping_mul" => s!"Hax.wrapping_mul_{suffix}"
-    -- Rotate
-    | "rotate_left" => s!"Hax.rotate_left_{suffix}"
-    | "rotate_right" => s!"Hax.rotate_right_{suffix}"
-    -- Comparison
-    | "Eq" | "eq" => s!"Hax.eq_{suffix}"
-    | "Ne" | "ne" => s!"Hax.ne_{suffix}"
-    | "Lt" | "lt" => s!"Hax.lt_{suffix}"
-    | "Le" | "le" => s!"Hax.le_{suffix}"
-    | "Gt" | "gt" => s!"Hax.gt_{suffix}"
-    | "Ge" | "ge" => s!"Hax.ge_{suffix}"
-    -- Everything else: fall through to untyped
-    | _ => runtimeName f
-  | none => runtimeName f
-
-/-- Select the cast function name based on source and target types. -/
-def castFnName (srcTy dstTy : ImpType) : String :=
-  match srcTy, dstTy with
-  | .bool, _ =>
-    -- Bool → Int/UInt: convert true→1, false→0
-    "Hax.boolToInt"
-  | _, _ =>
-    match srcTy.intWidth?, dstTy.intWidth? with
-    | some sw, some dw =>
-      let srcSuffix := if srcTy.isSigned then sw.toSignedSuffix else sw.toSuffix
-      let dstSuffix := if dstTy.isSigned then dw.toSignedSuffix else dw.toSuffix
-      if srcSuffix == dstSuffix then "id"
-      else s!"Hax.cast_{srcSuffix}_{dstSuffix}"
-    | _, _ => "id"  -- non-integer cast: identity
 
 /-- Format an integer literal with a type annotation when the type is known. -/
 def litIntTyped (n : Int) (ty : ImpType) : String :=
@@ -1549,7 +1495,7 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- `atLine` will prepend `indent lvl` since this is treated as a leaf
   -- (it's an `.app`); we therefore don't add `{ind}` ourselves.
   | .app "_HAX_MERGE" [inner] =>
-    let innerStr := (toLean inner lvl).trimLeft
+    let innerStr := (toLean inner lvl).trimAsciiStart.toString
     s!"({innerStr}).merge"
 
   -- Function application
@@ -2091,7 +2037,7 @@ where
     let ind := indent lvl
     -- Render fold at current level so the body gets proper nesting,
     -- then strip the leading indent since we place it after 'let acc :='
-    let foldStr := (toLean foldExpr lvl).trimLeft
+    let foldStr := (toLean foldExpr lvl).trimAsciiStart.toString
     let accs := extractAccumulators body
     -- Check if this fold uses ControlFlow (forFold instead of foldRange).
     -- If so, the result is `ControlFlow β α` and needs `.merge` to extract the value.
@@ -2129,7 +2075,7 @@ where
       We split into two lets to help Lean's type inference. -/
   seqWhileFold (lvl : Nat) (foldExpr body tail : ImpExpr) : String :=
     let ind := indent lvl
-    let foldStr := (toLean foldExpr lvl).trimLeft
+    let foldStr := (toLean foldExpr lvl).trimAsciiStart.toString
     let accs := extractWhileAccumulators body
     -- Filter out loop-local variables (same as in toLean whileFold case)
     let localVars := collectLetBindVars body
@@ -2159,7 +2105,7 @@ where
   seqFoldReturn (lvl : Nat) (foldExpr body tail : ImpExpr) : String :=
     if hasCfBreak body then
       let ind := indent lvl
-      let foldStr := (toLean foldExpr lvl).trimLeft
+      let foldStr := (toLean foldExpr lvl).trimAsciiStart.toString
       let accs := extractAccumulators body
       let ind1 := indent (lvl + 1)
       -- Emit init overrides for accumulators that need default initialization
@@ -2168,7 +2114,7 @@ where
         else overrides.map (fun (n, e) =>
           s!"{ind}let {sanitizeName n} := {toLean e 0}\n") |> String.join
       -- Render the tail expression to detect its type for annotations
-      let tailStr := (atLine tail (lvl + 1)).trimRight
+      let tailStr := (atLine tail (lvl + 1)).trimAsciiEnd.toString
       -- Decide whether THIS fold's `.Break _v` arm needs to re-wrap `_v`.
       -- The `forFoldReturn` result type is `ControlFlow β (ControlFlow γ α)`,
       -- so `.Break _v` already yields `_v : β` (the function-return value).

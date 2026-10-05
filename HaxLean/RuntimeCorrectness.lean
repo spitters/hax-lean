@@ -10,305 +10,21 @@ public import HaxLean.Semantics
 public import HaxLean.SemanticsCF
 
 /-!
-# Correctness Proofs for Width-Aware Runtime Operations
+# ControlFlow freedom of the width-aware builtin tables
 
-Proves that the width-specific runtime operations (`Hax.shl_u32`, `Hax.bitxor_u64`,
-etc.) match Lean's built-in `UIntN` semantics (which are `BitVec n` under the hood),
-and satisfy standard algebraic properties used in crypto proofs.
+## Contents
 
-## Categories
-
-1. **Definitional correctness**: each `Hax.op_uN` equals the corresponding Lean operator
-2. **Algebraic properties**: commutativity, associativity, self-cancellation, De Morgan
-3. **Identity/annihilator**: zero identities and annihilators for each operation
-4. **Cast correctness**: widening preserves value, narrowing truncates, roundtrip laws
-5. **Test vectors**: `decide` pins of values Rust computes
-6. **ControlFlow freedom of the builtin tables**: `NoControlFlow` for the width
-   tables, `DeepNoControlFlow` for `panicOps`, `widthOps` and `fullBuiltins`
+1. **Bitwise builtins**: `bitwiseBuiltins`, the default builtin table extended with
+   the bitwise operations on `Int`
+2. **`NoControlFlow`** for the width tables and `widthAwareBuiltins`
+3. **`DeepNoControlFlow`** for `panicOps`, `widthOps` and `fullBuiltins`
 -/
 
 @[expose] public section
 
 namespace Hax
 
-/-! ## 1. Definitional Correctness
-
-Each width-specific operation is definitionally equal to the corresponding
-Lean built-in operator. These are all `rfl`. -/
-
--- UInt8
-theorem add_u8_eq  (a b : UInt8) : add_u8 a b = a + b := rfl
-theorem sub_u8_eq  (a b : UInt8) : sub_u8 a b = a - b := rfl
-theorem mul_u8_eq  (a b : UInt8) : mul_u8 a b = a * b := rfl
-theorem shl_u8_eq  (a b : UInt8) : shl_u8 a b = a <<< b := rfl
-theorem shr_u8_eq  (a b : UInt8) : shr_u8 a b = a >>> b := rfl
-theorem bitand_u8_eq (a b : UInt8) : bitand_u8 a b = a &&& b := rfl
-theorem bitor_u8_eq  (a b : UInt8) : bitor_u8 a b = a ||| b := rfl
-theorem bitxor_u8_eq (a b : UInt8) : bitxor_u8 a b = a ^^^ b := rfl
-theorem bitnot_u8_eq (a : UInt8) : bitnot_u8 a = ~~~a := rfl
-
--- UInt16
-theorem add_u16_eq  (a b : UInt16) : add_u16 a b = a + b := rfl
-theorem sub_u16_eq  (a b : UInt16) : sub_u16 a b = a - b := rfl
-theorem mul_u16_eq  (a b : UInt16) : mul_u16 a b = a * b := rfl
-theorem shl_u16_eq  (a b : UInt16) : shl_u16 a b = a <<< b := rfl
-theorem shr_u16_eq  (a b : UInt16) : shr_u16 a b = a >>> b := rfl
-theorem bitand_u16_eq (a b : UInt16) : bitand_u16 a b = a &&& b := rfl
-theorem bitor_u16_eq  (a b : UInt16) : bitor_u16 a b = a ||| b := rfl
-theorem bitxor_u16_eq (a b : UInt16) : bitxor_u16 a b = a ^^^ b := rfl
-theorem bitnot_u16_eq (a : UInt16) : bitnot_u16 a = ~~~a := rfl
-
--- UInt32
-theorem add_u32_eq  (a b : UInt32) : add_u32 a b = a + b := rfl
-theorem sub_u32_eq  (a b : UInt32) : sub_u32 a b = a - b := rfl
-theorem mul_u32_eq  (a b : UInt32) : mul_u32 a b = a * b := rfl
-theorem shl_u32_eq  (a b : UInt32) : shl_u32 a b = a <<< b := rfl
-theorem shr_u32_eq  (a b : UInt32) : shr_u32 a b = a >>> b := rfl
-theorem bitand_u32_eq (a b : UInt32) : bitand_u32 a b = a &&& b := rfl
-theorem bitor_u32_eq  (a b : UInt32) : bitor_u32 a b = a ||| b := rfl
-theorem bitxor_u32_eq (a b : UInt32) : bitxor_u32 a b = a ^^^ b := rfl
-theorem bitnot_u32_eq (a : UInt32) : bitnot_u32 a = ~~~a := rfl
-
--- UInt64
-theorem add_u64_eq  (a b : UInt64) : add_u64 a b = a + b := rfl
-theorem sub_u64_eq  (a b : UInt64) : sub_u64 a b = a - b := rfl
-theorem mul_u64_eq  (a b : UInt64) : mul_u64 a b = a * b := rfl
-theorem shl_u64_eq  (a b : UInt64) : shl_u64 a b = a <<< b := rfl
-theorem shr_u64_eq  (a b : UInt64) : shr_u64 a b = a >>> b := rfl
-theorem bitand_u64_eq (a b : UInt64) : bitand_u64 a b = a &&& b := rfl
-theorem bitor_u64_eq  (a b : UInt64) : bitor_u64 a b = a ||| b := rfl
-theorem bitxor_u64_eq (a b : UInt64) : bitxor_u64 a b = a ^^^ b := rfl
-theorem bitnot_u64_eq (a : UInt64) : bitnot_u64 a = ~~~a := rfl
-
-/-! ## 2. Algebraic Properties
-
-Key algebraic laws for bitwise operations. Proofs destructure the `UIntN` wrapper
-to access the underlying `BitVec` and apply `BitVec.*` lemmas. -/
-
-section Algebraic
-
--- XOR commutativity
-@[simp] theorem bitxor_u8_comm  (a b : UInt8) : bitxor_u8 a b = bitxor_u8 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt8.ofBitVec (a ^^^ b) = UInt8.ofBitVec (b ^^^ a)
-  congr 1; exact BitVec.xor_comm a b
-@[simp] theorem bitxor_u16_comm (a b : UInt16) : bitxor_u16 a b = bitxor_u16 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt16.ofBitVec (a ^^^ b) = UInt16.ofBitVec (b ^^^ a)
-  congr 1; exact BitVec.xor_comm a b
-@[simp] theorem bitxor_u32_comm (a b : UInt32) : bitxor_u32 a b = bitxor_u32 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt32.ofBitVec (a ^^^ b) = UInt32.ofBitVec (b ^^^ a)
-  congr 1; exact BitVec.xor_comm a b
-@[simp] theorem bitxor_u64_comm (a b : UInt64) : bitxor_u64 a b = bitxor_u64 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt64.ofBitVec (a ^^^ b) = UInt64.ofBitVec (b ^^^ a)
-  congr 1; exact BitVec.xor_comm a b
-
--- XOR associativity
-theorem bitxor_u8_assoc (a b c : UInt8) :
-    bitxor_u8 (bitxor_u8 a b) c = bitxor_u8 a (bitxor_u8 b c) := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩; rcases c with ⟨c⟩
-  show UInt8.ofBitVec ((a ^^^ b) ^^^ c) = UInt8.ofBitVec (a ^^^ (b ^^^ c))
-  congr 1; exact BitVec.xor_assoc a b c
-theorem bitxor_u32_assoc (a b c : UInt32) :
-    bitxor_u32 (bitxor_u32 a b) c = bitxor_u32 a (bitxor_u32 b c) := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩; rcases c with ⟨c⟩
-  show UInt32.ofBitVec ((a ^^^ b) ^^^ c) = UInt32.ofBitVec (a ^^^ (b ^^^ c))
-  congr 1; exact BitVec.xor_assoc a b c
-theorem bitxor_u64_assoc (a b c : UInt64) :
-    bitxor_u64 (bitxor_u64 a b) c = bitxor_u64 a (bitxor_u64 b c) := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩; rcases c with ⟨c⟩
-  show UInt64.ofBitVec ((a ^^^ b) ^^^ c) = UInt64.ofBitVec (a ^^^ (b ^^^ c))
-  congr 1; exact BitVec.xor_assoc a b c
-
--- XOR self-cancellation (key for crypto: x ⊕ x = 0)
-@[simp] theorem bitxor_u8_self  (a : UInt8)  : bitxor_u8 a a = 0 := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a ^^^ a) = 0; simp [BitVec.xor_self]
-@[simp] theorem bitxor_u16_self (a : UInt16) : bitxor_u16 a a = 0 := by
-  rcases a with ⟨a⟩; show UInt16.ofBitVec (a ^^^ a) = 0; simp [BitVec.xor_self]
-@[simp] theorem bitxor_u32_self (a : UInt32) : bitxor_u32 a a = 0 := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a ^^^ a) = 0; simp [BitVec.xor_self]
-@[simp] theorem bitxor_u64_self (a : UInt64) : bitxor_u64 a a = 0 := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a ^^^ a) = 0; simp [BitVec.xor_self]
-
--- AND commutativity
-@[simp] theorem bitand_u8_comm  (a b : UInt8) : bitand_u8 a b = bitand_u8 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt8.ofBitVec (a &&& b) = UInt8.ofBitVec (b &&& a)
-  congr 1; exact BitVec.and_comm a b
-@[simp] theorem bitand_u32_comm (a b : UInt32) : bitand_u32 a b = bitand_u32 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt32.ofBitVec (a &&& b) = UInt32.ofBitVec (b &&& a)
-  congr 1; exact BitVec.and_comm a b
-@[simp] theorem bitand_u64_comm (a b : UInt64) : bitand_u64 a b = bitand_u64 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt64.ofBitVec (a &&& b) = UInt64.ofBitVec (b &&& a)
-  congr 1; exact BitVec.and_comm a b
-
--- OR commutativity
-@[simp] theorem bitor_u8_comm  (a b : UInt8) : bitor_u8 a b = bitor_u8 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt8.ofBitVec (a ||| b) = UInt8.ofBitVec (b ||| a)
-  congr 1; exact BitVec.or_comm a b
-@[simp] theorem bitor_u32_comm (a b : UInt32) : bitor_u32 a b = bitor_u32 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt32.ofBitVec (a ||| b) = UInt32.ofBitVec (b ||| a)
-  congr 1; exact BitVec.or_comm a b
-@[simp] theorem bitor_u64_comm (a b : UInt64) : bitor_u64 a b = bitor_u64 b a := by
-  rcases a with ⟨a⟩; rcases b with ⟨b⟩
-  show UInt64.ofBitVec (a ||| b) = UInt64.ofBitVec (b ||| a)
-  congr 1; exact BitVec.or_comm a b
-
--- Double negation (involution)
-@[simp] theorem bitnot_u8_invol  (a : UInt8) : bitnot_u8 (bitnot_u8 a) = a := by
-  rcases a with ⟨a⟩
-  show UInt8.ofBitVec (~~~(~~~a)) = UInt8.ofBitVec a
-  congr 1; simp [BitVec.not_not]
-@[simp] theorem bitnot_u32_invol (a : UInt32) : bitnot_u32 (bitnot_u32 a) = a := by
-  rcases a with ⟨a⟩
-  show UInt32.ofBitVec (~~~(~~~a)) = UInt32.ofBitVec a
-  congr 1; simp [BitVec.not_not]
-@[simp] theorem bitnot_u64_invol (a : UInt64) : bitnot_u64 (bitnot_u64 a) = a := by
-  rcases a with ⟨a⟩
-  show UInt64.ofBitVec (~~~(~~~a)) = UInt64.ofBitVec a
-  congr 1; simp [BitVec.not_not]
-
-end Algebraic
-
-/-! ## 3. Identity and Zero Laws -/
-
-section Identity
-
--- XOR with 0 is identity
-@[simp] theorem bitxor_u8_zero  (a : UInt8) : bitxor_u8 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a ^^^ 0) = UInt8.ofBitVec a; simp
-@[simp] theorem bitxor_u32_zero (a : UInt32) : bitxor_u32 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a ^^^ 0) = UInt32.ofBitVec a; simp
-@[simp] theorem bitxor_u64_zero (a : UInt64) : bitxor_u64 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a ^^^ 0) = UInt64.ofBitVec a; simp
-
--- AND with 0 is 0
-@[simp] theorem bitand_u8_zero  (a : UInt8) : bitand_u8 a 0 = 0 := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a &&& 0) = UInt8.ofBitVec 0; congr 1; simp
-@[simp] theorem bitand_u32_zero (a : UInt32) : bitand_u32 a 0 = 0 := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a &&& 0) = UInt32.ofBitVec 0; congr 1; simp
-@[simp] theorem bitand_u64_zero (a : UInt64) : bitand_u64 a 0 = 0 := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a &&& 0) = UInt64.ofBitVec 0; congr 1; simp
-
--- OR with 0 is identity
-@[simp] theorem bitor_u8_zero  (a : UInt8) : bitor_u8 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a ||| 0) = UInt8.ofBitVec a; simp
-@[simp] theorem bitor_u32_zero (a : UInt32) : bitor_u32 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a ||| 0) = UInt32.ofBitVec a; simp
-@[simp] theorem bitor_u64_zero (a : UInt64) : bitor_u64 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a ||| 0) = UInt64.ofBitVec a; simp
-
--- Shift by 0 is identity
-@[simp] theorem shl_u8_zero  (a : UInt8) : shl_u8 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a <<< (0 : BitVec 8)) = UInt8.ofBitVec a; simp
-@[simp] theorem shl_u32_zero (a : UInt32) : shl_u32 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a <<< (0 : BitVec 32)) = UInt32.ofBitVec a; simp
-@[simp] theorem shl_u64_zero (a : UInt64) : shl_u64 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a <<< (0 : BitVec 64)) = UInt64.ofBitVec a; simp
-
-@[simp] theorem shr_u8_zero  (a : UInt8) : shr_u8 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a >>> (0 : BitVec 8)) = UInt8.ofBitVec a; simp
-@[simp] theorem shr_u32_zero (a : UInt32) : shr_u32 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a >>> (0 : BitVec 32)) = UInt32.ofBitVec a; simp
-@[simp] theorem shr_u64_zero (a : UInt64) : shr_u64 a 0 = a := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a >>> (0 : BitVec 64)) = UInt64.ofBitVec a; simp
-
--- AND idempotent
-@[simp] theorem bitand_u8_self  (a : UInt8) : bitand_u8 a a = a := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a &&& a) = UInt8.ofBitVec a; congr 1; simp
-@[simp] theorem bitand_u32_self (a : UInt32) : bitand_u32 a a = a := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a &&& a) = UInt32.ofBitVec a; congr 1; simp
-@[simp] theorem bitand_u64_self (a : UInt64) : bitand_u64 a a = a := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a &&& a) = UInt64.ofBitVec a; congr 1; simp
-
--- OR idempotent
-@[simp] theorem bitor_u8_self  (a : UInt8) : bitor_u8 a a = a := by
-  rcases a with ⟨a⟩; show UInt8.ofBitVec (a ||| a) = UInt8.ofBitVec a; congr 1; simp
-@[simp] theorem bitor_u32_self (a : UInt32) : bitor_u32 a a = a := by
-  rcases a with ⟨a⟩; show UInt32.ofBitVec (a ||| a) = UInt32.ofBitVec a; congr 1; simp
-@[simp] theorem bitor_u64_self (a : UInt64) : bitor_u64 a a = a := by
-  rcases a with ⟨a⟩; show UInt64.ofBitVec (a ||| a) = UInt64.ofBitVec a; congr 1; simp
-
-end Identity
-
-/-! ## 4. Cast Correctness -/
-
-section Cast
-
--- Widening casts: definitionally equal to Lean coercions
-theorem cast_u8_u16_eq  (x : UInt8)  : cast_u8_u16 x = x.toUInt16 := rfl
-theorem cast_u8_u32_eq  (x : UInt8)  : cast_u8_u32 x = x.toUInt32 := rfl
-theorem cast_u8_u64_eq  (x : UInt8)  : cast_u8_u64 x = x.toUInt64 := rfl
-theorem cast_u16_u32_eq (x : UInt16) : cast_u16_u32 x = x.toUInt32 := rfl
-theorem cast_u16_u64_eq (x : UInt16) : cast_u16_u64 x = x.toUInt64 := rfl
-theorem cast_u32_u64_eq (x : UInt32) : cast_u32_u64 x = x.toUInt64 := rfl
-
--- Narrowing casts: definitionally equal to Lean coercions
-theorem cast_u64_u32_eq (x : UInt64) : cast_u64_u32 x = x.toUInt32 := rfl
-theorem cast_u64_u16_eq (x : UInt64) : cast_u64_u16 x = x.toUInt16 := rfl
-theorem cast_u64_u8_eq  (x : UInt64) : cast_u64_u8 x = x.toUInt8 := rfl
-theorem cast_u32_u16_eq (x : UInt32) : cast_u32_u16 x = x.toUInt16 := rfl
-theorem cast_u32_u8_eq  (x : UInt32) : cast_u32_u8 x = x.toUInt8 := rfl
-theorem cast_u16_u8_eq  (x : UInt16) : cast_u16_u8 x = x.toUInt8 := rfl
-
-end Cast
-
-/-! ## 5. Concrete Test Vectors
-
-These `decide` theorems pin specific values of the wrapping operations,
-as Rust computes them. -/
-
-section TestVectors
-
--- XOR
-theorem test_xor_u64 : bitxor_u64 0xFF00FF00FF00FF00 0x0F0F0F0F0F0F0F0F =
-    (0xF00FF00FF00FF00F : UInt64) := by decide
-
--- AND
-theorem test_and_u32 : bitand_u32 0xFF00FF00 0x0F0F0F0F =
-    (0x0F000F00 : UInt32) := by decide
-
--- OR
-theorem test_or_u32 : bitor_u32 0xFF00FF00 0x0F0F0F0F =
-    (0xFF0FFF0F : UInt32) := by decide
-
--- NOT
-theorem test_not_u8 : bitnot_u8 0x0F = (0xF0 : UInt8) := by decide
-
--- Shift left (wraps at width boundary)
-theorem test_shl_u8_wrap : shl_u8 1 7 = (128 : UInt8) := by decide
--- Note: Lean's BitVec shift uses (shiftAmt % width), so 1 <<< 8 on u8 = 1 <<< 0 = 1
-theorem test_shl_u8_mod : shl_u8 1 8 = (1 : UInt8) := by decide
-
--- Shift right
-theorem test_shr_u32 : shr_u32 0xFF000000 8 = (0x00FF0000 : UInt32) := by decide
-
--- Self-cancellation
-theorem test_xor_cancel_u64 :
-    bitxor_u64 (bitxor_u64 0xDEADBEEFCAFEBABE 0x1234567890ABCDEF)
-               0x1234567890ABCDEF = (0xDEADBEEFCAFEBABE : UInt64) := by decide
-
--- Wrapping addition
-theorem test_add_u8_wrap : add_u8 200 100 = (44 : UInt8) := by decide
-theorem test_add_u32_wrap : add_u32 0xFFFFFFFF 1 = (0 : UInt32) := by decide
-
--- Cast roundtrip (widening then narrowing)
-theorem test_cast_roundtrip_u8_u32 :
-    cast_u32_u8 (cast_u8_u32 42) = (42 : UInt8) := by decide
-
--- Cast truncation
-theorem test_cast_truncate_u32_u8 :
-    cast_u32_u8 300 = (44 : UInt8) := by decide
-
-end TestVectors
-
-/-! ## 6. Semantic Builtins Extension
+/-! ## 1. Semantic Builtins Extension
 
 Extend `defaultBuiltins` with bitwise operations for the denotational
 semantics. Compatible with pipeline correctness proofs since `Builtins`
@@ -330,7 +46,7 @@ def bitwiseBuiltins : Hax.Builtins
   | "cast",   [v] => some v
   | f, args => Hax.defaultBuiltins f args
 
-/-! ## 7. widthAwareBuiltins NoControlFlow
+/-! ## 2. widthAwareBuiltins NoControlFlow
 
 Prove that `widthAwareBuiltins` never produces ControlFlow values,
 which is required by `Builtins.DeepNoControlFlow` for pipeline correctness. -/
@@ -467,7 +183,7 @@ theorem widthAwareBuiltins_noControlFlow :
     rw [hwo] at h
     exact Hax.Builtins.defaultBuiltins_noControlFlow f args _ h isBreak w rfl
 
-/-! ## 8. Panic/Unwrap Operations DeepNoControlFlow
+/-! ## 3. Panic/Unwrap Operations DeepNoControlFlow
 
 `panicOps` returns the payload of an `option` or `result` argument, which may
 itself be a ControlFlow value, so `panicOps` and `fullBuiltins` satisfy
