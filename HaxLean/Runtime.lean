@@ -753,94 +753,6 @@ instance : HaxCond Int where toBool := fun n => n != 0
     Used for Rust's `b as u64` when `b : Bool`. -/
 @[inline] def boolToInt (b : Bool) : Int := if b then 1 else 0
 
-/-! ### Signed Integer Operations
-
-Rust signed integers use two's complement wrapping. They are represented as `Int`
-with explicit modular reduction (so the wrapping is explicit rather than relying
-on a fixed-width type). `bmod_signed w n` reduces `n` to `[-2^(w-1), 2^(w-1))`. -/
-
-/-- Signed modular reduction: maps integer to [-2^(w-1), 2^(w-1)). -/
-@[inline] def bmod_signed (bits : Nat) (n : Int) : Int :=
-  let m := 2 ^ bits
-  let r := n % m
-  if r ≥ m / 2 then r - m else r
-
--- Signed 8-bit operations
-@[inline] def add_i8  (a b : Int) : Int := bmod_signed 8 (a + b)
-@[inline] def sub_i8  (a b : Int) : Int := bmod_signed 8 (a - b)
-@[inline] def mul_i8  (a b : Int) : Int := bmod_signed 8 (a * b)
-@[inline] def div_i8  (a b : Int) : Int := if b = 0 then 0 else bmod_signed 8 (a.tdiv b)
-@[inline] def rem_i8  (a b : Int) : Int := if b = 0 then 0 else bmod_signed 8 (a.tmod b)
-@[inline] def neg_i8  (a : Int) : Int := bmod_signed 8 (-a)
-@[inline] def eq_i8   (a b : Int) : Bool := a == b
-@[inline] def ne_i8   (a b : Int) : Bool := a != b
-@[inline] def lt_i8   (a b : Int) : Bool := a < b
-@[inline] def le_i8   (a b : Int) : Bool := a ≤ b
-@[inline] def gt_i8   (a b : Int) : Bool := a > b
-@[inline] def ge_i8   (a b : Int) : Bool := a ≥ b
-
--- Signed 16-bit operations
-@[inline] def add_i16 (a b : Int) : Int := bmod_signed 16 (a + b)
-@[inline] def sub_i16 (a b : Int) : Int := bmod_signed 16 (a - b)
-@[inline] def mul_i16 (a b : Int) : Int := bmod_signed 16 (a * b)
-@[inline] def div_i16 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 16 (a.tdiv b)
-@[inline] def rem_i16 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 16 (a.tmod b)
-@[inline] def neg_i16 (a : Int) : Int := bmod_signed 16 (-a)
-@[inline] def eq_i16  (a b : Int) : Bool := a == b
-@[inline] def ne_i16  (a b : Int) : Bool := a != b
-@[inline] def lt_i16  (a b : Int) : Bool := a < b
-@[inline] def le_i16  (a b : Int) : Bool := a ≤ b
-@[inline] def gt_i16  (a b : Int) : Bool := a > b
-@[inline] def ge_i16  (a b : Int) : Bool := a ≥ b
-
--- Signed 32-bit operations
-@[inline] def add_i32 (a b : Int) : Int := bmod_signed 32 (a + b)
-@[inline] def sub_i32 (a b : Int) : Int := bmod_signed 32 (a - b)
-@[inline] def mul_i32 (a b : Int) : Int := bmod_signed 32 (a * b)
-@[inline] def div_i32 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 32 (a.tdiv b)
-@[inline] def rem_i32 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 32 (a.tmod b)
-@[inline] def neg_i32 (a : Int) : Int := bmod_signed 32 (-a)
-@[inline] def eq_i32  (a b : Int) : Bool := a == b
-@[inline] def ne_i32  (a b : Int) : Bool := a != b
-@[inline] def lt_i32  (a b : Int) : Bool := a < b
-@[inline] def le_i32  (a b : Int) : Bool := a ≤ b
-@[inline] def gt_i32  (a b : Int) : Bool := a > b
-@[inline] def ge_i32  (a b : Int) : Bool := a ≥ b
-
--- Signed 64-bit operations
-@[inline] def add_i64 (a b : Int) : Int := bmod_signed 64 (a + b)
-@[inline] def sub_i64 (a b : Int) : Int := bmod_signed 64 (a - b)
-@[inline] def mul_i64 (a b : Int) : Int := bmod_signed 64 (a * b)
-@[inline] def div_i64 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 64 (a.tdiv b)
-@[inline] def rem_i64 (a b : Int) : Int := if b = 0 then 0 else bmod_signed 64 (a.tmod b)
-@[inline] def neg_i64 (a : Int) : Int := bmod_signed 64 (-a)
-@[inline] def eq_i64  (a b : Int) : Bool := a == b
-@[inline] def ne_i64  (a b : Int) : Bool := a != b
-@[inline] def lt_i64  (a b : Int) : Bool := a < b
-@[inline] def le_i64  (a b : Int) : Bool := a ≤ b
-@[inline] def gt_i64  (a b : Int) : Bool := a > b
-@[inline] def ge_i64  (a b : Int) : Bool := a ≥ b
-
-/-! ### Signed cast operations -/
-
-@[inline] def cast_i8_i16  (x : Int) : Int := bmod_signed 16 x
-@[inline] def cast_i8_i32  (x : Int) : Int := bmod_signed 32 x
-@[inline] def cast_i8_i64  (x : Int) : Int := bmod_signed 64 x
-@[inline] def cast_i16_i32 (x : Int) : Int := bmod_signed 32 x
-@[inline] def cast_i16_i64 (x : Int) : Int := bmod_signed 64 x
-@[inline] def cast_i32_i64 (x : Int) : Int := bmod_signed 64 x
-@[inline] def cast_i64_i32 (x : Int) : Int := bmod_signed 32 x
-@[inline] def cast_i64_i16 (x : Int) : Int := bmod_signed 16 x
-@[inline] def cast_i64_i8  (x : Int) : Int := bmod_signed 8 x
-@[inline] def cast_i32_i16 (x : Int) : Int := bmod_signed 16 x
-@[inline] def cast_i32_i8  (x : Int) : Int := bmod_signed 8 x
-@[inline] def cast_i16_i8  (x : Int) : Int := bmod_signed 8 x
-
--- Cross-sign casts
-@[inline] def cast_u8_i16  (x : UInt8)  : Int := bmod_signed 16 (x.toBitVec.toNat : Int)
-@[inline] def cast_u16_i32 (x : UInt16) : Int := bmod_signed 32 (x.toBitVec.toNat : Int)
-@[inline] def cast_u32_i64 (x : UInt32) : Int := bmod_signed 64 (x.toBitVec.toNat : Int)
-
 /-! ### Collection operations -/
 
 /-- Create an array filled with `n` copies of `val`. -/
@@ -975,9 +887,6 @@ theorem vec_remove_of_lt {α : Type} [Inhabited α] (arr : Array α) (i : Int)
 
 /-- `From::from`: the identity. -/
 @[inline] def from_val {α : Type} (x : α) : α := x
-
--- USize casts
-@[inline] def cast_u64_usize (x : UInt64) : USize := USize.ofNat x.toBitVec.toNat
 
 /-- Slice: take first n elements (arr[..n]). -/
 @[inline] def slice_to {α : Type} (arr : Array α) (n : Int) : Array α :=
