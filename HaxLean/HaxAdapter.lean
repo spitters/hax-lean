@@ -394,6 +394,11 @@ structure ImplSelfTypeMap where
       `.app "ZERO" []`, rather than a variable. Set by the trait-to-class
       emission, where such a read names the class field. -/
   localBoundConstCalls : Bool := false
+  /-- The crates whose trait methods are nominal: a call of a method declared
+      by a trait of one of these crates, not resolved to a trait `impl` of the
+      extracted crate, takes the head `krate::Trait::h`, where `h` is the head
+      the call takes when the list is empty (`nominalTraitQualifier?`). -/
+  nominalKrates : List String := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -893,6 +898,55 @@ def resolveTraitImplCall (funJ : Json) (m : ImplSelfTypeMap) : Option String := 
   let (implId, method) ← traitCallImplMethod funJ
   let entry ← m.traitImplMethods.find? fun p => p.1 == implId && p.2.1 == method
   some entry.2.2
+
+/-- The qualifier `krate::Trait` of a call whose callee is a method declared by
+    the trait `Trait` of a crate `krate` in `krates`: the callee's `DefId` has
+    kind `AssocFn`, its parent has kind `Trait`, and `Trait` is the
+    second-to-last segment of its path. `none` for any other call. -/
+def nominalTraitQualifier? (funJ : Json) (krates : List String) : Option String := do
+  guard (!krates.isEmpty)
+  let contents ← (funJ.getObjVal? "contents").toOption
+  let gn ← (contents.getObjVal? "GlobalName").toOption
+  let item ← (gn.getObjVal? "item").toOption
+  let v ← (item.getObjVal? "value").toOption
+  let defId ← (v.getObjVal? "def_id").toOption
+  let dc ← (defId.getObjVal? "contents").toOption
+  let dv ← (dc.getObjVal? "value").toOption
+  let krate ← (dv.getObjValAs? String "krate").toOption
+  guard (krates.contains krate)
+  guard ((dv.getObjValAs? String "kind").toOption == some "AssocFn")
+  let p ← (dv.getObjVal? "parent").toOption
+  let pv ← (p.getObjVal? "contents" >>= (·.getObjVal? "value")).toOption
+  guard ((pv.getObjValAs? String "kind").toOption == some "Trait")
+  let segs ← (dv.getObjValAs? (Array Json) "path").toOption
+  guard (segs.size ≥ 2)
+  let seg ← segs[segs.size - 2]?
+  let trait ← (seg.getObjVal? "data" >>= (·.getObjValAs? String "TypeNs")).toOption
+  pure s!"{krate}::{trait}"
+
+/-- The head `q::h` of a call with qualifier `q` (`nominalTraitQualifier?`)
+    whose head is `h` when no crate is nominal. -/
+def qualifyNominalHead (q h : String) : String := s!"{q}::{h}"
+
+/-- The head a call has when no crate is nominal, from its head under the
+    nominal crates `krates`: `h` for `k::T::h` with `k` in `krates`, and the
+    head itself otherwise. It inverts `qualifyNominalHead` on the qualifiers
+    of `krates`. -/
+def unqualifyNominalHead (krates : List String) (f : String) : String :=
+  if krates.isEmpty then f
+  else
+    match f.splitOn "::" with
+    | k :: _ :: rest@(_ :: _) => if krates.contains k then "::".intercalate rest else f
+    | _ => f
+
+/-- `unqualifyNominalHead` applied to every app head of a typed expression. -/
+partial def tUnqualifyNominalHeads (krates : List String) (e : TExpr) : TExpr :=
+  if krates.isEmpty then e
+  else
+    match e with
+    | .mk (.app f args) ty =>
+      .mk (.app (unqualifyNominalHead krates f) (args.map (tUnqualifyNominalHeads krates))) ty
+    | e => tMapChildren (tUnqualifyNominalHeads krates) e
 
 /-- The emitted name of a read of an associated constant (`Self::ONE`) that
     resolves to a trait `impl` block of the extracted crate, from the
@@ -3378,6 +3432,16 @@ where
           | some t => s!"{op}#{t}"
           | none => funName'
         | _ => funName'
+      -- A call of a trait method of a nominal crate keeps its trait in the
+      -- head (`primeir_hax::Field::mul`), which separates it from the integer
+      -- builtin of the same short name. A call resolved to a trait `impl` of
+      -- the extracted crate names a definition and keeps that name.
+      let funName'' :=
+        match nominalTraitQualifier? funJ implMap.nominalKrates with
+        | some q =>
+          if (resolveTraitImplCall funJ implMap).isSome then funName''
+          else qualifyNominalHead q funName''
+        | none => funName''
       return .app funName'' args
 
     else if let .ok data := j.getObjVal? "Let" then
@@ -4565,9 +4629,14 @@ partial def parseImplConstTExpr (implItem : Json) (implMap : ImplSelfTypeMap) :
     definition, and a read of it through a `Concrete` atom takes its name. The
     trait-to-class emission sets it; its instances name those definitions. It
     also makes a read of an associated constant through a trait bound of a type
-    parameter a nullary call, `.app "ZERO" []` (`constReadKind`). -/
+    parameter a nullary call, `.app "ZERO" []` (`constReadKind`).
+
+    `nominalKrates` names the crates whose trait-method calls take the
+    qualified head `krate::Trait::h` (`ImplSelfTypeMap.nominalKrates`); with
+    the empty list every head is the one of the unqualified parse. -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
-    (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false) :
+    (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
+    (nominalKrates : List String := []) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
   -- Build the impl-self-type map once from the full JSON. This lets the
@@ -4580,7 +4649,7 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
       structFields := structFields, localCrate := localCrateOfExport j,
       traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else []
       traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else []
-      localBoundConstCalls := traitImplConsts }
+      localBoundConstCalls := traitImplConsts, nominalKrates := nominalKrates }
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []

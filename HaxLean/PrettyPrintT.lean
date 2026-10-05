@@ -1425,7 +1425,12 @@ def toLeanLowCTDef (name : String) : String :=
     file then imports the CatCrypt modules those two definitions name.
     `contracts` holds the function contracts and lemma statements of
     `--emit-contracts` (`Hax.ContractEmit`), rendered after the definitions and
-    instances. -/
+    instances.
+    `nominalKrates` names the crates whose trait-method calls carry the
+    qualified head `krate::Trait::h` in `rawTdefs` and `procTdefs`
+    (`HaxAdapter.parseHaxFileWithTExpr`): the `ImpExpr` and `TExpr` literals
+    keep those heads, and every other part of the file is printed from the
+    terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`). -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1438,7 +1443,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (crateName : String := "")
     (emitLowCT : Bool := false)
     (classHooks : ClassEmit.ClassHooks := {})
-    (contracts : ContractEmit.Plan := {}) : String :=
+    (contracts : ContractEmit.Plan := {})
+    (nominalKrates : List String := []) : String :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
@@ -1449,59 +1455,97 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- the rendered body. The literal below is emitted untagged.
   let markDep (te : TExpr) : TExpr :=
     if classHooks.enabled then unmarkDepEq (markDepOperators te) else markDepOperators te
-  let rawTdefs := rawTdefs.map fun (n, te) => (n, markDep te)
-  let procTdefs := procTdefs.map fun (n, te) => (n, markDep te)
+  -- The heads of the nominal crates' trait-method calls are qualified in the
+  -- input (`HaxAdapter.qualifyNominalHead`). The literals keep them; every
+  -- other part of the file reads the unqualified heads, so the surface
+  -- definitions and the `Deps` class are the ones of the unqualified input.
+  let rawTdefsQ := rawTdefs.map fun (n, te) => (n, markDep te)
+  let procTdefsQ := procTdefs.map fun (n, te) => (n, markDep te)
+  let rawTdefs := rawTdefs.map fun (n, te) =>
+    (n, markDep (HaxAdapter.tUnqualifyNominalHeads nominalKrates te))
+  let procTdefs := procTdefs.map fun (n, te) =>
+    (n, markDep (HaxAdapter.tUnqualifyNominalHeads nominalKrates te))
   -- Build struct-new mapping from rawTdefs (which have types from hax JSON)
   let newStructMap := buildNewStructMap rawTdefs structMeta
-  -- TCB pre-process: rewrite `.namedProj T x` in the post-pipeline TExpr
-  -- to `.app "::namedProj::T" [x]` (via the top-level `markNamedProj`)
-  -- so the renderer (operating on ImpExpr after erasure) can recognize
-  -- newtype-specific `.0` projections via the marker function-name.
-  let procTdefs := procTdefs.map fun (n, te) => (n, markNamedProj te)
-  -- Apply the typed init-fold-accums phase BEFORE erase, so the
-  -- accumulator init insertions happen on the type-rich TExpr.
-  -- Erase-preservation: `Hax.TPhase.tInitMissingFoldAccums_erase`
-  -- proves `(tInitMissingFoldAccums bound e).erase = initMissingFoldAccums bound e.erase`.
-  let procTdefs := procTdefs.map fun (n, te) =>
-    (n, tInitMissingFoldAccums [] te)
-  -- Typed phases (run BEFORE erase so type-dependent rewrites use direct
-  -- `TExpr.ty` annotations instead of post-erase heuristics). The
-  -- equivalent untyped passes downstream become idempotent no-ops because
-  -- the patterns they detect (`.app ".field"`, `.app "new" args`,
-  -- `.app "from_elem" ..`, `.app ".N" ..` for N>1) have already been
-  -- rewritten at the TExpr level. Each typed phase has a documented
-  -- erase-preservation property (theorem deferred pending a `WellTyped`
-  -- predicate).
   let ambiguousFields := findAmbiguousFields structMeta
-  let procTdefs := if ambiguousFields.isEmpty then procTdefs
-    else procTdefs.map fun (n, te) =>
-      (n, tQualifyProjections structMeta ambiguousFields te te)
-  let procTdefs := if structMeta.isEmpty then procTdefs
-    else procTdefs.map fun (n, te) => (n, tRewriteNewToStructCtor structMeta te)
-  let procTdefs := if structMeta.isEmpty then procTdefs
-    else procTdefs.map fun (n, te) =>
-      let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
-      let fnRetTypes := match fnRetType with
-        | some ty => if ty.isUnknown then [] else [(n, ty)]
-        | none => []
-      (n, tRewriteStructFromElem structMeta fnRetTypes procTdefs te)
-  let procTdefs := procTdefs.map fun (n, te) => (n, tFixProjectionPaths te)
+  -- The typed passes on the processed terms, before erasure.
+  let typedBodies (procTdefs : List (String × TExpr)) : List (String × TExpr) :=
+    -- TCB pre-process: rewrite `.namedProj T x` in the post-pipeline TExpr
+    -- to `.app "::namedProj::T" [x]` (via the top-level `markNamedProj`)
+    -- so the renderer (operating on ImpExpr after erasure) can recognize
+    -- newtype-specific `.0` projections via the marker function-name.
+    let procTdefs := procTdefs.map fun (n, te) => (n, markNamedProj te)
+    -- Apply the typed init-fold-accums phase BEFORE erase, so the
+    -- accumulator init insertions happen on the type-rich TExpr.
+    -- Erase-preservation: `Hax.TPhase.tInitMissingFoldAccums_erase`
+    -- proves `(tInitMissingFoldAccums bound e).erase = initMissingFoldAccums bound e.erase`.
+    let procTdefs := procTdefs.map fun (n, te) =>
+      (n, tInitMissingFoldAccums [] te)
+    -- Typed phases (run BEFORE erase so type-dependent rewrites use direct
+    -- `TExpr.ty` annotations instead of post-erase heuristics). The
+    -- equivalent untyped passes downstream become idempotent no-ops because
+    -- the patterns they detect (`.app ".field"`, `.app "new" args`,
+    -- `.app "from_elem" ..`, `.app ".N" ..` for N>1) have already been
+    -- rewritten at the TExpr level. Each typed phase has a documented
+    -- erase-preservation property (theorem deferred pending a `WellTyped`
+    -- predicate).
+    let procTdefs := if ambiguousFields.isEmpty then procTdefs
+      else procTdefs.map fun (n, te) =>
+        (n, tQualifyProjections structMeta ambiguousFields te te)
+    let procTdefs := if structMeta.isEmpty then procTdefs
+      else procTdefs.map fun (n, te) => (n, tRewriteNewToStructCtor structMeta te)
+    let procTdefs := if structMeta.isEmpty then procTdefs
+      else procTdefs.map fun (n, te) =>
+        let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
+        let fnRetTypes := match fnRetType with
+          | some ty => if ty.isUnknown then [] else [(n, ty)]
+          | none => []
+        (n, tRewriteStructFromElem structMeta fnRetTypes procTdefs te)
+    procTdefs.map fun (n, te) => (n, tFixProjectionPaths te)
+  -- The erased bodies: the processed terms erased if present, otherwise the
+  -- raw ones erased and pipelined; then canonicalised.
+  let erasedBodies (rawTdefs procTdefs : List (String × TExpr)) :
+      List (String × ImpExpr) :=
+    let defs : List (String × ImpExpr) :=
+      if procTdefs.isEmpty then
+        -- Erase raw TExprs and apply pipeline
+        let rawDefs := rawTdefs.map fun (n, te) => (n, te.erase)
+        rawDefs.map fun (n, e) => (n, pipeline e)
+      else
+        procTdefs.map fun (n, te) => (n, te.erase)
+    -- Canonicalization passes (Hax.Canonicalize): drop dead CF bindings,
+    -- rewrite panic to unit, normalise _assign discard. After this, the
+    -- corresponding detection logic in `toLean` is redundant.
+    defs.map fun (n, e) => (n, Hax.Canonicalize.canonicalize e)
+  -- The zero-arg `new()` rewriter (`rewriteNewFromStructMap`) consumes the
+  -- per-function struct mapping from `rawTdefs` that the typed phase doesn't
+  -- reconstruct (the typed `tRewriteNewToStructCtor` skips empty-args calls).
+  let rewriteNew (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+    if newStructMap.isEmpty then defs
+    else defs.map fun (fname, e) =>
+      match newStructMap.find? (·.1 == fname) with
+      | some (_, [sname]) =>
+        match structMeta.find? (·.1 == sname) with
+        | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
+        | none => (fname, e)
+      | _ => (fname, e)
+  let procTdefs := typedBodies procTdefs
   -- The typed terms the `TExpr` literals take their node types from: the
   -- pipelined ones when present, the raw ones otherwise.
   let srcTdefs : List (String × TExpr) :=
     if procTdefs.isEmpty then rawTdefs else procTdefs
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
-  let defs : List (String × ImpExpr) :=
-    if procTdefs.isEmpty then
-      -- Erase raw TExprs and apply pipeline
-      let rawDefs := rawTdefs.map fun (n, te) => (n, te.erase)
-      rawDefs.map fun (n, e) => (n, pipeline e)
+  let defs := erasedBodies rawTdefs procTdefs
+  -- The typed terms and erased bodies of the literals under qualified heads,
+  -- by the same passes; `none` when no crate is nominal, and the literals
+  -- are then taken from `srcTdefs` and `defs`.
+  let literalBodies : Option (List (String × TExpr) × List (String × ImpExpr)) :=
+    if nominalKrates.isEmpty then none
     else
-      procTdefs.map fun (n, te) => (n, te.erase)
-  -- Canonicalization passes (Hax.Canonicalize): drop dead CF bindings,
-  -- rewrite panic to unit, normalise _assign discard. After this, the
-  -- corresponding detection logic in `toLean` is redundant.
-  let defs := defs.map fun (n, e) => (n, Hax.Canonicalize.canonicalize e)
+      let procQ := typedBodies procTdefsQ
+      let srcQ := if procQ.isEmpty then rawTdefsQ else procQ
+      some (srcQ, rewriteNew (applyTypedPasses (erasedBodies rawTdefsQ procQ)
+        structMeta fnTypes []).1)
   -- Apply typed passes (struct projection disambiguation, etc.)
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
@@ -1519,19 +1563,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- which the hax JSON adapter inserts for macro expansions like
   -- `vec![T::ZERO; n]`. Without the unwrap, the typed phase silently
   -- missed those calls and we depended on the untyped fallback (SPDZ).
-  --
-  -- The zero-arg `new()` rewriter (`rewriteNewFromStructMap`) is kept —
-  -- it consumes per-function struct mapping from `rawTdefs` that the
-  -- typed phase doesn't reconstruct (the typed `tRewriteNewToStructCtor`
-  -- skips empty-args calls).
-  let defs := if newStructMap.isEmpty then defs
-    else defs.map fun (fname, e) =>
-      match newStructMap.find? (·.1 == fname) with
-      | some (_, [sname]) =>
-        match structMeta.find? (·.1 == sname) with
-        | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
-        | none => (fname, e)
-      | _ => (fname, e)
+  let defs := rewriteNew defs
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
   let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs) (newtypes := newtypes) (classHooks := classHooks)
@@ -1553,17 +1585,24 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let short := ImpType.sanitizeAdtShortName name
     if axiomClashSet.contains short then some s!"{short}_T"
     else clashedBaseLookup name
-  -- Rewrite function body projection references for conflicts
-  let defs := if projConflicts.isEmpty then defs
-    else defs.map fun (n, e) =>
-      let e' := projConflicts.foldl (fun expr (unqual, qual) =>
-        rewriteAppName unqual qual expr) e
-      (n, e')
-  -- Newtype constructor call sites take the `«T.mk»` name the newtype
-  -- preamble declares. This runs after `generatePreambleTyped`, whose
-  -- `Deps`-field filter keys on the source name `T`.
-  let defs := if newtypes.isEmpty then defs
+  let postPreamble (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+    -- Rewrite function body projection references for conflicts
+    let defs := if projConflicts.isEmpty then defs
+      else defs.map fun (n, e) =>
+        let e' := projConflicts.foldl (fun expr (unqual, qual) =>
+          rewriteAppName unqual qual expr) e
+        (n, e')
+    -- Newtype constructor call sites take the `«T.mk»` name the newtype
+    -- preamble declares. This runs after `generatePreambleTyped`, whose
+    -- `Deps`-field filter keys on the source name `T`.
+    if newtypes.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewtypeCtors newtypes e)
+  let defs := postPreamble defs
+  -- The bodies and node types the literals are printed from.
+  let (srcTdefsQ, defsQ) : List (String × TExpr) × List (String × ImpExpr) :=
+    match literalBodies with
+    | none => (srcTdefs, defs)
+    | some (s, d) => (s, postPreamble d)
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
@@ -1594,9 +1633,9 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- the typed term. A definition whose rebuilt term does not print the same
   -- `ImpExpr` as its literal — a `.typeAscription` node, which no `TExpr`
   -- constructor erases to — is left without one.
-  let texprs : List (String × TExpr) := defs.filterMap fun (n, e0) =>
+  let texprs : List (String × TExpr) := defsQ.filterMap fun (n, e0) =>
     let e := unmarkDepOperators e0
-    let src := (srcTdefs.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
+    let src := (srcTdefsQ.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
     let t := retypeWith e src
     if toLeanImpExpr t.erase == toLeanImpExpr e then some (n, t) else none
   let tyPfx :=
@@ -1801,7 +1840,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       (surfaceDefs.map (·.2), "mutual\n\n", "end\n\n" ++ insts)
   let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{inductiveBlock}{newtypeBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
   let body := "\n".intercalate bodyParts
-  let impExprs := "\n".intercalate (defs.map fun (n, e) =>
+  let impExprs := "\n".intercalate (defsQ.map fun (n, e) =>
     let impExprDef := toLeanImpExprDef n (unmarkDepOperators e)
     let impExprDef := if needsPartial then impExprDef.replace "def " "partial def " else impExprDef
     s!"{impExprDef}")
@@ -1816,7 +1855,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     "\n".intercalate (texprs.map fun (n, _) => toLeanEraseExample n) ++ "\n\n"
   let lowCTBlock :=
     if !emitLowCT then "" else
-    let ds := "\n".intercalate (defs.map fun (n, e) =>
+    let ds := "\n".intercalate (defsQ.map fun (n, e) =>
       let anfDef := toLeanImpExprAnfDef n (unmarkDepOperators e)
       let anfDef := if needsPartial then anfDef.replace "def " "partial def " else anfDef
       let lowDef := toLeanLowCTDef n

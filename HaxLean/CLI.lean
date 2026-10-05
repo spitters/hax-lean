@@ -101,6 +101,12 @@ structure Options where
       pre- and postcondition fields of each trait method with the `Contract`
       class of refinement obligations. -/
   emitContracts : Bool := false
+  /-- The crates whose trait methods are nominal. With `--emit-certified
+      --hax`, a call of a method declared by a trait of one of these crates
+      carries the head `krate::Trait::method` in the `ImpExpr` and `TExpr`
+      literals; the surface definitions and the `Deps` class are those of the
+      empty list. -/
+  nominalKrates : List String := []
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -127,6 +133,8 @@ where
     | "--emit-classes" :: file :: rest, opts =>
       go rest { opts with emitClasses := some file }
     | "--emit-contracts" :: rest, opts => go rest { opts with emitContracts := true }
+    | "--nominal-crates" :: ks :: rest, opts =>
+      go rest { opts with nominalKrates := ks.splitOn "," |>.filter (!·.isEmpty) }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -157,7 +165,12 @@ OPTIONS:
                     (requires/ensures, lemmas; trait method pre- and
                     postconditions and their Contract class with
                     --emit-classes) as Prop definitions
-  --help           Show this help message
+  --nominal-crates CRATE,CRATE
+                    With --emit-certified --hax: a call of a trait method of
+                    one of these crates carries the head
+                    CRATE::Trait::method in the ImpExpr and TExpr literals;
+                    the surface definitions and the Deps class are unchanged
+  --help          Show this help message
 
 INPUT:
   JSON-encoded ImpExpr (default) or hax Decorated<ExprKind> (with --hax).

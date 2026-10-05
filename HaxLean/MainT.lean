@@ -142,7 +142,7 @@ def main (args : List String) : IO UInt32 := do
       structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
     let (_expr, fnTypes, rawTdefs, procTdefs) ←
       IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
-        (traitImplConsts := classMode))
+        (traitImplConsts := classMode) (nominalKrates := opts.nominalKrates))
     let fnTypes := dedupByName fnTypes
     let rawTdefs := dedupByName rawTdefs
     let procTdefs := dedupByName procTdefs
@@ -163,14 +163,17 @@ def main (args : List String) : IO UInt32 := do
       else
         let erased := procTdefs.map fun (n, te) => (n, te.erase)
         let sl := mkStructLookup structMeta (computeStructPassthrough structMeta erased)
-        traitImplDepTypeConflicts rawTdefs traitImplNames sl (newtypes.map (·.1))
+        -- The `Deps` names are the unqualified heads (`--nominal-crates`).
+        let raw := rawTdefs.map fun (n, te) =>
+          (n, HaxAdapter.tUnqualifyNominalHeads opts.nominalKrates te)
+        traitImplDepTypeConflicts raw traitImplNames sl (newtypes.map (·.1))
     let (fnTypes, rawTdefs, procTdefs) ←
       if depTypeConflicts.isEmpty then pure (fnTypes, rawTdefs, procTdefs)
       else do
         IO.eprintln s!"INFO trait-impl-opaque: the `Deps` names {depTypeConflicts} are used at two types; every trait `impl` of the crate keeps opaque methods"
         let (_expr, fnTypes, rawTdefs, procTdefs) ←
           IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
-            (resolveTraitImpls := false))
+            (resolveTraitImpls := false) (nominalKrates := opts.nominalKrates))
         pure (dedupByName fnTypes, dedupByName rawTdefs, dedupByName procTdefs)
     IO.eprintln s!"INFO defs={procTdefs.length} trait-impl-defs={traitImplNames.length} dep-type-conflicts={depTypeConflicts.length}"
     let t ← phaseTick "adapter-to-texpr" t
@@ -308,7 +311,8 @@ def main (args : List String) : IO UInt32 := do
       toLeanCertifiedFileTyped rawTdefs opts.name structMeta fnTypes postPipelineTdefs
         newtypes enumMeta aliasMeta (mutWriteTupleReturns writeFns)
         (crateName := crateName) (emitLowCT := opts.emitLowCT)
-        (classHooks := classHooks) (contracts := contractPlan) ++ secrecyDef
+        (classHooks := classHooks) (contracts := contractPlan)
+        (nominalKrates := opts.nominalKrates) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered

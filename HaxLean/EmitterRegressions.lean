@@ -1969,4 +1969,66 @@ def asSliceCallJson (t : Json) (x : String) : Json :=
 #guard match (parseT (asSliceCallJson sliceTyJson "x")).erase with
   | .app "as_slice" [_] => true | _ => false
 
+/-! ## Qualified heads of nominal trait methods
+
+With `nominalKrates` set, a call of a method declared by a trait of a listed
+crate takes the head `krate::Trait::method`; a trait method of any other crate,
+such as `core::ops::Mul::mul` on an integer, keeps its head. The file printer
+prints the qualified heads in the literals only: the surface definitions and the
+`Deps` class are those of the unqualified input. -/
+
+open Lean in
+/-- The callee `krate::Trait::m`, a method declared by the trait `Trait`, called
+    through a trait bound, as a hax `GlobalName` node. -/
+def traitMethodFnJson (krate trait m : String) : Json :=
+  haxNode (Json.mkObj [("GlobalName", Json.mkObj [
+    ("item", Json.mkObj [("value", Json.mkObj [
+      ("def_id", Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+        ("krate", Json.str krate),
+        ("path", Json.arr #[defIdSeg "TypeNs" trait, defIdSeg "ValueNs" m]),
+        ("kind", Json.str "AssocFn"),
+        ("parent", Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+          ("kind", Json.str "Trait")])])])])])]),
+      ("in_trait", Json.mkObj [("impl", Json.mkObj [("LocalBound", Json.mkObj [])])])])])])])
+
+open Lean in
+/-- The call `krate::Trait::m(a, b)`. -/
+def traitMethodCallJson (krate trait m : String) : Json :=
+  haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", traitMethodFnJson krate trait m),
+    ("args", Json.arr #[haxVarRef "a", haxVarRef "b"])])])
+
+/-- The app head of the typed parse of `j` under the nominal crates `ks`. -/
+def nominalCallHead (ks : List String) (j : Lean.Json) : Option String :=
+  match HaxAdapter.parseHaxTExpr j { nominalKrates := ks } with
+  | .ok (.mk (.app f _) _) => some f
+  | _ => none
+
+-- `Field::mul` of `primeir_hax` on a type parameter carries its trait and crate.
+#guard nominalCallHead ["primeir_hax"] (traitMethodCallJson "primeir_hax" "Field" "mul")
+  == some "primeir_hax::Field::mul"
+-- Without nominal crates the head is the bare method name.
+#guard nominalCallHead [] (traitMethodCallJson "primeir_hax" "Field" "mul") == some "mul"
+-- The integer `mul` (`core::ops::Mul::mul`) keeps its head.
+#guard nominalCallHead ["primeir_hax"] (traitMethodCallJson "core" "Mul" "mul") == some "mul"
+-- Unqualifying inverts the qualification and leaves other heads alone.
+#guard HaxAdapter.unqualifyNominalHead ["primeir_hax"] "primeir_hax::Field::mul" == "mul"
+#guard HaxAdapter.unqualifyNominalHead ["primeir_hax"] "RangeInclusive::new"
+  == "RangeInclusive::new"
+
+/-- `fn f<F: Field>(a: F, b: F) -> F { a.mul(b) }` with the qualified head. -/
+def qualifiedMulFn : TExpr :=
+  .mk (.letBind "a" (.mk (.var "a") typeParamTy)
+    (.mk (.letBind "b" (.mk (.var "b") typeParamTy)
+      (.mk (.app "primeir_hax::Field::mul"
+        [.mk (.var "a") typeParamTy, .mk (.var "b") typeParamTy]) typeParamTy))
+      typeParamTy)) typeParamTy
+
+-- The file printed from the qualified head is the file of the bare head with the
+-- head qualified in the two literals only.
+#guard toLeanCertifiedFileTyped [("f", qualifiedMulFn)] "Test" [] [] []
+    (nominalKrates := ["primeir_hax"]) ==
+  (toLeanCertifiedFileTyped [("f", mulFnTypeParam)] "Test" [] [] []).replace
+    "\"mul\"" "\"primeir_hax::Field::mul\""
+
 end Hax.EmitterRegressions
