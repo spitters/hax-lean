@@ -1347,8 +1347,9 @@ def extractExprType (j : Json) : ImpType :=
 
 /-- The width tag (`intTypeTag?`) of a hax expression's `ty` field: `some t` for an
     integer type, `none` otherwise. Used by the `Binary`, `AssignOp` and `Unary`
-    parsers to annotate width-sensitive operators (`>>`, `^`, `&`, `|`, `!`) and the
-    sign-sensitive `/` and `%` with the width and signedness of their operand. -/
+    parsers to annotate the arithmetic operators (`+`, `-`, `*`, `/`, `%`) and the
+    width-sensitive operators (`>>`, `^`, `&`, `|`, `!`) with the width and
+    signedness of their operand. -/
 def extractExprWidth (j : Json) : Option String :=
   intTypeTag? (extractExprType j)
 
@@ -1357,15 +1358,19 @@ def extractExprWidth (j : Json) : Option String :=
 def extractCastTag (srcJ outerJ : Json) : Option String :=
   castTag? (extractExprType srcJ) (extractExprType outerJ)
 
-/-- Suffix an operator name with the width tag of its operand: every
-    width-sensitive operator when the tag is known, and `/`, `%` when the operand
-    is signed (the unsigned and untyped `/`, `%` agree with Rust). -/
+/-- Suffix an operator name with the width tag of its operand when the tag is
+    known: the checked arithmetic operators `Add`, `Sub`, `Mul`, `Div`, `Rem`,
+    whose overflow and division by zero depend on the operand type, and the
+    bitwise operators, shifts, wrapping operations and rotations. The method
+    names `div`, `rem` take the tag of a signed operand only. An operator on an
+    operand of unknown or non-integer type keeps its name. -/
 def annotateOpWidth (op : String) (width : Option String) : String :=
-  let widthSensitive := ["BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Not",
+  let widthSensitive := ["Add", "Sub", "Mul", "Div", "Rem",
+                         "BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Not",
                          "bitand", "bitor", "bitxor", "shl", "shr", "bitnot",
                          "wrapping_add", "wrapping_sub", "wrapping_mul", "wrapping_neg",
                          "rotate_right", "rotate_left"]
-  let signSensitive := ["Div", "Rem", "div", "rem"]
+  let signSensitive := ["div", "rem"]
   if widthSensitive.contains op then
     match width with
     | some w => s!"{op}#{w}"

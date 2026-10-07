@@ -724,6 +724,44 @@ def sintMulOp (w : Nat) (a b : Int) : Option Value :=
 def uintSubOp (w : Nat) (a b : Int) : Option Value :=
   if 0 ≤ b ∧ b ≤ a ∧ a < 2 ^ w then some (.int (a - b)) else none
 
+/-- The checked addition of Rust `u<w>` on `int` values: `a + b` when `0 ≤ a`, `0 ≤ b`
+    and `a + b < 2^w` (both operands are then below `2^w`), `none` otherwise, where Rust
+    panics. -/
+def uintAddOp (w : Nat) (a b : Int) : Option Value :=
+  if 0 ≤ a ∧ 0 ≤ b ∧ a + b < 2 ^ w then some (.int (a + b)) else none
+
+/-- The checked multiplication of Rust `u<w>` on `int` values: `a * b` when `a`, `b` and
+    `a * b` lie in `[0, 2^w)`, `none` otherwise, where Rust panics. -/
+def uintMulOp (w : Nat) (a b : Int) : Option Value :=
+  if 0 ≤ a ∧ a < 2 ^ w ∧ 0 ≤ b ∧ b < 2 ^ w ∧ a * b < 2 ^ w then some (.int (a * b))
+  else none
+
+/-- The division `/` of Rust `u<w>` on `int` values: the quotient `a / b` for `a` in
+    `[0, 2^w)` and `b` in `(0, 2^w)`, `none` otherwise; at `b = 0` Rust panics. -/
+def uintDivOp (w : Nat) (a b : Int) : Option Value :=
+  if 0 ≤ a ∧ a < 2 ^ w ∧ 0 < b ∧ b < 2 ^ w then some (.int (a / b)) else none
+
+/-- The remainder `%` of Rust `u<w>` on `int` values: `a % b` for `a` in `[0, 2^w)` and
+    `b` in `(0, 2^w)`, `none` otherwise; at `b = 0` Rust panics. -/
+def uintRemOp (w : Nat) (a b : Int) : Option Value :=
+  if 0 ≤ a ∧ a < 2 ^ w ∧ 0 < b ∧ b < 2 ^ w then some (.int (a % b)) else none
+
+/-- The division `/` of Rust `i<w>` on `int` values: the quotient rounded towards zero
+    (`Int.tdiv`) for `a`, `b` in `[-2^(w-1), 2^(w-1))` with `b ≠ 0` and not
+    `a = -2^(w-1)`, `b = -1`; `none` otherwise, where Rust panics. -/
+def sintDivOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ -2 ^ (w - 1) ≤ b ∧ b < 2 ^ (w - 1) ∧
+      b ≠ 0 ∧ ¬(a = -2 ^ (w - 1) ∧ b = -1) then some (.int (a.tdiv b))
+  else none
+
+/-- The remainder `%` of Rust `i<w>` on `int` values: the remainder with the sign of the
+    dividend (`Int.tmod`) for `a`, `b` in `[-2^(w-1), 2^(w-1))` with `b ≠ 0` and not
+    `a = -2^(w-1)`, `b = -1`; `none` otherwise, where Rust panics. -/
+def sintRemOp (w : Nat) (a b : Int) : Option Value :=
+  if -2 ^ (w - 1) ≤ a ∧ a < 2 ^ (w - 1) ∧ -2 ^ (w - 1) ≤ b ∧ b < 2 ^ (w - 1) ∧
+      b ≠ 0 ∧ ¬(a = -2 ^ (w - 1) ∧ b = -1) then some (.int (a.tmod b))
+  else none
+
 /-- The left shift `<<` of Rust `i<w>` on `int` values: for `a` in `[-2^(w-1), 2^(w-1))`
     and an amount `0 ≤ b < w`, the product `a · 2^b` in two's complement modulo `2^w`
     (`Int.bmod`), the bits shifted out discarded; `none` otherwise, where the operand is
@@ -759,7 +797,12 @@ def sintShrOp (w : Nat) (a b : Int) : Option Value :=
       subtraction `sintSubOp` of the signed type (`isize` `64` bits wide), and `Sub#u128`
       the checked subtraction `uintSubOp 128`;
     * `Add#i<w>` and `Mul#i<w>` for the same widths, the checked addition `sintAddOp` and
-      multiplication `sintMulOp` of the signed type. -/
+      multiplication `sintMulOp` of the signed type;
+    * `Add#t`, `Sub#t`, `Mul#t`, `Div#t`, `Rem#t` for the unsigned tags
+      `t ∈ {8, 16, 32, 64, 128, size}`, the checked operations `uintAddOp`, `uintSubOp`,
+      `uintMulOp`, `uintDivOp`, `uintRemOp` of the unsigned type (`usize` `64` bits wide);
+    * `Div#i<w>` and `Rem#i<w>` for the signed widths, the operations `sintDivOp` and
+      `sintRemOp`. -/
 def hax64CmpOps : Builtins
   | "Lt", [.int a, .int b] => some (.bool (decide (a < b)))
   | "lt", [.int a, .int b] => some (.bool (decide (a < b)))
@@ -803,6 +846,48 @@ def hax64CmpOps : Builtins
       if x + y < 2 ^ 64 then some (x + y) else none
   | "Sub", [.int a, .int b] => u64BinOp a b fun x y => if y ≤ x then some (x - y) else none
   | "sub", [.int a, .int b] => u64BinOp a b fun x y => if y ≤ x then some (x - y) else none
+  | "Add#8", [.int a, .int b] => uintAddOp 8 a b
+  | "Add#16", [.int a, .int b] => uintAddOp 16 a b
+  | "Add#32", [.int a, .int b] => uintAddOp 32 a b
+  | "Add#64", [.int a, .int b] => uintAddOp 64 a b
+  | "Add#128", [.int a, .int b] => uintAddOp 128 a b
+  | "Add#size", [.int a, .int b] => uintAddOp 64 a b
+  | "Sub#8", [.int a, .int b] => uintSubOp 8 a b
+  | "Sub#16", [.int a, .int b] => uintSubOp 16 a b
+  | "Sub#32", [.int a, .int b] => uintSubOp 32 a b
+  | "Sub#64", [.int a, .int b] => uintSubOp 64 a b
+  | "Sub#128", [.int a, .int b] => uintSubOp 128 a b
+  | "Sub#size", [.int a, .int b] => uintSubOp 64 a b
+  | "Mul#8", [.int a, .int b] => uintMulOp 8 a b
+  | "Mul#16", [.int a, .int b] => uintMulOp 16 a b
+  | "Mul#32", [.int a, .int b] => uintMulOp 32 a b
+  | "Mul#64", [.int a, .int b] => uintMulOp 64 a b
+  | "Mul#128", [.int a, .int b] => uintMulOp 128 a b
+  | "Mul#size", [.int a, .int b] => uintMulOp 64 a b
+  | "Div#8", [.int a, .int b] => uintDivOp 8 a b
+  | "Div#16", [.int a, .int b] => uintDivOp 16 a b
+  | "Div#32", [.int a, .int b] => uintDivOp 32 a b
+  | "Div#64", [.int a, .int b] => uintDivOp 64 a b
+  | "Div#128", [.int a, .int b] => uintDivOp 128 a b
+  | "Div#size", [.int a, .int b] => uintDivOp 64 a b
+  | "Rem#8", [.int a, .int b] => uintRemOp 8 a b
+  | "Rem#16", [.int a, .int b] => uintRemOp 16 a b
+  | "Rem#32", [.int a, .int b] => uintRemOp 32 a b
+  | "Rem#64", [.int a, .int b] => uintRemOp 64 a b
+  | "Rem#128", [.int a, .int b] => uintRemOp 128 a b
+  | "Rem#size", [.int a, .int b] => uintRemOp 64 a b
+  | "Div#i8", [.int a, .int b] => sintDivOp 8 a b
+  | "Div#i16", [.int a, .int b] => sintDivOp 16 a b
+  | "Div#i32", [.int a, .int b] => sintDivOp 32 a b
+  | "Div#i64", [.int a, .int b] => sintDivOp 64 a b
+  | "Div#i128", [.int a, .int b] => sintDivOp 128 a b
+  | "Div#isize", [.int a, .int b] => sintDivOp 64 a b
+  | "Rem#i8", [.int a, .int b] => sintRemOp 8 a b
+  | "Rem#i16", [.int a, .int b] => sintRemOp 16 a b
+  | "Rem#i32", [.int a, .int b] => sintRemOp 32 a b
+  | "Rem#i64", [.int a, .int b] => sintRemOp 64 a b
+  | "Rem#i128", [.int a, .int b] => sintRemOp 128 a b
+  | "Rem#isize", [.int a, .int b] => sintRemOp 64 a b
   | _, _ => none
 
 /-- The narrow calls of `u64` code beside the arms of `hax64WordOps`, on `int`
@@ -1454,6 +1539,292 @@ theorem hax64WordOps_Sub : hax64WordOps "Sub" [.int a, .int b] =
 
 theorem hax64WordOps_sub : hax64WordOps "sub" [.int a, .int b] =
     u64BinOp a b fun x y => if y ≤ x then some (x - y) else none := rfl
+
+/-! The checked arithmetic at an unsigned width tag and the signed division and
+remainder: the arms, as equations. -/
+
+theorem hax64WordOps_add8 : hax64WordOps "Add#8" [.int a, .int b] = uintAddOp 8 a b := rfl
+theorem hax64WordOps_add16 : hax64WordOps "Add#16" [.int a, .int b] = uintAddOp 16 a b := rfl
+theorem hax64WordOps_add32 : hax64WordOps "Add#32" [.int a, .int b] = uintAddOp 32 a b := rfl
+theorem hax64WordOps_add64 : hax64WordOps "Add#64" [.int a, .int b] = uintAddOp 64 a b := rfl
+theorem hax64WordOps_add128 : hax64WordOps "Add#128" [.int a, .int b] = uintAddOp 128 a b :=
+  rfl
+theorem hax64WordOps_addSize : hax64WordOps "Add#size" [.int a, .int b] = uintAddOp 64 a b :=
+  rfl
+
+theorem hax64WordOps_sub8 : hax64WordOps "Sub#8" [.int a, .int b] = uintSubOp 8 a b := rfl
+theorem hax64WordOps_sub16 : hax64WordOps "Sub#16" [.int a, .int b] = uintSubOp 16 a b := rfl
+theorem hax64WordOps_sub32 : hax64WordOps "Sub#32" [.int a, .int b] = uintSubOp 32 a b := rfl
+theorem hax64WordOps_sub64 : hax64WordOps "Sub#64" [.int a, .int b] = uintSubOp 64 a b := rfl
+theorem hax64WordOps_sub128 : hax64WordOps "Sub#128" [.int a, .int b] = uintSubOp 128 a b :=
+  rfl
+theorem hax64WordOps_subSize : hax64WordOps "Sub#size" [.int a, .int b] = uintSubOp 64 a b :=
+  rfl
+
+theorem hax64WordOps_mul8 : hax64WordOps "Mul#8" [.int a, .int b] = uintMulOp 8 a b := rfl
+theorem hax64WordOps_mul16 : hax64WordOps "Mul#16" [.int a, .int b] = uintMulOp 16 a b := rfl
+theorem hax64WordOps_mul32 : hax64WordOps "Mul#32" [.int a, .int b] = uintMulOp 32 a b := rfl
+theorem hax64WordOps_mul64 : hax64WordOps "Mul#64" [.int a, .int b] = uintMulOp 64 a b := rfl
+theorem hax64WordOps_mul128 : hax64WordOps "Mul#128" [.int a, .int b] = uintMulOp 128 a b :=
+  rfl
+theorem hax64WordOps_mulSize : hax64WordOps "Mul#size" [.int a, .int b] = uintMulOp 64 a b :=
+  rfl
+
+theorem hax64WordOps_div8 : hax64WordOps "Div#8" [.int a, .int b] = uintDivOp 8 a b := rfl
+theorem hax64WordOps_div16 : hax64WordOps "Div#16" [.int a, .int b] = uintDivOp 16 a b := rfl
+theorem hax64WordOps_div32 : hax64WordOps "Div#32" [.int a, .int b] = uintDivOp 32 a b := rfl
+theorem hax64WordOps_div64 : hax64WordOps "Div#64" [.int a, .int b] = uintDivOp 64 a b := rfl
+theorem hax64WordOps_div128 : hax64WordOps "Div#128" [.int a, .int b] = uintDivOp 128 a b :=
+  rfl
+theorem hax64WordOps_divSize : hax64WordOps "Div#size" [.int a, .int b] = uintDivOp 64 a b :=
+  rfl
+
+theorem hax64WordOps_rem8 : hax64WordOps "Rem#8" [.int a, .int b] = uintRemOp 8 a b := rfl
+theorem hax64WordOps_rem16 : hax64WordOps "Rem#16" [.int a, .int b] = uintRemOp 16 a b := rfl
+theorem hax64WordOps_rem32 : hax64WordOps "Rem#32" [.int a, .int b] = uintRemOp 32 a b := rfl
+theorem hax64WordOps_rem64 : hax64WordOps "Rem#64" [.int a, .int b] = uintRemOp 64 a b := rfl
+theorem hax64WordOps_rem128 : hax64WordOps "Rem#128" [.int a, .int b] = uintRemOp 128 a b :=
+  rfl
+theorem hax64WordOps_remSize : hax64WordOps "Rem#size" [.int a, .int b] = uintRemOp 64 a b :=
+  rfl
+
+theorem hax64WordOps_divI8 : hax64WordOps "Div#i8" [.int a, .int b] = sintDivOp 8 a b := rfl
+theorem hax64WordOps_divI16 : hax64WordOps "Div#i16" [.int a, .int b] = sintDivOp 16 a b :=
+  rfl
+theorem hax64WordOps_divI32 : hax64WordOps "Div#i32" [.int a, .int b] = sintDivOp 32 a b :=
+  rfl
+theorem hax64WordOps_divI64 : hax64WordOps "Div#i64" [.int a, .int b] = sintDivOp 64 a b :=
+  rfl
+theorem hax64WordOps_divI128 : hax64WordOps "Div#i128" [.int a, .int b] = sintDivOp 128 a b :=
+  rfl
+theorem hax64WordOps_divIsize : hax64WordOps "Div#isize" [.int a, .int b] = sintDivOp 64 a b :=
+  rfl
+
+theorem hax64WordOps_remI8 : hax64WordOps "Rem#i8" [.int a, .int b] = sintRemOp 8 a b := rfl
+theorem hax64WordOps_remI16 : hax64WordOps "Rem#i16" [.int a, .int b] = sintRemOp 16 a b :=
+  rfl
+theorem hax64WordOps_remI32 : hax64WordOps "Rem#i32" [.int a, .int b] = sintRemOp 32 a b :=
+  rfl
+theorem hax64WordOps_remI64 : hax64WordOps "Rem#i64" [.int a, .int b] = sintRemOp 64 a b :=
+  rfl
+theorem hax64WordOps_remI128 : hax64WordOps "Rem#i128" [.int a, .int b] = sintRemOp 128 a b :=
+  rfl
+theorem hax64WordOps_remIsize : hax64WordOps "Rem#isize" [.int a, .int b] = sintRemOp 64 a b :=
+  rfl
+
+/-- `uintAddOp` on two natural numbers: their sum when it is below `2^w`. -/
+theorem uintAddOp_natCast (w n m : Nat) :
+    uintAddOp w n m = if n + m < 2 ^ w then some (.int ((n + m : Nat))) else none := by
+  unfold uintAddOp
+  by_cases h : n + m < 2 ^ w
+  · rw [if_pos h, if_pos ⟨by omega, by omega, by exact_mod_cast h⟩, Int.natCast_add]
+  · rw [if_neg h, if_neg fun hc => h (by exact_mod_cast hc.2.2)]
+
+/-- `uintSubOp` on two natural numbers: their difference when the subtrahend does not
+    exceed the minuend and the minuend is below `2^w`. -/
+theorem uintSubOp_natCast (w n m : Nat) :
+    uintSubOp w n m = if m ≤ n ∧ n < 2 ^ w then some (.int ((n - m : Nat))) else none := by
+  unfold uintSubOp
+  by_cases h : m ≤ n ∧ n < 2 ^ w
+  · rw [if_pos h, if_pos ⟨by omega, by omega, by exact_mod_cast h.2⟩, Int.natCast_sub h.1]
+  · rw [if_neg h, if_neg fun hc => h ⟨by omega, by exact_mod_cast hc.2.2⟩]
+
+/-- `uintMulOp` on two natural numbers below `2^w`: their product when it is below
+    `2^w`. -/
+theorem uintMulOp_natCast (w n m : Nat) :
+    uintMulOp w n m =
+      if n < 2 ^ w ∧ m < 2 ^ w ∧ n * m < 2 ^ w then some (.int ((n * m : Nat))) else none := by
+  unfold uintMulOp
+  by_cases h : n < 2 ^ w ∧ m < 2 ^ w ∧ n * m < 2 ^ w
+  · rw [if_pos h, if_pos ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.1,
+      by exact_mod_cast h.2.2⟩, Int.natCast_mul]
+  · rw [if_neg h, if_neg fun hc => h ⟨by exact_mod_cast hc.2.1, by exact_mod_cast hc.2.2.2.1,
+      by exact_mod_cast hc.2.2.2.2⟩]
+
+/-- `uintDivOp` on two natural numbers below `2^w`: their quotient when the divisor is
+    positive. -/
+theorem uintDivOp_natCast (w n m : Nat) :
+    uintDivOp w n m =
+      if n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w then some (.int ((n / m : Nat))) else none := by
+  unfold uintDivOp
+  by_cases h : n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w
+  · rw [if_pos h, if_pos ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.2⟩,
+      Int.natCast_ediv]
+  · rw [if_neg h, if_neg fun hc => h ⟨by exact_mod_cast hc.2.1, by omega,
+      by exact_mod_cast hc.2.2.2⟩]
+
+/-- `uintRemOp` on two natural numbers below `2^w`: the remainder when the divisor is
+    positive. -/
+theorem uintRemOp_natCast (w n m : Nat) :
+    uintRemOp w n m =
+      if n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w then some (.int ((n % m : Nat))) else none := by
+  unfold uintRemOp
+  by_cases h : n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w
+  · rw [if_pos h, if_pos ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.2⟩,
+      Int.natCast_emod]
+  · rw [if_neg h, if_neg fun hc => h ⟨by exact_mod_cast hc.2.1, by omega,
+      by exact_mod_cast hc.2.2.2⟩]
+
+/-- A value of `uintAddOp` is the sum of two natural numbers and is below `2^w`. -/
+theorem uintAddOp_some {w : Nat} {a b : Int} {v : Value} (h : uintAddOp w a b = some v) :
+    ∃ x y : Nat, a = x ∧ b = y ∧ x + y < 2 ^ w ∧ v = .int ((x + y : Nat)) := by
+  have hc : 0 ≤ a ∧ 0 ≤ b := by
+    unfold uintAddOp at h
+    by_cases hc : 0 ≤ a ∧ 0 ≤ b ∧ a + b < 2 ^ w
+    · exact ⟨hc.1, hc.2.1⟩
+    · rw [if_neg hc] at h; cases h
+  obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
+  obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
+  rw [uintAddOp_natCast] at h
+  by_cases hs : x + y < 2 ^ w
+  · rw [if_pos hs] at h
+    exact ⟨x, y, rfl, rfl, hs, (Option.some.inj h).symm⟩
+  · rw [if_neg hs] at h; cases h
+
+/-- A value of `uintSubOp` is the difference of two natural numbers, the subtrahend at
+    most the minuend and the minuend below `2^w`. -/
+theorem uintSubOp_some {w : Nat} {a b : Int} {v : Value} (h : uintSubOp w a b = some v) :
+    ∃ x y : Nat, a = x ∧ b = y ∧ y ≤ x ∧ x < 2 ^ w ∧ v = .int ((x - y : Nat)) := by
+  have hc : 0 ≤ a ∧ 0 ≤ b := by
+    unfold uintSubOp at h
+    by_cases hc : 0 ≤ b ∧ b ≤ a ∧ a < 2 ^ w
+    · exact ⟨by omega, hc.1⟩
+    · rw [if_neg hc] at h; cases h
+  obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
+  obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
+  rw [uintSubOp_natCast] at h
+  by_cases hs : y ≤ x ∧ x < 2 ^ w
+  · rw [if_pos hs] at h
+    exact ⟨x, y, rfl, rfl, hs.1, hs.2, (Option.some.inj h).symm⟩
+  · rw [if_neg hs] at h; cases h
+
+/-- A value of `uintMulOp` is the product of two natural numbers below `2^w` and is
+    below `2^w`. -/
+theorem uintMulOp_some {w : Nat} {a b : Int} {v : Value} (h : uintMulOp w a b = some v) :
+    ∃ x y : Nat, a = x ∧ b = y ∧ x < 2 ^ w ∧ y < 2 ^ w ∧ x * y < 2 ^ w ∧
+      v = .int ((x * y : Nat)) := by
+  have hc : 0 ≤ a ∧ 0 ≤ b := by
+    unfold uintMulOp at h
+    by_cases hc : 0 ≤ a ∧ a < 2 ^ w ∧ 0 ≤ b ∧ b < 2 ^ w ∧ a * b < 2 ^ w
+    · exact ⟨hc.1, hc.2.2.1⟩
+    · rw [if_neg hc] at h; cases h
+  obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
+  obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
+  rw [uintMulOp_natCast] at h
+  by_cases hs : x < 2 ^ w ∧ y < 2 ^ w ∧ x * y < 2 ^ w
+  · rw [if_pos hs] at h
+    exact ⟨x, y, rfl, rfl, hs.1, hs.2.1, hs.2.2, (Option.some.inj h).symm⟩
+  · rw [if_neg hs] at h; cases h
+
+/-- A value of `uintDivOp` is the quotient of two natural numbers below `2^w`, the
+    divisor positive. -/
+theorem uintDivOp_some {w : Nat} {a b : Int} {v : Value} (h : uintDivOp w a b = some v) :
+    ∃ x y : Nat, a = x ∧ b = y ∧ x < 2 ^ w ∧ 0 < y ∧ y < 2 ^ w ∧
+      v = .int ((x / y : Nat)) := by
+  have hc : 0 ≤ a ∧ 0 ≤ b := by
+    unfold uintDivOp at h
+    by_cases hc : 0 ≤ a ∧ a < 2 ^ w ∧ 0 < b ∧ b < 2 ^ w
+    · exact ⟨hc.1, by omega⟩
+    · rw [if_neg hc] at h; cases h
+  obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
+  obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
+  rw [uintDivOp_natCast] at h
+  by_cases hs : x < 2 ^ w ∧ 0 < y ∧ y < 2 ^ w
+  · rw [if_pos hs] at h
+    exact ⟨x, y, rfl, rfl, hs.1, hs.2.1, hs.2.2, (Option.some.inj h).symm⟩
+  · rw [if_neg hs] at h; cases h
+
+/-- A value of `uintRemOp` is the remainder of two natural numbers below `2^w`, the
+    divisor positive. -/
+theorem uintRemOp_some {w : Nat} {a b : Int} {v : Value} (h : uintRemOp w a b = some v) :
+    ∃ x y : Nat, a = x ∧ b = y ∧ x < 2 ^ w ∧ 0 < y ∧ y < 2 ^ w ∧
+      v = .int ((x % y : Nat)) := by
+  have hc : 0 ≤ a ∧ 0 ≤ b := by
+    unfold uintRemOp at h
+    by_cases hc : 0 ≤ a ∧ a < 2 ^ w ∧ 0 < b ∧ b < 2 ^ w
+    · exact ⟨hc.1, by omega⟩
+    · rw [if_neg hc] at h; cases h
+  obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
+  obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
+  rw [uintRemOp_natCast] at h
+  by_cases hs : x < 2 ^ w ∧ 0 < y ∧ y < 2 ^ w
+  · rw [if_pos hs] at h
+    exact ⟨x, y, rfl, rfl, hs.1, hs.2.1, hs.2.2, (Option.some.inj h).symm⟩
+  · rw [if_neg hs] at h; cases h
+
+/-- A value of `uintAddOp` is a natural number below `2^w`. -/
+theorem uintAddOp_lt {w : Nat} {a b : Int} {v : Value} (h : uintAddOp w a b = some v) :
+    ∃ r : Nat, v = .int r ∧ r < 2 ^ w := by
+  obtain ⟨x, y, -, -, hs, rfl⟩ := uintAddOp_some h
+  exact ⟨x + y, rfl, hs⟩
+
+/-- A value of `uintSubOp` is a natural number below `2^w`. -/
+theorem uintSubOp_lt {w : Nat} {a b : Int} {v : Value} (h : uintSubOp w a b = some v) :
+    ∃ r : Nat, v = .int r ∧ r < 2 ^ w := by
+  obtain ⟨x, y, -, -, -, hx, rfl⟩ := uintSubOp_some h
+  exact ⟨x - y, rfl, Nat.lt_of_le_of_lt (Nat.sub_le x y) hx⟩
+
+/-- A value of `uintMulOp` is a natural number below `2^w`. -/
+theorem uintMulOp_lt {w : Nat} {a b : Int} {v : Value} (h : uintMulOp w a b = some v) :
+    ∃ r : Nat, v = .int r ∧ r < 2 ^ w := by
+  obtain ⟨x, y, -, -, -, -, hs, rfl⟩ := uintMulOp_some h
+  exact ⟨x * y, rfl, hs⟩
+
+/-- A value of `uintDivOp` is a natural number below `2^w`. -/
+theorem uintDivOp_lt {w : Nat} {a b : Int} {v : Value} (h : uintDivOp w a b = some v) :
+    ∃ r : Nat, v = .int r ∧ r < 2 ^ w := by
+  obtain ⟨x, y, -, -, hx, -, -, rfl⟩ := uintDivOp_some h
+  exact ⟨x / y, rfl, Nat.lt_of_le_of_lt (Nat.div_le_self x y) hx⟩
+
+/-- A value of `uintRemOp` is a natural number below `2^w`. -/
+theorem uintRemOp_lt {w : Nat} {a b : Int} {v : Value} (h : uintRemOp w a b = some v) :
+    ∃ r : Nat, v = .int r ∧ r < 2 ^ w := by
+  obtain ⟨x, y, -, -, -, hy0, hy, rfl⟩ := uintRemOp_some h
+  exact ⟨x % y, rfl, Nat.lt_trans (Nat.mod_lt x hy0) hy⟩
+
+/-- The checked addition at `64` bits is the `u64BinOp` of the arm `Add`. -/
+theorem uintAddOp_64 :
+    uintAddOp 64 a b = u64BinOp a b fun x y => if x + y < 2 ^ 64 then some (x + y) else none := by
+  by_cases h : 0 ≤ a ∧ a < 2 ^ 64 ∧ 0 ≤ b ∧ b < 2 ^ 64
+  · obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le h.1
+    obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le h.2.2.1
+    rw [uintAddOp_natCast, u64BinOp_natCast (by omega) (by omega)]
+    by_cases hs : x + y < 2 ^ 64
+    · rw [if_pos hs, if_pos hs]; rfl
+    · rw [if_neg hs, if_neg hs]; rfl
+  · rw [uintAddOp, u64BinOp, if_neg h, if_neg (by omega)]
+
+/-- The checked subtraction at `64` bits is the `u64BinOp` of the arm `Sub`. -/
+theorem uintSubOp_64 :
+    uintSubOp 64 a b = u64BinOp a b fun x y => if y ≤ x then some (x - y) else none := by
+  by_cases h : 0 ≤ a ∧ a < 2 ^ 64 ∧ 0 ≤ b ∧ b < 2 ^ 64
+  · obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le h.1
+    obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le h.2.2.1
+    rw [uintSubOp_natCast, u64BinOp_natCast (by omega) (by omega)]
+    by_cases hs : y ≤ x
+    · rw [if_pos hs, if_pos ⟨hs, by omega⟩]; rfl
+    · rw [if_neg hs, if_neg fun hc => hs hc.1]; rfl
+  · rw [uintSubOp, u64BinOp, if_neg h, if_neg (by omega)]
+
+/-- `Add#64` answers as `Add`. -/
+theorem hax64WordOps_add64_eq_Add :
+    hax64WordOps "Add#64" [.int a, .int b] = hax64WordOps "Add" [.int a, .int b] :=
+  uintAddOp_64 a b
+
+/-- `Add#size` answers as `Add`. -/
+theorem hax64WordOps_addSize_eq_Add :
+    hax64WordOps "Add#size" [.int a, .int b] = hax64WordOps "Add" [.int a, .int b] :=
+  uintAddOp_64 a b
+
+/-- `Sub#64` answers as `Sub`. -/
+theorem hax64WordOps_sub64_eq_Sub :
+    hax64WordOps "Sub#64" [.int a, .int b] = hax64WordOps "Sub" [.int a, .int b] :=
+  uintSubOp_64 a b
+
+/-- `Sub#size` answers as `Sub`. -/
+theorem hax64WordOps_subSize_eq_Sub :
+    hax64WordOps "Sub#size" [.int a, .int b] = hax64WordOps "Sub" [.int a, .int b] :=
+  uintSubOp_64 a b
 
 theorem hax64WordOps_index (vs : List Value) :
     hax64WordOps "index" [.array vs, .int a] = none := rfl

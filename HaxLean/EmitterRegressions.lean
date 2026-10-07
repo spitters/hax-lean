@@ -2031,4 +2031,71 @@ def qualifiedMulFn : TExpr :=
   (toLeanCertifiedFileTyped [("f", mulFnTypeParam)] "Test" [] [] []).replace
     "\"mul\"" "\"primeir_hax::Field::mul\""
 
+/-! ## Width tags of the checked arithmetic operators
+
+`+`, `-`, `*`, `/`, `%` on an integer operand carry the tag of the operand type
+(`Add#32`, `Mul#64`, `Sub#i8`, `Add#size`), in a binary node and in a compound
+assignment; on an operand of unknown type the operator keeps its name. The
+tagged head prints as the untagged operator. -/
+
+open Lean in
+/-- A read of the local variable `n` of type `ty`. -/
+def haxVarRefT (ty : Json) (n : String) : Json :=
+  haxNodeT ty (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str n)])])])
+
+open Lean in
+/-- `a op b` for variables `a`, `b` of type `ty`. -/
+def binaryJson (op : String) (ty : Json) : Json :=
+  haxNodeT ty (Json.mkObj [("Binary", Json.mkObj [("op", Json.str op),
+    ("lhs", haxVarRefT ty "a"), ("rhs", haxVarRefT ty "b")])])
+
+open Lean in
+/-- `a + b` for variables `a`, `b` with no type. -/
+def untypedAddJson : Json :=
+  haxNode (Json.mkObj [("Binary", Json.mkObj [("op", Json.str "Add"),
+    ("lhs", haxVarRef "a"), ("rhs", haxVarRef "b")])])
+
+-- A `u32` addition, a `u64` multiplication, a signed subtraction, a `usize` addition.
+#guard (parseT (binaryJson "Add" (intTyJson "Uint" "U32"))).erase
+  == .app "Add#32" [.var "a", .var "b"]
+#guard (parseT (binaryJson "Mul" (intTyJson "Uint" "U64"))).erase
+  == .app "Mul#64" [.var "a", .var "b"]
+#guard (parseT (binaryJson "Sub" (intTyJson "Int" "I8"))).erase
+  == .app "Sub#i8" [.var "a", .var "b"]
+#guard (parseT (binaryJson "Add" (intTyJson "Uint" "Usize"))).erase
+  == .app "Add#size" [.var "a", .var "b"]
+-- Unsigned and signed division and remainder.
+#guard (parseT (binaryJson "Div" (intTyJson "Uint" "U16"))).erase
+  == .app "Div#16" [.var "a", .var "b"]
+#guard (parseT (binaryJson "Rem" (intTyJson "Int" "I32"))).erase
+  == .app "Rem#i32" [.var "a", .var "b"]
+-- An operand with no type keeps the operator untagged.
+#guard (parseT untypedAddJson).erase == .app "Add" [.var "a", .var "b"]
+-- The compound assignment `a += b` at `u32`.
+#guard (parseT (assignOpJson "AddAssign" (haxVarRefT (intTyJson "Uint" "U32") "a")
+    (haxVarRefT (intTyJson "Uint" "U32") "b"))).erase
+  == .assign "a" (.app "Add#32" [.var "a", .var "b"])
+
+-- The tagged heads print as the untagged operators.
+#guard runtimeName "Add#32" == "Hax.add" && runtimeName "Sub#size" == "Hax.sub"
+  && runtimeName "Mul#64" == "Hax.mul" && runtimeName "Div#8" == "Hax.div"
+  && runtimeName "Rem#128" == "Hax.rem" && runtimeName "Add#i32" == "Hax.add"
+  && runtimeName "Div#i32" == "Hax.div_iw 32"
+#guard arithBase "Add#32" == "Add" && arithBase "Div#16" == "Div"
+  && arithBase "Div#i32" == "Div#i32" && arithBase "mul#dep" == "mul#dep"
+  && arithBase "BitXor#8" == "BitXor#8"
+
+/-- `fn f(a: u32, b: u32) -> u32 { a + b }` with the addition named `head`. -/
+def addFnU32 (head : String) : TExpr :=
+  let u32 : ImpType := .uint .w32
+  .mk (.letBind "a" (.mk (.var "a") u32)
+    (.mk (.letBind "b" (.mk (.var "b") u32)
+      (.mk (.app head [.mk (.var "a") u32, .mk (.var "b") u32]) u32)) u32)) u32
+
+-- The file printed from the tagged head is the file of the untagged head with
+-- the head tagged in the literals only.
+#guard toLeanCertifiedFileTyped [("f", addFnU32 "Add#32")] "Test" [] [] [] ==
+  (toLeanCertifiedFileTyped [("f", addFnU32 "Add")] "Test" [] [] []).replace
+    "\"Add\"" "\"Add#32\""
+
 end Hax.EmitterRegressions

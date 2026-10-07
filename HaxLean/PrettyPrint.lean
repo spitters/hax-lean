@@ -117,6 +117,9 @@ def widthAwareRuntime (f : String) : String :=
         | "cast"              => s!"Hax.cast_iw {iw}"
         | "div" | "Div"       => s!"Hax.div_iw {iw}"
         | "rem" | "Rem"       => s!"Hax.rem_iw {iw}"
+        | "Add"               => "Hax.add"
+        | "Sub"               => "Hax.sub"
+        | "Mul"               => "Hax.mul"
         | "to_be_bytes"        => s!"Hax.to_be_bytes_iw {iw}"
         | "to_le_bytes"        => s!"Hax.to_le_bytes_iw {iw}"
         | "from_be_bytes"      => s!"Hax.from_be_bytes_iw {iw}"
@@ -140,6 +143,12 @@ def widthAwareRuntime (f : String) : String :=
       | "bitxor" | "BitXor" => s!"Hax.bitxor_w {w}"
       | "bitnot" | "Not"    => s!"Hax.bitnot_w {w}"
       | "cast"               => s!"Hax.castVal_w {w}"
+      -- The checked arithmetic operators render as on `Int`, at every width.
+      | "Add"                => "Hax.add"
+      | "Sub"                => "Hax.sub"
+      | "Mul"                => "Hax.mul"
+      | "Div"                => "Hax.div"
+      | "Rem"                => "Hax.rem"
       -- Inherent integer methods whose meaning depends on the width: the
       -- adapter suffixes them (`to_be_bytes#32`) and the runtime carries a
       -- width-indexed builtin for each, so they are not Deps fields.
@@ -152,6 +161,21 @@ def widthAwareRuntime (f : String) : String :=
       | _ => s!"Hax.{op}"
     | _ => f
   else sanitizeName f
+
+/-- The operator of a width-tagged checked arithmetic head that renders as the
+    untagged operator: `Add#t`, `Sub#t`, `Mul#t` at every integer tag `t`, and
+    `Div#t`, `Rem#t` at an unsigned tag (`Add#32` is `Add`, `Div#i32` is kept,
+    since it renders as `Hax.div_iw`). Every other head is returned unchanged.
+    The classifications of an integer operation by name read a head through
+    this function. -/
+def arithBase (f : String) : String :=
+  match f.splitOn "#" with
+  | [op, tag] =>
+    if tag == "dep" then f
+    else if op == "Add" || op == "Sub" || op == "Mul" then op
+    else if (op == "Div" || op == "Rem") && !tag.startsWith "i" then op
+    else f
+  | _ => f
 
 /-- Map builtin function names to qualified Lean 4 identifiers.
     Known builtins get `Hax.` prefix; constructors map to Lean equivalents. -/
@@ -2809,7 +2833,7 @@ where
         "castVal", "cast", "min", "max"]
       let isVar (a : ImpExpr) := match a with
         | ImpExpr.var v => v == varName | _ => false
-      let isIntArg := allArgsIntFns.any (f == ·) && args.any isVar
+      let isIntArg := allArgsIntFns.any (arithBase f == ·) && args.any isVar
       let posSpecific :=
         (f == "index" || f == "array_update") && args.length > 1 &&
           (match args.toArray[1]? with | some a => isVar a | _ => false)
@@ -2834,7 +2858,7 @@ def isIntExprBase : ImpExpr → Bool
   | .lit (.uintLit _ _) => true
   | .lit (.sintLit _ _) => true
   | .lit (.bool _) => true
-  | .app f _ => match f with
+  | .app f _ => match arithBase f with
     | "add" | "sub" | "mul" | "div" | "rem" | "neg"
     | "Add" | "Sub" | "Mul" | "Div" | "Rem" | "Neg"
     -- Indexing returns Int (element of Array Int)
@@ -2890,7 +2914,7 @@ partial def isVarUsedAsInt (varName : String) : ImpExpr → Bool
       | .var v => v == varName
       | .app n [] => n == varName  -- 0-arity call = constant
       | _ => false
-    let allArgsInt := allArgsIntFns.any (f == ·) && args.any argIsVarName
+    let allArgsInt := allArgsIntFns.any (arithBase f == ·) && args.any argIsVarName
     -- Helper: check if arg at position i is .var varName (or 0-arity .app)
     let argIsVar (i : Nat) := match args.toArray[i]? with
       | some a => argIsVarName a
@@ -3288,7 +3312,7 @@ partial def detectReturnIsInt (fname : String)
   | .app f args =>
     let inArgs := args.any (detectReturnIsInt fname paramTypeMap structMeta fnBody defsMap callRetTypes)
     -- Check if fname's result is used directly as an Int-typed arg
-    let directUse := match f with
+    let directUse := match arithBase f with
       -- array_update arr idx val — val is Int only if arr has Int element type (flat)
       -- For nested arrays (Array (Array Int)), val is Array Int, not Int.
       | "array_update" => if args.length == 3 then
