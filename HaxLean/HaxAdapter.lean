@@ -399,6 +399,12 @@ structure ImplSelfTypeMap where
       extracted crate, takes the head `krate::Trait::h`, where `h` is the head
       the call takes when the list is empty (`nominalTraitQualifier?`). -/
   nominalKrates : List String := []
+  /-- The local `impl primeir_hax::Field for T` blocks whose self type `T` is
+      a newtype over `u64`, as `(impl interning id, T, modulus)`
+      (`buildFieldImplMap`). A call of a method of `fieldTaggedMethods`
+      resolved to one of them takes the head `fieldTagHead` of its modulus,
+      and a read of its `ZERO` or `ONE` is the literal `0` or `1`. -/
+  fieldImpls : List (Nat × String × Nat) := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -899,6 +905,41 @@ def resolveTraitImplCall (funJ : Json) (m : ImplSelfTypeMap) : Option String := 
   let entry ← m.traitImplMethods.find? fun p => p.1 == implId && p.2.1 == method
   some entry.2.2
 
+/-- The methods of `primeir_hax::Field` whose calls take a modulus-tagged head,
+    with their arities. -/
+def fieldTaggedMethods : List (String × Nat) :=
+  [("add", 2), ("sub", 2), ("mul", 2), ("neg", 1), ("square", 1), ("double", 1)]
+
+/-- The head `<method>#p<modulus>` of a field operation in the prime field of
+    modulus `p`, the modulus in decimal: `mul#p2013265921`. -/
+def fieldTagHead (method : String) (p : Nat) : String :=
+  method ++ "#p" ++ toString p
+
+/-- The modulus-tagged head (`fieldTagHead`) of a call with `nArgs` arguments
+    of a method of `fieldTaggedMethods` that resolves to an `impl` of
+    `m.fieldImpls`, when `nArgs` is the method's arity. `none` for any other
+    call. -/
+def fieldTaggedHead? (funJ : Json) (nArgs : Nat) (m : ImplSelfTypeMap) : Option String := do
+  guard (!m.fieldImpls.isEmpty)
+  let (implId, method) ← traitCallImplMethod funJ
+  let arity ← fieldTaggedMethods.lookup method
+  guard (arity == nArgs)
+  let entry ← m.fieldImpls.find? (·.1 == implId)
+  pure (fieldTagHead method entry.2.2)
+
+/-- The value of a read of the associated constant `ZERO` (`0`) or `ONE` (`1`)
+    of an `impl` of `m.fieldImpls`, from the `NamedConst` or `GlobalName` node
+    of the read. `none` for any other read. -/
+def fieldConstLit? (globalName : Json) (m : ImplSelfTypeMap) : Option Int := do
+  guard (!m.fieldImpls.isEmpty)
+  let (implId, item) ← traitCallImplMethod
+    (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])])
+  guard (m.fieldImpls.any (·.1 == implId))
+  match item with
+  | "ZERO" => some 0
+  | "ONE" => some 1
+  | _ => none
+
 /-- The qualifier `krate::Trait` of a call whose callee is a method declared by
     the trait `Trait` of a crate `krate` in `krates`: the callee's `DefId` has
     kind `AssocFn`, its parent has kind `Trait`, and `Trait` is the
@@ -1025,8 +1066,12 @@ def classItemRef? (f : String) : Option String :=
     class and taken at the bound's type (`classItemHead`) when the bound's
     self type is a type variable, since a nullary class item does not
     determine its instance and two classes may declare an item of one name; a
-    variable otherwise. -/
+    variable otherwise. A read of `ZERO` or `ONE` of a field `impl`
+    (`fieldConstLit?`) is the literal `0` or `1`. -/
 def constReadKind (globalName : Json) (m : ImplSelfTypeMap) (name : String) : TExprKind :=
+  match fieldConstLit? globalName m with
+  | some v => .lit (.int v)
+  | none =>
   match resolveTraitImplConstRef globalName m with
   | some n => .var n
   | none =>
@@ -3377,6 +3422,10 @@ where
         return .unitVal
       let argsJ ← data.getObjValAs? (Array Json) "args"
       let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a implMap)
+      -- A call of a method of `primeir_hax::Field` resolved to a field `impl`
+      -- of the crate takes its modulus-tagged head (`fieldTaggedHead?`).
+      if let some h := fieldTaggedHead? funJ args.length implMap then
+        return .app h args
       -- A `Vec` passed through a `deref_mut` re-borrow is the `Vec` place
       -- itself (`tDerefMutArg`), so a write-back through the argument reaches
       -- its root variable.
@@ -4615,6 +4664,221 @@ partial def parseImplConstTExpr (implItem : Json) (implMap : ImplSelfTypeMap) :
     return some (body, processed, ⟨[], parseHaxType tyJ⟩)
   | _ => return none
 
+/-- Parse the inner ImpType of a newtype, a tuple struct with exactly one field.
+    Hax represents `struct T(Inner)` as `kind: Struct(..., {Tuple: [[field0_data]]})`.
+    Returns `none` for any other struct, including a tuple struct with zero or
+    several fields, which `parseStructDefs` reads as a struct with positional
+    fields. -/
+def parseTupleStructInner (structData : Array Json) : Option ImpType :=
+  let variantData := structData.toList[2]?
+  match variantData with
+  | some vd =>
+    match vd.getObjVal? "Tuple" with
+    | .ok (Json.arr tupleData) =>
+      match tupleData.toList with
+      | (Json.arr fields) :: _ =>
+        match fields.toList with
+        | [fj] =>
+          match fj.getObjVal? "ty" with
+          | .ok tyJ => some (parseHaxType tyJ)
+          | _ => none
+        | _ => none
+      | _ => none
+    | _ => none
+  | _ => none
+
+/-- Walk top-level JSON items (including nested Mod items) and collect
+    every `struct T(Inner)` newtype (single-positional-field tuple
+    struct). Returns `(T.name, Inner)` pairs. Newtypes are distinct from
+    named-field structs (which `parseStructDefsFromJson` handles). -/
+partial def buildNewtypeMap (j : Json) : NewtypeMap :=
+  let parseItems (items : List Json) : NewtypeMap :=
+    items.foldl (init := []) fun acc item =>
+      match item.getObjVal? "kind" with
+      | .ok kindJ =>
+        -- Tuple struct: kind.Struct = [name, generics, {Tuple: ...}]
+        let here : NewtypeMap :=
+          match kindJ.getObjVal? "Struct" with
+          | .ok (.arr sd) =>
+            let name := match sd.toList with
+              | (Json.arr nameSpan) :: _ =>
+                match nameSpan.toList with
+                | (Json.str n) :: _ => n
+                | _ => ""
+              | _ => ""
+            if name.isEmpty then []
+            else match parseTupleStructInner sd with
+              | some inner => [(name, inner)]
+              | none => []
+          | _ => []
+        -- Recurse into Mod items: kind.Mod = [name_data, [sub_items]]
+        let modNewtypes : NewtypeMap :=
+          match kindJ.getObjVal? "Mod" with
+          | .ok (.arr modData) =>
+            match modData.toList[1]? with
+            | some (Json.arr subItems) => buildNewtypeMap (Json.arr subItems)
+            | _ => []
+          | _ => []
+        acc ++ here ++ modNewtypes
+      | _ => acc
+  match j with
+  | .arr items =>
+    let raw := parseItems items.toList
+    raw.foldl (fun acc (n, t) =>
+      if acc.any (·.1 == n) then acc else acc ++ [(n, t)]) []
+  | _ => []
+
+/-! ## Modulus-tagged field operations
+
+A call of a method of `primeir_hax::Field` that resolves to an `impl` of the
+crate whose self type is a newtype over `u64` takes the head
+`<method>#p<modulus>` (`fieldTagHead`); the newtype is erased to `u64` in the
+whole export (`tEraseFieldNewtypes`), so the operands and the result of such a
+call are `u64` values. -/
+
+/-- Every item of a hax export, at the top level or under a `Mod`. -/
+partial def exportItems (j : Json) : List Json :=
+  match j with
+  | .arr items => items.toList.flatMap fun it =>
+    let sub : List Json :=
+      match (it.getObjVal? "kind" >>= (·.getObjVal? "Mod")) with
+      | .ok (.arr modData) =>
+        match modData.toList[1]? with
+        | some s => exportItems s
+        | none => []
+      | .ok modData =>
+        match modData.getObjValAs? (Array Json) "items" with
+        | .ok s => exportItems (.arr s)
+        | _ => []
+      | _ => []
+    it :: sub
+  | _ => []
+
+/-- The top-level constants of a hax export (the four-element `Const` form
+    `[ident, generics, ty, body]`), as `(name, body)`. -/
+def exportConstBodies (j : Json) : List (String × Json) :=
+  (exportItems j).filterMap fun it => do
+    let kind ← (it.getObjVal? "kind").toOption
+    match kind.getObjVal? "Const" with
+    | .ok (.arr cd) =>
+      match cd.toList with
+      | [ident, _, _, body] => some (extractFnName ident, body)
+      | _ => none
+    | _ => none
+
+/-- The `u64` limbs a constant expression denotes: an integer literal, an array
+    literal of integer literals, a borrow or dereference of one, or a read of a
+    constant of `consts` (matched on the last `::` segment of its name), with at
+    most `fuel` nested reads. -/
+partial def constLimbs (consts : List (String × Json)) (fuel : Nat) (e : TExpr) :
+    Option (List Nat) :=
+  match e.kind with
+  | .lit (.int n) => if 0 ≤ n then some [n.toNat] else none
+  | .lit (.uintLit _ n) => some [n]
+  | .borrow e | .deref e | .ann e => constLimbs consts fuel e
+  | .app "array_lit" es => do
+    let ls ← es.mapM (constLimbs consts fuel)
+    ls.mapM fun l => match l with
+      | [x] => some x
+      | _ => none
+  | .var n | .app n [] =>
+    match fuel with
+    | 0 => none
+    | fuel + 1 => do
+      let body ← consts.lookup (((n.splitOn "::").getLast?).getD n)
+      let te ← (parseHaxTExpr body {}).toOption
+      constLimbs consts fuel te
+  | _ => none
+
+/-- Whether a trait `impl` block implements the trait `Field` of the crate
+    `primeir_hax` (its `of_trait` reference). -/
+def isPrimeirFieldImpl (impl : Json) : Bool :=
+  let r : Option Unit := do
+    let tr ← (impl.getObjVal? "of_trait").toOption
+    let tv ← (tr.getObjVal? "value").toOption
+    let defId ← (tv.getObjVal? "def_id").toOption
+    guard (defIdKrate defId == "primeir_hax")
+    guard (defIdLeafName defId == some "Field")
+  r.isSome
+
+/-- The local `impl primeir_hax::Field for T` blocks of a hax export whose self
+    type `T` is a newtype over `u64` in `newtypes`, as
+    `(impl interning id, T, modulus)`. The modulus is the value of the `impl`'s
+    `MODULUS_LE` constant read as little-endian base-`2^64` limbs
+    (`constLimbs`); an `impl` whose `MODULUS_LE` does not evaluate to limbs
+    below `2^64` denoting a number at least `2` is not listed. -/
+def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) : List (Nat × String × Nat) :=
+  let consts := exportConstBodies j
+  (exportItems j).filterMap fun it => do
+    let kind ← (it.getObjVal? "kind").toOption
+    let impl ← (kind.getObjVal? "Impl").toOption
+    guard (isPrimeirFieldImpl impl)
+    let oid ← (it.getObjVal? "owner_id").toOption
+    let c ← (oid.getObjVal? "contents").toOption
+    guard ((c.getObjVal? "value" >>= (·.getObjValAs? Bool "is_local")).toOption == some true)
+    let implId ← (c.getObjValAs? Nat "id").toOption
+    let selfTy ← (impl.getObjVal? "self_ty").toOption
+    let stVal ← (selfTy.getObjVal? "value").toOption
+    let adt ← (stVal.getObjVal? "Adt").toOption
+    let sn ← extractAdtShortName adt
+    guard (newtypes.lookup sn == some (.uint .w64))
+    let implItems ← (impl.getObjValAs? (Array Json) "items").toOption
+    let modItem ← implItems.find? fun ii =>
+      (ii.getObjVal? "ident").toOption.map extractFnName == some "MODULUS_LE"
+    let k ← (modItem.getObjVal? "kind").toOption
+    let bodyJ ← match k.getObjVal? "Const" with
+      | .ok (.arr #[_, b]) => some b
+      | _ => none
+    let te ← (parseHaxTExpr bodyJ {}).toOption
+    let limbs ← constLimbs consts 8 te
+    guard (limbs.all (· < 2 ^ 64))
+    let p := limbs.foldr (fun l acc => l + 2 ^ 64 * acc) 0
+    guard (2 ≤ p)
+    pure (implId, sn, p)
+
+/-- The last `::` segment of a name. -/
+def lastPathSegment (n : String) : String := ((n.splitOn "::").getLast?).getD n
+
+/-- `ty` with every type of `names` (newtypes over `u64`) replaced by `u64`. -/
+partial def eraseFieldNewtypeTy (names : List String) : ImpType → ImpType
+  | .adt n args =>
+    if args.isEmpty && names.contains (lastPathSegment n) then .uint .w64
+    else .adt n (args.map (eraseFieldNewtypeTy names))
+  | .tuple es => .tuple (es.map (eraseFieldNewtypeTy names))
+  | .option t => .option (eraseFieldNewtypeTy names t)
+  | .result a b => .result (eraseFieldNewtypeTy names a) (eraseFieldNewtypeTy names b)
+  | .controlFlow a b =>
+    .controlFlow (eraseFieldNewtypeTy names a) (eraseFieldNewtypeTy names b)
+  | .fn ps r => .fn (ps.map (eraseFieldNewtypeTy names)) (eraseFieldNewtypeTy names r)
+  | .ref t m => .ref (eraseFieldNewtypeTy names t) m
+  | .slice t => .slice (eraseFieldNewtypeTy names t)
+  | .array t n => .array (eraseFieldNewtypeTy names t) n
+  | t => t
+
+/-- Whether `ty` is a type of `names`, or a reference to one. -/
+def isFieldNewtypeTy (names : List String) : ImpType → Bool
+  | .adt n [] => names.contains (lastPathSegment n)
+  | .ref t _ => isFieldNewtypeTy names t
+  | _ => false
+
+/-- A typed expression with the newtypes `names` over `u64` erased: a
+    construction `T(x)` with `x : u64` is `x`, a projection `x.0` of an
+    `x : T` is `x`, and every type of `names` in a node's type is `u64`
+    (`eraseFieldNewtypeTy`). -/
+partial def tEraseFieldNewtypes (names : List String) (e : TExpr) : TExpr :=
+  let go := tEraseFieldNewtypes names
+  let rest : Unit → TExpr := fun _ =>
+    match tMapChildren go e with
+    | .mk k ty => .mk k (eraseFieldNewtypeTy names ty)
+  match e with
+  | .mk (.app f [x]) ty =>
+    if names.contains (lastPathSegment f) && isFieldNewtypeTy names ty
+        && x.ty == .uint .w64 then go x
+    else if f == ".0" && isFieldNewtypeTy names x.ty then go x
+    else rest ()
+  | .mk (.proj x 0) _ => if isFieldNewtypeTy names x.ty then go x else rest ()
+  | _ => rest ()
+
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
     processed typed defs (for pipeline/rendering)).
@@ -4638,7 +4902,12 @@ partial def parseImplConstTExpr (implItem : Json) (implMap : ImplSelfTypeMap) :
 
     `nominalKrates` names the crates whose trait-method calls take the
     qualified head `krate::Trait::h` (`ImplSelfTypeMap.nominalKrates`); with
-    the empty list every head is the one of the unqualified parse. -/
+    the empty list every head is the one of the unqualified parse.
+
+    A call of a method of `primeir_hax::Field` resolved to an `impl` of
+    `buildFieldImplMap` takes its modulus-tagged head (`fieldTaggedHead?`),
+    and the self types of those `impl`s are erased to `u64` in every definition
+    and signature (`tEraseFieldNewtypes`), whatever the other flags. -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
     (nominalKrates : List String := []) :
@@ -4654,7 +4923,9 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
       structFields := structFields, localCrate := localCrateOfExport j,
       traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else []
       traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else []
-      localBoundConstCalls := traitImplConsts, nominalKrates := nominalKrates }
+      localBoundConstCalls := traitImplConsts, nominalKrates := nominalKrates
+      fieldImpls := buildFieldImplMap j (buildNewtypeMap j) }
+  let fieldNewtypes := (implMap.fieldImpls.map (·.2.1)).eraseDups
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
@@ -4744,6 +5015,13 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
   match j with
   | .arr items =>
     let parsed ← parseItemsTExpr items.toList
+    let parsed :=
+      if fieldNewtypes.isEmpty then parsed
+      else
+        let eraseTy := eraseFieldNewtypeTy fieldNewtypes
+        parsed.map fun (name, raw, proc, ti) =>
+          (name, tEraseFieldNewtypes fieldNewtypes raw, tEraseFieldNewtypes fieldNewtypes proc,
+            ⟨ti.paramTypes.map fun (p, t) => (p, eraseTy t), eraseTy ti.retType⟩)
     match parsed with
     | [] => throw "no functions or constants found in hax export"
     | _ =>
@@ -5060,69 +5338,5 @@ def parseEnumDefsFromJson (j : Json) : List EnumInfo :=
   -- Deduplicate by enum name (keep first occurrence)
   raw.foldl (fun acc ei =>
     if acc.any (·.name == ei.name) then acc else acc ++ [ei]) []
-
-/-- Parse the inner ImpType of a newtype, a tuple struct with exactly one field.
-    Hax represents `struct T(Inner)` as `kind: Struct(..., {Tuple: [[field0_data]]})`.
-    Returns `none` for any other struct, including a tuple struct with zero or
-    several fields, which `parseStructDefs` reads as a struct with positional
-    fields. -/
-def parseTupleStructInner (structData : Array Json) : Option ImpType :=
-  let variantData := structData.toList[2]?
-  match variantData with
-  | some vd =>
-    match vd.getObjVal? "Tuple" with
-    | .ok (Json.arr tupleData) =>
-      match tupleData.toList with
-      | (Json.arr fields) :: _ =>
-        match fields.toList with
-        | [fj] =>
-          match fj.getObjVal? "ty" with
-          | .ok tyJ => some (parseHaxType tyJ)
-          | _ => none
-        | _ => none
-      | _ => none
-    | _ => none
-  | _ => none
-
-/-- Walk top-level JSON items (including nested Mod items) and collect
-    every `struct T(Inner)` newtype (single-positional-field tuple
-    struct). Returns `(T.name, Inner)` pairs. Newtypes are distinct from
-    named-field structs (which `parseStructDefsFromJson` handles). -/
-partial def buildNewtypeMap (j : Json) : NewtypeMap :=
-  let parseItems (items : List Json) : NewtypeMap :=
-    items.foldl (init := []) fun acc item =>
-      match item.getObjVal? "kind" with
-      | .ok kindJ =>
-        -- Tuple struct: kind.Struct = [name, generics, {Tuple: ...}]
-        let here : NewtypeMap :=
-          match kindJ.getObjVal? "Struct" with
-          | .ok (.arr sd) =>
-            let name := match sd.toList with
-              | (Json.arr nameSpan) :: _ =>
-                match nameSpan.toList with
-                | (Json.str n) :: _ => n
-                | _ => ""
-              | _ => ""
-            if name.isEmpty then []
-            else match parseTupleStructInner sd with
-              | some inner => [(name, inner)]
-              | none => []
-          | _ => []
-        -- Recurse into Mod items: kind.Mod = [name_data, [sub_items]]
-        let modNewtypes : NewtypeMap :=
-          match kindJ.getObjVal? "Mod" with
-          | .ok (.arr modData) =>
-            match modData.toList[1]? with
-            | some (Json.arr subItems) => buildNewtypeMap (Json.arr subItems)
-            | _ => []
-          | _ => []
-        acc ++ here ++ modNewtypes
-      | _ => acc
-  match j with
-  | .arr items =>
-    let raw := parseItems items.toList
-    raw.foldl (fun acc (n, t) =>
-      if acc.any (·.1 == n) then acc else acc ++ [(n, t)]) []
-  | _ => []
 
 end Hax.HaxAdapter
