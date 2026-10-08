@@ -985,8 +985,12 @@ def hax64NarrowOps : Builtins
 A call of a method of the prime-field interface at a concrete field has the head
 `<method>#p<modulus in decimal>`, for example `mul#p2013265921`. `FieldTag.fieldTag?` reads the
 method and the modulus off a head. `FieldTag.fieldCall` is the meaning of a tagged head on the
-canonical representatives of the field, each one word: defined at a modulus below `2^64` on
-arguments below the modulus, with the value of the field operation, and undefined otherwise. -/
+canonical representatives of the field. At a modulus below `2^64` an element is one word, the
+integer of its canonical representative. At a modulus `p ≥ 2^64` an element is an array of
+`n = FieldTag.fieldLimbs p` words, the least `n` with `p ≤ 2^(64 n)`: the little-endian limbs
+`FieldTag.limbsOf n a` of its canonical representative `a < p`, the word `i` holding
+`a / 2^(64 i) mod 2^64`. A tagged head is defined on arguments below the modulus, with the value of
+the field operation in the same encoding, and undefined otherwise. -/
 
 namespace FieldTag
 
@@ -1130,6 +1134,87 @@ theorem fieldVal_lt (m : FieldMethod) {p : Nat} (hp : 0 < p) (a b : Nat) :
     fieldVal m p a b < p := by
   cases m <;> exact Nat.mod_lt _ hp
 
+/-- The number of `64`-bit words of the binary digits of `q`, in at most `fuel` steps. -/
+def wordsAux : Nat → Nat → Nat
+  | 0, _ => 0
+  | fuel + 1, q => if q = 0 then 0 else wordsAux fuel (q / 2 ^ 64) + 1
+
+/-- With at least `q` steps, `q` is below `2^(64 · wordsAux fuel q)`. -/
+theorem lt_pow_wordsAux : ∀ (fuel q : Nat), q ≤ fuel → q < 2 ^ (64 * wordsAux fuel q)
+  | 0, q, h => by simp only [wordsAux]; omega
+  | fuel + 1, q, h => by
+      simp only [wordsAux]
+      split
+      · omega
+      · rename_i hq
+        have hd : q / 2 ^ 64 ≤ fuel := by
+          have : q / 2 ^ 64 < q := Nat.div_lt_self (by omega) (by decide)
+          omega
+        have ih := lt_pow_wordsAux fuel (q / 2 ^ 64) hd
+        rw [Nat.mul_add, Nat.mul_one, Nat.pow_add]
+        exact (Nat.div_lt_iff_lt_mul (Nat.two_pow_pos 64)).mp ih
+
+/-- **The number of limbs of an element at the modulus `p`**: the number of `64`-bit words of
+    `p - 1`, the least `n` with `p ≤ 2^(64 n)`. -/
+def fieldLimbs (p : Nat) : Nat := wordsAux p (p - 1)
+
+/-- The modulus is at most `2^(64 · fieldLimbs p)`. -/
+theorem le_pow_fieldLimbs (p : Nat) : p ≤ 2 ^ (64 * fieldLimbs p) := by
+  have := lt_pow_wordsAux p (p - 1) (by omega)
+  unfold fieldLimbs
+  omega
+
+/-- **The little-endian limbs of `a`** in `n` words: the word `i` holds
+    `a / 2^(64 i) mod 2^64`. -/
+def limbsOf : Nat → Nat → List Value
+  | 0, _ => []
+  | n + 1, a => .int (a % 2 ^ 64 : Nat) :: limbsOf n (a / 2 ^ 64)
+
+/-- There are `n` limbs in `n` words. -/
+theorem length_limbsOf : ∀ (n a : Nat), (limbsOf n a).length = n
+  | 0, _ => rfl
+  | n + 1, a => by simp [limbsOf, length_limbsOf n]
+
+/-- A limb is the integer of a number below `2^64`. -/
+theorem limbsOf_word : ∀ (n a : Nat), ∀ v ∈ limbsOf n a, ∃ r : Nat, v = .int r ∧ r < 2 ^ 64
+  | 0, _, v, h => by simp [limbsOf] at h
+  | n + 1, a, v, h => by
+      simp only [limbsOf, List.mem_cons] at h
+      rcases h with rfl | h
+      · exact ⟨_, rfl, Nat.mod_lt _ (by decide)⟩
+      · exact limbsOf_word n _ v h
+
+/-- **The number of a list of little-endian limbs**: defined when every value is the integer of
+    a number below `2^64`. -/
+def limbsDec : List Value → Option Nat
+  | [] => some 0
+  | .int l :: vs =>
+      if 0 ≤ l ∧ l < 2 ^ 64 then (limbsDec vs).map fun r => l.toNat + 2 ^ 64 * r else none
+  | _ :: _ => none
+
+/-- The limbs of `a` in `n` words denote `a mod 2^(64 n)`. -/
+theorem limbsDec_limbsOf : ∀ (n a : Nat), limbsDec (limbsOf n a) = some (a % 2 ^ (64 * n))
+  | 0, a => by simp [limbsOf, limbsDec, Nat.mod_one]
+  | n + 1, a => by
+      have hl : ((a % 2 ^ 64 : Nat) : Int) < 2 ^ 64 := by
+        exact_mod_cast Nat.mod_lt _ (by decide)
+      simp only [limbsOf, limbsDec, limbsDec_limbsOf n, Option.map_some, Int.toNat_natCast,
+        if_pos (And.intro (Int.natCast_nonneg _) hl)]
+      rw [Nat.mul_succ, Nat.add_comm (64 * n) 64, Nat.pow_add, Nat.mod_mul]
+
+/-- **The arm of the head of `m` at a modulus `p ≥ 2^64`** on the numbers `a` and `b`: defined
+    when `a`, and `b` for a method with two arguments, is below `p`, with the limbs of the value
+    `fieldVal m p a b` in `fieldLimbs p` words. -/
+def fieldArmWide (m : FieldMethod) (p a b : Nat) : Option Value :=
+  if a < p ∧ (m.binary = true → b < p) then
+    some (.array (limbsOf (fieldLimbs p) (fieldVal m p a b)))
+  else none
+
+/-- The argument values of a call of a method on the limbs of the numbers `a` and `b` in `n`
+    words. -/
+def fieldArgsWide (m : FieldMethod) (n a b : Nat) : List Value :=
+  if m.binary then [.array (limbsOf n a), .array (limbsOf n b)] else [.array (limbsOf n a)]
+
 /-- The argument values of a call of a method on the numbers `a` and `b`. -/
 def fieldArgs (m : FieldMethod) (a b : Nat) : List Value :=
   if m.binary then [.int a, .int b] else [.int a]
@@ -1141,12 +1226,23 @@ def fieldArm (m : FieldMethod) (p a b : Nat) : Option Value :=
 
 /-- **The value of a tagged head** of the method `m` at the modulus `p` on the argument values
     `args`: at a modulus below `2^64`, on two non-negative integers for a method with two
-    arguments and on one for a method with one, the arm `fieldArm`; no value otherwise. -/
+    arguments and on one for a method with one, the arm `fieldArm`; at a modulus `p ≥ 2^64`, on
+    two arrays of `fieldLimbs p` limbs for a method with two arguments and on one for a method
+    with one, the arm `fieldArmWide` of the numbers `limbsDec` reads off the limbs; no value
+    otherwise. -/
 def fieldCall (m : FieldMethod) (p : Nat) : List Value → Option Value
   | [.int a, .int b] =>
       if p < 2 ^ 64 ∧ m.binary = true ∧ 0 ≤ a ∧ 0 ≤ b then fieldArm m p a.toNat b.toNat
       else none
   | [.int a] => if p < 2 ^ 64 ∧ m.binary = false ∧ 0 ≤ a then fieldArm m p a.toNat 0 else none
+  | [.array xs, .array ys] =>
+      if 2 ^ 64 ≤ p ∧ m.binary = true ∧ xs.length = fieldLimbs p ∧ ys.length = fieldLimbs p then
+        (limbsDec xs).bind fun a => (limbsDec ys).bind fun b => fieldArmWide m p a b
+      else none
+  | [.array xs] =>
+      if 2 ^ 64 ≤ p ∧ m.binary = false ∧ xs.length = fieldLimbs p then
+        (limbsDec xs).bind fun a => fieldArmWide m p a 0
+      else none
   | _ => none
 
 /-- At a modulus below `2^64`, a tagged head on the argument values of the numbers `a` and
@@ -1155,31 +1251,79 @@ theorem fieldCall_fieldArgs {m : FieldMethod} {p : Nat} (hp : p < 2 ^ 64) (a b :
     fieldCall m p (fieldArgs m a b) = fieldArm m p a b := by
   cases m <;> simp [fieldArgs, FieldMethod.binary, fieldCall, hp, fieldArm, fieldVal]
 
-/-- A value of a tagged head is an integer below its modulus, and the modulus is below
-    `2^64`. -/
-theorem fieldCall_lt {m : FieldMethod} {p : Nat} {args : List Value} {v : Value}
-    (h : fieldCall m p args = some v) : ∃ n : Nat, v = .int n ∧ n < p ∧ p < 2 ^ 64 := by
+/-- A value of the arm `fieldArm` is an integer below the modulus. -/
+theorem fieldArm_lt {m : FieldMethod} {p a b : Nat} {v : Value} (h : fieldArm m p a b = some v) :
+    ∃ n : Nat, v = .int n ∧ n < p := by
+  unfold fieldArm at h
+  split at h
+  · rename_i hl
+    cases h
+    exact ⟨_, rfl, fieldVal_lt m (Nat.lt_of_le_of_lt (Nat.zero_le _) hl.1) _ _⟩
+  · cases h
+
+/-- A value of the arm `fieldArmWide` is the array of the limbs of a number below the modulus in
+    `fieldLimbs p` words. -/
+theorem fieldArmWide_lt {m : FieldMethod} {p a b : Nat} {v : Value}
+    (h : fieldArmWide m p a b = some v) :
+    ∃ n : Nat, v = .array (limbsOf (fieldLimbs p) n) ∧ n < p := by
+  unfold fieldArmWide at h
+  split at h
+  · rename_i hl
+    cases h
+    exact ⟨_, rfl, fieldVal_lt m (Nat.lt_of_le_of_lt (Nat.zero_le _) hl.1) _ _⟩
+  · cases h
+
+/-- **A value of a tagged head is an element of the field**: at a modulus below `2^64` the
+    integer of a number below the modulus; at a modulus `p ≥ 2^64` the array of the limbs of a
+    number below the modulus in `fieldLimbs p` words. -/
+theorem fieldCall_some {m : FieldMethod} {p : Nat} {args : List Value} {v : Value}
+    (h : fieldCall m p args = some v) :
+    (∃ n : Nat, v = .int n ∧ n < p ∧ p < 2 ^ 64) ∨
+      (2 ^ 64 ≤ p ∧ ∃ n : Nat, v = .array (limbsOf (fieldLimbs p) n) ∧ n < p) := by
   unfold fieldCall at h
   split at h
   · split at h
     · rename_i hc
-      unfold fieldArm at h
-      split at h
-      · rename_i hl
-        cases h
-        exact ⟨_, rfl, fieldVal_lt m (Nat.lt_of_le_of_lt (Nat.zero_le _) hl.1) _ _, hc.1⟩
-      · cases h
+      obtain ⟨n, rfl, hn⟩ := fieldArm_lt h
+      exact Or.inl ⟨n, rfl, hn, hc.1⟩
     · cases h
   · split at h
     · rename_i hc
-      unfold fieldArm at h
-      split at h
-      · rename_i hl
-        cases h
-        exact ⟨_, rfl, fieldVal_lt m (Nat.lt_of_le_of_lt (Nat.zero_le _) hl.1) _ _, hc.1⟩
-      · cases h
+      obtain ⟨n, rfl, hn⟩ := fieldArm_lt h
+      exact Or.inl ⟨n, rfl, hn, hc.1⟩
+    · cases h
+  · split at h
+    · rename_i hc
+      obtain ⟨a, -, h⟩ := Option.bind_eq_some_iff.mp h
+      obtain ⟨b, -, h⟩ := Option.bind_eq_some_iff.mp h
+      exact Or.inr ⟨hc.1, fieldArmWide_lt h⟩
+    · cases h
+  · split at h
+    · rename_i hc
+      obtain ⟨a, -, h⟩ := Option.bind_eq_some_iff.mp h
+      exact Or.inr ⟨hc.1, fieldArmWide_lt h⟩
     · cases h
   · cases h
+
+/-- At a modulus below `2^64`, a value of a tagged head is an integer below its modulus. -/
+theorem fieldCall_lt {m : FieldMethod} {p : Nat} (hp : p < 2 ^ 64) {args : List Value}
+    {v : Value} (h : fieldCall m p args = some v) : ∃ n : Nat, v = .int n ∧ n < p := by
+  rcases fieldCall_some h with ⟨n, hv, hn, -⟩ | ⟨hp', -⟩
+  · exact ⟨n, hv, hn⟩
+  · omega
+
+/-- At a modulus `p ≥ 2^64`, a tagged head on the limbs of the numbers `a` and `b` below `p` in
+    `fieldLimbs p` words is the arm `fieldArmWide`. -/
+theorem fieldCall_fieldArgsWide {m : FieldMethod} {p : Nat} (hp : 2 ^ 64 ≤ p) {a b : Nat}
+    (ha : a < p) (hb : b < p) :
+    fieldCall m p (fieldArgsWide m (fieldLimbs p) a b) = fieldArmWide m p a b := by
+  have hpow := le_pow_fieldLimbs p
+  have hda := limbsDec_limbsOf (fieldLimbs p) a
+  have hdb := limbsDec_limbsOf (fieldLimbs p) b
+  rw [Nat.mod_eq_of_lt (by omega)] at hda hdb
+  cases m <;>
+    simp [fieldArgsWide, FieldMethod.binary, fieldCall, hp, length_limbsOf, hda, hdb,
+      fieldArmWide, fieldVal]
 
 /-- No array operation of `widthArrayOps` has a tagged head. -/
 theorem widthArrayOps_of_fieldTag? {f : String} {m : FieldMethod} {p : Nat}
@@ -1335,6 +1479,21 @@ theorem hax64Builtins_fieldArgs {f : String} {m : FieldTag.FieldMethod} {p : Nat
   rw [hax64WordOps_of_fieldTag? h, FieldTag.fieldCall_fieldArgs hp,
     FieldTag.widthArrayOps_of_fieldTag? h]
   cases FieldTag.fieldArm m p a b <;> rfl
+
+/-- **The `u64` table answers a wide tagged head on limbs**: at a head `FieldTag.fieldTag?`
+    reads as the method `m` at a modulus `p ≥ 2^64`, the call on the limbs of numbers `a` and
+    `b` below `p` in `FieldTag.fieldLimbs p` words is the array of the limbs of
+    `FieldTag.fieldVal m p a b`. -/
+theorem hax64Builtins_fieldArgsWide {f : String} {m : FieldTag.FieldMethod} {p : Nat}
+    (h : FieldTag.fieldTag? f = some (m, p)) (hp : 2 ^ 64 ≤ p) {a b : Nat} (ha : a < p)
+    (hb : b < p) :
+    hax64Builtins f (FieldTag.fieldArgsWide m (FieldTag.fieldLimbs p) a b) =
+      some (.array (FieldTag.limbsOf (FieldTag.fieldLimbs p) (FieldTag.fieldVal m p a b))) := by
+  unfold hax64Builtins
+  rw [hax64WordOps_of_fieldTag? h, FieldTag.fieldCall_fieldArgsWide hp ha hb]
+  unfold FieldTag.fieldArmWide
+  rw [if_pos ⟨ha, fun _ => hb⟩]
+  rfl
 
 /-- A value of the `u64` table at a tagged head is the value `FieldTag.fieldCall` of the
     head. -/
