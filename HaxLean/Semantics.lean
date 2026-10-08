@@ -980,6 +980,215 @@ def hax64NarrowOps : Builtins
   | "Shr#i64", [.int a, .int b] => sintShrOp 64 a b
   | f, args => hax64CmpOps f args
 
+/-! ## Modulus-tagged field calls
+
+A call of a method of the prime-field interface at a concrete field has the head
+`<method>#p<modulus in decimal>`, for example `mul#p2013265921`. `FieldTag.fieldTag?` reads the
+method and the modulus off a head. `FieldTag.fieldCall` is the meaning of a tagged head on the
+canonical representatives of the field, each one word: defined at a modulus below `2^64` on
+arguments below the modulus, with the value of the field operation, and undefined otherwise. -/
+
+namespace FieldTag
+
+/-- The tagged methods of the prime-field interface. -/
+inductive FieldMethod where
+  | add | sub | mul | neg | square | double
+  deriving DecidableEq, Repr
+
+namespace FieldMethod
+
+/-- The characters of the name of a method. -/
+def nameChars : FieldMethod → List Char
+  | .add => ['a', 'd', 'd']
+  | .sub => ['s', 'u', 'b']
+  | .mul => ['m', 'u', 'l']
+  | .neg => ['n', 'e', 'g']
+  | .square => ['s', 'q', 'u', 'a', 'r', 'e']
+  | .double => ['d', 'o', 'u', 'b', 'l', 'e']
+
+/-- A method with two arguments. -/
+def binary : FieldMethod → Bool
+  | .add | .sub | .mul => true
+  | .neg | .square | .double => false
+
+/-- The method with the name of the characters `s`. -/
+def ofChars? (s : List Char) : Option FieldMethod :=
+  [add, sub, mul, neg, square, double].find? fun m => m.nameChars == s
+
+/-- A method read off the characters `s` has the name `s`. -/
+theorem nameChars_of_ofChars? {s : List Char} {m : FieldMethod} (h : ofChars? s = some m) :
+    m.nameChars = s := by
+  simp only [ofChars?, List.find?] at h
+  repeat' split at h
+  all_goals first
+    | (cases h; rename_i hb; exact beq_iff_eq.mp hb)
+    | cases h
+
+end FieldMethod
+
+/-- The character of a decimal digit. -/
+def digitChar : Nat → Char
+  | 0 => '0' | 1 => '1' | 2 => '2' | 3 => '3' | 4 => '4'
+  | 5 => '5' | 6 => '6' | 7 => '7' | 8 => '8' | _ => '9'
+
+/-- The decimal digits of `n` before the characters `acc`, in at most `fuel` steps. -/
+def decDigitsAux : Nat → Nat → List Char → List Char
+  | 0, _, acc => acc
+  | fuel + 1, n, acc =>
+      if n < 10 then digitChar n :: acc
+      else decDigitsAux fuel (n / 10) (digitChar (n % 10) :: acc)
+
+/-- The decimal digits of a number. -/
+def decDigits (n : Nat) : List Char := decDigitsAux (n + 1) n []
+
+/-- **The head of the method `m` at the modulus `p`**: the name of the method, `#p`, and `p`
+    in decimal. -/
+def fieldHead (m : FieldMethod) (p : Nat) : String :=
+  String.ofList (m.nameChars ++ '#' :: 'p' :: decDigits p)
+
+/-- The number the decimal digits `cs` denote after the digits of `acc`. -/
+def digitsVal (acc : Nat) : List Char → Nat
+  | [] => acc
+  | c :: cs => digitsVal (10 * acc + (c.toNat - 48)) cs
+
+/-- A nonempty list of decimal digits. -/
+def digitsOk (cs : List Char) : Bool :=
+  !cs.isEmpty && cs.all fun c => decide (48 ≤ c.toNat ∧ c.toNat ≤ 57)
+
+/-- The characters before and after the first `#p`. -/
+def splitTag : List Char → List Char × List Char
+  | [] => ([], [])
+  | '#' :: 'p' :: cs => ([], cs)
+  | c :: cs => (c :: (splitTag cs).1, (splitTag cs).2)
+
+/-- When characters follow the first `#p`, the characters are those before it, `#p`, and
+    those after it. -/
+theorem splitTag_eq : ∀ cs : List Char, (splitTag cs).2 ≠ [] →
+    cs = (splitTag cs).1 ++ '#' :: 'p' :: (splitTag cs).2
+  | [], h => absurd rfl h
+  | c :: cs, h => by
+      by_cases hc : ∃ cs', c = '#' ∧ cs = 'p' :: cs'
+      · obtain ⟨cs', rfl, rfl⟩ := hc
+        rfl
+      · have he := splitTag.eq_3 c cs (fun cs' h1 h2 => hc ⟨cs', h1, h2⟩)
+        rw [he] at h ⊢
+        exact congrArg (c :: ·) (splitTag_eq cs h)
+
+/-- The method and the modulus of the characters of a head: the method named before the
+    first `#p` and the number of the decimal digits after it. -/
+def fieldTagChars? (cs : List Char) : Option (FieldMethod × Nat) :=
+  if digitsOk (splitTag cs).2 then
+    (FieldMethod.ofChars? (splitTag cs).1).map fun m => (m, digitsVal 0 (splitTag cs).2)
+  else none
+
+/-- **The method and the modulus of a head**: the method named before the first `#p` and the
+    number of the decimal digits after it; `none` when no method has the name or the
+    characters after `#p` are not a nonempty list of decimal digits. -/
+def fieldTag? (f : String) : Option (FieldMethod × Nat) := fieldTagChars? f.toList
+
+/-- **A tagged head is the name of its method, `#p` and the decimal digits of its
+    modulus.** -/
+theorem toList_of_fieldTag? {f : String} {m : FieldMethod} {p : Nat}
+    (h : fieldTag? f = some (m, p)) :
+    ∃ ds, f.toList = m.nameChars ++ '#' :: 'p' :: ds ∧ digitsOk ds = true ∧
+      p = digitsVal 0 ds := by
+  unfold fieldTag? fieldTagChars? at h
+  split at h
+  · rename_i hd
+    obtain ⟨m', hm', he⟩ := Option.map_eq_some_iff.mp h
+    simp only [Prod.mk.injEq] at he
+    obtain ⟨rfl, rfl⟩ := he
+    have hne : (splitTag f.toList).2 ≠ [] := by
+      intro h0
+      rw [h0] at hd
+      cases hd
+    refine ⟨(splitTag f.toList).2, ?_, hd, rfl⟩
+    rw [FieldMethod.nameChars_of_ofChars? hm']
+    exact splitTag_eq _ hne
+  · cases h
+
+/-- A tagged head contains `#`. -/
+theorem mem_toList_of_fieldTag? {f : String} {m : FieldMethod} {p : Nat}
+    (h : fieldTag? f = some (m, p)) : '#' ∈ f.toList := by
+  obtain ⟨ds, hf, -⟩ := toList_of_fieldTag? h
+  rw [hf]
+  simp
+
+/-- **The value of a method** on the canonical representatives `a` and `b` at the modulus
+    `p`; a method with one argument does not read `b`. -/
+def fieldVal (m : FieldMethod) (p a b : Nat) : Nat :=
+  match m with
+  | .add => (a + b) % p
+  | .sub => (a + p - b) % p
+  | .mul => (a * b) % p
+  | .neg => (p - a) % p
+  | .square => (a * a) % p
+  | .double => (2 * a) % p
+
+/-- The value of a method at a positive modulus is below the modulus. -/
+theorem fieldVal_lt (m : FieldMethod) {p : Nat} (hp : 0 < p) (a b : Nat) :
+    fieldVal m p a b < p := by
+  cases m <;> exact Nat.mod_lt _ hp
+
+/-- The argument values of a call of a method on the numbers `a` and `b`. -/
+def fieldArgs (m : FieldMethod) (a b : Nat) : List Value :=
+  if m.binary then [.int a, .int b] else [.int a]
+
+/-- **The arm of the head of `m` at `p`** on the numbers `a` and `b`: defined when `a`, and
+    `b` for a method with two arguments, is below `p`, with the value `fieldVal m p a b`. -/
+def fieldArm (m : FieldMethod) (p a b : Nat) : Option Value :=
+  if a < p ∧ (m.binary = true → b < p) then some (.int (fieldVal m p a b)) else none
+
+/-- **The value of a tagged head** of the method `m` at the modulus `p` on the argument values
+    `args`: at a modulus below `2^64`, on two non-negative integers for a method with two
+    arguments and on one for a method with one, the arm `fieldArm`; no value otherwise. -/
+def fieldCall (m : FieldMethod) (p : Nat) : List Value → Option Value
+  | [.int a, .int b] =>
+      if p < 2 ^ 64 ∧ m.binary = true ∧ 0 ≤ a ∧ 0 ≤ b then fieldArm m p a.toNat b.toNat
+      else none
+  | [.int a] => if p < 2 ^ 64 ∧ m.binary = false ∧ 0 ≤ a then fieldArm m p a.toNat 0 else none
+  | _ => none
+
+/-- At a modulus below `2^64`, a tagged head on the argument values of the numbers `a` and
+    `b` is the arm `fieldArm`. -/
+theorem fieldCall_fieldArgs {m : FieldMethod} {p : Nat} (hp : p < 2 ^ 64) (a b : Nat) :
+    fieldCall m p (fieldArgs m a b) = fieldArm m p a b := by
+  cases m <;> simp [fieldArgs, FieldMethod.binary, fieldCall, hp, fieldArm, fieldVal]
+
+/-- A value of a tagged head is an integer below its modulus, and the modulus is below
+    `2^64`. -/
+theorem fieldCall_lt {m : FieldMethod} {p : Nat} {args : List Value} {v : Value}
+    (h : fieldCall m p args = some v) : ∃ n : Nat, v = .int n ∧ n < p ∧ p < 2 ^ 64 := by
+  unfold fieldCall at h
+  split at h
+  · split at h
+    · rename_i hc
+      unfold fieldArm at h
+      split at h
+      · rename_i hl
+        cases h
+        exact ⟨_, rfl, fieldVal_lt m (Nat.lt_of_le_of_lt (Nat.zero_le _) hl.1) _ _, hc.1⟩
+      · cases h
+    · cases h
+  · split at h
+    · rename_i hc
+      unfold fieldArm at h
+      split at h
+      · rename_i hl
+        cases h
+        exact ⟨_, rfl, fieldVal_lt m (Nat.lt_of_le_of_lt (Nat.zero_le _) hl.1) _ _, hc.1⟩
+      · cases h
+    · cases h
+  · cases h
+
+/-- No array operation of `widthArrayOps` has a tagged head. -/
+theorem widthArrayOps_of_fieldTag? {f : String} {m : FieldMethod} {p : Nat}
+    (h : fieldTag? f = some (m, p)) (args : List Value) : widthArrayOps f args = none := by
+  unfold widthArrayOps
+  split <;> first | rfl | (subst_vars; cases h) | simp_all
+
+end FieldTag
+
 /-- The Rust `u64` operations on `int` values in `[0, 2^64)`:
     * `wrapping_add#64`, `wrapping_sub#64`, `wrapping_mul#64` modulo `2^64`;
     * `mulhi#64`, the high 64 bits of the 128-bit product;
@@ -1002,8 +1211,16 @@ def hax64NarrowOps : Builtins
       more, and the truncations `cast#8`, `cast#32` of a non-negative value;
     * `none` on the array constructors `array_lit` and `repeat`, which `hax64Builtins`
       reads from `widthArrayOps`;
-    * every other call as `hax64NarrowOps`. -/
-def hax64WordOps : Builtins
+    * every other call as `hax64NarrowOps`.
+
+    A head `FieldTag.fieldTag?` reads as a method of the prime-field interface at a modulus
+    is read first, as `FieldTag.fieldCall`: at a modulus below `2^64`, on arguments below the
+    modulus, the value of the field operation, and no value otherwise. -/
+def hax64WordOps (f : String) (args : List Value) : Option Value :=
+  match FieldTag.fieldTag? f with
+  | some (m, p) => FieldTag.fieldCall m p args
+  | none =>
+  match f, args with
   | "array_lit", _ => none
   | "repeat", _ => none
   | "wrapping_add#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
@@ -1100,6 +1317,35 @@ theorem hax64Builtins_of_none {f : String} {args : List Value}
   unfold hax64Builtins
   rw [h]
   rfl
+
+/-- At a tagged head, `hax64WordOps` is the value `FieldTag.fieldCall` of the head. -/
+theorem hax64WordOps_of_fieldTag? {f : String} {m : FieldTag.FieldMethod} {p : Nat}
+    (h : FieldTag.fieldTag? f = some (m, p)) (args : List Value) :
+    hax64WordOps f args = FieldTag.fieldCall m p args := by
+  unfold hax64WordOps
+  rw [h]
+
+/-- **The `u64` table answers a tagged head by its arm**: at a head `FieldTag.fieldTag?` reads
+    as the method `m` at a modulus `p` below `2^64`, the call on the argument values of the
+    numbers `a` and `b` is `FieldTag.fieldArm m p a b`. -/
+theorem hax64Builtins_fieldArgs {f : String} {m : FieldTag.FieldMethod} {p : Nat}
+    (h : FieldTag.fieldTag? f = some (m, p)) (hp : p < 2 ^ 64) (a b : Nat) :
+    hax64Builtins f (FieldTag.fieldArgs m a b) = FieldTag.fieldArm m p a b := by
+  unfold hax64Builtins
+  rw [hax64WordOps_of_fieldTag? h, FieldTag.fieldCall_fieldArgs hp,
+    FieldTag.widthArrayOps_of_fieldTag? h]
+  cases FieldTag.fieldArm m p a b <;> rfl
+
+/-- A value of the `u64` table at a tagged head is the value `FieldTag.fieldCall` of the
+    head. -/
+theorem hax64Builtins_of_fieldTag? {f : String} {m : FieldTag.FieldMethod} {p : Nat}
+    (h : FieldTag.fieldTag? f = some (m, p)) {args : List Value} {v : Value}
+    (hv : hax64Builtins f args = some v) : FieldTag.fieldCall m p args = some v := by
+  unfold hax64Builtins at hv
+  rw [hax64WordOps_of_fieldTag? h, FieldTag.widthArrayOps_of_fieldTag? h] at hv
+  cases hc : FieldTag.fieldCall m p args with
+  | none => rw [hc] at hv; cases hv
+  | some w => rw [hc] at hv; exact hv
 
 /-! The arms of `hax64WordOps` and of `widthArrayOps` used by the word
 contract, as equations. -/
