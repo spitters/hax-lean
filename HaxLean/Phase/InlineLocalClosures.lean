@@ -76,6 +76,8 @@ variables of `blockW` bound, so the refinement relates environments that agree o
   with the closure table, from environments related by `ContRel`.
 * `denote'_inlineSpine`: from one environment, `inlineSpine e` read with `bi` refines
   `denoteSpine bi fuel e`, the final environments agreeing off `spineW e`.
+* `denoteSpine_letBind_var`: the spine reading of a binding of a variable to a bound
+  variable.
 -/
 
 @[expose] public section
@@ -2541,6 +2543,18 @@ def denoteSpine (bi : Builtins) (fuel : Nat) : ImpExpr → StateM Env Outcome
     | .val _ => denoteSpine bi fuel b
     | other => pure other
   | e => denote' bi fuel e
+
+/-- The spine reading of a binding of a variable to a bound variable whose value is no
+    control-flow value is the reading of the continuation in the extended environment. -/
+theorem denoteSpine_letBind_var (bi : Builtins) (fuel : Nat) (x y : String) (cont : ImpExpr)
+    (env : Env) {w : Value} (h : env y = some w) (hw : w.isControlFlow = false) :
+    denoteSpine bi fuel (.letBind x (.var y) cont) env
+      = denoteSpine bi fuel cont (env.extend x w) := by
+  have hb : ∀ {σ α β : Type} (m : StateM σ α) (f : α → StateM σ β) (s : σ),
+      (m >>= f) s = f (m s).1 (m s).2 := fun _ _ _ => rfl
+  have hg : ∀ {σ : Type} (s : σ), (get : StateM σ σ) s = (s, s) := fun _ => rfl
+  simp only [denoteSpine, denote', hb, hg, h]
+  cases w <;> first | rfl | simp at hw
 
 /-- Two environments agree off the variables `U`. -/
 def EqOff (U : List String) (e₁ e₂ : Env) : Prop := ∀ x, U.contains x = false → e₁ x = e₂ x
