@@ -1415,59 +1415,162 @@ def toLeanLowCTDef (name : String) : String :=
 
 /-! ## The emitted `ImpExpr` literal
 
-The `_impExpr` literal of a generated definition is the erasure of a typed
-term built from the pipelined term by phases that each have an `_erase`
-theorem. The renderer-only rewrites (the projection markers of
-`markNamedProj`, the struct-name passes `tQualifyProjections`,
-`tRewriteNewToStructCtor`, `tRewriteStructFromElem`, `tFixProjectionPaths`,
-`Canonicalize.canonicalize`, the zero-argument `new()` rewrite and the
-newtype-constructor renaming `rewriteNewtypeCtors`) apply to the surface
-definitions only. -/
+The `_impExpr` literal of a generated definition is built from the pipelined
+term in three parts.
 
-/-- The typed terms whose erasures are the emitted `ImpExpr` literals. With
-    pipelined terms `procTdefs` each is `tInitMissingFoldAccums [] te`;
+* On the typed term: the accumulator initialisation `tInitMissingFoldAccums`
+  and the struct-name passes `literalStructSteps` (`tQualifyProjections`,
+  `tRewriteNewToStructCtor`, `tRewriteStructFromElem`), which read the node
+  types and are therefore applied before erasure.
+* The erasure `TExpr.erase`: a projection is `.proj e i` with the flat
+  component index `i`, a newtype projection `.app ".0" [e]`, a newtype
+  construction the newtype name applied to its argument.
+* On the erased term: the untyped rewrites `literalPost`
+  (`Canonicalize.canonicalize`, `applyTypedPasses`, the zero-argument `new()`
+  rewrite `rewriteNewDefs`, and the renaming of conflicting projection names).
+
+The projection markers of `markNamedProj`, the nested projection paths of
+`tFixProjectionPaths` and the newtype-constructor renaming
+`rewriteNewtypeCtors` belong to the surface definitions only. -/
+
+/-- The struct-name passes on the typed terms: projections whose field name
+    occurs in several structs are qualified by the receiver's struct
+    (`tQualifyProjections`), `new` calls become struct constructors
+    (`tRewriteNewToStructCtor`) and `from_elem` calls at a struct type are
+    expanded (`tRewriteStructFromElem`). -/
+def literalStructSteps (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (defs : List (String × TExpr)) : List (String × TExpr) :=
+  let ambiguousFields := findAmbiguousFields structMeta
+  let defs := if ambiguousFields.isEmpty then defs
+    else defs.map fun (n, te) => (n, tQualifyProjections structMeta ambiguousFields te te)
+  let defs := if structMeta.isEmpty then defs
+    else defs.map fun (n, te) => (n, tRewriteNewToStructCtor structMeta te)
+  if structMeta.isEmpty then defs
+  else defs.map fun (n, te) =>
+    let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
+    let fnRetTypes := match fnRetType with
+      | some ty => if ty.isUnknown then [] else [(n, ty)]
+      | none => []
+    (n, tRewriteStructFromElem structMeta fnRetTypes defs te)
+
+/-- Without struct metadata the struct-name passes are the identity. -/
+theorem literalStructSteps_nil (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (defs : List (String × TExpr)) : literalStructSteps [] fnTypes defs = defs := by
+  simp [literalStructSteps, findAmbiguousFields]
+
+/-- The zero-argument `new()` rewrite: in a definition whose `new` calls
+    construct exactly one struct (`buildNewStructMap`), each such call becomes
+    that struct's constructor with default fields (`rewriteNewFromStructMap`). -/
+def rewriteNewDefs (structMeta : StructMeta) (newStructMap : List (String × List String))
+    (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+  if newStructMap.isEmpty then defs
+  else defs.map fun (fname, e) =>
+    match newStructMap.find? (·.1 == fname) with
+    | some (_, [sname]) =>
+      match structMeta.find? (·.1 == sname) with
+      | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
+      | none => (fname, e)
+    | _ => (fname, e)
+
+/-- The renaming of the projection names that conflict with a dependency
+    name: each pair `(unqual, qual)` renames the call head `unqual` to `qual`. -/
+def renameProjConflicts (projConflicts : List (String × String))
+    (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+  if projConflicts.isEmpty then defs
+  else defs.map fun (n, e) =>
+    (n, projConflicts.foldl (fun expr (unqual, qual) => rewriteAppName unqual qual expr) e)
+
+/-- The untyped rewrites of the erased literal terms, in order:
+    `Canonicalize.canonicalize`, `applyTypedPasses`, `rewriteNewDefs` and
+    `renameProjConflicts`. -/
+def literalPost (structMeta : StructMeta) (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+  let defs := defs.map fun (n, e) => (n, Canonicalize.canonicalize e)
+  let defs := (applyTypedPasses defs structMeta fnTypes []).1
+  renameProjConflicts projConflicts (rewriteNewDefs structMeta newStructMap defs)
+
+/-- The typed terms whose erasures the emitted `ImpExpr` literals are built
+    from. With pipelined terms `procTdefs` each is
+    `tInitMissingFoldAccums [] te` followed by `literalStructSteps`;
     otherwise each raw term of `rawTdefs` is passed through `tPipeline`. -/
-def emitLiteralTerms (rawTdefs procTdefs : List (String × TExpr)) :
-    List (String × TExpr) :=
+def emitLiteralTerms (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (rawTdefs procTdefs : List (String × TExpr)) : List (String × TExpr) :=
   if procTdefs.isEmpty then rawTdefs.map fun (n, te) => (n, tPipeline te)
-  else procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te)
+  else literalStructSteps structMeta fnTypes
+    (procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te))
 
-/-- The emitted `ImpExpr` literals: the erasures of `emitLiteralTerms`. -/
-def emitLiteralBodies (rawTdefs procTdefs : List (String × TExpr)) :
-    List (String × ImpExpr) :=
-  (emitLiteralTerms rawTdefs procTdefs).map fun (n, t) => (n, t.erase)
+/-- The emitted `ImpExpr` literals: `literalPost` of the erasures of
+    `emitLiteralTerms`. -/
+def emitLiteralBodies (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (rawTdefs procTdefs : List (String × TExpr)) : List (String × ImpExpr) :=
+  literalPost structMeta fnTypes newStructMap projConflicts
+    ((emitLiteralTerms structMeta fnTypes rawTdefs procTdefs).map fun (n, t) => (n, t.erase))
 
-/-- With pipelined terms, the literal of each definition is the untyped
-    accumulator initialisation of the erased pipelined term. -/
-theorem emitLiteralBodies_proc (rawTdefs procTdefs : List (String × TExpr))
-    (h : procTdefs ≠ []) :
-    emitLiteralBodies rawTdefs procTdefs
-      = procTdefs.map fun (n, te) => (n, initMissingFoldAccums [] te.erase) := by
+/-- With pipelined terms, the literals are `literalPost` of the erased
+    struct-name passes over the accumulator-initialised terms. -/
+theorem emitLiteralBodies_proc (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (rawTdefs procTdefs : List (String × TExpr)) (h : procTdefs ≠ []) :
+    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs procTdefs
+      = literalPost structMeta fnTypes newStructMap projConflicts
+          ((literalStructSteps structMeta fnTypes
+            (procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te))).map
+              fun (n, t) => (n, t.erase)) := by
   have hne : procTdefs.isEmpty = false := List.isEmpty_eq_false_iff.mpr h
-  simp only [emitLiteralBodies, emitLiteralTerms, hne, Bool.false_eq_true, if_false,
-    List.map_map]
-  congr 1
-  funext p
-  simp [tInitMissingFoldAccums_erase]
+  simp only [emitLiteralBodies, emitLiteralTerms, hne, Bool.false_eq_true, if_false]
 
-/-- Without pipelined terms, the literal of each definition is the untyped
-    pipeline applied to the erased raw term. -/
-theorem emitLiteralBodies_raw (rawTdefs : List (String × TExpr)) :
-    emitLiteralBodies rawTdefs []
-      = rawTdefs.map fun (n, te) => (n, pipeline te.erase) := by
+/-- Without pipelined terms, the literals are `literalPost` of the untyped
+    pipeline applied to the erased raw terms. -/
+theorem emitLiteralBodies_raw (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (rawTdefs : List (String × TExpr)) :
+    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs []
+      = literalPost structMeta fnTypes newStructMap projConflicts
+          (rawTdefs.map fun (n, te) => (n, pipeline te.erase)) := by
   simp only [emitLiteralBodies, emitLiteralTerms, List.isEmpty_nil, if_true, List.map_map]
-  congr 1
+  congr 2
   funext p
   simp [tPipeline_erase]
 
-/-- The literal of a definition whose pipelined term is `tPipelineFull nt te`
-    is `initMissingFoldAccums [] (tPipelineFull nt te).erase`. -/
-theorem emitLiteralBodies_tPipelineFull (nt : HaxAdapter.NewtypeMap)
+/-- The literals of definitions whose pipelined terms are `tPipelineFull nt te`:
+    `literalPost` of the erased struct-name passes over
+    `tInitMissingFoldAccums [] (tPipelineFull nt te)`. -/
+theorem emitLiteralBodies_tPipelineFull (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (nt : HaxAdapter.NewtypeMap)
     (rawTdefs : List (String × TExpr)) (defs : List (String × TExpr)) (h : defs ≠ []) :
-    emitLiteralBodies rawTdefs (defs.map fun (n, te) => (n, tPipelineFull nt te))
-      = defs.map fun (n, te) => (n, initMissingFoldAccums [] (tPipelineFull nt te).erase) := by
-  rw [emitLiteralBodies_proc _ _ (by simpa using h), List.map_map]
+    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs
+        (defs.map fun (n, te) => (n, tPipelineFull nt te))
+      = literalPost structMeta fnTypes newStructMap projConflicts
+          ((literalStructSteps structMeta fnTypes
+            (defs.map fun (n, te) => (n, tInitMissingFoldAccums [] (tPipelineFull nt te)))).map
+              fun (n, t) => (n, t.erase)) := by
+  rw [emitLiteralBodies_proc _ _ _ _ _ _ (by simpa using h), List.map_map]
   rfl
+
+/-- Without struct metadata, the literal of a definition whose pipelined term
+    is `tPipelineFull nt te` is `literalPost` of
+    `initMissingFoldAccums [] (tPipelineFull nt te).erase`. -/
+theorem emitLiteralBodies_tPipelineFull_nil (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (nt : HaxAdapter.NewtypeMap)
+    (rawTdefs : List (String × TExpr)) (defs : List (String × TExpr)) (h : defs ≠ []) :
+    emitLiteralBodies [] fnTypes newStructMap projConflicts rawTdefs
+        (defs.map fun (n, te) => (n, tPipelineFull nt te))
+      = literalPost [] fnTypes newStructMap projConflicts
+          (defs.map fun (n, te) => (n, initMissingFoldAccums [] (tPipelineFull nt te).erase)) := by
+  rw [emitLiteralBodies_tPipelineFull _ _ _ _ _ _ _ h, literalStructSteps_nil, List.map_map]
+  congr 2
+  funext p
+  simp [tInitMissingFoldAccums_erase]
 
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
@@ -1488,9 +1591,10 @@ theorem emitLiteralBodies_tPipelineFull (nt : HaxAdapter.NewtypeMap)
     (`HaxAdapter.parseHaxFileWithTExpr`): the `ImpExpr` and `TExpr` literals
     keep those heads, and every other part of the file is printed from the
     terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`).
-    The `ImpExpr` literals are `emitLiteralBodies rawTdefs procTdefs`
-    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`); the renderer-only
-    rewrites apply to the surface definitions alone. -/
+    The `ImpExpr` literals are `emitLiteralBodies` of the input
+    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`); the projection
+    markers, the nested projection paths and the newtype-constructor renaming
+    apply to the surface definitions alone. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1510,12 +1614,13 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
   let procTdefs := procTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
-  -- The `ImpExpr` literals and the typed terms they erase from
-  -- (`emitLiteralBodies`, `emitLiteralTerms`), taken from the input before
-  -- any renderer-only rewrite: untagged, and with the qualified heads of the
-  -- nominal crates' trait-method calls (`HaxAdapter.qualifyNominalHead`).
-  let literalSrc := emitLiteralTerms rawTdefs procTdefs
-  let literalDefs := emitLiteralBodies rawTdefs procTdefs
+  -- The `ImpExpr` literals (`emitLiteralBodies`, below) are built from the
+  -- input before any surface-only rewrite: untagged, and with the qualified
+  -- heads of the nominal crates' trait-method calls
+  -- (`HaxAdapter.qualifyNominalHead`).
+  let literalRaw := rawTdefs
+  let literalProc := procTdefs
+  let literalFnTypes := fnTypes
   -- Operator calls on a type parameter are tagged `#dep` in both TExpr
   -- families: the raw one supplies the `Deps` signature, the processed one
   -- the rendered body.
@@ -1530,7 +1635,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (n, markDep (HaxAdapter.tUnqualifyNominalHeads nominalKrates te))
   -- Build struct-new mapping from rawTdefs (which have types from hax JSON)
   let newStructMap := buildNewStructMap rawTdefs structMeta
-  let ambiguousFields := findAmbiguousFields structMeta
   -- The typed passes on the processed terms, before erasure.
   let typedBodies (procTdefs : List (String × TExpr)) : List (String × TExpr) :=
     -- TCB pre-process: rewrite `.namedProj T x` in the post-pipeline TExpr
@@ -1544,26 +1648,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     -- proves `(tInitMissingFoldAccums bound e).erase = initMissingFoldAccums bound e.erase`.
     let procTdefs := procTdefs.map fun (n, te) =>
       (n, tInitMissingFoldAccums [] te)
-    -- Typed phases (run BEFORE erase so type-dependent rewrites use direct
-    -- `TExpr.ty` annotations instead of post-erase heuristics). The
-    -- equivalent untyped passes downstream become idempotent no-ops because
-    -- the patterns they detect (`.app ".field"`, `.app "new" args`,
-    -- `.app "from_elem" ..`, `.app ".N" ..` for N>1) have already been
-    -- rewritten at the TExpr level. Each typed phase has a documented
-    -- erase-preservation property (theorem deferred pending a `WellTyped`
-    -- predicate).
-    let procTdefs := if ambiguousFields.isEmpty then procTdefs
-      else procTdefs.map fun (n, te) =>
-        (n, tQualifyProjections structMeta ambiguousFields te te)
-    let procTdefs := if structMeta.isEmpty then procTdefs
-      else procTdefs.map fun (n, te) => (n, tRewriteNewToStructCtor structMeta te)
-    let procTdefs := if structMeta.isEmpty then procTdefs
-      else procTdefs.map fun (n, te) =>
-        let fnRetType := fnTypes.find? (·.1 == n) |>.map (·.2.retType)
-        let fnRetTypes := match fnRetType with
-          | some ty => if ty.isUnknown then [] else [(n, ty)]
-          | none => []
-        (n, tRewriteStructFromElem structMeta fnRetTypes procTdefs te)
+    -- The typed struct-name passes (run before erase so type-dependent
+    -- rewrites read `TExpr.ty`), then the nested projection paths of the
+    -- right-nested surface tuples.
+    let procTdefs := literalStructSteps structMeta fnTypes procTdefs
     procTdefs.map fun (n, te) => (n, tFixProjectionPaths te)
   -- The erased bodies: the processed terms erased if present, otherwise the
   -- raw ones erased and pipelined; then canonicalised.
@@ -1584,14 +1672,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- per-function struct mapping from `rawTdefs` that the typed phase doesn't
   -- reconstruct (the typed `tRewriteNewToStructCtor` skips empty-args calls).
   let rewriteNew (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
-    if newStructMap.isEmpty then defs
-    else defs.map fun (fname, e) =>
-      match newStructMap.find? (·.1 == fname) with
-      | some (_, [sname]) =>
-        match structMeta.find? (·.1 == sname) with
-        | some (_, fields) => (fname, rewriteNewFromStructMap sname fields e)
-        | none => (fname, e)
-      | _ => (fname, e)
+    rewriteNewDefs structMeta newStructMap defs
   let procTdefs := typedBodies procTdefs
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
   let defs := erasedBodies rawTdefs procTdefs
@@ -1636,17 +1717,17 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     else clashedBaseLookup name
   let postPreamble (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
     -- Rewrite function body projection references for conflicts
-    let defs := if projConflicts.isEmpty then defs
-      else defs.map fun (n, e) =>
-        let e' := projConflicts.foldl (fun expr (unqual, qual) =>
-          rewriteAppName unqual qual expr) e
-        (n, e')
+    let defs := renameProjConflicts projConflicts defs
     -- Newtype constructor call sites take the `«T.mk»` name the newtype
     -- preamble declares. This runs after `generatePreambleTyped`, whose
     -- `Deps`-field filter keys on the source name `T`.
     if newtypes.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewtypeCtors newtypes e)
   let defs := postPreamble defs
+  -- The `ImpExpr` literals and the typed terms they erase from.
+  let literalSrc := emitLiteralTerms structMeta literalFnTypes literalRaw literalProc
+  let literalDefs := emitLiteralBodies structMeta literalFnTypes newStructMap projConflicts
+    literalRaw literalProc
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
