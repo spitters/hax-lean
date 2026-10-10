@@ -36,6 +36,11 @@ match.
   environment.
 * `denote'_rewriteSite`: the rewrite of one node refines the node under `denote'`.
 * `tIrrefutableTupleMatch_erase`: the typed phase commutes with erasure.
+* `denote'_bottomUp`: a rewrite of one node that refines the node, the final
+  environments related by a reflexive, transitive relation kept by `extend`, gives a
+  `bottomUp` traversal that refines every term whose reads that relation admits
+  (`readsOk`).
+* `irrefutableTupleMatch_refines`: the whole pass refines its input under `denote'`.
 -/
 
 @[expose] public section
@@ -701,5 +706,483 @@ open IrrefutableTupleMatch in
 theorem tIrrefutableTupleMatch_erase (t : TExpr) :
     (tIrrefutableTupleMatch t).erase = irrefutableTupleMatch t.erase :=
   tBottomUp_erase tRewriteSite rewriteSite (fun k ty hk => tRewriteSite_erase k ty hk) t
+
+namespace IrrefutableTupleMatch
+
+open InlineLocalClosures
+
+/-! ## Refinement through `bottomUp` -/
+
+/-- A variable read or the projection of one: an expression that leaves the environment
+    unchanged and that `bottomUp` keeps when the rewrite keeps such nodes. -/
+def simpleRead : ImpExpr → Bool
+  | .var _ => true
+  | .proj (.var _) _ => true
+  | _ => false
+
+/-- The reads of `e` are admissible in mode `s`. In mode `true` every variable may be
+    read, in mode `false` only those with `rd`. The value of a `letBind` and the operand
+    of a `proj` are read in the mode of the node; the body of `letBind n v b` is read in
+    mode `true` when `up n` holds or when the node is in mode `true` and `v` is a
+    `simpleRead`, and in mode `false` otherwise; every other child is read in mode
+    `false`. -/
+def readsOk (rd up : String → Bool) : Bool → ImpExpr → Bool
+  | s, .var x => s || rd x
+  | s, .letBind n v b =>
+    readsOk rd up s v && readsOk rd up (up n || (s && simpleRead v)) b
+  | _, .lam _ b => readsOk rd up false b
+  | _, .app _ args => readsList rd up args
+  | _, .tuple es => readsList rd up es
+  | s, .proj e _ => readsOk rd up s e
+  | _, .ifThenElse c t e =>
+    readsOk rd up false c && readsOk rd up false t && readsOk rd up false e
+  | _, .match_ sc arms => readsOk rd up false sc && readsArms rd up arms
+  | _, .seq a b => readsOk rd up false a && readsOk rd up false b
+  | _, .borrow e => readsOk rd up false e
+  | _, .deref e => readsOk rd up false e
+  | _, .assign _ r => readsOk rd up false r
+  | _, .forLoop _ lo hi b =>
+    readsOk rd up false lo && readsOk rd up false hi && readsOk rd up false b
+  | _, .forLoopRev _ lo hi b =>
+    readsOk rd up false lo && readsOk rd up false hi && readsOk rd up false b
+  | _, .whileLoop c b => readsOk rd up false c && readsOk rd up false b
+  | _, .break_ (some e) => readsOk rd up false e
+  | _, .earlyReturn e => readsOk rd up false e
+  | _, .questionMark e => readsOk rd up false e
+  | _, .forFold _ lo hi b =>
+    readsOk rd up false lo && readsOk rd up false hi && readsOk rd up false b
+  | _, .forFoldRev _ lo hi b =>
+    readsOk rd up false lo && readsOk rd up false hi && readsOk rd up false b
+  | _, .whileFold c b => readsOk rd up false c && readsOk rd up false b
+  | _, .forFoldReturn _ lo hi b =>
+    readsOk rd up false lo && readsOk rd up false hi && readsOk rd up false b
+  | _, .forFoldRevReturn _ lo hi b =>
+    readsOk rd up false lo && readsOk rd up false hi && readsOk rd up false b
+  | _, .whileFoldReturn c b => readsOk rd up false c && readsOk rd up false b
+  | _, .cfBreak e => readsOk rd up false e
+  | _, .cfContinue e => readsOk rd up false e
+  | _, .cfBreakContinue e => readsOk rd up false e
+  | _, .typeAscription e _ => readsOk rd up false e
+  | _, _ => true
+where
+  /-- `readsOk` in mode `false` of every expression of a list. -/
+  readsList (rd up : String → Bool) : List ImpExpr → Bool
+    | [] => true
+    | e :: es => readsOk rd up false e && readsList rd up es
+  /-- `readsOk` in mode `false` of the body of every match arm. -/
+  readsArms (rd up : String → Bool) : List (ImpPat × ImpExpr) → Bool
+    | [] => true
+    | (_, e) :: rest => readsOk rd up false e && readsArms rd up rest
+
+theorem readsOk.readsList_eq (rd up : String → Bool) (es : List ImpExpr) :
+    readsOk.readsList rd up es = es.all (readsOk rd up false) := by
+  induction es with
+  | nil => rfl
+  | cons e es ih => simp [readsOk.readsList, ih]
+
+theorem readsOk.readsArms_eq (rd up : String → Bool) (arms : List (ImpPat × ImpExpr)) :
+    readsOk.readsArms rd up arms = arms.all fun pa => readsOk rd up false pa.2 := by
+  induction arms with
+  | nil => rfl
+  | cons pa arms ih => obtain ⟨p, e⟩ := pa; simp [readsOk.readsArms, ih]
+
+/-- Every read is admissible when every variable may be read in mode `false`. -/
+theorem readsOk_of_rd {rd : String → Bool} (up : String → Bool) (hrd : ∀ x, rd x = true)
+    (e : ImpExpr) : ∀ s, readsOk rd up s e = true := by
+  induction e using ImpExpr.ind with
+  | app g args ih =>
+    intro s
+    simp only [readsOk, readsOk.readsList_eq, List.all_eq_true]
+    exact fun a ha => ih a ha false
+  | tuple es ih =>
+    intro s
+    simp only [readsOk, readsOk.readsList_eq, List.all_eq_true]
+    exact fun a ha => ih a ha false
+  | match_ sc arms ihs iha =>
+    intro s
+    simp only [readsOk, readsOk.readsArms_eq, List.all_eq_true, Bool.and_eq_true]
+    exact ⟨ihs false, fun pa ha => iha pa ha false⟩
+  | letBind n v b ihv ihb =>
+    intro s
+    simp only [readsOk, Bool.and_eq_true]
+    exact ⟨ihv s, ihb _⟩
+  | proj e i ih => intro s; exact ih s
+  | _ => intro s; simp_all [readsOk]
+
+/-- The relation of a mode: equality in mode `true`, `R` in mode `false`. -/
+def modeRel (R : Env → Env → Prop) : Bool → Env → Env → Prop
+  | true => fun e₁ e₂ => e₁ = e₂
+  | false => R
+
+/-- A run related to `m` from equal environments, `m` related to `src` from `P`-related
+    ones, the final relation transitive: the run is related to `src`. -/
+theorem refR_site {α : Type} {P R : Env → Env → Prop} {bad : α → Prop}
+    (hR : ∀ a b c, R a b → R b c → R a c) {t m src : StateM Env α}
+    (hf : RefR (fun e₁ e₂ => e₁ = e₂) R bad t m) (hc : RefR P R bad m src) :
+    RefR P R bad t src := by
+  intro e₁ e₂ hP o s₂ hr hb
+  obtain ⟨sm, hm, hR₁⟩ := hc e₁ e₂ hP o s₂ hr hb
+  obtain ⟨s₁, h₁, hR₂⟩ := hf e₁ e₁ rfl o sm hm hb
+  exact ⟨s₁, h₁, hR _ _ _ hR₂ hR₁⟩
+
+theorem refR_modify_ext {α : Type} {P P' Q : Env → Env → Prop} {bad : α → Prop} {n : String}
+    {w : Value} (hn : ∀ e₁ e₂, P e₁ e₂ → P' (e₁.extend n w) (e₂.extend n w))
+    {k₁ k₂ : PUnit → StateM Env α} (h : ∀ u, RefR P' Q bad (k₁ u) (k₂ u)) :
+    RefR P Q bad (_root_.modify (fun x => x.extend n w) >>= k₁)
+      (_root_.modify (fun x => x.extend n w) >>= k₂) := by
+  intro e₁ e₂ hP o s hr hb
+  exact h _ _ _ (hn e₁ e₂ hP) o s hr hb
+
+/-- Pattern matching extends the environment by bindings that depend on the pattern and
+    the value only, so a relation kept by every `extend` relates the results. -/
+theorem matchPat_rel {R : Env → Env → Prop}
+    (hR : ∀ e₁ e₂ n w, R e₁ e₂ → R (e₁.extend n w) (e₂.extend n w)) (pat : ImpPat) (v : Value)
+    (e₁ : Env) : ∀ e₂, R e₁ e₂ → Option.Rel R (matchPat pat v e₁) (matchPat pat v e₂) := by
+  induction pat, v, e₁ using matchPat.induct (motive_1 := fun pats vs e₁ =>
+      ∀ e₂, R e₁ e₂ →
+        Option.Rel R (matchPat.matchPatList pats vs e₁) (matchPat.matchPatList pats vs e₂)) with
+  | case6 pats vs env hlen ih1 => intro e₂ hs; simp only [matchPat, hlen]; exact ih1 e₂ hs
+  | case8 pats vs env hlen ih1 => intro e₂ hs; simp only [matchPat, hlen]; exact ih1 e₂ hs
+  | case9 p v env ih2 => intro e₂ hs; simp only [matchPat]; exact ih2 e₂ hs
+  | case11 p v env ih2 => intro e₂ hs; simp only [matchPat]; exact ih2 e₂ hs
+  | case12 p v env ih2 => intro e₂ hs; simp only [matchPat]; exact ih2 e₂ hs
+  | case15 p ps v vs env ih2 ih1 =>
+    rename_i e₂ hs
+    have h2 := ih2 e₂ hs
+    simp only [matchPat.matchPatList]
+    revert ih1
+    generalize matchPat p v env = a₁ at h2 ⊢
+    generalize matchPat p v e₂ = a₂ at h2 ⊢
+    intro ih1
+    cases h2 with
+    | none => exact Option.Rel.none
+    | some h => exact ih1 _ _ h
+  | case4 name v' env =>
+    intro e₂ hs
+    simp only [matchPat]
+    exact Option.Rel.some (hR _ _ _ _ hs)
+  | case16 t x env h1 h2 =>
+    rename_i e₂ hs
+    cases t <;> cases x <;> simp_all [matchPat.matchPatList]
+  | _ =>
+    intros
+    simp_all [matchPat, matchPat.matchPatList]
+
+theorem denoteMatchArms'_cons_run (bi : Builtins) (fuel : Nat) (v : Value) (p : ImpPat)
+    (b : ImpExpr) (rest : List (ImpPat × ImpExpr)) (env : Env) :
+    (denoteMatchArms' bi fuel v ((p, b) :: rest)).run env =
+      match matchPat p v env with
+      | some env' => (denote' bi fuel b).run env'
+      | none => (denoteMatchArms' bi fuel v rest).run env := by
+  conv => lhs; unfold denoteMatchArms'
+  dsimp only [bind, Bind.bind, StateT.bind, get, getThe, MonadStateOf.get, StateT.get, set,
+    MonadStateOf.set, StateT.set, pure, Pure.pure, StateT.pure, Id.run, StateT.run]
+  rcases matchPat p v env with _ | e' <;> rfl
+
+/-- Match arms whose bodies are related are related, from environments related by a
+    relation that every `extend` keeps. -/
+theorem arms_rel {R : Env → Env → Prop} {bi₁ bi₂ : Builtins}
+    (hR : ∀ e₁ e₂ n w, R e₁ e₂ → R (e₁.extend n w) (e₂.extend n w)) (g : ImpExpr → ImpExpr)
+    (fuel : Nat) (v : Value) (arms : List (ImpPat × ImpExpr))
+    (ih : ∀ pa, pa ∈ arms → RefE R (denote' bi₁ fuel (g pa.2)) (denote' bi₂ fuel pa.2)) :
+    RefE R (denoteMatchArms' bi₁ fuel v (arms.map fun (p, e) => (p, g e)))
+      (denoteMatchArms' bi₂ fuel v arms) := by
+  induction arms with
+  | nil =>
+    simp only [List.map_nil]
+    unfold denoteMatchArms'
+    exact RefR.pure _
+  | cons pa rest iha =>
+    obtain ⟨p, b⟩ := pa
+    intro e₁ e₂ hR₁ o s₂ hr hb
+    have hm := matchPat_rel hR p v e₁ e₂ hR₁
+    simp only [List.map_cons]
+    rw [denoteMatchArms'_cons_run] at hr ⊢
+    generalize matchPat p v e₁ = a₁ at hm ⊢
+    generalize matchPat p v e₂ = a₂ at hm hr
+    cases hm with
+    | none =>
+      exact iha (fun pa h => ih pa (List.mem_cons_of_mem _ h)) e₁ e₂ hR₁ o s₂ hr hb
+    | some h =>
+      exact ih (p, b) List.mem_cons_self _ _ h o s₂ hr hb
+
+section BottomUp
+
+variable {R : Env → Env → Prop} {rd up : String → Bool} {bi : Builtins}
+  {f : ImpExpr → ImpExpr}
+
+/-- **Refinement through `bottomUp`.** Let the rewrite `f` of one node refine the node
+    from equal environments, the final environments related by a transitive, reflexive
+    relation `R`; let every `extend` keep `R`, an `extend` at a name with `up` turn `R`
+    into equality, and `R`-related environments agree on the names with `rd`; let `f` keep
+    variable reads and their projections. For `e` whose reads are admissible in mode `s`
+    (`readsOk`), `bottomUp f e` refines `e` from environments related in mode `s`. -/
+theorem denote'_bottomUp (hRrefl : ∀ a, R a a) (hRtrans : ∀ a b c, R a b → R b c → R a c)
+    (hRext : ∀ e₁ e₂ n w, R e₁ e₂ → R (e₁.extend n w) (e₂.extend n w))
+    (hup : ∀ e₁ e₂ n w, R e₁ e₂ → up n = true → e₁.extend n w = e₂.extend n w)
+    (hrd : ∀ e₁ e₂ x, R e₁ e₂ → rd x = true → e₁ x = e₂ x)
+    (hfv : ∀ y, f (.var y) = .var y) (hfp : ∀ y i, f (.proj (.var y) i) = .proj (.var y) i)
+    (hf : ∀ fuel e, RefR (fun e₁ e₂ => e₁ = e₂) R IsErr (denote' bi fuel (f e))
+      (denote' bi fuel e))
+    (e : ImpExpr) : ∀ s, readsOk rd up s e = true → ∀ fuel,
+      RefR (modeRel R s) R IsErr (denote' bi fuel (bottomUp f e)) (denote' bi fuel e) := by
+  have hlow : ∀ s a b, modeRel R s a b → R a b := by
+    intro s a b h
+    cases s
+    · exact h
+    · cases h; exact hRrefl a
+  have site : ∀ s fuel (x src : ImpExpr),
+      RefR (modeRel R s) R IsErr (denote' bi fuel x) (denote' bi fuel src) →
+      RefR (modeRel R s) R IsErr (denote' bi fuel (f x)) (denote' bi fuel src) :=
+    fun _ fuel x _ h => refR_site hRtrans (hf fuel x) h
+  have low : ∀ s {t src : StateM Env Outcome}, RefE R t src → RefR (modeRel R s) R IsErr t src :=
+    fun s _ _ h => h.mono (hlow s) (fun _ _ h => h)
+  have ext : ∀ n e₁ e₂ w, R e₁ e₂ → R (e₁.extend n w) (e₂.extend n w) :=
+    fun n e₁ e₂ w h => hRext e₁ e₂ n w h
+  induction e using ImpExpr.ind with
+  | var x =>
+    intro s hK fuel
+    simp only [bottomUp]
+    refine site s fuel _ _ ?_
+    intro e₁ e₂ hP o s₂ hr hnb
+    rw [ContinueFlag.var_run] at hr ⊢
+    have hx : e₁ x = e₂ x := by
+      cases s
+      · simp only [readsOk, Bool.false_or] at hK
+        exact hrd e₁ e₂ x hP hK
+      · cases hP; rfl
+    rw [hx]
+    cases h : e₂ x <;> simp only [h] at hr <;> obtain ⟨rfl, rfl⟩ := Prod.mk.inj hr
+    · exact absurd ⟨_, rfl⟩ hnb
+    · exact ⟨e₁, rfl, hlow s _ _ hP⟩
+  | letBind n v b ihv ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ ?_
+    have hv : RefR (modeRel R s) (modeRel R (s && simpleRead v)) IsErr
+        (denote' bi fuel (bottomUp f v)) (denote' bi fuel v) := by
+      cases s
+      · exact ihv false hK.1 fuel
+      · cases hsv : simpleRead v
+        · exact ihv true hK.1 fuel
+        · have hbv : bottomUp f v = v := by
+            unfold simpleRead at hsv
+            split at hsv
+            · simp only [bottomUp, hfv]
+            · simp only [bottomUp, hfv, hfp]
+            · cases hsv
+          rw [hbv]
+          exact RefR.refl _
+    have hb := ihb _ hK.2 fuel
+    have hx : ∀ w e₁ e₂, modeRel R (s && simpleRead v) e₁ e₂ →
+        modeRel R (up n || (s && simpleRead v)) (e₁.extend n w) (e₂.extend n w) := by
+      intro w e₁ e₂ h
+      cases hu : up n
+      · simp only [Bool.false_or]
+        generalize (s && simpleRead v) = t at h ⊢
+        cases t
+        · exact ext n e₁ e₂ w h
+        · cases h; rfl
+      · exact hup e₁ e₂ n w (hlow _ _ _ h) hu
+    simp only [denote']
+    refine RefR.bind (badα := IsErr) hv (fun o ho => ?_) (fun a ha s => by
+      obtain ⟨m, hm⟩ := ha; subst hm; exact ⟨m, rfl⟩)
+    split
+    · exact (RefR.pure _).mono (hlow _) (fun _ _ h => h)
+    · exact refR_modify_ext (hx _) (fun _ => hb)
+    · exact (RefR.pure _).mono (hlow _) (fun _ _ h => h)
+  | proj e i ih =>
+    intro s hK fuel
+    simp only [readsOk] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ ?_
+    have h := ih s hK
+    simp only [denote']
+    rel_step
+  | app g args ih =>
+    intro s hK fuel
+    simp only [readsOk, readsOk.readsList_eq, List.all_eq_true] at hK
+    simp only [bottomUp, bottomUp.mapE_eq]
+    refine site s fuel _ _ (low s ?_)
+    simp only [denote']
+    unfold denoteApp'
+    refine RefR.bind (badα := fun o => o = none)
+      (args_rel _ args fuel fun a ha => (ih a ha false (hK a ha) fuel).mono (hlow false)
+        (fun _ _ h => h))
+      (fun r hr => ?_) (fun r hr s => by subst hr; exact ⟨_, rfl⟩)
+    split <;> (try split) <;> first | exact RefR.pure _ | exact absurd rfl hr
+  | tuple es ih =>
+    intro s hK fuel
+    simp only [readsOk, readsOk.readsList_eq, List.all_eq_true] at hK
+    simp only [bottomUp, bottomUp.mapE_eq]
+    refine site s fuel _ _ (low s ?_)
+    simp only [denote']
+    refine RefR.bind (badα := fun o => o = none)
+      (args_rel _ es fuel fun a ha => (ih a ha false (hK a ha) fuel).mono (hlow false)
+        (fun _ _ h => h))
+      (fun r hr => ?_) (fun r hr s => by subst hr; exact ⟨_, rfl⟩)
+    split <;> first | exact RefR.pure _ | exact absurd rfl hr
+  | match_ sc arms ihs iha =>
+    intro s hK fuel
+    simp only [readsOk, readsOk.readsArms_eq, List.all_eq_true, Bool.and_eq_true] at hK
+    simp only [bottomUp, bottomUp.mapA_eq]
+    refine site s fuel _ _ (low s ?_)
+    have hs : RefE R (denote' bi fuel (bottomUp f sc)) (denote' bi fuel sc) := ihs false hK.1 fuel
+    have ha := arms_rel hRext (bottomUp f) fuel (bi₁ := bi) (bi₂ := bi)
+    simp only [denote']
+    refine RefR.bind (badα := IsErr) hs (fun o ho => ?_) (fun a ha s => by
+      obtain ⟨m, hm⟩ := ha; subst hm; exact ⟨m, rfl⟩)
+    split
+    · exact RefR.pure _
+    · exact ha _ arms fun pa hpa => iha pa hpa false (hK.2 pa hpa) fuel
+    · exact RefR.pure _
+  | lam qs b _ =>
+    intro _ _ fuel
+    simp only [bottomUp]
+    refine site _ fuel _ _ ?_
+    exact RefR.of_bad fun _ => by simp only [denote']; exact ⟨_, rfl⟩
+  | forLoop v lo hi b ihl ihh ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hl := ihl false hK.1.1
+    have hh := ihh false hK.1.2
+    have := forLoopOrig'_rel (bi₁ := bi) (ext v) (ihb false hK.2)
+    simp only [denote']
+    rel_step
+  | forLoopRev v lo hi b ihl ihh ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hl := ihl false hK.1.1
+    have hh := ihh false hK.1.2
+    have := forLoopRevOrig'_rel (bi₁ := bi) (ext v) (ihb false hK.2)
+    simp only [denote']
+    rel_step
+  | forFold v lo hi b ihl ihh ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hl := ihl false hK.1.1
+    have hh := ihh false hK.1.2
+    have := forLoop'_rel (bi₁ := bi) (ext v) (ihb false hK.2)
+    simp only [denote']
+    rel_step
+  | forFoldRev v lo hi b ihl ihh ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hl := ihl false hK.1.1
+    have hh := ihh false hK.1.2
+    have := forLoopRev'_rel (bi₁ := bi) (ext v) (ihb false hK.2)
+    simp only [denote']
+    rel_step
+  | forFoldReturn v lo hi b ihl ihh ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hl := ihl false hK.1.1
+    have hh := ihh false hK.1.2
+    have := forLoop'Return_rel (bi₁ := bi) (ext v) (ihb false hK.2)
+    simp only [denote']
+    rel_step
+  | forFoldRevReturn v lo hi b ihl ihh ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hl := ihl false hK.1.1
+    have hh := ihh false hK.1.2
+    have := forLoopRev'Return_rel (bi₁ := bi) (ext v) (ihb false hK.2)
+    simp only [denote']
+    rel_step
+  | whileLoop c b ihc ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    simp only [denote']
+    exact whileOrig'_rel (ihc false hK.1) (ihb false hK.2) fuel
+  | whileFold c b ihc ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    simp only [denote']
+    exact while'_rel (ihc false hK.1) (ihb false hK.2) fuel
+  | whileFoldReturn c b ihc ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    simp only [denote']
+    exact while'Return_rel (ihc false hK.1) (ihb false hK.2) fuel
+  | assign n rhs ih =>
+    intro s hK fuel
+    simp only [readsOk] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have hn := ext n
+    have hr := ih false hK
+    simp only [denote']
+    rel_step
+  | seq a b iha ihb =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have ha := iha false hK.1
+    have hb := ihb false hK.2
+    simp only [denote']
+    rel_step
+  | ifThenElse c t e ihc iht ihe =>
+    intro s hK fuel
+    simp only [readsOk, Bool.and_eq_true] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have h1 := ihc false hK.1.1
+    have h2 := iht false hK.1.2
+    have h3 := ihe false hK.2
+    simp only [denote']
+    rel_step
+  | borrow e ih | deref e ih | break_some e ih | earlyReturn e ih
+  | questionMark e ih | cfBreak e ih | cfContinue e ih | cfBreakContinue e ih
+  | typeAscription e _ ih =>
+    intro s hK fuel
+    simp only [readsOk] at hK
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    have h := ih false hK
+    simp only [denote']
+    rel_step
+  | _ =>
+    intro s _ fuel
+    simp only [bottomUp]
+    refine site s fuel _ _ (low s ?_)
+    simp only [denote']
+    rel_step
+
+end BottomUp
+
+end IrrefutableTupleMatch
+
+open IrrefutableTupleMatch InlineLocalClosures in
+/-- **The whole pass.** `irrefutableTupleMatch e` refines `e` under `denote'`: from equal
+    environments, every run of `e` that does not end in an error is the run of the
+    rewritten term, with the same final environment. -/
+theorem irrefutableTupleMatch_refines (bi : Builtins) (e : ImpExpr) (fuel : Nat) :
+    RefE (fun e₁ e₂ => e₁ = e₂) (denote' bi fuel (irrefutableTupleMatch e))
+      (denote' bi fuel e) :=
+  denote'_bottomUp (rd := fun _ => true) (up := fun _ => true) (fun _ => rfl)
+    (fun _ _ _ h₁ h₂ => h₁.trans h₂) (fun _ _ _ _ h => h ▸ rfl) (fun _ _ _ _ h _ => h ▸ rfl)
+    (fun _ _ _ h _ => h ▸ rfl) (fun _ => rfl) (fun _ _ => rfl)
+    (fun fuel e => denote'_rewriteSite bi fuel e) e true
+    (readsOk_of_rd _ (fun _ => rfl) e true) fuel
 
 end Hax

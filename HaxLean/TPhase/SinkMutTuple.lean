@@ -45,6 +45,9 @@ equal initial environments to final environments that agree off `m` (`EqOff [m]`
   in a non-control-flow value where the branch ends in its tail tuple.
 * `denote'_rewriteSite`: the rewrite of one node refines the node under `denote'`, the
   final environments agreeing off `m`.
+* `sinkMutTuple_refines`: the whole pass refines its input under `denote'` when the input
+  reads `_mtup` only right after binding it (`mtupReadsOk`), the final environments
+  agreeing off `_mtup`.
 -/
 
 @[expose] public section
@@ -497,6 +500,44 @@ theorem denote'_rewriteSite (bi : Builtins) (fuel : Nat) (m : String) (e : ImpEx
     · exact refl
   · exact refl
 
+/-! ## The whole pass -/
+
+/-- The reads of `_mtup` in `e` are admissible for `sinkMutTuple`: `_mtup` is read only
+    where every run has just bound it (`readsOk`, the binding of `_mtup` and the chain of
+    variable reads and their projections after it in mode `true`). -/
+def mtupReadsOk (e : ImpExpr) : Bool :=
+  readsOk (fun y => y != "_mtup") (fun n => n == "_mtup") true e
+
 end SinkMutTuple
+
+open SinkMutTuple IrrefutableTupleMatch InlineLocalClosures in
+/-- **The whole pass.** For `e` that reads `_mtup` only where it has just been bound
+    (`mtupReadsOk`), `sinkMutTuple e` refines `e` under `denote'`: from equal environments,
+    every run of `e` that does not end in an error is matched by a run of the rewritten
+    term with the same outcome, the final environments agreeing off `_mtup`. -/
+theorem sinkMutTuple_refines (bi : Builtins) (e : ImpExpr) (h : mtupReadsOk e = true)
+    (fuel : Nat) :
+    RefR (fun e₁ e₂ => e₁ = e₂) (EqOff ["_mtup"]) IsErr (denote' bi fuel (sinkMutTuple e))
+      (denote' bi fuel e) :=
+  denote'_bottomUp (rd := fun y => y != "_mtup") (up := fun n => n == "_mtup")
+    (fun _ _ _ => rfl) (fun _ _ _ h₁ h₂ x hx => (h₁ x hx).trans (h₂ x hx))
+    (by
+      intro e₁ e₂ n w h x hx
+      simp only [Env.extend]
+      split
+      · rfl
+      · exact h x hx)
+    (by
+      intro e₁ e₂ n w h hn
+      simp only [beq_iff_eq] at hn
+      subst hn
+      funext x
+      simp only [Env.extend]
+      split
+      · rfl
+      · rename_i hx
+        exact h x (by simpa using hx))
+    (fun _ _ x h hx => h x (by simpa using hx)) (fun _ => rfl) (fun _ _ => rfl)
+    (fun fuel e => denote'_rewriteSite bi fuel "_mtup" e) e true h fuel
 
 end Hax
