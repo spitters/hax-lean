@@ -904,10 +904,10 @@ def wrapTagFile : String :=
 -- No declaration reuses the alias name `Tag`.
 #eval ((wrapTagFile.splitOn "def Tag ").length == 1)  -- true
 
--- The construction site names the constructor, in the surface rendering and
--- in the `ImpExpr` literal.
+-- The construction site names the constructor in the surface rendering; the
+-- `ImpExpr` literal carries the erase form, the newtype name applied to the value.
 #eval ((wrapTagFile.splitOn "(fun v => «Tag.mk» v)").length == 2)  -- true
-#eval ((wrapTagFile.splitOn "(.app \"Tag.mk\" [(.var \"v\")])").length == 2)  -- true
+#eval ((wrapTagFile.splitOn "(.app \"Tag\" [(.var \"v\")])").length == 2)  -- true
 
 /-- `struct Pair(u32, u32)`, in the adapter's positional-field encoding. -/
 def pairStructMeta : StructMeta := [("Pair", [("0", "int", .int), ("1", "int", .int)])]

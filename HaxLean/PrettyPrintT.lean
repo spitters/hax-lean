@@ -9,6 +9,7 @@ public import HaxLean.TExpr
 public import HaxLean.AnfLowCT
 public import HaxLean.PrettyPrint
 public import HaxLean.Pipeline
+public import HaxLean.TPipeline
 public import HaxLean.HaxAdapter
 public import HaxLean.TPhase.AnnotateLets
 public import HaxLean.TPhase.InitFoldAccums
@@ -1412,6 +1413,62 @@ def toLeanImpExprAnfDef (name : String) (e : ImpExpr) : String :=
 def toLeanLowCTDef (name : String) : String :=
   s!"def {sanitizeName (name ++ "_lowct")} : Option LowCT :=\n  haxToLowCT {sanitizeName (name ++ "_impExprAnf")}\n"
 
+/-! ## The emitted `ImpExpr` literal
+
+The `_impExpr` literal of a generated definition is the erasure of a typed
+term built from the pipelined term by phases that each have an `_erase`
+theorem. The renderer-only rewrites (the projection markers of
+`markNamedProj`, the struct-name passes `tQualifyProjections`,
+`tRewriteNewToStructCtor`, `tRewriteStructFromElem`, `tFixProjectionPaths`,
+`Canonicalize.canonicalize`, the zero-argument `new()` rewrite and the
+newtype-constructor renaming `rewriteNewtypeCtors`) apply to the surface
+definitions only. -/
+
+/-- The typed terms whose erasures are the emitted `ImpExpr` literals. With
+    pipelined terms `procTdefs` each is `tInitMissingFoldAccums [] te`;
+    otherwise each raw term of `rawTdefs` is passed through `tPipeline`. -/
+def emitLiteralTerms (rawTdefs procTdefs : List (String × TExpr)) :
+    List (String × TExpr) :=
+  if procTdefs.isEmpty then rawTdefs.map fun (n, te) => (n, tPipeline te)
+  else procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te)
+
+/-- The emitted `ImpExpr` literals: the erasures of `emitLiteralTerms`. -/
+def emitLiteralBodies (rawTdefs procTdefs : List (String × TExpr)) :
+    List (String × ImpExpr) :=
+  (emitLiteralTerms rawTdefs procTdefs).map fun (n, t) => (n, t.erase)
+
+/-- With pipelined terms, the literal of each definition is the untyped
+    accumulator initialisation of the erased pipelined term. -/
+theorem emitLiteralBodies_proc (rawTdefs procTdefs : List (String × TExpr))
+    (h : procTdefs ≠ []) :
+    emitLiteralBodies rawTdefs procTdefs
+      = procTdefs.map fun (n, te) => (n, initMissingFoldAccums [] te.erase) := by
+  have hne : procTdefs.isEmpty = false := List.isEmpty_eq_false_iff.mpr h
+  simp only [emitLiteralBodies, emitLiteralTerms, hne, Bool.false_eq_true, if_false,
+    List.map_map]
+  congr 1
+  funext p
+  simp [tInitMissingFoldAccums_erase]
+
+/-- Without pipelined terms, the literal of each definition is the untyped
+    pipeline applied to the erased raw term. -/
+theorem emitLiteralBodies_raw (rawTdefs : List (String × TExpr)) :
+    emitLiteralBodies rawTdefs []
+      = rawTdefs.map fun (n, te) => (n, pipeline te.erase) := by
+  simp only [emitLiteralBodies, emitLiteralTerms, List.isEmpty_nil, if_true, List.map_map]
+  congr 1
+  funext p
+  simp [tPipeline_erase]
+
+/-- The literal of a definition whose pipelined term is `tPipelineFull nt te`
+    is `initMissingFoldAccums [] (tPipelineFull nt te).erase`. -/
+theorem emitLiteralBodies_tPipelineFull (nt : HaxAdapter.NewtypeMap)
+    (rawTdefs : List (String × TExpr)) (defs : List (String × TExpr)) (h : defs ≠ []) :
+    emitLiteralBodies rawTdefs (defs.map fun (n, te) => (n, tPipelineFull nt te))
+      = defs.map fun (n, te) => (n, initMissingFoldAccums [] (tPipelineFull nt te).erase) := by
+  rw [emitLiteralBodies_proc _ _ (by simpa using h), List.map_map]
+  rfl
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
@@ -1430,7 +1487,10 @@ def toLeanLowCTDef (name : String) : String :=
     qualified head `krate::Trait::h` in `rawTdefs` and `procTdefs`
     (`HaxAdapter.parseHaxFileWithTExpr`): the `ImpExpr` and `TExpr` literals
     keep those heads, and every other part of the file is printed from the
-    terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`). -/
+    terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`).
+    The `ImpExpr` literals are `emitLiteralBodies rawTdefs procTdefs`
+    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`); the renderer-only
+    rewrites apply to the surface definitions alone. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1450,17 +1510,20 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
   let procTdefs := procTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
+  -- The `ImpExpr` literals and the typed terms they erase from
+  -- (`emitLiteralBodies`, `emitLiteralTerms`), taken from the input before
+  -- any renderer-only rewrite: untagged, and with the qualified heads of the
+  -- nominal crates' trait-method calls (`HaxAdapter.qualifyNominalHead`).
+  let literalSrc := emitLiteralTerms rawTdefs procTdefs
+  let literalDefs := emitLiteralBodies rawTdefs procTdefs
   -- Operator calls on a type parameter are tagged `#dep` in both TExpr
   -- families: the raw one supplies the `Deps` signature, the processed one
-  -- the rendered body. The literal below is emitted untagged.
+  -- the rendered body.
   let markDep (te : TExpr) : TExpr :=
     if classHooks.enabled then unmarkDepEq (markDepOperators te) else markDepOperators te
-  -- The heads of the nominal crates' trait-method calls are qualified in the
-  -- input (`HaxAdapter.qualifyNominalHead`). The literals keep them; every
-  -- other part of the file reads the unqualified heads, so the surface
-  -- definitions and the `Deps` class are the ones of the unqualified input.
-  let rawTdefsQ := rawTdefs.map fun (n, te) => (n, markDep te)
-  let procTdefsQ := procTdefs.map fun (n, te) => (n, markDep te)
+  -- Every part of the file other than the literals reads the unqualified
+  -- heads, so the surface definitions and the `Deps` class are the ones of
+  -- the unqualified input.
   let rawTdefs := rawTdefs.map fun (n, te) =>
     (n, markDep (HaxAdapter.tUnqualifyNominalHeads nominalKrates te))
   let procTdefs := procTdefs.map fun (n, te) =>
@@ -1530,22 +1593,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         | none => (fname, e)
       | _ => (fname, e)
   let procTdefs := typedBodies procTdefs
-  -- The typed terms the `TExpr` literals take their node types from: the
-  -- pipelined ones when present, the raw ones otherwise.
-  let srcTdefs : List (String × TExpr) :=
-    if procTdefs.isEmpty then rawTdefs else procTdefs
   -- For body rendering: use proc TExprs if provided, otherwise erase raw and pipeline
   let defs := erasedBodies rawTdefs procTdefs
-  -- The typed terms and erased bodies of the literals under qualified heads,
-  -- by the same passes; `none` when no crate is nominal, and the literals
-  -- are then taken from `srcTdefs` and `defs`.
-  let literalBodies : Option (List (String × TExpr) × List (String × ImpExpr)) :=
-    if nominalKrates.isEmpty then none
-    else
-      let procQ := typedBodies procTdefsQ
-      let srcQ := if procQ.isEmpty then rawTdefsQ else procQ
-      some (srcQ, rewriteNew (applyTypedPasses (erasedBodies rawTdefsQ procQ)
-        structMeta fnTypes []).1)
   -- Apply typed passes (struct projection disambiguation, etc.)
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
@@ -1598,11 +1647,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if newtypes.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewtypeCtors newtypes e)
   let defs := postPreamble defs
-  -- The bodies and node types the literals are printed from.
-  let (srcTdefsQ, defsQ) : List (String × TExpr) × List (String × ImpExpr) :=
-    match literalBodies with
-    | none => (srcTdefs, defs)
-    | some (s, d) => (s, postPreamble d)
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
@@ -1633,9 +1677,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- the typed term. A definition whose rebuilt term does not print the same
   -- `ImpExpr` as its literal — a `.typeAscription` node, which no `TExpr`
   -- constructor erases to — is left without one.
-  let texprs : List (String × TExpr) := defsQ.filterMap fun (n, e0) =>
-    let e := unmarkDepOperators e0
-    let src := (srcTdefsQ.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
+  let texprs : List (String × TExpr) := literalDefs.filterMap fun (n, e) =>
+    let src := (literalSrc.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
     let t := retypeWith e src
     if toLeanImpExpr t.erase == toLeanImpExpr e then some (n, t) else none
   let tyPfx :=
@@ -1840,8 +1883,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       (surfaceDefs.map (·.2), "mutual\n\n", "end\n\n" ++ insts)
   let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{inductiveBlock}{newtypeBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
   let body := "\n".intercalate bodyParts
-  let impExprs := "\n".intercalate (defsQ.map fun (n, e) =>
-    let impExprDef := toLeanImpExprDef n (unmarkDepOperators e)
+  let impExprs := "\n".intercalate (literalDefs.map fun (n, e) =>
+    let impExprDef := toLeanImpExprDef n e
     let impExprDef := if needsPartial then impExprDef.replace "def " "partial def " else impExprDef
     s!"{impExprDef}")
   -- A `partial def` is opaque, so the erasure identity is emitted only for a
@@ -1855,8 +1898,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     "\n".intercalate (texprs.map fun (n, _) => toLeanEraseExample n) ++ "\n\n"
   let lowCTBlock :=
     if !emitLowCT then "" else
-    let ds := "\n".intercalate (defsQ.map fun (n, e) =>
-      let anfDef := toLeanImpExprAnfDef n (unmarkDepOperators e)
+    let ds := "\n".intercalate (literalDefs.map fun (n, e) =>
+      let anfDef := toLeanImpExprAnfDef n e
       let anfDef := if needsPartial then anfDef.replace "def " "partial def " else anfDef
       let lowDef := toLeanLowCTDef n
       let lowDef := if needsPartial then lowDef.replace "def " "partial def " else lowDef
