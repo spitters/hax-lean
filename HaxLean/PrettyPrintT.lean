@@ -18,6 +18,7 @@ public import HaxLean.TPhase.RewriteNewToStructCtor
 public import HaxLean.TPhase.RewriteStructFromElem
 public import HaxLean.TPhase.FixProjectionPaths
 public import HaxLean.TPhase.SinkMutTuple
+public import HaxLean.TPhase.ElideNewtype
 public import HaxLean.ClassEmit
 public import HaxLean.ContractEmit
 
@@ -1428,9 +1429,10 @@ term in three parts.
   construction the newtype name applied to its argument.
 * On the erased term: the untyped rewrites `literalPost`
   (`Canonicalize.canonicalize`, `applyTypedPasses`, the zero-argument `new()`
-  rewrite `rewriteNewDefs`, the renaming of conflicting projection names, and
-  the sinking of the `_mtup` joins of `if`-statements into their branches,
-  `sinkMutTuple`).
+  rewrite `rewriteNewDefs`, the renaming of conflicting projection names, the
+  sinking of the `_mtup` joins of `if`-statements into their branches,
+  `sinkMutTuple`, and the elision of the newtype constructions and
+  projections, `elideNewtype` at the heads of `literalIdentityHeads`).
 
 The projection markers of `markNamedProj`, the nested projection paths of
 `tFixProjectionPaths` and the newtype-constructor renaming
@@ -1494,14 +1496,29 @@ def literalSteps (structMeta : StructMeta) (fnTypes : List (String × HaxAdapter
   let defs := (applyTypedPasses defs structMeta fnTypes []).1
   renameProjConflicts projConflicts (rewriteNewDefs structMeta newStructMap defs)
 
+/-- The call heads that the literal elides as identities: the name of every
+    newtype of `newtypes` (its construction `S(x)` is `app "S" [x]`), and the
+    projection head `.0` when `newtypes` is not empty and no struct of
+    `structMeta` has a positional field `0`. A tuple struct with several fields
+    is a struct of `structMeta` with positional fields, and its projection `.0`
+    is not the identity; `buildNewtypeMap` records the single-field tuple
+    structs, which `parseStructDefs` leaves out. -/
+def literalIdentityHeads (structMeta : StructMeta) (newtypes : HaxAdapter.NewtypeMap) :
+    List String :=
+  let ctors := newtypes.map (·.1)
+  if newtypes.isEmpty || structMeta.any (fun (_, fs) => fs.any (·.1 == "0")) then ctors
+  else ".0" :: ctors
+
 /-- The untyped rewrites of the erased literal terms: `literalSteps`, then
     `sinkMutTuple`, whose rewrite of one node refines the node under `denote'`
-    (`SinkMutTuple.denote'_rewriteSite`). -/
+    (`SinkMutTuple.denote'_rewriteSite`), then `elideNewtype heads`, which
+    refines its input under `denote'` when the builtins are the identity at
+    `heads` (`elideNewtype_refines`). -/
 def literalPost (structMeta : StructMeta) (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
-    (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+    (heads : List String) (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
   (literalSteps structMeta fnTypes newStructMap projConflicts defs).map
-    fun (n, e) => (n, sinkMutTuple e)
+    fun (n, e) => (n, elideNewtype heads (sinkMutTuple e))
 
 /-- The typed terms whose erasures the emitted `ImpExpr` literals are built
     from. With pipelined terms `procTdefs` each is
@@ -1515,12 +1532,13 @@ def emitLiteralTerms (structMeta : StructMeta)
     (procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te))
 
 /-- The emitted `ImpExpr` literals: `literalPost` of the erasures of
-    `emitLiteralTerms`. -/
+    `emitLiteralTerms`, eliding the call heads `heads`. -/
 def emitLiteralBodies (structMeta : StructMeta)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
-    (rawTdefs procTdefs : List (String × TExpr)) : List (String × ImpExpr) :=
-  literalPost structMeta fnTypes newStructMap projConflicts
+    (rawTdefs procTdefs : List (String × TExpr)) (heads : List String := []) :
+    List (String × ImpExpr) :=
+  literalPost structMeta fnTypes newStructMap projConflicts heads
     ((emitLiteralTerms structMeta fnTypes rawTdefs procTdefs).map fun (n, t) => (n, t.erase))
 
 /-- With pipelined terms, the literals are `literalPost` of the erased
@@ -1528,9 +1546,10 @@ def emitLiteralBodies (structMeta : StructMeta)
 theorem emitLiteralBodies_proc (structMeta : StructMeta)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (heads : List String)
     (rawTdefs procTdefs : List (String × TExpr)) (h : procTdefs ≠ []) :
-    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs procTdefs
-      = literalPost structMeta fnTypes newStructMap projConflicts
+    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs procTdefs heads
+      = literalPost structMeta fnTypes newStructMap projConflicts heads
           ((literalStructSteps structMeta fnTypes
             (procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te))).map
               fun (n, t) => (n, t.erase)) := by
@@ -1542,9 +1561,9 @@ theorem emitLiteralBodies_proc (structMeta : StructMeta)
 theorem emitLiteralBodies_raw (structMeta : StructMeta)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
-    (rawTdefs : List (String × TExpr)) :
-    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs []
-      = literalPost structMeta fnTypes newStructMap projConflicts
+    (heads : List String) (rawTdefs : List (String × TExpr)) :
+    emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs [] heads
+      = literalPost structMeta fnTypes newStructMap projConflicts heads
           (rawTdefs.map fun (n, te) => (n, pipeline te.erase)) := by
   simp only [emitLiteralBodies, emitLiteralTerms, List.isEmpty_nil, if_true, List.map_map]
   congr 2
@@ -1557,30 +1576,30 @@ theorem emitLiteralBodies_raw (structMeta : StructMeta)
 theorem emitLiteralBodies_tPipelineFull (structMeta : StructMeta)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
-    (nt : HaxAdapter.NewtypeMap)
+    (heads : List String) (nt : HaxAdapter.NewtypeMap)
     (rawTdefs : List (String × TExpr)) (defs : List (String × TExpr)) (h : defs ≠ []) :
     emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs
-        (defs.map fun (n, te) => (n, tPipelineFull nt te))
-      = literalPost structMeta fnTypes newStructMap projConflicts
+        (defs.map fun (n, te) => (n, tPipelineFull nt te)) heads
+      = literalPost structMeta fnTypes newStructMap projConflicts heads
           ((literalStructSteps structMeta fnTypes
             (defs.map fun (n, te) => (n, tInitMissingFoldAccums [] (tPipelineFull nt te)))).map
               fun (n, t) => (n, t.erase)) := by
-  rw [emitLiteralBodies_proc _ _ _ _ _ _ (by simpa using h), List.map_map]
+  rw [emitLiteralBodies_proc _ _ _ _ _ _ _ (by simpa using h), List.map_map]
   rfl
 
 /-- Without struct metadata, the literal of a definition whose pipelined term
-    is `tPipelineFull nt te` is `sinkMutTuple` of `literalSteps` of
-    `initMissingFoldAccums [] (tPipelineFull nt te).erase`. -/
+    is `tPipelineFull nt te` is `elideNewtype heads` of `sinkMutTuple` of
+    `literalSteps` of `initMissingFoldAccums [] (tPipelineFull nt te).erase`. -/
 theorem emitLiteralBodies_tPipelineFull_nil (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
-    (nt : HaxAdapter.NewtypeMap)
+    (heads : List String) (nt : HaxAdapter.NewtypeMap)
     (rawTdefs : List (String × TExpr)) (defs : List (String × TExpr)) (h : defs ≠ []) :
     emitLiteralBodies [] fnTypes newStructMap projConflicts rawTdefs
-        (defs.map fun (n, te) => (n, tPipelineFull nt te))
+        (defs.map fun (n, te) => (n, tPipelineFull nt te)) heads
       = (literalSteps [] fnTypes newStructMap projConflicts
           (defs.map fun (n, te) => (n, initMissingFoldAccums [] (tPipelineFull nt te).erase))).map
-          fun (n, e) => (n, sinkMutTuple e) := by
-  rw [emitLiteralBodies_tPipelineFull _ _ _ _ _ _ _ h, literalStructSteps_nil, List.map_map]
+          fun (n, e) => (n, elideNewtype heads (sinkMutTuple e)) := by
+  rw [emitLiteralBodies_tPipelineFull _ _ _ _ _ _ _ _ h, literalStructSteps_nil, List.map_map]
   unfold literalPost
   congr 3
   funext p
@@ -1606,7 +1625,8 @@ theorem emitLiteralBodies_tPipelineFull_nil (fnTypes : List (String × HaxAdapte
     keep those heads, and every other part of the file is printed from the
     terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`).
     The `ImpExpr` literals are `emitLiteralBodies` of the input
-    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`); the projection
+    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`), eliding the newtype
+    constructions and projections (`literalIdentityHeads`); the projection
     markers, the nested projection paths and the newtype-constructor renaming
     apply to the surface definitions alone. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
@@ -1741,7 +1761,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- The `ImpExpr` literals and the typed terms they erase from.
   let literalSrc := emitLiteralTerms structMeta literalFnTypes literalRaw literalProc
   let literalDefs := emitLiteralBodies structMeta literalFnTypes newStructMap projConflicts
-    literalRaw literalProc
+    literalRaw literalProc (literalIdentityHeads structMeta newtypes)
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
