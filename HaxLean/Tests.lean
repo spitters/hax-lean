@@ -676,18 +676,18 @@ def tupleArgCall : TExpr :=
 
 #eval (tRebindMutCalls sFields tupleWriters tupleTup pushLetCall).erase
   == ImpExpr.letBind "_wb" (.app "p" [.borrow (.var "dst"), .var "pos"])
-       (.seq (.assign "dst" (.app "::proj::.2" [.var "_wb"]))
+       (.seq (.assign "dst" (.proj (.var "_wb") 1))
          (.letBind "p0" (.proj (.var "_wb") 0)
            (.app "use" [.var "p0", .var "dst"])))  -- true
 #eval (tRebindMutCalls sFields tupleWriters tupleTup rejLoopCall).erase
   == ImpExpr.whileLoop (.var "c")
        (.letBind "_wb" (.app "rej" [.borrow (.var "f"), .var "idx"])
-         (.seq (.assign "f" (.app "::proj::.2" [.var "_wb"]))
+         (.seq (.assign "f" (.proj (.var "_wb") 1))
            (.assign "idx" (.proj (.var "_wb") 0))))  -- true
 #eval (tRebindMutCalls sFields tupleWriters tupleTup twoWriteStmt).erase
   == ImpExpr.letBind "_wb" (.app "w" [.borrow (.var "st"), .borrow (.var "o")])
        (.seq (.assign "st" (.proj (.var "_wb") 0))
-         (.seq (.assign "o" (.app "::proj::.2" [.var "_wb"]))
+         (.seq (.assign "o" (.proj (.var "_wb") 1))
            (.app "digest" [.var "st"])))  -- true
 #eval (tRebindMutCalls sFields tupleWriters tupleTup tupleArgCall).erase
   == tupleArgCall.erase  -- true

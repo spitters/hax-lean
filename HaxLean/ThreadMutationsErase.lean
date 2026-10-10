@@ -184,12 +184,16 @@ def varTuple : List String → ImpExpr
   | [v] => .var v
   | vs => .tuple (vs.map (fun v => .var v))
 
+/-- Untyped twin of `tDestructureAt`. -/
+def destructureAt (tup : ImpExpr) : Nat → List String → ImpExpr → ImpExpr
+  | _, [], cont => cont
+  | i, v :: vs, cont => .letBind v (.proj tup i) (destructureAt tup (i + 1) vs cont)
+
 /-- Untyped twin of `tDestructure`. -/
 def destructure : List String → ImpExpr → ImpExpr → ImpExpr
   | [], _, cont => cont
   | [v], tup, cont => .letBind v tup cont
-  | v :: vs, tup, cont =>
-    .letBind v (.proj tup 0) (destructure vs (.app "::proj::.2" [tup]) cont)
+  | v :: v₂ :: vs, tup, cont => destructureAt tup 0 (v :: v₂ :: vs) cont
 
 /-! ## Erase commutation for the helpers -/
 
@@ -292,15 +296,24 @@ theorem tStripAnn_ne_ann (e : TExpr) (x : TExpr) (ty : ImpType) :
   | v₁ :: v₂ :: vs =>
     simp [tVarTuple, varTuple, TExpr.erase, TExpr.eraseList_eq, List.map_map, Function.comp_def]
 
+@[simp] theorem tAtTupleTy_erase (n : Nat) (t : TExpr) : (tAtTupleTy n t).erase = t.erase := by
+  obtain ⟨k, ty⟩ := t
+  cases k with
+  | break_ o => cases o <;> simp [tAtTupleTy, TExpr.erase]
+  | _ => simp [tAtTupleTy, TExpr.erase]
+
+@[simp] theorem tDestructureAt_erase (tup : TExpr) (i : Nat) (vs : List String) (cont : TExpr) :
+    (tDestructureAt tup i vs cont).erase = destructureAt tup.erase i vs cont.erase := by
+  induction vs generalizing i with
+  | nil => rfl
+  | cons v vs ih => simp [tDestructureAt, destructureAt, TExpr.erase, ih]
+
 @[simp] theorem tDestructure_erase (vs : List String) (tup cont : TExpr) :
     (tDestructure vs tup cont).erase = destructure vs tup.erase cont.erase := by
-  induction vs generalizing tup with
-  | nil => rfl
-  | cons v vs ih =>
-    cases vs with
-    | nil => simp [tDestructure, destructure, TExpr.erase]
-    | cons v₂ vs =>
-      simp [tDestructure, destructure, TExpr.erase, TExpr.eraseList_eq, ih]
+  match vs with
+  | [] => rfl
+  | [v] => simp [tDestructure, destructure, TExpr.erase]
+  | v :: v₂ :: vs => simp [tDestructure, destructure]
 
 /-! ## Untyped twins of the `&mut` write-back rewrites
 
@@ -381,8 +394,7 @@ def callWritebackSlice (writers : List (String × Nat)) (f : String) (args : Lis
 def tupleComp (tup : ImpExpr) : Nat → Nat → ImpExpr
   | _, 0 => tup
   | _, 1 => tup
-  | 0, _ => .proj tup 0
-  | i + 1, n + 1 => tupleComp (.app "::proj::.2" [tup]) i n
+  | i, _ + 2 => .proj tup i
 
 /-- Untyped twin of `tMutArgRoots`. -/
 def mutArgRoots (args : List ImpExpr) : List Nat → Option (List String)
@@ -670,8 +682,7 @@ def returnMutParams (names : List String) (hasRes : Bool) (body : ImpExpr) : Imp
 
 @[simp] theorem tTupleComp_erase (tup : TExpr) (i n : Nat) :
     (tTupleComp tup i n).erase = tupleComp tup.erase i n := by
-  induction i generalizing tup n <;> rcases n with _ | _ | n <;>
-    simp_all [tTupleComp, tupleComp, TExpr.erase, TExpr.eraseList_eq]
+  rcases n with _ | _ | n <;> simp [tTupleComp, tupleComp, TExpr.erase]
 
 @[simp] theorem tMutArgRoots_erase (args : List TExpr) (ps : List Nat) :
     tMutArgRoots args ps = mutArgRoots (args.map TExpr.erase) ps := by

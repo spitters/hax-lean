@@ -183,24 +183,27 @@ def tVarTuple : List String → TExpr
   | [v] => .mk (.var v) .unknown
   | vs => .mk (.tuple (vs.map (fun v => .mk (.var v) .unknown))) .unknown
 
-/-- Rebind `vars` from the right-nested tuple `tup`, then continue with `cont`.
-    A Lean n-tuple `(v₁,…,vₙ)` is `(v₁, (v₂, … vₙ))`, so the head is `tup.1`
-    (`proj 0`, which the renderer's untyped `.proj` fallback already prints
-    correctly at any arity) and the rest live in `tup.2` — recurse there. The
-    tail is built with the `::proj::.2` marker (`Hax.PrettyPrint.projPath`'s
-    convention, consumed by the `::proj::` arm of `toLean`) rather than a bare
-    `.proj tup 1`, because a bare `.proj _ i` node is read by the untyped
-    fallback as a FLAT index into an n-ary tuple and only `i = 0` is safe there;
-    the marker instead says directly "the second component of this pair",
-    which is what the right-nested encoding always means for index `1`. The
-    last variable binds the remaining tail directly (a flat `tup.i` would be
-    invalid: `(a,b,c).3` doesn't exist). -/
+/-- `t` at the type of an `n`-tuple of unknown components. A projection from a
+    receiver of this type renders as the nested path of its flat index
+    (`markNamedProj`, `PrettyPrint.projPath`). -/
+def tAtTupleTy (n : Nat) : TExpr → TExpr
+  | .mk k _ => .mk k (.tuple (List.replicate n .unknown))
+
+/-- Bind `vars` to the components `i, i+1, …` of `tup` (flat `.proj` indices),
+    then continue with `cont`. -/
+def tDestructureAt (tup : TExpr) : Nat → List String → TExpr → TExpr
+  | _, [], cont => cont
+  | i, v :: vs, cont =>
+    .mk (.letBind v (.mk (.proj tup i) .unknown) (tDestructureAt tup (i + 1) vs cont)) cont.ty
+
+/-- Rebind `vars` from the tuple `tup`, then continue with `cont`: the single
+    variable binds `tup` itself, and `n ≥ 2` variables bind the flat projections
+    `tup.0, …, tup.(n-1)` of `tup` at the `n`-tuple type (`tAtTupleTy`). -/
 def tDestructure : List String → TExpr → TExpr → TExpr
   | [], _, cont => cont
   | [v], tup, cont => .mk (.letBind v tup cont) cont.ty
-  | v :: vs, tup, cont =>
-    .mk (.letBind v (.mk (.proj tup 0) .unknown)
-      (tDestructure vs (.mk (.app "::proj::.2" [tup]) .unknown) cont)) cont.ty
+  | v :: v₂ :: vs, tup, cont =>
+    tDestructureAt (tAtTupleTy (vs.length + 2) tup) 0 (v :: v₂ :: vs) cont
 
 /-- Replace the tail value of a `let`/`seq` chain with `newTail`, keeping the
     bindings.
@@ -478,16 +481,13 @@ never from the call, because a projection of a call does not lower. -/
 /-- The binder a tuple-form call site holds its callee's result in. -/
 def tWbTmp : String := "_wb"
 
-/-- The `i`-th component of the right-nested `n`-tuple `tup`. A Lean `n`-tuple
-    `(c₀, …, c_{n-1})` is `(c₀, (c₁, … c_{n-1}))`, so the head is `.proj _ 0`
-    and the rest live in the `::proj::.2`-marked tail (`PrettyPrint.projPath`'s
-    convention), which is where the recursion descends; the last component is
-    that tail itself. -/
+/-- The `i`-th component of the `n`-tuple `tup`: `tup` itself when `n ≤ 1`, and
+    otherwise the flat projection `tup.i` of `tup` at the `n`-tuple type
+    (`tAtTupleTy`). -/
 def tTupleComp (tup : TExpr) : Nat → Nat → TExpr
   | _, 0 => tup
   | _, 1 => tup
-  | 0, _ => .mk (.proj tup 0) .unknown
-  | i + 1, n + 1 => tTupleComp (.mk (.app "::proj::.2" [tup]) .unknown) i n
+  | i, n + 2 => .mk (.proj (tAtTupleTy (n + 2) tup) i) .unknown
 
 /-- The variables the arguments at `positions` write to, when every one of them
     is a plain place (`tMutArgRoot`). `none` as soon as one is not. -/

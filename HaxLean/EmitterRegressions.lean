@@ -181,32 +181,28 @@ def nestedProjTyped : TExpr :=
 
 #guard toLean (markNamedProj nestedProjTyped).erase == "(t.2.1).2"
 
-/-! ## `tDestructure`'s tail projection, marker-based
+/-! ## `tDestructure`'s flat projections
 
 `tDestructure` (`HaxLean/ThreadMutations.lean`) rebinds the variables of a
-branch-mutation join from the right-nested tuple `_mtup`. Its recursion
-threads the tail (`_mtup.2`, `(_mtup.2).2`, …) into the next call as a
-`::proj::.2` marker rather than a bare `TExpr.proj _ 1`: a bare `.proj e i`
-node is read by the untyped `.proj` fallback as a flat index into an
-n-ary tuple, valid only at `i = 0`, whereas the marker states directly
-"the second component of this pair" — the meaning index `1` always has in
-the right-nested encoding, at any depth. -/
+branch-mutation join from the tuple `_mtup` by the flat projections
+`.proj _mtup i`, the receiver at the `n`-tuple type (`tAtTupleTy`). The
+surface marker step `markNamedProj` prints each projection by the nested
+path of its flat index (`PrettyPrint.projPath`). -/
 
-/-- Two mutated variables: `_mtup = (h, block)`, `h` at the head (renders via
-    the untyped `.proj` fallback's `i = 0` case) and `block` at the tail
-    (renders via the `::proj::.2` marker). -/
+/-- Two mutated variables: `_mtup = (h, block)`, `h` at index `0` and `block`
+    at index `1`. -/
 def destr2 : TExpr :=
   tDestructure ["h", "block"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)
 
 #guard toLean (markNamedProj destr2).erase 1 == "  let h := _mtup.1\n  let block := _mtup.2\n  cont"
 
-/-- Three mutated variables: the second and third both go through the
-    marker, one recursion level apart, so `c`'s marker wraps `b`'s. -/
+/-- Three mutated variables: the second and third components print as the
+    paths `.2.1` and `.2.2`. -/
 def destr3 : TExpr :=
   tDestructure ["a", "b", "c"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)
 
 #guard toLean (markNamedProj destr3).erase 1 ==
-  "  let a := _mtup.1\n  let b := (_mtup.2).1\n  let c := (_mtup.2).2\n  cont"
+  "  let a := _mtup.1\n  let b := _mtup.2.1\n  let c := _mtup.2.2\n  cont"
 
 /-! ## `tDestructure` behind its own `_mtup` binding
 
@@ -216,13 +212,8 @@ just bound to the joined branches' value (`ThreadMutations.lean`, the
 `.letBind "_mtup" ifE (tDestructure m …)` construction). That extra
 binding is what `extractTupleDestr` (`PrettyPrint.lean`) inspects to
 decide whether the whole chain collapses to a tuple pattern
-`let (a, b) := ifE`: at two components the chain's tail binds directly to
-a `::proj::.2`-marked `_mtup`, which `extractTupleDestr` still recognises
-component-by-component, so it collapses. At three or more components the
-middle components project a marker that is itself wrapped in another
-marker, which `extractTupleDestr` does not follow; it refuses the
-collapse and each binding renders on its own line through the markers
-`destr3` already pins, with `_mtup` itself bound to `ifE`. -/
+`let (a, b) := ifE`; the chain of `projPath` markers collapses at every
+arity. -/
 
 /-- Two components behind a `_mtup` binding collapse to a tuple pattern. -/
 def destr2Wrapped : TExpr :=
@@ -233,16 +224,34 @@ def destr2Wrapped : TExpr :=
 #guard toLean (markNamedProj destr2Wrapped).erase 1 ==
   "  let (h, block) := ifE\n  cont"
 
-/-- Three components behind a `_mtup` binding do not collapse: `_mtup` is
-    bound to `ifE` and each component projects it, rather than the first
-    component aliasing to the whole of `ifE`. -/
+/-- Three components behind a `_mtup` binding collapse to a tuple pattern. -/
 def destr3Wrapped : TExpr :=
   .mk (.letBind "_mtup" (.mk (.var "ifE") .unknown)
     (tDestructure ["a", "b", "c"] (.mk (.var "_mtup") .unknown) (.mk (.var "cont") .unknown)))
     .unknown
 
 #guard toLean (markNamedProj destr3Wrapped).erase 1 ==
-  "  let _mtup := ifE\n  let a := _mtup.1\n  let b := (_mtup.2).1\n  let c := (_mtup.2).2\n  cont"
+  "  let (a, b, c) := ifE\n  cont"
+
+/-! ## The `_mtup` join of the literal sunk into its branches
+
+The literal step `sinkMutTuple` (`HaxLean/TPhase/SinkMutTuple.lean`) drops the
+binding of `_mtup` and its destructuring, the branch tails `(x, y)` becoming
+`unitVal`. -/
+
+/-- `let _mtup := if c then (x := 1; (x, y)) else (x, y); let x := _mtup.0;
+    let y := _mtup.1; (x, y)`. -/
+def mtupJoin : ImpExpr :=
+  .letBind "_mtup"
+    (.ifThenElse (.var "c")
+      (.letBind "x" (.lit (.int 1)) (.tuple [.var "x", .var "y"]))
+      (.tuple [.var "x", .var "y"]))
+    (.letBind "x" (.proj (.var "_mtup") 0) (.letBind "y" (.proj (.var "_mtup") 1)
+      (.tuple [.var "x", .var "y"])))
+
+#guard toLeanImpExpr (sinkMutTuple mtupJoin) ==
+  "(.seq (.ifThenElse (.var \"c\") (.letBind \"x\" (.lit (ImpLit.int 1)) .unitVal) .unitVal) " ++
+    "(.tuple [(.var \"x\"), (.var \"y\")]))"
 
 /-! ## Erased newtype constructor calls
 
@@ -2098,5 +2107,32 @@ def addFnU32 (head : String) : TExpr :=
 #guard toLeanCertifiedFileTyped [("f", addFnU32 "Add#32")] "Test" [] [] [] ==
   (toLeanCertifiedFileTyped [("f", addFnU32 "Add")] "Test" [] [] []).replace
     "\"Add\"" "\"Add#32\""
+
+/-! ## No `_mtup` join and no `::proj::` marker in the literal of an `if`-join
+
+`ifJoinBody vs` initialises the variables `vs`, assigns all of them in the
+then-branch of a statement-`if` on `c`, and returns them. After the
+branch-mutation rewrite and the pipeline, the emitted literal holds neither
+the join temporary `_mtup` nor a `::proj::` marker. -/
+
+/-- `let vs := 0; if c { vs := 1 }; vs`, the tail the single variable passed to
+    `f` or the tuple of the variables. -/
+def ifJoinBody (vs : List String) : TExpr :=
+  vs.foldr (fun v acc => .mk (.letBind v (.mk (.lit (.int 0)) .unknown) acc) .unknown)
+    (.mk (.seq
+      (.mk (.ifThenElse (.mk (.var "c") .unknown)
+        (vs.foldr (fun v acc =>
+            .mk (.seq (.mk (.assign v (.mk (.lit (.int 1)) .unknown)) .unit) acc) .unit)
+          (.mk .unitVal .unit))
+        (.mk .unitVal .unit)) .unit)
+      (match vs with
+       | [v] => .mk (.app "f" [.mk (.var v) .unknown]) .unknown
+       | _ => .mk (.tuple (vs.map fun v => .mk (.var v) .unknown)) .unknown)) .unknown)
+
+#guard (emitLiteralBodies [] [] [] [] []
+    ([["x"], ["x", "y"], ["x", "y", "z"]].map fun vs =>
+      ("f", tPipelineFull [] (tThreadMut true (ifJoinBody vs))))).all fun (_, e) =>
+  let s := toLeanImpExpr e
+  !(s.contains "_mtup") && !(s.contains "::proj::")
 
 end Hax.EmitterRegressions

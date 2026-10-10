@@ -17,6 +17,7 @@ public import HaxLean.TPhase.QualifyProjections
 public import HaxLean.TPhase.RewriteNewToStructCtor
 public import HaxLean.TPhase.RewriteStructFromElem
 public import HaxLean.TPhase.FixProjectionPaths
+public import HaxLean.TPhase.SinkMutTuple
 public import HaxLean.ClassEmit
 public import HaxLean.ContractEmit
 
@@ -1427,7 +1428,9 @@ term in three parts.
   construction the newtype name applied to its argument.
 * On the erased term: the untyped rewrites `literalPost`
   (`Canonicalize.canonicalize`, `applyTypedPasses`, the zero-argument `new()`
-  rewrite `rewriteNewDefs`, and the renaming of conflicting projection names).
+  rewrite `rewriteNewDefs`, the renaming of conflicting projection names, and
+  the sinking of the `_mtup` joins of `if`-statements into their branches,
+  `sinkMutTuple`).
 
 The projection markers of `markNamedProj`, the nested projection paths of
 `tFixProjectionPaths` and the newtype-constructor renaming
@@ -1481,15 +1484,24 @@ def renameProjConflicts (projConflicts : List (String × String))
   else defs.map fun (n, e) =>
     (n, projConflicts.foldl (fun expr (unqual, qual) => rewriteAppName unqual qual expr) e)
 
-/-- The untyped rewrites of the erased literal terms, in order:
+/-- The name-level rewrites of the erased literal terms, in order:
     `Canonicalize.canonicalize`, `applyTypedPasses`, `rewriteNewDefs` and
     `renameProjConflicts`. -/
-def literalPost (structMeta : StructMeta) (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+def literalSteps (structMeta : StructMeta) (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
     (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
   let defs := defs.map fun (n, e) => (n, Canonicalize.canonicalize e)
   let defs := (applyTypedPasses defs structMeta fnTypes []).1
   renameProjConflicts projConflicts (rewriteNewDefs structMeta newStructMap defs)
+
+/-- The untyped rewrites of the erased literal terms: `literalSteps`, then
+    `sinkMutTuple`, whose rewrite of one node refines the node under `denote'`
+    (`SinkMutTuple.denote'_rewriteSite`). -/
+def literalPost (structMeta : StructMeta) (fnTypes : List (String × HaxAdapter.FnTypeInfo))
+    (newStructMap : List (String × List String)) (projConflicts : List (String × String))
+    (defs : List (String × ImpExpr)) : List (String × ImpExpr) :=
+  (literalSteps structMeta fnTypes newStructMap projConflicts defs).map
+    fun (n, e) => (n, sinkMutTuple e)
 
 /-- The typed terms whose erasures the emitted `ImpExpr` literals are built
     from. With pipelined terms `procTdefs` each is
@@ -1557,7 +1569,7 @@ theorem emitLiteralBodies_tPipelineFull (structMeta : StructMeta)
   rfl
 
 /-- Without struct metadata, the literal of a definition whose pipelined term
-    is `tPipelineFull nt te` is `literalPost` of
+    is `tPipelineFull nt te` is `sinkMutTuple` of `literalSteps` of
     `initMissingFoldAccums [] (tPipelineFull nt te).erase`. -/
 theorem emitLiteralBodies_tPipelineFull_nil (fnTypes : List (String × HaxAdapter.FnTypeInfo))
     (newStructMap : List (String × List String)) (projConflicts : List (String × String))
@@ -1565,10 +1577,12 @@ theorem emitLiteralBodies_tPipelineFull_nil (fnTypes : List (String × HaxAdapte
     (rawTdefs : List (String × TExpr)) (defs : List (String × TExpr)) (h : defs ≠ []) :
     emitLiteralBodies [] fnTypes newStructMap projConflicts rawTdefs
         (defs.map fun (n, te) => (n, tPipelineFull nt te))
-      = literalPost [] fnTypes newStructMap projConflicts
-          (defs.map fun (n, te) => (n, initMissingFoldAccums [] (tPipelineFull nt te).erase)) := by
+      = (literalSteps [] fnTypes newStructMap projConflicts
+          (defs.map fun (n, te) => (n, initMissingFoldAccums [] (tPipelineFull nt te).erase))).map
+          fun (n, e) => (n, sinkMutTuple e) := by
   rw [emitLiteralBodies_tPipelineFull _ _ _ _ _ _ _ h, literalStructSteps_nil, List.map_map]
-  congr 2
+  unfold literalPost
+  congr 3
   funext p
   simp [tInitMissingFoldAccums_erase]
 

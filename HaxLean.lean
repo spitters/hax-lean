@@ -33,6 +33,7 @@ public import HaxLean.TPhase.InitFoldAccums
 public import HaxLean.TPhase.QualifyProjections
 public import HaxLean.TPhase.RewriteNewToStructCtor
 public import HaxLean.TPhase.RewriteStructFromElem
+public import HaxLean.TPhase.SinkMutTuple
 public import HaxLean.TPhase.FixProjectionPaths
 public import HaxLean.TPhase.IrrefutableTupleMatch
 public import HaxLean.TPipeline
