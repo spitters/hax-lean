@@ -16,6 +16,7 @@ public import HaxLean.TPhase.ExplicitMonadic
 public import HaxLean.TPhase.AnnotateLets
 public import HaxLean.TPhase.ElideNewtypeProj
 public import HaxLean.TPhase.FlattenLetFoldReturn
+public import HaxLean.TPhase.IrrefutableTupleMatch
 public import HaxLean.Pipeline
 
 /-!
@@ -56,38 +57,29 @@ def tPipeline (e : TExpr) : TExpr :=
 def tPipelineWithCFWrap (e : TExpr) : TExpr :=
   tWrapMatchArmsCF (tPipeline e)
 
-/-- Extended typed pipeline including the newtype-projection elision
-    and the let-fold-return flattening (post-pipeline normalisations).
+/-- The typed pipeline followed by the post-pipeline normalisations: the
+    match-arm control-flow wrap, the rewrite of irrefutable tuple matches into
+    `let` chains, the newtype-projection elision and the let-fold-return
+    flattening. Every backend reads this term or its erasure.
 
-    Composed alongside `tPipeline` so the existing `tPipeline_erase` is
-    unchanged. `tElideToNamedProj` is a denotation-identity via the
-    standard erase-then-untyped-denote route. `tFlattenLetFoldReturn` is
-    a **render-time** normalisation, now a **total** `fuel`-bounded
-    function (no `partial`). Its four rewrites are mechanised as
-    denotation-preserving identities on the untyped semantics in
-    `Hax/Phase/FlattenLetFoldReturn.lean` (`flattenA_denote`..
-    `flattenD_denote`): B and C are unconditional `denote = denote`
-    equalities; A and D hold under the `noVarRef "_"` freshness
-    side-condition via the env-insensitivity congruence
-    `denote_agreeExcept`, with composable two-environment forms
-    (`flattenA_rel`, `flattenD_rel`) and `Rel` a partial equivalence.
-    The fuel below is a generous quadratic bound in the AST node count,
-    exceeding the recursion depth, so the result is the rewrite fixpoint
-    — byte-identical to the previous `partial def`. The whole-pass
-    denotation preservation `flattenLetFoldReturn_denote`
-    (`noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e))
-    (denote e)`) is **proved** on the total untyped twin (axiom-clean),
-    by a heterogeneous structural congruence composed with the four
-    rewrite identities. A fixed-fuel erase lemma does not hold for all
-    fuel (`ann`/`namedProj` nodes consume typed-side fuel that `erase`
-    removes), so the whole-pass theorem is stated on the untyped twin to
-    avoid that obstruction. -/
+    `tIrrefutableTupleMatch` commutes with erasure
+    (`tIrrefutableTupleMatch_erase`) and its rewrite of a node refines the node
+    under `denote'` (`IrrefutableTupleMatch.denote'_rewriteSite`).
+    `tElideToNamedProj` is the identity after erasure. `tFlattenLetFoldReturn`
+    is a total `fuel`-bounded function; its four rewrites preserve the untyped
+    denotation (`flattenA_denote`..`flattenD_denote` in
+    `Hax/Phase/FlattenLetFoldReturn.lean`, A and D under the `noVarRef "_"`
+    freshness condition), and the whole pass satisfies
+    `flattenLetFoldReturn_denote`
+    (`noVarRef "_" e → Rel "_" (denote (flattenLetFoldReturn k e)) (denote e)`)
+    on the untyped twin. A fixed-fuel erase lemma does not hold for every fuel
+    (`ann`/`namedProj` nodes consume typed-side fuel that `erase` removes), so
+    that theorem is stated on the untyped twin. -/
 def tPipelineFull (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
-  let inner := tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e))
-  -- `tFlattenLetFoldReturn` is now total (fuel-bounded). The fuel is a
-  -- generous quadratic bound in the AST size, exceeding the (finite)
-  -- recursion depth, so the result is the rewrite fixpoint — identical
-  -- to the previous `partial def`.
+  let inner :=
+    tElideToNamedProj newtypes (tIrrefutableTupleMatch (tWrapMatchArmsCF (tPipeline e)))
+  -- The fuel is a quadratic bound in the AST size, which exceeds the
+  -- recursion depth, so the result is the rewrite fixpoint.
   let n := inner.erase.nodeCount
   tFlattenLetFoldReturn (n * n + n + 1000) inner
 

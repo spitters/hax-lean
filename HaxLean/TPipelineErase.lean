@@ -16,20 +16,20 @@ public import HaxLean.ThreadMutationsErase
 
     tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te))
 
-so two *pre-pipeline* passes (`tLowerClosureCalls`, `tThreadMut`) and three
-*post-pipeline* passes (`tWrapMatchArmsCF`, `tElideToNamedProj`,
-`tFlattenLetFoldReturn`) sit around the verified 4-phase `tPipeline`. The
-individual erase lemmas
-`tLowerClosureCalls_erase`/`tThreadMut_erase` (the pre-passes) and
-`tPipeline_erase`/`tElideToNamedProj_erase` (the pipeline + elision) already
-exist; this file proves `tWrapMatchArmsCF_erase` and then *composes* the whole
-chain into a single commuting square, bringing the pre-passes into the diagram:
+so two *pre-pipeline* passes (`tLowerClosureCalls`, `tThreadMut`) and four
+*post-pipeline* passes (`tWrapMatchArmsCF`, `tIrrefutableTupleMatch`,
+`tElideToNamedProj`, `tFlattenLetFoldReturn`) sit around the verified 4-phase
+`tPipeline`. The individual erase lemmas are
+`tLowerClosureCalls_erase`/`tThreadMut_erase` (the pre-passes),
+`tPipeline_erase`, `tIrrefutableTupleMatch_erase` and `tElideToNamedProj_erase`;
+this file proves `tWrapMatchArmsCF_erase` and composes the whole chain into a
+single commuting square that includes the pre-passes:
 
-    TExpr  ──[tElide ∘ tWrapCF ∘ tPipeline ∘ tThreadMut ∘ tLowerClosureCalls]──→ TExpr
-      │                                                                            │
-      │ erase                                                                      │ erase
-      ↓                                                                            ↓
-    ImpExpr ──[wrapMatchArmsCF ∘ pipeline ∘ threadMut ∘ lowerClosureCalls]──────→ ImpExpr
+    TExpr ──[tElide ∘ tTupleMatch ∘ tWrapCF ∘ tPipeline ∘ tThreadMut ∘ tLowerClosureCalls]──→ TExpr
+      │                                                                                        │
+      │ erase                                                                                  │ erase
+      ↓                                                                                        ↓
+    ImpExpr ──[tupleMatch ∘ wrapMatchArmsCF ∘ pipeline ∘ threadMut ∘ lowerClosureCalls]──→ ImpExpr
 
 ## The flatten boundary
 
@@ -151,7 +151,7 @@ theorem tWrapMatchArmsCF_erase_and (e : TExpr) :
   | namedProj _ _ _ ih =>
     exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1], rfl⟩
   | ann _ _ ih =>
-    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, wrapMatchArmsCF, ih.1],
+    exact ⟨by simp [tWrapMatchArmsCF, TExpr.erase, ih.1],
       by simp [tWrapMatchArmsCF.valPos, TExpr.erase, ih.2]⟩
   | app _ _ args ih =>
     refine ⟨?_, rfl⟩
@@ -208,22 +208,23 @@ theorem tPipelineWithCFWrap_prePipeline_erase (active : Bool) (names : List Stri
   unfold tPipelineWithCFWrap
   rw [tWrapMatchArmsCF_erase, tPipeline_erase, prePipeline_erase]
 
-/-- The pre-flatten core of `tPipelineFull`: elision ∘ CF-wrap ∘ pipeline.
-    `tElideToNamedProj` is denotation-identity at the erase level
+/-- The pre-flatten core of `tPipelineFull`: elision ∘ tuple-match rewrite ∘
+    CF-wrap ∘ pipeline. `tElideToNamedProj` is the identity after erasure
     (`tElideToNamedProj_erase : … = e.erase`), so it adds nothing to the untyped
-    side. This is the strongest composed erase theorem that holds cleanly — the
-    chain stops here, before the final `tFlattenLetFoldReturn` (see the module
-    docstring's "flatten boundary"). -/
+    side. The composed erase theorem ends here, before the final
+    `tFlattenLetFoldReturn` (see the module docstring's "flatten boundary"). -/
 def tPipelineFullInner (newtypes : HaxAdapter.NewtypeMap) (e : TExpr) : TExpr :=
-  tElideToNamedProj newtypes (tWrapMatchArmsCF (tPipeline e))
+  tElideToNamedProj newtypes (tIrrefutableTupleMatch (tWrapMatchArmsCF (tPipeline e)))
 
 /-- Commuting diagram for the full pre-flatten chain, with the pre-passes. -/
 theorem tPipelineFullInner_prePipeline_erase
     (newtypes : HaxAdapter.NewtypeMap) (active : Bool) (names : List String) (e : TExpr) :
     (tPipelineFullInner newtypes (tThreadMut active (tLowerClosureCalls names e))).erase
-      = wrapMatchArmsCF (pipeline (threadMut active (lowerClosureCalls names e.erase))) := by
+      = irrefutableTupleMatch
+          (wrapMatchArmsCF (pipeline (threadMut active (lowerClosureCalls names e.erase)))) := by
   unfold tPipelineFullInner
-  rw [tElideToNamedProj_erase, tWrapMatchArmsCF_erase, tPipeline_erase, prePipeline_erase]
+  rw [tElideToNamedProj_erase, tIrrefutableTupleMatch_erase, tWrapMatchArmsCF_erase,
+    tPipeline_erase, prePipeline_erase]
 
 /-- `tPipelineFull` is the pre-flatten core followed by the fuel-bounded flatten;
     the erase capstone composes through the core (`tPipelineFullInner`). -/

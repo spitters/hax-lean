@@ -1613,6 +1613,46 @@ def parseLiteral (data : Json) : ImpExpr :=
     .app "str_opaque" []
   else .app "literal" []  -- char, float, etc.
 
+/-- The bindings that destructure the tuple held by the variable `parent` by the
+    subpatterns `pats`, the first at component `i`. A variable is bound to its
+    projection (a name starting with `_` to `_`); a nested tuple pattern binds its
+    projection to the temporary `parent_i` and is destructured from it in turn;
+    any other subpattern binds its projection to `_`. -/
+def tupleDestructBinds (parent : String) : List ImpPat → Nat → List (String × ImpExpr)
+  | [], _ => []
+  | .varPat n :: ps, i =>
+    (if n.startsWith "_" then "_" else n, .proj (.var parent) i) ::
+      tupleDestructBinds parent ps (i + 1)
+  | .tuplePat qs :: ps, i =>
+    let t := parent ++ "_" ++ toString i
+    ((t, .proj (.var parent) i) :: tupleDestructBinds t qs 0) ++
+      tupleDestructBinds parent ps (i + 1)
+  | _ :: ps, i => ("_", .proj (.var parent) i) :: tupleDestructBinds parent ps (i + 1)
+
+/-- The type of component `i` of a tuple type; `.unknown` for any other type. -/
+def tupleComponentTy (ty : ImpType) (i : Nat) : ImpType :=
+  match ty with
+  | .tuple ts => ts.getD i .unknown
+  | _ => .unknown
+
+/-- Typed `tupleDestructBinds`: `parentTy` is the type of `parent`; a temporary has
+    the type of its component, a projection has type `.unknown`. -/
+def tTupleDestructBinds (parent : String) (parentTy : ImpType) :
+    List ImpPat → Nat → List (String × TExpr)
+  | [], _ => []
+  | .varPat n :: ps, i =>
+    (if n.startsWith "_" then "_" else n,
+      TExpr.mk (.proj (TExpr.mk (.var parent) parentTy) i) .unknown) ::
+      tTupleDestructBinds parent parentTy ps (i + 1)
+  | .tuplePat qs :: ps, i =>
+    let t := parent ++ "_" ++ toString i
+    ((t, TExpr.mk (.proj (TExpr.mk (.var parent) parentTy) i) .unknown) ::
+        tTupleDestructBinds t (tupleComponentTy parentTy i) qs 0) ++
+      tTupleDestructBinds parent parentTy ps (i + 1)
+  | _ :: ps, i =>
+    ("_", TExpr.mk (.proj (TExpr.mk (.var parent) parentTy) i) .unknown) ::
+      tTupleDestructBinds parent parentTy ps (i + 1)
+
 /-- Replace the deepest unitVal in a letBind chain with a continuation.
     letBind a v1 (letBind b v2 unitVal) → letBind a v1 (letBind b v2 cont) -/
 def replaceDeepestUnit (e : ImpExpr) (cont : ImpExpr) : ImpExpr :=
@@ -1745,11 +1785,7 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
       match pat with
       | .tuplePat pats =>
         let tmpName := "_tup"
-        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
-          let name := match p with
-            | .varPat n => if n.startsWith "_" then "_" else n
-            | _ => "_"
-          (name, ImpExpr.proj (.var tmpName) i)
+        let bindings := tupleDestructBinds tmpName pats 0
         let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
         return .letBind tmpName rhs inner
       | .varPat n =>
@@ -2156,11 +2192,7 @@ def parseStmt (j : Json) : Except String ImpExpr := do
       match pat with
       | .tuplePat pats =>
         let tmpName := "_tup"
-        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
-          let name := match p with
-            | .varPat n => if n.startsWith "_" then "_" else n
-            | _ => "_"
-          (name, ImpExpr.proj (.var tmpName) i)
+        let bindings := tupleDestructBinds tmpName pats 0
         let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
         return .letBind tmpName init inner
       | .varPat n =>
@@ -3517,11 +3549,7 @@ where
       match pat with
       | .tuplePat pats =>
         let tmpName := "_tup"
-        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
-          let name := match p with
-            | .varPat n => if n.startsWith "_" then "_" else n
-            | _ => "_"
-          (name, TExpr.mk (.proj (TExpr.mk (.var tmpName) rhs.ty) i) .unknown)
+        let bindings := tTupleDestructBinds tmpName rhs.ty pats 0
         let inner := bindings.foldr (fun (n, proj) acc =>
           TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
         return .letBind tmpName rhs inner
@@ -3935,11 +3963,7 @@ where
       match pat with
       | .tuplePat pats =>
         let tmpName := "_tup"
-        let bindings := (pats.zip (List.range pats.length)).map fun (p, i) =>
-          let name := match p with
-            | .varPat n => if n.startsWith "_" then "_" else n
-            | _ => "_"
-          (name, TExpr.mk (.proj (TExpr.mk (.var tmpName) init.ty) i) .unknown)
+        let bindings := tTupleDestructBinds tmpName init.ty pats 0
         let inner := bindings.foldr (fun (n, proj) acc =>
           TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
         return TExpr.mk (.letBind tmpName init inner) .unknown
