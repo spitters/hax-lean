@@ -8,6 +8,7 @@ module
 
 public import HaxLean.Rust
 public meta import Lean.Meta.Tactic.Simp.RegisterCommand
+public meta import Lean.Elab.Command
 
 /-!
 # A prelude for the Aeneas Lean backend over the vendored Aeneas `Std` model
@@ -21,7 +22,14 @@ names that output uses beyond the vendored `Aeneas.Std` (`HaxLean/Rust`, Aeneas 
 * `core.iter.range.Step`, `core.iter.range.StepUsize` and
   `core.iter.range.IteratorRange.next`, the iteration of `start..end`;
 * the simp attributes `global_simps`, `rust_loop_body` and `rust_loop`, which the backend
-  places on its definitions.
+  places on its definitions;
+* the command `open N hiding namespace a b` and the `CoreModels.core` names the output of
+  the hax 0.4.2 Lean backend (Aeneas `build-183e4f0`) uses beside `Aeneas.Std`: `Option`
+  with `Some` and `None`, `ops.range.Range`, `iter.range.Step`,
+  `Usize.Insts.CoreIterRangeStep`, `Range::next`, and `wrapping_add`, `wrapping_sub`,
+  `wrapping_mul` on unsigned scalars in `RustM`. A file of that output elaborates with
+  `import Aeneas` replaced by `import HaxLean.AeneasBackendPrelude`, `import CoreModels`
+  removed, and the Mathlib linter options removed.
 
 The Aeneas release that printed the output (commit `b08bf81`) defines `Result` as an
 interaction tree over the effect `RustEffect`; the vendored model defines it as the flat
@@ -88,3 +96,79 @@ def core.iter.range.IteratorRange.next {A : Type} (StepInst : core.iter.range.St
   else .ok (none, range)
 
 end Aeneas.Std
+
+namespace CoreModels.Command
+
+open Lean Elab Command
+
+/-- `open N hiding namespace a b`: opens the namespace `N` except every declaration under
+    `N.a` and `N.b`. The command of the hax Lean library `CoreModels.Command`
+    (cryspen/hax, `hax-lib/proof-libs/lean`, Apache-2.0). -/
+syntax (name := openHidingNs) "open" ident "hiding" "namespace" ident+ : command
+
+/-- Elaborates `open N hiding namespace a b` as `open N hiding` the declarations under
+    `N.a` and `N.b`. -/
+@[command_elab openHidingNs]
+meta def elabOpenHidingNs : CommandElab := fun stx => do
+  let nsStx : Ident := ⟨stx[1]⟩
+  let subs : Array Ident := stx[4].getArgs.map (⟨·⟩)
+  let ns ← resolveUniqueNamespace nsStx
+  let except : List Name := (← getEnv).constants.fold (init := []) fun acc nm _ =>
+    if subs.any (fun sub => (ns ++ sub.getId).isPrefixOf nm) then
+      nm.replacePrefix ns .anonymous :: acc
+    else acc
+  activateScoped ns
+  modifyScope fun s => { s with openDecls := OpenDecl.simple ns except :: s.openDecls }
+
+end CoreModels.Command
+
+/-! ## The `CoreModels.core` names of the Aeneas backend output
+
+The hax Lean library `CoreModels` gives the `core` items the backend output calls, under
+`CoreModels.core`; the output opens `Aeneas.Std` without its `core` namespace. The names
+below are those items over the vendored `Aeneas.Std` model. -/
+
+namespace CoreModels.core
+
+open Aeneas.Std Aeneas.Std.ScalarElab
+
+namespace option
+
+/-- Rust's `Option`: Lean's `Option`. -/
+abbrev Option := _root_.Option
+
+/-- `Option::Some`. -/
+@[match_pattern] abbrev Option.Some {T : Type} (x : T) : Option T := _root_.Option.some x
+
+/-- `Option::None`. -/
+@[match_pattern] abbrev Option.None {T : Type} : Option T := _root_.Option.none
+
+end option
+
+/-- `core::ops::range::Range`: the vendored `Range`. -/
+abbrev ops.range.Range := Aeneas.Std.core.ops.range.Range
+
+/-- `core::iter::range::Step`: the comparison and `forward_checked`. -/
+abbrev iter.range.Step := Aeneas.Std.core.iter.range.Step
+
+/-- `Step` on `usize`. -/
+abbrev Usize.Insts.CoreIterRangeStep : iter.range.Step Usize :=
+  Aeneas.Std.core.iter.range.StepUsize
+
+/-- `Iterator::next` on `Range<A>`. -/
+abbrev ops.range.Range.Insts.CoreIterTraitsIteratorIterator.next :=
+  @Aeneas.Std.core.iter.range.IteratorRange.next
+
+uscalar /-- `wrapping_add` on an unsigned scalar, in `RustM`. -/
+def num.«%S».wrapping_add (x y : «%S») : RustM «%S» :=
+  .ok (Aeneas.Std.core.num.«%S».wrapping_add x y)
+
+uscalar /-- `wrapping_sub` on an unsigned scalar, in `RustM`. -/
+def num.«%S».wrapping_sub (x y : «%S») : RustM «%S» :=
+  .ok (Aeneas.Std.core.num.«%S».wrapping_sub x y)
+
+uscalar /-- `wrapping_mul` on an unsigned scalar, in `RustM`. -/
+def num.«%S».wrapping_mul (x y : «%S») : RustM «%S» :=
+  .ok (Aeneas.Std.core.num.«%S».wrapping_mul x y)
+
+end CoreModels.core
