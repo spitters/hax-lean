@@ -11,6 +11,7 @@ public import HaxLean.TExpr
 public import HaxLean.InlineClosures
 public import HaxLean.JsonSize
 public import Lean.Data.Json
+import HaxLean.InclusiveRange
 
 /-!
 # Hax AST Adapter
@@ -2611,10 +2612,11 @@ partial def reconstructForLoops : ImpExpr → ImpExpr
       [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
       -- Found the pattern! Extract the loop var from the inner next() match
       let lo' := reconstructForLoops lo
-      -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`.
+      -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`
+      -- (`inclusiveUpper`, an integer literal on a literal `hi`).
       let hi' :=
         let h := reconstructForLoops hi
-        if inclusive then .app "add" [h, .lit (.int 1)] else h
+        if inclusive then inclusiveUpper h else h
       match tryExtractNextMatch innerBody _iterVar with
       | some (loopVar, body) =>
         let body' := reconstructForLoops body
@@ -4168,9 +4170,10 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
           | some (.range loImp hiImp _reversed _inclusive) =>
             let loTE := reconstructForLoopsTExpr (findSubTExprForImp scrut loImp)
             let hiTE := reconstructForLoopsTExpr (findSubTExprForImp scrut hiImp)
-            -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`.
+            -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`
+            -- (`inclusiveUpperT`, an integer literal on a literal `hi`).
             let hiTE := if inclusive || scrutIsInclusiveRange scrut
-              then TExpr.mk (.app "add" [hiTE, TExpr.mk (.lit (.int 1)) .unknown]) .unknown
+              then inclusiveUpperT hiTE
               else hiTE
             if reversed then .mk (.forLoopRev loopVar loTE hiTE bodyRec) ty
             else .mk (.forLoop loopVar loTE hiTE bodyRec) ty
