@@ -1654,6 +1654,59 @@ def tTupleDestructBinds (parent : String) (parentTy : ImpType) :
     ("_", TExpr.mk (.proj (TExpr.mk (.var parent) parentTy) i) .unknown) ::
       tTupleDestructBinds parent parentTy ps (i + 1)
 
+/-- The field subpatterns of a hax struct pattern: for a `Variant` pattern whose
+    `info.kind` is `Struct`, each entry of `subpatterns` as the field name (named by
+    `extractDefIdName`, as the `Field` projection names it) and the subpattern JSON;
+    `none` for any other pattern. -/
+def structPatFields? (j : Json) : Option (List (String × Json)) := do
+  let patKind := match j.getObjVal? "contents" with
+    | .ok c => c
+    | _ => j
+  let vd ← (patKind.getObjVal? "Variant").toOption
+  let info ← (vd.getObjVal? "info").toOption
+  let kindJ ← (info.getObjVal? "kind").toOption
+  let _ ← (kindJ.getObjVal? "Struct").toOption
+  let fps ← (vd.getObjValAs? (Array Json) "subpatterns").toOption
+  fps.toList.mapM fun fp => do
+    let fj ← (fp.getObjVal? "field").toOption
+    let pj ← (fp.getObjVal? "pattern").toOption
+    return (extractDefIdName fj, pj)
+
+/-- The bindings that destructure the struct held by the variable `parent` by the
+    field subpatterns `fields` (from `structPatFields?`). A variable is bound to the
+    field projection `.app ".f" [.var parent]` (a name starting with `_` to `_`); a
+    wildcard binds nothing; a nested tuple or struct pattern binds the projection to
+    the temporary `parent_f` and is destructured from it in turn; any other
+    subpattern binds the projection to `_`. -/
+partial def structDestructBinds (parent : String) (fields : List (String × Json)) :
+    List (String × ImpExpr) :=
+  fields.flatMap fun (f, pj) =>
+    let proj : ImpExpr := .app ("." ++ f) [.var parent]
+    let t := parent ++ "_" ++ f
+    match parseHaxPat pj with
+    | .varPat n => [(if n.startsWith "_" then "_" else n, proj)]
+    | .wildcard => []
+    | .tuplePat qs => (t, proj) :: tupleDestructBinds t qs 0
+    | _ => match structPatFields? pj with
+      | some fs => (t, proj) :: structDestructBinds t fs
+      | none => [("_", proj)]
+
+/-- Typed `structDestructBinds`: `parentTy` is the type of `parent`; a projection
+    has the type `ty` of its subpattern node. -/
+partial def tStructDestructBinds (parent : String) (parentTy : ImpType)
+    (fields : List (String × Json)) : List (String × TExpr) :=
+  fields.flatMap fun (f, pj) =>
+    let fTy := extractExprType pj
+    let proj := TExpr.mk (.app ("." ++ f) [TExpr.mk (.var parent) parentTy]) fTy
+    let t := parent ++ "_" ++ f
+    match parseHaxPat pj with
+    | .varPat n => [(if n.startsWith "_" then "_" else n, proj)]
+    | .wildcard => []
+    | .tuplePat qs => (t, proj) :: tTupleDestructBinds t fTy qs 0
+    | _ => match structPatFields? pj with
+      | some fs => (t, proj) :: tStructDestructBinds t fTy fs
+      | none => [("_", proj)]
+
 /-- Replace the deepest unitVal in a letBind chain with a continuation.
     letBind a v1 (letBind b v2 unitVal) → letBind a v1 (letBind b v2 cont) -/
 def replaceDeepestUnit (e : ImpExpr) (cont : ImpExpr) : ImpExpr :=
@@ -1792,7 +1845,14 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
       | .varPat n =>
         return .letBind n rhs .unitVal
       | _ =>
-        return .letBind "_let" rhs .unitVal
+        -- Struct destructuring: let S { x, .. } = rhs → let _st := rhs; let x := _st.x
+        match data.getObjVal? "pat" |>.toOption |>.bind structPatFields? with
+        | some fields =>
+          let bindings := structDestructBinds "_st" fields
+          let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
+          return .letBind "_st" rhs inner
+        | none =>
+          return .letBind "_let" rhs .unitVal
     | .error e => throw e
   | .error _ =>
   match h_Block : j.getObjVal? "Block" with
@@ -2199,7 +2259,14 @@ def parseStmt (j : Json) : Except String ImpExpr := do
       | .varPat n =>
         return .letBind n init .unitVal  -- body filled in by stmtsToSeq
       | _ =>
-        return .letBind "_let" init .unitVal
+        -- Struct destructuring: let S { x, .. } = init → let _st := init; let x := _st.x
+        match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
+        | some fields =>
+          let bindings := structDestructBinds "_st" fields
+          let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
+          return .letBind "_st" init inner
+        | none =>
+          return .letBind "_let" init .unitVal
     | .error _ => return .unitVal
   | .error _ => return .unitVal
 termination_by jsonSize j
@@ -3594,7 +3661,14 @@ where
       | .varPat n =>
         return .letBind n rhs (TExpr.mk .unitVal .unit)
       | _ =>
-        return .letBind "_let" rhs (TExpr.mk .unitVal .unit)
+        match data.getObjVal? "pat" |>.toOption |>.bind structPatFields? with
+        | some fields =>
+          let bindings := tStructDestructBinds "_st" rhs.ty fields
+          let inner := bindings.foldr (fun (n, proj) acc =>
+            TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
+          return .letBind "_st" rhs inner
+        | none =>
+          return .letBind "_let" rhs (TExpr.mk .unitVal .unit)
 
     else if let .ok data := j.getObjVal? "Block" then
       -- Strip assertion-shape Blocks. `assert!`/`assert_eq!` expands
@@ -4008,7 +4082,14 @@ where
       | .varPat n =>
         return TExpr.mk (.letBind n init (TExpr.mk .unitVal .unit)) .unknown
       | _ =>
-        return TExpr.mk (.letBind "_let" init (TExpr.mk .unitVal .unit)) .unknown
+        match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
+        | some fields =>
+          let bindings := tStructDestructBinds "_st" init.ty fields
+          let inner := bindings.foldr (fun (n, proj) acc =>
+            TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
+          return TExpr.mk (.letBind "_st" init inner) .unknown
+        | none =>
+          return TExpr.mk (.letBind "_let" init (TExpr.mk .unitVal .unit)) .unknown
     else
       return TExpr.mk .unitVal .unit
 
