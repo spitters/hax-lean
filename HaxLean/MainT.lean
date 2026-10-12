@@ -58,7 +58,7 @@ open Lean (toJson Json)
 def parseHaxInputTyped (input : String) :
     IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo)
         × List (String × TExpr) × List (String × TExpr)) := do
-  let json ← IO.ofExcept (Json.parseVerified input)
+  let json ← IO.ofExcept (parseHaxExportItems input)
   IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
 
 /-- Keep the first entry for each name, in first-occurrence order.

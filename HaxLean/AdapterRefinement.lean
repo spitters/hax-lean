@@ -6,6 +6,8 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.HaxAdapter
+import all Lean.Data.Json.Basic
+import Std.Data.TreeMap.Raw.Lemmas
 
 /-!
 # Structural Refinement of `parseHaxFile`
@@ -7845,5 +7847,76 @@ theorem parseHaxExpr_step :
 theorem parseHaxExpr_refines_unconditional :
     ∀ (j : Json) (e : ImpExpr), parseHaxExpr j = .ok e → JsonRefinesExpr j e := by
   intro j; exact parseHaxExpr_refines_by_cases parseHaxExpr_step j
+
+/-! ## Item bodies of hax 0.3 and hax 0.4
+
+An item body of a hax 0.4 export is the object `{"expr": e, "params": ps}`;
+one of a hax 0.3 export is the expression `e` itself. `thirBodyExpr` maps both
+to `e`. -/
+
+/-- `thirBodyExpr` returns the `expr` field of the object `{"expr": e, "params": ps}`. -/
+theorem thirBodyExpr_mkObj_expr_params (e ps : Json) :
+    thirBodyExpr (Json.mkObj [("expr", e), ("params", ps)]) = e := by
+  have h1 : (Std.TreeMap.Raw.ofList [("expr", e), ("params", ps)] compare)["contents"]? =
+      none :=
+    Std.TreeMap.Raw.getElem?_ofList_of_contains_eq_false (by simp)
+  have h2 : (Std.TreeMap.Raw.ofList [("expr", e), ("params", ps)] compare)["expr"]? = some e :=
+    Std.TreeMap.Raw.getElem?_ofList_of_mem (k := "expr") (by simp) (by simp) (by simp)
+  have h3 : (Std.TreeMap.Raw.ofList [("expr", e), ("params", ps)] compare)["params"]? =
+      some ps :=
+    Std.TreeMap.Raw.getElem?_ofList_of_mem (k := "params") (by simp) (by simp) (by simp)
+  simp [thirBodyExpr, Json.mkObj, Json.getObjVal?, h1, h2, h3]
+  rfl
+
+/-- `thirBodyExpr` is the identity on an expression object with keys `ty`,
+    `span` and `contents`. -/
+theorem thirBodyExpr_mkObj_contents (ty span c : Json) :
+    thirBodyExpr (Json.mkObj [("ty", ty), ("span", span), ("contents", c)]) =
+      Json.mkObj [("ty", ty), ("span", span), ("contents", c)] := by
+  have h : (Std.TreeMap.Raw.ofList [("ty", ty), ("span", span), ("contents", c)]
+      compare)["contents"]? = some c :=
+    Std.TreeMap.Raw.getElem?_ofList_of_mem (k := "contents") (by simp) (by simp) (by simp)
+  apply thirBodyExpr_of_contents (c := c)
+  simp [Json.mkObj, Json.getObjVal?, h]
+  rfl
+
+/-- The hax 0.4 item body and the hax 0.3 item body of an expression object
+    give the same parsed body. -/
+theorem parseHaxExpr_thirBodyExpr_shapes (ty span c ps : Json) :
+    parseHaxExpr (thirBodyExpr (Json.mkObj
+        [("expr", Json.mkObj [("ty", ty), ("span", span), ("contents", c)]), ("params", ps)])) =
+      parseHaxExpr (thirBodyExpr (Json.mkObj [("ty", ty), ("span", span), ("contents", c)])) := by
+  rw [thirBodyExpr_mkObj_expr_params, thirBodyExpr_mkObj_contents]
+
+/-- On the literal `1`, the hax 0.4 item body and the hax 0.3 item body give
+    the same parsed body. -/
+example :
+    let e := Json.mkObj [("ty", .null), ("span", .null),
+      ("contents", Json.mkObj [("Literal", Json.mkObj [("lit", .num 1)])])]
+    parseHaxExpr (thirBodyExpr (Json.mkObj [("expr", e), ("params", .arr #[])])) =
+      parseHaxExpr (thirBodyExpr e) :=
+  parseHaxExpr_thirBodyExpr_shapes _ _ _ _
+
+/-! ## Export item arrays of hax 0.3 and hax 0.4 -/
+
+/-- `haxExportArray` is the identity on the item array of a hax 0.3 export. -/
+@[simp] theorem haxExportArray_arr (items : Array Json) :
+    haxExportArray (.arr items) = .ok (.arr items) := by
+  rfl
+
+/-- `haxExportArray` returns the item array of a hax 0.4 export `{"Legacy": items}`. -/
+theorem haxExportArray_legacy (items : Array Json) :
+    haxExportArray (Json.mkObj [("Legacy", .arr items)]) = .ok (.arr items) := by
+  have h : (Std.TreeMap.Raw.ofList [("Legacy", Json.arr items)] compare)["Legacy"]? =
+      some (.arr items) :=
+    Std.TreeMap.Raw.getElem?_ofList_of_mem (k := "Legacy") (by simp) (by simp) (by simp)
+  simp [haxExportArray, Json.mkObj, Json.getObjVal?, -Std.TreeMap.Raw.ofList_singleton, h]
+  rfl
+
+/-- The hax 0.4 export `{"Legacy": items}` and the hax 0.3 export `items` give
+    the same item array. -/
+example (items : Array Json) :
+    haxExportArray (Json.mkObj [("Legacy", .arr items)]) = haxExportArray (.arr items) := by
+  rw [haxExportArray_legacy, haxExportArray_arr]
 
 end Hax.AdapterRefinement

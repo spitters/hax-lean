@@ -175,7 +175,7 @@ def fnParts (item : Json) : Option (Json × Array Json × Json) := do
   let generics := ((fnData.getObjVal? "generics").toOption <|>
     (item.getObjVal? "generics").toOption).getD .null
   let params ← (defLike.getObjValAs? (Array Json) "params").toOption
-  let body := (defLike.getObjVal? "body").toOption.getD .null
+  let body := ((defLike.getObjVal? "body").toOption.map HaxAdapter.thirBodyExpr).getD .null
   pure (generics, params, body)
 
 /-- The name a pattern binds: the variable of a binding, `_` otherwise. -/

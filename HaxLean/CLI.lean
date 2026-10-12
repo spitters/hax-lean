@@ -12,17 +12,23 @@ public import HaxLean.Pipeline
 open Hax
 open Lean (Json ToJson FromJson toJson fromJson?)
 
-/-- Verified RFC 8259 JSON parser; replaces the unverified `Lean.Json.parse`.
+/-- The verified RFC 8259 JSON parser.
     An export written by `cargo hax json --use-ids` is returned in its inline
     form (`Hax.resolveIds`). -/
 def Json.parseVerified (s : String) : Except String Json :=
   Hax.resolveIds <$> Hax.Json.parseJsonString s
 
-/-- A hax frontend export parsed by `Json.parseVerified`, with its items listed
-    once each and every `Mod` sub-item list emptied
+/-- The item array of a hax frontend export parsed by `Json.parseVerified`
+    (`HaxAdapter.haxExportArray`: the `Legacy` items of a hax 0.4 export, the
+    bare array of a hax 0.3 export). -/
+def parseHaxExportItems (s : String) : Except String Json :=
+  Json.parseVerified s >>= HaxAdapter.haxExportArray
+
+/-- The item array of a hax frontend export (`parseHaxExportItems`), with its
+    items listed once each and every `Mod` sub-item list emptied
     (`HaxAdapter.flattenModItems`). -/
 def parseHaxExport (s : String) : Except String Json :=
-  HaxAdapter.flattenModItems <$> Json.parseVerified s
+  HaxAdapter.flattenModItems <$> parseHaxExportItems s
 
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do
@@ -41,7 +47,7 @@ def parseExpr (input : String) : IO ImpExpr := do
     Handles both the full `hax_frontend_export.json` (array of items)
     and a single `Decorated<ExprKind>` (one expression). -/
 def parseHaxInput (input : String) : IO ImpExpr := do
-  let json ← IO.ofExcept (Json.parseVerified input)
+  let json ← IO.ofExcept (parseHaxExportItems input)
   IO.ofExcept (HaxAdapter.parseHaxFile json)
 
 /-- Struct metadata read off an already-parsed hax JSON value.
@@ -53,7 +59,7 @@ def structMetaOfJson (json : Json) : StructMeta :=
 
 /-- Parse struct metadata from hax JSON for preamble generation. -/
 def parseHaxStructMeta (input : String) : IO StructMeta := do
-  let json ← IO.ofExcept (Json.parseVerified input)
+  let json ← IO.ofExcept (parseHaxExportItems input)
   return structMetaOfJson json
 
 /-- Parse hax JSON with per-function type information.
@@ -61,7 +67,7 @@ def parseHaxStructMeta (input : String) : IO StructMeta := do
 def parseHaxInputWithTypes (input : String) :
     IO (ImpExpr × List (String × HaxAdapter.FnTypeInfo) × List (String × ImpType)
         × List (String × HaxAdapter.FnTypeInfo) × List (String × ImpType)) := do
-  let json ← IO.ofExcept (Json.parseVerified input)
+  let json ← IO.ofExcept (parseHaxExportItems input)
   let (expr, fnTypes) ← IO.ofExcept (HaxAdapter.parseHaxFileWithTypes json)
   -- Extract return types for all function calls from the raw JSON expression tree
   let callRetTypes := HaxAdapter.extractCallReturnTypesFromFile json

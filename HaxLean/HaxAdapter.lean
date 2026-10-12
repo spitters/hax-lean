@@ -2752,6 +2752,30 @@ partial def normalizeAssignOps : ImpExpr → ImpExpr
   | .cfBreakContinue e => .cfBreakContinue (normalizeAssignOps e)
   | .typeAscription e ty => .typeAscription (normalizeAssignOps e) ty
 
+/-- The THIR expression of an item body (the `body` of a `Fn` definition or
+    of a `Const` item). In a hax 0.4 export an item body is the object
+    `{"expr": e, "params": ps}` and this returns `e`; in a hax 0.3 export the
+    item body is the expression itself, an object with a `contents` key, and
+    this returns it unchanged. Any other value is returned unchanged. -/
+@[expose] def thirBodyExpr (j : Json) : Json :=
+  match j.getObjVal? "contents" with
+  | .ok _ => j
+  | .error _ =>
+    match j.getObjVal? "expr", j.getObjVal? "params" with
+    | .ok e, .ok _ => e
+    | _, _ => j
+
+/-- `thirBodyExpr` is the identity on an item body of the hax 0.3 shape. -/
+@[simp] theorem thirBodyExpr_of_contents {j c : Json}
+    (h : j.getObjVal? "contents" = .ok c) : thirBodyExpr j = j := by
+  simp [thirBodyExpr, h]
+
+/-- `thirBodyExpr` returns the `expr` field of an item body of the hax 0.4 shape. -/
+theorem thirBodyExpr_of_expr_params {j e ps : Json} {m : String}
+    (hc : j.getObjVal? "contents" = .error m) (he : j.getObjVal? "expr" = .ok e)
+    (hp : j.getObjVal? "params" = .ok ps) : thirBodyExpr j = e := by
+  simp [thirBodyExpr, hc, he, hp]
+
 /-! ## Full hax export file parsing
 
 The `hax_frontend_export.json` produced by `cargo hax json` is a top-level **array** of
@@ -2759,8 +2783,9 @@ items. Each item has `{def_id, owner_id, span, vis_span, kind, attributes, visib
 The `kind` field is an externally-tagged enum:
 
 - `"Fn"`: `{ident: [name, span], generics, def: {header, params, ret, body}}`
-  where `body` is a `Decorated<ExprKind>` that `parseHaxExpr` handles.
-- `"Const"`: `[ident_pair, generics, ty, body]` where `body` is `Decorated<ExprKind>`.
+  where `body` is an item body (see `thirBodyExpr`) whose expression
+  `parseHaxExpr` handles.
+- `"Const"`: `[ident_pair, generics, ty, body]` where `body` is an item body.
 - `"TyAlias"`, `"Mod"`, `"Use"`, `"ExternCrate"`: skipped.
 
 A `Mod` item carries the items of its module as a sub-item list (`kind.Mod =
@@ -2827,6 +2852,17 @@ partial def flattenModItemsAux (items : Array Json)
     if seen.contains k then (out, seen)
     else flattenModItemsAux (modSubItems item) (out.push (clearModSubItems item), seen.insert k)
 
+/-- The item array of a hax export. A hax 0.4 export is the object
+    `{"Legacy": items}` (the `Items` enum of the frontend) and this returns
+    `items`; a `{"FullDef": _}` export is refused with an error; any other value,
+    in particular the bare item array of a hax 0.3 export, is returned unchanged. -/
+@[expose] def haxExportArray (j : Json) : Except String Json :=
+  match j.getObjVal? "Legacy" with
+  | .ok items => .ok items
+  | .error _ =>
+    match j.getObjVal? "FullDef" with
+    | .ok _ => .error "hax export in the FullDef form is not supported; export with the legacy item form"
+    | .error _ => .ok j
 /-- The items of an export in pre-order (an item, then the items of its `Mod`
     sub-item list), each item once by `haxItemKey` at its first occurrence, with
     every `Mod` sub-item list emptied. A value other than an array is returned
@@ -2913,7 +2949,7 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
         | _ => []
       | _ => []
     let body ← match fnData.getObjVal? "def" with
-      | .ok def_ => parseHaxExpr (← def_.getObjVal? "body")
+      | .ok def_ => parseHaxExpr (thirBodyExpr (← def_.getObjVal? "body"))
       | _ => throw s!"Fn item '{name}' missing def.body"
     let processed := normalizeAssignOps (reconstructForLoops body)
     -- Wrap body in identity let-bindings for parameters so the pretty printer
@@ -2930,7 +2966,7 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
     let body ← match constData.toList[3]? with
-      | some bodyJ => parseHaxExpr bodyJ
+      | some bodyJ => parseHaxExpr (thirBodyExpr bodyJ)
       | none => throw s!"Const item '{name}' missing body"
     return some (name, normalizeAssignOps (reconstructForLoops body))
   -- Skip: Mod, Use, ExternCrate, TyAlias
@@ -2964,7 +3000,7 @@ partial def parseHaxItemWithTypes (j : Json) :
         | _ => .unknown
       | none => .unknown
     let body ← match def_ with
-      | some d => parseHaxExpr (← d.getObjVal? "body")
+      | some d => parseHaxExpr (thirBodyExpr (← d.getObjVal? "body"))
       | none => throw s!"Fn item '{name}' missing def.body"
     let processed := normalizeAssignOps (reconstructForLoops body)
     let wrapped := if paramNames.isEmpty then processed else wrapParams paramNames processed
@@ -2976,7 +3012,7 @@ partial def parseHaxItemWithTypes (j : Json) :
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
     let body ← match constData.toList[3]? with
-      | some bodyJ => parseHaxExpr bodyJ
+      | some bodyJ => parseHaxExpr (thirBodyExpr bodyJ)
       | none => throw s!"Const item '{name}' missing body"
     return some (name, normalizeAssignOps (reconstructForLoops body), ⟨[], .unknown⟩)
   else return none
@@ -3105,7 +3141,7 @@ partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
     | .ok fnData =>
       match fnData.getObjVal? "def" with
       | .ok d => match d.getObjVal? "body" with
-        | .ok body => collectCallSignatures body
+        | .ok body => collectCallSignatures (thirBodyExpr body)
         | _ => []
       | _ => []
     | _ =>
@@ -3113,7 +3149,7 @@ partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
       match kind.getObjVal? "Const" with
       | .ok (.arr constData) =>
         match constData.toList[3]? with
-        | some bodyJ => collectCallSignatures bodyJ
+        | some bodyJ => collectCallSignatures (thirBodyExpr bodyJ)
         | none => []
       | _ => []
   | _ => []
@@ -3200,14 +3236,14 @@ partial def extractVarRefTypesItem (item : Json) : List (String × ImpType) :=
     | .ok fnData =>
       match fnData.getObjVal? "def" with
       | .ok d => match d.getObjVal? "body" with
-        | .ok body => collectVarRefTypes body
+        | .ok body => collectVarRefTypes (thirBodyExpr body)
         | _ => []
       | _ => []
     | _ =>
       match kind.getObjVal? "Const" with
       | .ok (.arr constData) =>
         match constData.toList[3]? with
-        | some bodyJ => collectVarRefTypes bodyJ
+        | some bodyJ => collectVarRefTypes (thirBodyExpr bodyJ)
         | none => []
       | _ => []
   | _ => []
@@ -3239,7 +3275,7 @@ partial def extractCallRetTypesItem (item : Json) : List (String × ImpType) :=
     | .ok fnData =>
       match fnData.getObjVal? "def" with
       | .ok d => match d.getObjVal? "body" with
-        | .ok body => collectCallReturnTypes body
+        | .ok body => collectCallReturnTypes (thirBodyExpr body)
         | _ => []
       | _ => []
     | _ => []
@@ -4439,7 +4475,7 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     let retType := match defLike.getObjVal? "ret" with
       | .ok retJ => parseHaxType retJ
       | _ => .unknown
-    let body ← parseHaxTExpr (← defLike.getObjVal? "body") implMap
+    let body ← parseHaxTExpr (thirBodyExpr (← defLike.getObjVal? "body")) implMap
     -- Save the raw TExpr (with full types from hax JSON) for type extraction
     let rawWrapped := if paramNames.isEmpty then body
       else paramNames.foldr (fun p acc =>
@@ -4470,7 +4506,7 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
     let body ← match constData.toList[3]? with
-      | some bodyJ => parseHaxTExpr bodyJ implMap
+      | some bodyJ => parseHaxTExpr (thirBodyExpr bodyJ) implMap
       | none => throw s!"Const item '{name}' missing body"
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
     return some (name, body, processed, ⟨[], .unknown⟩)
@@ -4676,14 +4712,14 @@ def buildTraitImplConstMap (j : Json) : List (Nat × String × String) :=
 
 /-- The definition of an associated constant of a trait `impl` block, from the
     `impl` item. Such an item has the two-element form `Const: [ty, body]`,
-    with `body` an expression node. `none` for any other item. -/
+    with `body` an item body (`thirBodyExpr`). `none` for any other item. -/
 partial def parseImplConstTExpr (implItem : Json) (implMap : ImplSelfTypeMap) :
     Except String (Option (TExpr × TExpr × FnTypeInfo)) := do
   let kind ← implItem.getObjVal? "kind"
   match kind.getObjVal? "Const" with
   | .ok (.arr #[tyJ, bodyJ]) =>
     if bodyJ.isNull then return none
-    let body ← parseHaxTExpr bodyJ implMap
+    let body ← parseHaxTExpr (thirBodyExpr bodyJ) implMap
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
     return some (body, processed, ⟨[], parseHaxType tyJ⟩)
   | _ => return none
@@ -4786,7 +4822,7 @@ def exportConstBodies (j : Json) : List (String × Json) :=
     match kind.getObjVal? "Const" with
     | .ok (.arr cd) =>
       match cd.toList with
-      | [ident, _, _, body] => some (extractFnName ident, body)
+      | [ident, _, _, body] => some (extractFnName ident, thirBodyExpr body)
       | _ => none
     | _ => none
 
@@ -4851,7 +4887,7 @@ def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) : List (Nat × String �
       (ii.getObjVal? "ident").toOption.map extractFnName == some "MODULUS_LE"
     let k ← (modItem.getObjVal? "kind").toOption
     let bodyJ ← match k.getObjVal? "Const" with
-      | .ok (.arr #[_, b]) => some b
+      | .ok (.arr #[_, b]) => some (thirBodyExpr b)
       | _ => none
     let te ← (parseHaxTExpr bodyJ {}).toOption
     let limbs ← constLimbs consts 8 te
