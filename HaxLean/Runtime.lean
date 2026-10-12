@@ -620,6 +620,14 @@ haxpipeT emits these when it knows the Rust type width from the TExpr. -/
     the values of an unsigned source; a signed source is cast with `cast_uw`. -/
 @[inline] def castVal_w (dstWidth : Nat) (a : Int) : Int := mod2w dstWidth a
 
+/-- The exclusive end `hi + 1` of the inclusive range `lo..=hi`, as an unbounded integer:
+    the `range_incl_end` builtin of the semantics, so the end of `0..=MAX` does not wrap. -/
+@[inline] def range_incl_end (a : Int) : Int := a + 1
+
+/-- `range_incl_end` at width `w`: the end does not depend on the width, since it is not
+    reduced modulo `2^w`. -/
+@[inline] def range_incl_end_w (_w : Nat) (a : Int) : Int := range_incl_end a
+
 /-- The bit width of `usize` and `isize`: the platform word size, 32 or 64. -/
 abbrev usizeBits : Nat := System.Platform.numBits
 

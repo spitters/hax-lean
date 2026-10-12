@@ -223,6 +223,7 @@ def runtimeName (f : String) : String :=
   | "slice_update" => "Hax.slice_update"
   | "slice_reverse" => "Hax.slice_reverse"
   | "vec_remove" => "Hax.vec_remove"
+  | "range_incl_end" => "Hax.range_incl_end"
   -- Slice/mutation operations
   | "literal" => "Hax.literal"
   | "str_opaque" => "Hax.literal"
@@ -2626,7 +2627,8 @@ def isRuntimeName (f : String) : Bool :=
   | "index" | "array_lit" | "repeat" | "push" | "len"
   | "rotate_right" | "rotate_left"
   | "wrapping_add" | "wrapping_sub" | "wrapping_mul"
-  | "array_update" | "slice_update" | "slice_reverse" | "vec_remove" | "cast" | "castVal"
+  | "array_update" | "slice_update" | "slice_reverse" | "vec_remove" | "range_incl_end"
+  | "cast" | "castVal"
   | "Some" | "None" | "Ok" | "Err"
   | "panic" | "literal" | "str_opaque" | "deref" | "deref_mut" | "clone" | "to_vec" | "copy_from_slice"
   | "extend_from_slice" | "truncate" | "sha256"
@@ -2653,7 +2655,7 @@ def builtinTable : List (String × List String) :=
   , ("collection",       ["copy_from_slice", "extend_from_slice", "truncate",
                           "with_capacity", "into_vec", "into_iter", "iter", "map",
                           "collect", "flat_map", "zip", "next", "new", "enumerate"])
-  , ("range",            ["RangeTo", "RangeFrom", "Range"])
+  , ("range",            ["RangeTo", "RangeFrom", "Range", "range_incl_end"])
   , ("misc-runtime",     ["count_ones", "assert_failed", "assert_failed'",
                           "from", "into", "literal", "str_opaque", "deref", "deref_mut", "clone",
                           "cast", "castVal", "castVal_w", "from_val",

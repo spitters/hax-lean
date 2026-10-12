@@ -1097,6 +1097,7 @@ def sliceReverseCall : TExpr := parseT (sliceReverseCallJson "path")
 -- It renders as the runtime function, not as a `Deps` field.
 #guard runtimeName "slice_reverse" == "Hax.slice_reverse" && isAlwaysBuiltin "slice_reverse"
 #guard runtimeName "vec_remove" == "Hax.vec_remove" && isAlwaysBuiltin "vec_remove"
+#guard runtimeName "range_incl_end" == "Hax.range_incl_end" && isAlwaysBuiltin "range_incl_end"
 
 -- Nothing is dropped.
 #guard tDroppedMutCalls [] [] [] [] sliceReverseCall == []
