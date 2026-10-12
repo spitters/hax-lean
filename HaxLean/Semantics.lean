@@ -491,7 +491,10 @@ def widthCastOps : Builtins
 
 /-- Array operations (guarded: only return data values, not controlFlow).
     `index`, `array_update` and `vec_remove` are undefined at an index outside
-    the array, where Rust panics. -/
+    the array, where Rust panics. The table also holds `range_incl_end`, the
+    exclusive end of the inclusive range `lo..=hi`: on an unsigned, signed or
+    unbounded integer `hi` it is the integer `hi + 1`, computed in `Int`, so the
+    maximum of a word type gives its modulus. -/
 def widthArrayOps : Builtins
   | "index", [.array vs, .uint _ i] => vs[i]?.bind fun
     | .controlFlow _ _ => none
@@ -519,6 +522,9 @@ def widthArrayOps : Builtins
   | "vec_remove", [.array vs, .int i] =>
     if 0 ≤ i then vs[i.toNat]?.map fun x => .tuple [x, .array (vs.eraseIdx i.toNat)]
     else none
+  | "range_incl_end", [.uint _ n] => some (.int ((n : Int) + 1))
+  | "range_incl_end", [.sint _ n] => some (.int (n + 1))
+  | "range_incl_end", [.int n] => some (.int (n + 1))
   | _, _ => none
 
 /-- Signed integer modular reduction: maps to [-2^(w-1), 2^(w-1)). -/

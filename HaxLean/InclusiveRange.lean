@@ -19,22 +19,30 @@ which iterates the integer interval `[lo, hi')`; `hi'` is `inclusiveUpper hi`.
 ## Main definitions
 
 * `inclusiveUpper` — the exclusive bound `hi + 1`: an integer literal when `hi`
-  is an integer literal, else the application `add hi 1`.
+  is an integer literal, else the application `range_incl_end hi`.
 * `inclusiveUpperT` — the same bound on typed expressions.
+* `RangeInclEnd` — a builtin table whose `range_incl_end` is the integer
+  `k + 1` on every value denoting the integer `k`.
 * `denoteForInclusive` — the reference iteration over `lo..=hi`: it compares
   `lo` with `hi` and never computes `hi + 1`.
 
 ## Main statements
 
 * `inclusiveUpperT_erase` — `inclusiveUpperT` erases to `inclusiveUpper`.
+* `fullBuiltins_rangeInclEnd`, `widthAwareBuiltins_rangeInclEnd`,
+  `hax64Builtins_rangeInclEnd` — the three tables satisfy `RangeInclEnd`.
 * `denoteForLoop_succ_eq_denoteForInclusive` — the counted loop over
   `[lo, hi + 1)` is the reference iteration over `lo..=hi`.
 * `denote_forLoop_inclusiveUpper_lit` — on a literal upper bound (of any
   width, including the maximum of the type), the lowered loop denotes the
   reference iteration, for every builtin table.
-* `denote_forLoop_inclusiveUpper_add` — on any other upper bound, the lowered
-  loop denotes the reference iteration whenever the builtin table adds `1`
-  to the bound's integer exactly.
+* `denote_forLoop_inclusiveUpper_end` — on any other upper bound, the lowered
+  loop denotes the reference iteration whenever the builtin table's
+  `range_incl_end` is the bound's integer plus `1`.
+* `denote_forLoop_inclusiveUpper_toInt` — on any other upper bound whose value
+  is an unsigned, signed or unbounded integer, under a table satisfying
+  `RangeInclEnd`, the lowered loop denotes the reference iteration, including
+  at the maximum of the type.
 * `denoteForInclusive_of_lt` — `lo..=hi` with `hi < lo` runs the body zero times.
 -/
 
@@ -48,14 +56,15 @@ namespace Hax
     On a literal `hi` denoting an integer `k` (unsuffixed, unsigned or signed)
     it is the integer literal `k + 1`; the addition happens in `Int`, so the
     maximum of a word type gives its modulus. On any other `hi` it is the
-    application `add hi 1`. -/
+    application `range_incl_end hi`, whose value in `widthArrayOps` is the
+    integer `hi + 1`. -/
 def inclusiveUpper (hi : ImpExpr) : ImpExpr :=
   match hi with
   | .lit l =>
     match (Value.ofLit l).toInt with
     | some k => .lit (.int (k + 1))
-    | none => .app "add" [hi, .lit (.int 1)]
-  | _ => .app "add" [hi, .lit (.int 1)]
+    | none => .app "range_incl_end" [hi]
+  | _ => .app "range_incl_end" [hi]
 
 /-- `inclusiveUpper` on typed expressions: the bound is decided on the erased
     expression, and the nodes it builds carry the type `.unknown`. -/
@@ -64,8 +73,8 @@ def inclusiveUpperT (hi : TExpr) : TExpr :=
   | .lit l =>
     match (Value.ofLit l).toInt with
     | some k => .mk (.lit (.int (k + 1))) .unknown
-    | none => .mk (.app "add" [hi, .mk (.lit (.int 1)) .unknown]) .unknown
-  | _ => .mk (.app "add" [hi, .mk (.lit (.int 1)) .unknown]) .unknown
+    | none => .mk (.app "range_incl_end" [hi]) .unknown
+  | _ => .mk (.app "range_incl_end" [hi]) .unknown
 
 theorem inclusiveUpperT_erase (hi : TExpr) :
     (inclusiveUpperT hi).erase = inclusiveUpper hi.erase := by
@@ -75,6 +84,28 @@ theorem inclusiveUpperT_erase (hi : TExpr) :
     rw [h]
     split <;> simp [TExpr.erase, h]
   · simp [TExpr.erase]
+
+/-- The builtin table `bi` computes the exclusive end of an inclusive range
+    exactly: `range_incl_end` on a value denoting the integer `k` is the
+    integer `k + 1`. -/
+def RangeInclEnd (bi : Builtins) : Prop :=
+  ∀ (v : Value) (k : Int), v.toInt = some k → bi "range_incl_end" [v] = some (.int (k + 1))
+
+theorem widthArrayOps_rangeInclEnd : RangeInclEnd widthArrayOps := by
+  intro v k h
+  cases v <;> simp only [Value.toInt, Option.some.injEq, reduceCtorEq] at h <;> subst h <;> rfl
+
+theorem fullBuiltins_rangeInclEnd : RangeInclEnd fullBuiltins := by
+  intro v k h
+  cases v <;> simp only [Value.toInt, Option.some.injEq, reduceCtorEq] at h <;> subst h <;> rfl
+
+theorem widthAwareBuiltins_rangeInclEnd : RangeInclEnd widthAwareBuiltins := by
+  intro v k h
+  cases v <;> simp only [Value.toInt, Option.some.injEq, reduceCtorEq] at h <;> subst h <;> rfl
+
+theorem hax64Builtins_rangeInclEnd : RangeInclEnd hax64Builtins := by
+  intro v k h
+  cases v <;> simp only [Value.toInt, Option.some.injEq, reduceCtorEq] at h <;> subst h <;> rfl
 
 /-- The reference iteration of a body over `lo..=hi`, as Rust's
     `RangeInclusive` iterator runs it: when `hi < lo` it runs nothing; otherwise
@@ -151,16 +182,16 @@ theorem denote_forLoop_inclusiveUpper_lit (bi : Builtins) (fuel : Nat)
   rcases ha with rfl | ⟨w, n, rfl, rfl⟩ <;>
     rw [← denoteForLoop_succ_eq_denoteForInclusive] <;> rfl
 
-theorem denote_forLoop_inclusiveUpper_add (bi : Builtins) (fuel : Nat)
+theorem denote_forLoop_inclusiveUpper_end (bi : Builtins) (fuel : Nat)
     (var : String) (lo hi body : ImpExpr) (k a : Int) (vlo vhi : Value)
     (s s' s'' : Env) (hnl : ∀ l, hi ≠ .lit l)
     (hlo : (denote bi fuel lo).run s = (.val vlo, s'))
     (ha : vlo = .int a ∨ ∃ (w : IntWidth) (n : Nat), vlo = .uint w n ∧ a = n)
     (hhi : (denote bi fuel hi).run s' = (.val vhi, s''))
-    (hadd : bi "add" [vhi, .int 1] = some (.int (k + 1))) :
+    (hend : bi "range_incl_end" [vhi] = some (.int (k + 1))) :
     (denote bi fuel (.forLoop var lo (inclusiveUpper hi) body)).run s =
       (denoteForInclusive bi var a k body fuel).run s'' := by
-  have hup : inclusiveUpper hi = .app "add" [hi, .lit (.int 1)] := by
+  have hup : inclusiveUpper hi = .app "range_incl_end" [hi] := by
     unfold inclusiveUpper
     split
     · next l => exact absurd rfl (hnl l)
@@ -168,10 +199,29 @@ theorem denote_forLoop_inclusiveUpper_add (bi : Builtins) (fuel : Nat)
   rw [hup, denote]
   simp only [StateT.run, bind, StateT.bind] at hlo hhi ⊢
   rw [show denote bi fuel lo s = (Outcome.val vlo, s') from hlo]
-  simp only [denote, denoteArgs, bind, StateT.bind, pure, Value.ofLit]
+  simp only [denote, denoteArgs, bind, StateT.bind, pure]
   rw [show denote bi fuel hi s' = (Outcome.val vhi, s'') from hhi]
   rw [← denoteForLoop_succ_eq_denoteForInclusive]
-  simp only [StateT.bind, StateT.pure, pure, bind, Option.map_some, hadd]
+  simp only [StateT.bind, StateT.pure, pure, bind, Option.map_some, hend]
   rcases ha with rfl | ⟨w, n, rfl, rfl⟩ <;> rfl
+
+/-- **A widthed upper bound of `lo..=hi` iterates Rust's count.** On an upper
+    bound that is not a literal and denotes an unsigned, signed or unbounded
+    integer `k`, under a table satisfying `RangeInclEnd` (`fullBuiltins`,
+    `widthAwareBuiltins`, `hax64Builtins`), the lowered loop denotes the
+    reference iteration over `lo..=k`; at `k` the maximum of its type it runs
+    the body once with the counter at `k`, and at `k < lo` it runs it zero
+    times (`denoteForInclusive_of_lt`). -/
+theorem denote_forLoop_inclusiveUpper_toInt (bi : Builtins) (hbi : RangeInclEnd bi)
+    (fuel : Nat) (var : String) (lo hi body : ImpExpr) (k a : Int) (vlo vhi : Value)
+    (s s' s'' : Env) (hnl : ∀ l, hi ≠ .lit l)
+    (hlo : (denote bi fuel lo).run s = (.val vlo, s'))
+    (ha : vlo = .int a ∨ ∃ (w : IntWidth) (n : Nat), vlo = .uint w n ∧ a = n)
+    (hhi : (denote bi fuel hi).run s' = (.val vhi, s''))
+    (hk : vhi.toInt = some k) :
+    (denote bi fuel (.forLoop var lo (inclusiveUpper hi) body)).run s =
+      (denoteForInclusive bi var a k body fuel).run s'' :=
+  denote_forLoop_inclusiveUpper_end bi fuel var lo hi body k a vlo vhi s s' s'' hnl hlo ha hhi
+    (hbi vhi k hk)
 
 end Hax
