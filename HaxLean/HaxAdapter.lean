@@ -4134,12 +4134,40 @@ where
             | .ok n => n
             | _ => "Adt"
       | _ => "Adt"
-    let fields ← match j.getObjValAs? (Array Json) "fields" with
-      | .ok fs => fs.toList.attach.mapM fun ⟨fj, _h⟩ =>
-        match fj.getObjVal? "value" with
-        | .ok v => parseHaxTExpr v implMap
-        | _ => pure (TExpr.mk .unitVal .unit)
-      | _ => pure []
+    let fieldsJ : List Json := match j.getObjValAs? (Array Json) "fields" with
+      | .ok fs => fs.toList
+      | _ => []
+    let given ← fieldsJ.mapM fun fj =>
+      match fj.getObjVal? "value" with
+      | .ok v => parseHaxTExpr v implMap
+      | _ => pure (TExpr.mk .unitVal .unit)
+    -- A functional record update `S { f: v, ..base }` lists only the written
+    -- fields; its `base` is `{Base: {base, field_types}}` (hax 0.4) or
+    -- `{base, field_types}` (hax 0.3). Each field of `S`, in declaration
+    -- order, is the written value or the projection `.f` of the base, typed by
+    -- `field_types`; a base other than a variable is bound once by a `let`.
+    let fru : Option Json := do
+      let b ← (j.getObjVal? "base").toOption
+      match b.getObjVal? "Base" with
+      | .ok inner => some inner
+      | _ => if (b.getObjVal? "base").toOption.isSome then some b else none
+    let (fields, fruBase) ← match fru, implMap.structFields.lookup name with
+      | some fruJ, some declared =>
+        let baseE ← parseHaxTExpr (← fruJ.getObjVal? "base") implMap
+        let fieldTys : List ImpType := match fruJ.getObjValAs? (Array Json) "field_types" with
+          | .ok ts => ts.toList.map parseHaxType
+          | _ => []
+        let named : List (Option String × TExpr) := (fieldsJ.zip given).map fun (fj, e) =>
+          ((fj.getObjVal? "field").toOption.map (extractDefIdName ·), e)
+        let (baseRef, bind) := match baseE.kind with
+          | .var _ => (baseE, none)
+          | _ => (TExpr.mk (.var "_fru_base") baseE.ty, some baseE)
+        let full := (declared.zip (List.range declared.length)).map fun (f, k) =>
+          match named.find? (·.1 == some f) with
+          | some (_, e) => e
+          | none => TExpr.mk (.app ("." ++ f) [baseRef]) (fieldTys.getD k .unknown)
+        pure (full, bind)
+      | _, _ => pure (given, none)
     -- An enum variant named like a struct of the crate (the typestate form
     -- `enum E { V(V) }`) is written `E::V`, which renders as the constructor
     -- `E.V`; the bare name would resolve to the struct.
@@ -4154,7 +4182,9 @@ where
           s!"{enumName}::{name}"
         else name
       | _ => name
-    return .app head fields
+    match fruBase with
+    | some b => return .letBind "_fru_base" b (TExpr.mk (.app head fields) b.ty)
+    | none => return .app head fields
 
 /-- `iterMutWriteBack` on a typed body: every write of the element variable `x`
     is followed by `store`, the write-back of `x` to its collection. -/
@@ -4688,6 +4718,18 @@ partial def fnNameCollisions (root : Json) : List String :=
   names.filter fun nm =>
     ((pairs.filter (·.1 == nm)).map (·.2)).eraseDups.length > 1
 
+/-- Whether the `impl` item `implItem` is a method whose first parameter is
+    `self`. Its parameters sit under `kind.Fn`, or under `kind.Fn.def`. -/
+def implFnTakesSelf (implItem : Json) : Bool :=
+  let params : Option (Array Json) := do
+    let k ← (implItem.getObjVal? "kind").toOption
+    let fnData ← (k.getObjVal? "Fn").toOption
+    let defLike := (fnData.getObjVal? "def").toOption.getD fnData
+    (defLike.getObjValAs? (Array Json) "params").toOption
+  match params with
+  | some ps => (extractParamNames ps).head? == some "self"
+  | none => false
+
 /-- The methods every trait `impl` block of the extracted crate defines, as
     `(impl interning id, trait short name, self-type short name, method name)`,
     recursing into `Mod` sub-items. Two kinds of `impl` are excluded and keep
@@ -4699,8 +4741,10 @@ partial def fnNameCollisions (root : Json) : List String :=
     builder through `&mut`, which the write-back gate refuses.
 
     `itemKind` selects the `impl` items collected: `"Fn"` (the methods, the
-    default) or `"Const"` (the associated constants). -/
-partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn") :
+    default) or `"Const"` (the associated constants). With `selfOnly`, only
+    the methods whose first parameter is `self` (`implFnTakesSelf`). -/
+partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn")
+    (selfOnly : Bool := false) :
     List (Nat × String × String × String) :=
   let ofImpl (it : Json) (impl : Json) : List (Nat × String × String × String) :=
     let traitName : Option String := do
@@ -4733,7 +4777,8 @@ partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn") 
         implItems.toList.filterMap fun implItem =>
           match implItem.getObjVal? "kind" with
           | .ok k =>
-            if (k.getObjVal? itemKind).toOption.isSome then
+            if (k.getObjVal? itemKind).toOption.isSome
+                && (!selfOnly || implFnTakesSelf implItem) then
               match implItem.getObjVal? "ident" with
               | .ok ident => some (iid, tn, sn, extractFnName ident)
               | _ => none
@@ -4747,11 +4792,11 @@ partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn") 
       match kindJ.getObjVal? "Mod" with
       | .ok (.arr modData) =>
         match modData.toList[1]? with
-        | some sub => collectLocalTraitImplMethods sub itemKind
+        | some sub => collectLocalTraitImplMethods sub itemKind selfOnly
         | none => []
       | .ok modData =>
         match modData.getObjValAs? (Array Json) "items" with
-        | .ok subItems => collectLocalTraitImplMethods (.arr subItems) itemKind
+        | .ok subItems => collectLocalTraitImplMethods (.arr subItems) itemKind selfOnly
         | _ => []
       | _ =>
         match kindJ.getObjVal? "Impl" with
@@ -4766,19 +4811,75 @@ partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn") 
   | .arr items => items.toList.foldl (init := []) fun acc it => acc ++ ofItem it
   | _ => []
 
+/-- The `(trait, method)` short names of the `GlobalName` item `j` when it
+    names a trait method through an `impl` atom other than `Concrete` (a
+    `LocalBound` of a type parameter, a projection). Such a call does not
+    resolve to an `impl` of the crate (`traitCallImplMethod`) and keeps the
+    name `extractDefIdName` gives the trait method. -/
+def boundTraitMethodCall? (gn : Json) : Option (String × String) := do
+  let item ← (gn.getObjVal? "item").toOption
+  let v ← (item.getObjVal? "value").toOption
+  let inTrait ← (v.getObjVal? "in_trait").toOption
+  let implJ ← (inTrait.getObjVal? "impl").toOption
+  guard (implJ.getObjVal? "Concrete").toOption.isNone
+  let calleeDefId ← (v.getObjVal? "def_id").toOption
+  match (defIdPathNames calleeDefId).reverse with
+  | method :: trait :: _ => some (trait, method)
+  | _ => none
+
+/-- The keys of a hax expression node that hold no expression: types, source
+    positions and `DefId`s. `traitMethodsCalledThroughBound` does not descend
+    into them. -/
+def nonExprKeys : List String :=
+  ["ty", "span", "def_id", "hir_id", "attributes", "generic_args", "impl_exprs",
+   "parent", "fn_span", "typ", "info", "field_types"]
+
+/-- The `(trait, method)` short names of every trait method the export calls
+    through an `impl` atom other than `Concrete` (`boundTraitMethodCall?`),
+    without duplicates. -/
+partial def traitMethodsCalledThroughBound (j : Json) : List (String × String) :=
+  (go j #[]).toList.eraseDups
+where
+  /-- Accumulate the bound trait-method calls of `j` into `acc`. -/
+  go (j : Json) (acc : Array (String × String)) : Array (String × String) :=
+    match j with
+    | .arr xs => xs.foldl (fun a x => go x a) acc
+    | .obj kvs =>
+      let acc := match (j.getObjVal? "GlobalName").toOption.bind boundTraitMethodCall? with
+        | some p => acc.push p
+        | none => acc
+      kvs.foldl (fun a k v => if nonExprKeys.contains k then a else go v a) acc
+    | _ => acc
+
+/-- The traits of the crate with a method `m` that the export calls through a
+    trait bound (`traitMethodsCalledThroughBound`), that a local `impl` defines
+    with a `self` receiver, and whose short name a local function also has.
+    `extractDefIdName` names such a call `<Trait>_<m>`, the field of the
+    generated `Deps` class, and its receiver is a value of a type parameter,
+    which the `impl`'s `self` type does not match. -/
+def boundShadowedTraits (j : Json) : List String :=
+  let selfMethods := collectLocalTraitImplMethods j (selfOnly := true)
+  let lc := localCrateOfExport j
+  ((traitMethodsCalledThroughBound j).filter fun (t, m) =>
+    lc.fnNames.contains m && selfMethods.any fun p => p.2.1 == t && p.2.2.2 == m).map (·.1)
+
 /-- The emitted name of every trait-`impl` method of the extracted crate, keyed
     by the `impl`'s interning id and the method name.
 
     The name is `<Trait>_<method>`, which identifies the trait and the method
-    the call site named. When the crate has more than one `impl` of that trait,
-    the self type disambiguates them: `<Trait>_<SelfTy>_<method>`. A dot is not
+    the call site named. The self type disambiguates them,
+    `<Trait>_<SelfTy>_<method>`, when the crate has more than one `impl` of that
+    trait, and for a trait of `boundShadowedTraits`, whose `<Trait>_<method>`
+    names the `Deps` field of a call through a trait bound. A dot is not
     usable as the separator: `PrettyPrint.isFieldProjection` classifies any app
     head containing one as a struct-field projection. -/
 def buildTraitImplMethodMap (j : Json) : List (Nat × String × String) :=
   let raw := collectLocalTraitImplMethods j
+  let shadowed := boundShadowedTraits j
   raw.map fun (implId, traitName, selfName, method) =>
     let implsOfTrait := ((raw.filter (·.2.1 == traitName)).map (·.1)).eraseDups
-    let qual := if implsOfTrait.length > 1 then s!"{traitName}_{selfName}" else traitName
+    let qual := if implsOfTrait.length > 1 || shadowed.contains traitName then
+      s!"{traitName}_{selfName}" else traitName
     (implId, method, s!"{qual}_{method}")
 
 /-- The emitted name of every associated constant of a trait `impl` of the
@@ -4789,9 +4890,11 @@ def buildTraitImplMethodMap (j : Json) : List (Nat × String × String) :=
 def buildTraitImplConstMap (j : Json) : List (Nat × String × String) :=
   let consts := collectLocalTraitImplMethods j "Const"
   let all := collectLocalTraitImplMethods j ++ consts
+  let shadowed := boundShadowedTraits j
   consts.map fun (implId, traitName, selfName, item) =>
     let implsOfTrait := ((all.filter (·.2.1 == traitName)).map (·.1)).eraseDups
-    let qual := if implsOfTrait.length > 1 then s!"{traitName}_{selfName}" else traitName
+    let qual := if implsOfTrait.length > 1 || shadowed.contains traitName then
+      s!"{traitName}_{selfName}" else traitName
     (implId, item, s!"{qual}_{item}")
 
 /-- The definition of an associated constant of a trait `impl` block, from the

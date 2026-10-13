@@ -1112,7 +1112,8 @@ partial def rewriteNewFromStructMap (sname : String) (fields : List (String × S
     verified `.namedProj` constructor and the TCB renderer.
 
     Also rewrites a `.proj e i` node whose receiver `e` has a known tuple
-    type (`e.ty = .tuple elems` with at least two elements) to the same
+    type, or a reference to one (`e.ty.pointee = .tuple elems` with at least
+    two elements; the surface erases references), to the same
     `::proj::<path>` marker `markProjChainWith` uses for destructuring
     chains, with `path` the projection path of component `i` in an
     `elems.length`-ary right-nested tuple (`PrettyPrint.projPath`). This
@@ -1129,7 +1130,7 @@ partial def markNamedProj : TExpr → TExpr
   | .mk (.tuple es) ty => .mk (.tuple (es.map markNamedProj)) ty
   | .mk (.proj e i) ty =>
     let e' := markNamedProj e
-    match e'.ty with
+    match e'.ty.pointee with
     | .tuple elems =>
       if elems.length ≥ 2 then .mk (.app s!"::proj::{projPath i elems.length}" [e']) ty
       else .mk (.proj e' i) ty

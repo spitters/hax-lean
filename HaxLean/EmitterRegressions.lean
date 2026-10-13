@@ -2191,4 +2191,99 @@ def ifJoinBody (vs : List String) : TExpr :=
   let s := toLeanImpExpr e
   !(s.contains "_mtup") && !(s.contains "::proj::")
 
+/-! ## Projection of a borrowed tuple, functional record update, and a trait
+    method called through a bound beside its only `impl`
+
+* A parameter `aggnonce: &([u8; 33], [u8; 33])` (MuSig2) carries the type
+  `&(A, B)`; its projection `aggnonce.1` renders through the pointee's arity.
+* `Session { send_ck: v, ..self }` (Double Ratchet) lists only the written
+  fields; the constructor takes every field in declaration order, the others
+  read from the base.
+* `crypto.ghash_multiply(h, x)` with `crypto: C`, `C: GcmCrypto` (AES-GCM) is a
+  `Deps` field named `GcmCrypto_ghash_multiply`, because the crate also defines
+  a function `ghash_multiply`; the only `impl GcmCrypto for RealGcm` then names
+  its method `GcmCrypto_RealGcm_ghash_multiply`. -/
+
+/-- A variable of type `&(A, B)`, projected at component `1`. -/
+def refPairProjTyped : TExpr :=
+  .mk (.proj (.mk (.var "t") (.ref (.tuple [.unknown, .unknown]) false)) 1) .unknown
+
+#guard toLean (markNamedProj refPairProjTyped).erase == "t.2"
+
+open Lean in
+/-- `S { b: v, ..s }`, with the base in the form `fru`. -/
+def fruAdtJson (fru : Json) : Json :=
+  haxNode (Json.mkObj [("Adt", Json.mkObj [
+    ("info", Json.mkObj [("variant", mkDefIdJson "k" [defIdSeg "TypeNs" "S"])]),
+    ("fields", Json.arr #[Json.mkObj [
+      ("field", mkDefIdJson "k" [defIdSeg "TypeNs" "S", defIdSeg "ValueNs" "b"]),
+      ("value", haxVarRef "v")]]),
+    ("base", fru)])])
+
+open Lean in
+/-- The base `s` of a functional record update, as hax 0.4 exports it. -/
+def fruBase04 : Json :=
+  Json.mkObj [("Base", Json.mkObj [("base", haxVarRef "s"), ("field_types", Json.arr #[])])]
+
+open Lean in
+/-- The base `s` of a functional record update, as hax 0.3 exports it. -/
+def fruBase03 : Json :=
+  Json.mkObj [("base", haxVarRef "s"), ("field_types", Json.arr #[])]
+
+/-- The constructor of `S { a, b, c }` with `b := v` and `a`, `c` read from `s`. -/
+def fruExpected : ImpExpr :=
+  .app "S" [.app ".a" [.var "s"], .var "v", .app ".c" [.var "s"]]
+
+#guard (HaxAdapter.parseHaxTExpr (fruAdtJson fruBase04)
+    { structFields := [("S", ["a", "b", "c"])] }).toOption.map TExpr.erase == some fruExpected
+#guard (HaxAdapter.parseHaxTExpr (fruAdtJson fruBase03)
+    { structFields := [("S", ["a", "b", "c"])] }).toOption.map TExpr.erase == some fruExpected
+
+open Lean in
+/-- A `DefId` in the `{contents: {value}}` form of a resolved export. -/
+def resolvedDefId (segs : List Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("value", mkDefIdJson "k" segs)])]
+
+open Lean in
+/-- The callee of `crypto.ghash_multiply(h, x)` with `crypto: C`, `C: GcmCrypto`. -/
+def boundGhashGlobalName : Json :=
+  Json.mkObj [("item", Json.mkObj [("value", Json.mkObj [
+    ("def_id", mkDefIdJson "k"
+      [defIdSeg "TypeNs" "gcm", defIdSeg "TypeNs" "GcmCrypto", defIdSeg "ValueNs" "ghash_multiply"]),
+    ("in_trait", Json.mkObj [("impl", Json.mkObj [("LocalBound", Json.mkObj [])])])])])]
+
+#guard HaxAdapter.boundTraitMethodCall? boundGhashGlobalName == some ("GcmCrypto", "ghash_multiply")
+
+open Lean in
+/-- An export with the function `ghash_multiply`, the only `impl GcmCrypto for
+    RealGcm` (interning id `7`) with the method `ghash_multiply(self, ..)`, and,
+    when `bound`, a function calling the trait method through a bound. -/
+def ghashExport (bound : Bool) : Json :=
+  let fnItem (n : String) (body : Json) : Json := Json.mkObj [
+    ("def_id", mkDefIdJson "k" [defIdSeg "TypeNs" "gcm", defIdSeg "ValueNs" n]),
+    ("kind", Json.mkObj [("Fn", Json.mkObj [("body", body)])])]
+  let selfParam := Json.mkObj [("pat", haxNode (Json.mkObj [("Binding", Json.mkObj [
+    ("var", Json.mkObj [("name", Json.str "self")])])]))]
+  let implItem := Json.mkObj [
+    ("owner_id", Json.mkObj [("contents", Json.mkObj [
+      ("id", (7 : Json)), ("value", Json.mkObj [("is_local", Json.bool true)])])]),
+    ("kind", Json.mkObj [("Impl", Json.mkObj [
+      ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id",
+        resolvedDefId [defIdSeg "TypeNs" "gcm", defIdSeg "TypeNs" "GcmCrypto"])])]),
+      ("self_ty", Json.mkObj [("value", Json.mkObj [("Adt", Json.mkObj [("value",
+        Json.mkObj [("def_id", resolvedDefId [defIdSeg "TypeNs" "RealGcm"])])])])]),
+      ("items", Json.arr #[Json.mkObj [
+        ("ident", Json.arr #[Json.str "ghash_multiply"]),
+        ("kind", Json.mkObj [("Fn", Json.mkObj [("params", Json.arr #[selfParam])])])]])])])]
+  let call := haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", haxNode (Json.mkObj [("GlobalName", boundGhashGlobalName)])),
+    ("args", Json.arr #[haxVarRef "crypto"])])])
+  Json.arr (#[fnItem "ghash_multiply" (haxVarRef "h"), implItem]
+    ++ (if bound then #[fnItem "gcm_ghash_step" call] else #[]))
+
+#guard HaxAdapter.buildTraitImplMethodMap (ghashExport true)
+  == [(7, "ghash_multiply", "GcmCrypto_RealGcm_ghash_multiply")]
+#guard HaxAdapter.buildTraitImplMethodMap (ghashExport false)
+  == [(7, "ghash_multiply", "GcmCrypto_ghash_multiply")]
+
 end Hax.EmitterRegressions
