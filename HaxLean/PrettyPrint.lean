@@ -72,6 +72,7 @@ def sanitizeName (n : String) : String :=
     | "protected" | "partial" | "unsafe" | "prefix" | "hiding"
     | "macro" | "syntax" | "tactic" | "notation" | "scoped"
     | "deriving" | "extends" | "abbrev" | "opaque" | "at" | "initialize"
+    | "seal" | "unseal" | "omit" | "include" | "example" | "universe"
     | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "mod" | "not" | "or" | "and"
     | "Or" | "And" | "Not" | "True" | "False" | "Eq" | "Ne" | "Nat" | "Int"
     | "Bool" | "String" | "Array" | "List" | "Option" | "IO" | "Monad"
