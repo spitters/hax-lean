@@ -1198,7 +1198,9 @@ def tWrapLets (binds : List (String × TExpr)) (e : TExpr) : TExpr :=
 
 mutual
 /-- Hoist the `tValueMutCall`s of the argument `a` of a call: such a call,
-    nested in calls and in `&`, `*` and ascriptions, after the calls in its own
+    nested in calls, in `&`, `*` and ascriptions, and in the scrutinee of a
+    `match` (evaluated before any arm; the arms stay in place, so the `match`
+    on `branch(call)` that `?` denotes is covered), after the calls in its own
     arguments, becomes a binding `tLiftTmp k := call` and the variable
     `tLiftTmp k` in its place. Returns the bindings in evaluation order, the
     rewritten argument and the next unused counter. -/
@@ -1220,6 +1222,9 @@ partial def tLiftArg (sigs : List (String × FnTypeInfo)) (a : TExpr) (k : Nat) 
   | .mk (.ann e) ty =>
     let r := tLiftArg sigs e k
     (r.1, .mk (.ann r.2.1) ty, r.2.2)
+  | .mk (.match_ s arms) ty =>
+    let r := tLiftArg sigs s k
+    (r.1, .mk (.match_ r.2.1 arms) ty, r.2.2)
   | _ => ([], a, k)
 
 /-- `tLiftArg` over the arguments `args` of one call, left to right; `prev`
@@ -1239,7 +1244,8 @@ end
 /-- The statement `e` with the `tValueMutCall`s in the argument positions of
     its head call hoisted (`tLiftArg`) into `let`s around it; the head call
     itself stays. A head under an ascription is looked through; under `&` or
-    `*` the operand is an argument position. -/
+    `*` the operand is an argument position, and so is the scrutinee of a
+    `match`. -/
 def tLiftStmt (sigs : List (String × FnTypeInfo)) (e : TExpr) :
     List (String × TExpr) × TExpr :=
   match e with
@@ -1249,7 +1255,7 @@ def tLiftStmt (sigs : List (String × FnTypeInfo)) (e : TExpr) :
   | .mk (.ann (.mk (.app f args) ty')) ty =>
     let s := tLiftArgList sigs [] args 0
     (s.1, .mk (.ann (.mk (.app f s.2.1) ty')) ty)
-  | .mk (.borrow _) _ | .mk (.deref _) _ =>
+  | .mk (.borrow _) _ | .mk (.deref _) _ | .mk (.match_ _ _) _ =>
     let s := tLiftArg sigs e 0
     (s.1, s.2.1)
   | _ => ([], e)
@@ -1259,8 +1265,9 @@ def tLiftStmt (sigs : List (String × FnTypeInfo)) (e : TExpr) :
     the second part of a `seq`, a branch of an `if` or a `match` in tail
     position, or the whole expression). A `let` value, an assignment's
     right-hand side and the head of a `seq` are left as they are: they are
-    tuple-form call sites already. In each of these statement positions, a
-    `tValueMutCall` in an argument position of the statement's head call is
+    tuple-form call sites already. In each of these statement positions and at
+    a `match` in tail position, a `tValueMutCall` in an argument position of
+    the statement's head call or in the scrutinee of its head `match` is
     bound by a `let` in front of the statement (`tLiftStmt`), when
     `tLiftGuard` admits evaluating it before the arguments to its left. -/
 partial def tHoistMutCalls (sigs : List (String × FnTypeInfo)) (e : TExpr) : TExpr :=
@@ -1285,7 +1292,11 @@ where
       tWrapLets s.1 (.mk (.seq s.2 (go tail b)) ty)
     | .mk (.ifThenElse c t f) ty => .mk (.ifThenElse (go false c) (go tail t) (go tail f)) ty
     | .mk (.match_ s arms) ty =>
-      .mk (.match_ (go false s) (arms.map fun pe => (pe.1, go tail pe.2))) ty
+      let e' : TExpr := .mk (.match_ (go false s) (arms.map fun pe => (pe.1, go tail pe.2))) ty
+      if tail then
+        let s := tLiftStmt sigs e'
+        tWrapLets s.1 s.2
+      else e'
     | .mk (.assign v rhs) ty =>
       let rhs' := go false rhs
       match tHoistFromUpdate sigs rhs' with

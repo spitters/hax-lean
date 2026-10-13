@@ -1399,6 +1399,75 @@ def sendRecvChain : TExpr :=
 #guard tDroppedMutCalls [] [] [] [("send", [1], true), ("recv", [1], true)] sendRecvChain ==
   [("recv", [1]), ("send", [1])]
 
+/-- The arms of the `match` that `c?` denotes: `Break(residual)` returns
+    `from_residual(residual)`, `Continue(val)` yields `val`. -/
+def tryArms (ty : ImpType) : List (ImpPat × TExpr) :=
+  [(.ctorPat "Break" [.varPat "residual"],
+      .mk (.earlyReturn (.mk (.app "from_residual" [.mk (.var "residual") .unknown]) .unknown))
+        ty),
+    (.ctorPat "Continue" [.varPat "val"], .mk (.var "val") ty)]
+
+/-- `c?` as the export carries it: a `match` on `branch(c)`. -/
+def tryOf (c : TExpr) (ty : ImpType) : TExpr :=
+  .mk (.match_ (.mk (.app "branch" [c]) .unknown) (tryArms ty)) ty
+
+/-- The erased arms of `tryArms`. -/
+def tryArmsE : List (ImpPat × ImpExpr) :=
+  [(.ctorPat "Break" [.varPat "residual"], .earlyReturn (.app "from_residual" [.var "residual"])),
+    (.ctorPat "Continue" [.varPat "val"], .var "val")]
+
+/-- `let est = init.send(&mut *ghost)?.recv(&mut *ghost, bs)?; into_isk(est)`:
+    the typestate chain of `sendRecvChain` with a `?` after each transition,
+    the first call in the scrutinee of a `match` in an argument position of the
+    second, the second in the scrutinee of the `let` value. -/
+def sendRecvTryChain : TExpr :=
+  let send : TExpr :=
+    .mk (.app "send" [.mk (.var "init") (.adt "Init" []), ghostReborrow]) .unknown
+  let recv : TExpr :=
+    .mk (.app "recv" [tryOf send (.adt "Awaiting" []), ghostReborrow, .mk (.var "bs") .unknown])
+      .unknown
+  .mk (.letBind "est" (tryOf recv (.adt "Done" []))
+    (.mk (.app "into_isk" [.mk (.var "est") (.adt "Done" [])]) bytes32)) bytes32
+
+-- Both calls are bound in front of the `let`, in evaluation order; each `match`
+-- stays in place with the bound value as the operand of `branch`.
+#guard (tHoistMutCalls [] sendRecvTryChain).erase ==
+  .letBind "_mutcall_arg0" (.app "send" [.var "init", .borrow (.deref (.var "ghost"))])
+    (.letBind "_mutcall_arg1"
+      (.app "recv" [.match_ (.app "branch" [.var "_mutcall_arg0"]) tryArmsE,
+        .borrow (.deref (.var "ghost")), .var "bs"])
+      (.letBind "est" (.match_ (.app "branch" [.var "_mutcall_arg1"]) tryArmsE)
+        (.app "into_isk" [.var "est"])))
+#guard tDroppedMutCalls [] [] [] [("send", [1], true), ("recv", [1], true)]
+  (tHoistMutCalls [] sendRecvTryChain) == []
+#guard tDroppedMutCalls [] [] [] [("send", [1], true), ("recv", [1], true)] sendRecvTryChain ==
+  [("recv", [1]), ("send", [1])]
+
+/-- `squeeze(&mut s)?` as the tail of a block: the `match` is in tail position. -/
+def squeezeTryTail : TExpr :=
+  let sTy : ImpType := .adt "St" []
+  tryOf (.mk (.app "squeeze" [.mk (.borrow (.mk (.var "s") sTy)) (.ref sTy true)]) .unknown)
+    bytes32
+
+#guard (tHoistMutCalls [] squeezeTryTail).erase ==
+  .letBind "_mutcall_arg0" (.app "squeeze" [.borrow (.var "s")])
+    (.match_ (.app "branch" [.var "_mutcall_arg0"]) tryArmsE)
+#guard tDroppedMutCalls [] [] [] [("squeeze", [0], true)] (tHoistMutCalls [] squeezeTryTail) == []
+
+/-- `let y = combine(s, squeeze(&mut s)?); y`: the argument left of the `?`
+    reads `s`, which the call in its scrutinee writes. -/
+def readThenWriteTry : TExpr :=
+  let sTy : ImpType := .adt "St" []
+  let call : TExpr :=
+    .mk (.app "squeeze" [.mk (.borrow (.mk (.var "s") sTy)) (.ref sTy true)]) .unknown
+  .mk (.letBind "y" (.mk (.app "combine" [.mk (.var "s") sTy, tryOf call bytes32]) .unknown)
+    (.mk (.var "y") .unknown)) .unknown
+
+-- Hoisting would read `s` after the write: the call stays and is reported.
+#guard (tHoistMutCalls [] readThenWriteTry).erase == readThenWriteTry.erase
+#guard tDroppedMutCalls [] [] [] [("squeeze", [0], true)] (tHoistMutCalls [] readThenWriteTry) ==
+  [("squeeze", [0])]
+
 /-- `let y = from_bytes(&squeeze(&mut s)); y`: a value call under `&` in an
     argument position of a `let` value. -/
 def squeezeUnderBorrow : TExpr :=
