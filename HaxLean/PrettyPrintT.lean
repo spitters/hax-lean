@@ -1606,56 +1606,57 @@ theorem emitLiteralBodies_tPipelineFull_nil (fnTypes : List (String × HaxAdapte
   funext p
   simp [tInitMissingFoldAccums_erase]
 
-/-- Generate a complete certified Lean 4 file from typed TExpr definitions.
-    `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
-    `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
-    If `procTdefs` is empty, bodies are rendered from rawTdefs (erased + pipelined).
-    `newtypes` is the JSON-derived newtype map; the renderer uses it to emit
-    `abbrev T_T := <Inner>` aliases plus definitional `«T.0»` unwraps.
-    `crateName` is the Rust crate the export was taken from; it appears in the
-    module docstring and is omitted from it when empty.
-    `emitLowCT` adds, beside each verbatim `_impExpr` literal, its
-    `anfLowCT`-normalised form and the `haxToLowCT` lowering of that form; the
-    file then imports the CatCrypt modules those two definitions name.
-    `contracts` holds the function contracts and lemma statements of
-    `--emit-contracts` (`Hax.ContractEmit`), rendered after the definitions and
-    instances.
-    `nominalKrates` names the crates whose trait-method calls carry the
-    qualified head `krate::Trait::h` in `rawTdefs` and `procTdefs`
-    (`HaxAdapter.parseHaxFileWithTExpr`): the `ImpExpr` and `TExpr` literals
-    keep those heads, and every other part of the file is printed from the
-    terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`).
-    The `ImpExpr` literals are `emitLiteralBodies` of the input
-    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`), eliding the newtype
-    constructions and projections (`literalIdentityHeads`); the projection
-    markers, the nested projection paths and the newtype-constructor renaming
-    apply to the surface definitions alone. -/
-def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
+/-- The terms `toLeanCertifiedFileTyped` computes from its input before it
+    renders the file, through the preamble of `generatePreambleTyped`. -/
+structure CertifiedPrep where
+  /-- The input `rawTdefs`, first definition of each name kept. -/
+  literalRaw : List (String × TExpr)
+  /-- The input `procTdefs`, first definition of each name kept. -/
+  literalProc : List (String × TExpr)
+  /-- `literalRaw` with unqualified nominal heads and `#dep` operator marks. -/
+  rawTdefs : List (String × TExpr)
+  /-- `literalProc` with unqualified nominal heads and `#dep` operator marks,
+      after the typed passes that precede erasure. -/
+  procTdefs : List (String × TExpr)
+  /-- The struct-construction map of `buildNewStructMap` on `rawTdefs`. -/
+  newStructMap : List (String × List String)
+  /-- The erased, canonicalised bodies after `applyTypedPasses` and
+      `rewriteNewDefs`. -/
+  defs : List (String × ImpExpr)
+  /-- The signature table returned by `applyTypedPasses`. -/
+  fnTypes : List (String × HaxAdapter.FnTypeInfo)
+  /-- `computeStructPassthrough` of the bodies returned by `applyTypedPasses`. -/
+  structIsPassthrough : List (String × Bool)
+  /-- The preamble text of `generatePreambleTyped`. -/
+  preamble : String
+  /-- The projection conflicts of `generatePreambleTyped`. -/
+  projConflicts : List (String × String)
+  /-- The names `generatePreambleTyped` emits as `<Name>_T`. -/
+  axiomClashSet : List String
+
+/-- The terms `toLeanCertifiedFileTyped` computes before rendering, from the
+    same arguments: deduplication by name, the `#dep` operator marks and the
+    unqualified nominal heads, the typed passes before erasure, the erased and
+    canonicalised bodies, `applyTypedPasses`, `rewriteNewDefs` and the
+    preamble of `generatePreambleTyped`. -/
+def certifiedPrep (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
     (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (procTdefs : List (String × TExpr) := [])
     (newtypes : HaxAdapter.NewtypeMap := [])
-    (enumMeta : List HaxAdapter.EnumInfo := [])
-    (aliasMeta : List HaxAdapter.TypeAliasInfo := [])
-    (mutWriteRets : List (String × List String × Bool) := [])
-    (crateName : String := "")
-    (emitLowCT : Bool := false)
     (classHooks : ClassEmit.ClassHooks := {})
-    (contracts : ContractEmit.Plan := {})
-    (nominalKrates : List String := []) : String :=
+    (nominalKrates : List String := []) : CertifiedPrep :=
   -- Deduplicate raw and proc
   let rawTdefs := rawTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
   let procTdefs := procTdefs.foldl (fun (acc : List (String × TExpr)) (n, te) =>
     if acc.any (·.1 == n) then acc else acc ++ [(n, te)]) []
-  -- The `ImpExpr` literals (`emitLiteralBodies`, below) are built from the
-  -- input before any surface-only rewrite: untagged, and with the qualified
-  -- heads of the nominal crates' trait-method calls
-  -- (`HaxAdapter.qualifyNominalHead`).
+  -- The `ImpExpr` literals (`emitLiteralBodies`) are built from the input
+  -- before any surface-only rewrite: untagged, and with the qualified heads of
+  -- the nominal crates' trait-method calls (`HaxAdapter.qualifyNominalHead`).
   let literalRaw := rawTdefs
   let literalProc := procTdefs
-  let literalFnTypes := fnTypes
   -- Operator calls on a type parameter are tagged `#dep` in both TExpr
   -- families: the raw one supplies the `Deps` signature, the processed one
   -- the rendered body.
@@ -1714,24 +1715,102 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Apply typed passes (struct projection disambiguation, etc.)
   let (defs, fnTypes) := applyTypedPasses defs structMeta fnTypes []
   let structIsPassthrough := computeStructPassthrough structMeta defs
-  let structLookup := classHooks.wrapLookup (mkStructLookup structMeta structIsPassthrough)
-  -- The four type-dependent post-erase rewriters
-  -- (`qualifyProjections`, `rewriteNewToStructCtor`,
-  -- `rewriteStructFromElem`, `fixProjectionPaths`) were removed here on
-  -- 2026-05-18 after the typed pipeline gained full coverage. The typed
-  -- analogs run on TExpr before erase using direct `arg.ty` annotations
-  -- (see `Hax.TPhase.{QualifyProjections,RewriteNewToStructCtor,
-  -- RewriteStructFromElem,FixProjectionPaths}`).
-  --
-  -- The fix that unblocked deletion: `tRewriteStructFromElem` now
-  -- unwraps `.ann` type-ascription wrappers around `from_elem` calls,
-  -- which the hax JSON adapter inserts for macro expansions like
-  -- `vec![T::ZERO; n]`. Without the unwrap, the typed phase silently
-  -- missed those calls and we depended on the untyped fallback (SPDZ).
+  -- The type-dependent rewriters run on TExpr before erase
+  -- (`Hax.TPhase.{QualifyProjections,RewriteNewToStructCtor,
+  -- RewriteStructFromElem,FixProjectionPaths}`), reading `arg.ty`;
+  -- `tRewriteStructFromElem` unwraps the `.ann` type-ascription wrappers the
+  -- hax JSON adapter inserts around `from_elem` calls (`vec![T::ZERO; n]`).
   let defs := rewriteNew defs
   -- Generate preamble: struct definitions use post-passes defs (for qualified names),
   -- deps class uses typed information from raw TExprs.
   let (preamble, projConflicts, axiomClashSet) := generatePreambleTyped rawTdefs moduleName structMeta fnTypes (processedDefs := defs) (procTdefs := procTdefs) (newtypes := newtypes) (classHooks := classHooks)
+  { literalRaw, literalProc, rawTdefs, procTdefs, newStructMap, defs, fnTypes,
+    structIsPassthrough, preamble, projConflicts, axiomClashSet }
+
+/-- The `ImpExpr` literals of `toLeanCertifiedFileTyped`, and its `TExpr`
+    literals: the emitted `ImpExpr` tree retyped by `retypeWith` from the
+    typed term of `emitLiteralTerms`. A definition whose rebuilt term does not
+    print the same `ImpExpr` as its literal (a `.typeAscription` node, which no
+    `TExpr` constructor erases to) has no `TExpr` literal.
+    `fnTypes` is the signature table the caller passed to `certifiedPrep`. -/
+def certifiedLiterals (p : CertifiedPrep) (structMeta : StructMeta)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo)) (newtypes : HaxAdapter.NewtypeMap) :
+    List (String × ImpExpr) × List (String × TExpr) :=
+  let literalSrc := emitLiteralTerms structMeta fnTypes p.literalRaw p.literalProc
+  let literalDefs := emitLiteralBodies structMeta fnTypes p.newStructMap p.projConflicts
+    p.literalRaw p.literalProc (literalIdentityHeads structMeta newtypes)
+  let texprs : List (String × TExpr) := literalDefs.filterMap fun (n, e) =>
+    let src := (literalSrc.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
+    let t := retypeWith e src
+    if toLeanImpExpr t.erase == toLeanImpExpr e then some (n, t) else none
+  (literalDefs, texprs)
+
+/-- The `TExpr` literals `toLeanCertifiedFileTyped` prints for the same
+    arguments, by name, in the order of the file. -/
+def certifiedLiteralTExprs (rawTdefs : List (String × TExpr))
+    (moduleName : String := "Generated")
+    (structMeta : StructMeta := [])
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
+    (procTdefs : List (String × TExpr) := [])
+    (newtypes : HaxAdapter.NewtypeMap := [])
+    (classHooks : ClassEmit.ClassHooks := {})
+    (nominalKrates : List String := []) : List (String × TExpr) :=
+  (certifiedLiterals
+    (certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes classHooks
+      nominalKrates)
+    structMeta fnTypes newtypes).2
+
+/-- Generate a complete certified Lean 4 file from typed TExpr definitions.
+    `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
+    `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
+    If `procTdefs` is empty, bodies are rendered from rawTdefs (erased + pipelined).
+    `newtypes` is the JSON-derived newtype map; the renderer uses it to emit
+    `abbrev T_T := <Inner>` aliases plus definitional `«T.0»` unwraps.
+    `crateName` is the Rust crate the export was taken from; it appears in the
+    module docstring and is omitted from it when empty.
+    `emitLowCT` adds, beside each verbatim `_impExpr` literal, its
+    `anfLowCT`-normalised form and the `haxToLowCT` lowering of that form; the
+    file then imports the CatCrypt modules those two definitions name.
+    `contracts` holds the function contracts and lemma statements of
+    `--emit-contracts` (`Hax.ContractEmit`), rendered after the definitions and
+    instances.
+    `nominalKrates` names the crates whose trait-method calls carry the
+    qualified head `krate::Trait::h` in `rawTdefs` and `procTdefs`
+    (`HaxAdapter.parseHaxFileWithTExpr`): the `ImpExpr` and `TExpr` literals
+    keep those heads, and every other part of the file is printed from the
+    terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`).
+    The `ImpExpr` literals are `emitLiteralBodies` of the input
+    (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`), eliding the newtype
+    constructions and projections (`literalIdentityHeads`); the projection
+    markers, the nested projection paths and the newtype-constructor renaming
+    apply to the surface definitions alone. -/
+def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
+    (moduleName : String := "Generated")
+    (structMeta : StructMeta := [])
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
+    (procTdefs : List (String × TExpr) := [])
+    (newtypes : HaxAdapter.NewtypeMap := [])
+    (enumMeta : List HaxAdapter.EnumInfo := [])
+    (aliasMeta : List HaxAdapter.TypeAliasInfo := [])
+    (mutWriteRets : List (String × List String × Bool) := [])
+    (crateName : String := "")
+    (emitLowCT : Bool := false)
+    (classHooks : ClassEmit.ClassHooks := {})
+    (contracts : ContractEmit.Plan := {})
+    (nominalKrates : List String := []) : String :=
+  let prep := certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes
+    classHooks nominalKrates
+  -- The `ImpExpr` and `TExpr` literals.
+  let (literalDefs, texprs) := certifiedLiterals prep structMeta fnTypes newtypes
+  let rawTdefs := prep.rawTdefs
+  let procTdefs := prep.procTdefs
+  let defs := prep.defs
+  let fnTypes := prep.fnTypes
+  let preamble := prep.preamble
+  let projConflicts := prep.projConflicts
+  let axiomClashSet := prep.axiomClashSet
+  let structIsPassthrough := prep.structIsPassthrough
+  let structLookup := classHooks.wrapLookup (mkStructLookup structMeta structIsPassthrough)
   -- Keep the BASE structLookup (no clash augment) for opaque-ADT
   -- collection — augmenting it would make collectOpaqueAdtNames treat
   -- clashing names as known structs and skip them, leaving `Commitment_T`
@@ -1759,10 +1838,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if newtypes.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewtypeCtors newtypes e)
   let defs := postPreamble defs
-  -- The `ImpExpr` literals and the typed terms they erase from.
-  let literalSrc := emitLiteralTerms structMeta literalFnTypes literalRaw literalProc
-  let literalDefs := emitLiteralBodies structMeta literalFnTypes newStructMap projConflicts
-    literalRaw literalProc (literalIdentityHeads structMeta newtypes)
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
@@ -1789,14 +1864,6 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       | .letBind _ (.var _) b => stripParams b
       | e => e
     hasGuardRecursion n (stripParams e)
-  -- `TExpr` literals: the emitted `ImpExpr` tree carrying the node types of
-  -- the typed term. A definition whose rebuilt term does not print the same
-  -- `ImpExpr` as its literal — a `.typeAscription` node, which no `TExpr`
-  -- constructor erases to — is left without one.
-  let texprs : List (String × TExpr) := literalDefs.filterMap fun (n, e) =>
-    let src := (literalSrc.find? (·.1 == n) |>.map (·.2)).getD unknownTExpr
-    let t := retypeWith e src
-    if toLeanImpExpr t.erase == toLeanImpExpr e then some (n, t) else none
   let tyPfx :=
     if (definedNames ++ structNames ++ allAppNames).any (·.startsWith "ty_")
       then "impTy_" else "ty_"

@@ -11,6 +11,7 @@ public import HaxLean.PrettyPrintT
 public import HaxLean.TPipeline
 public import HaxLean.InlineClosures
 public import HaxLean.ThreadMutations
+public import HaxLean.CertifiedTExprs
 
 /-!
 # haxpipeT CLI — Typed Extraction Pipeline
@@ -60,18 +61,6 @@ def parseHaxInputTyped (input : String) :
         × List (String × TExpr) × List (String × TExpr)) := do
   let json ← IO.ofExcept (parseHaxExportItems input)
   IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr json)
-
-/-- Keep the first entry for each name, in first-occurrence order.
-
-The export is read through `parseHaxExport`, which lists each item once, but
-two items can still define the same name. `toLeanCertifiedFileTyped` keeps the
-first definition of each name before rendering; applying the same rule here
-keeps the later ones out of the pipeline, the erasure and the validator. -/
-def dedupByName {α : Type} (xs : List (String × α)) : List (String × α) :=
-  let step (acc : Array (String × α) × List String) (p : String × α) :
-      Array (String × α) × List String :=
-    if acc.2.contains p.1 then acc else (acc.1.push p, p.1 :: acc.2)
-  (xs.foldl step (#[], [])).1.toList
 
 /-- Elapsed milliseconds since `start`, reported on stderr under `label`.
     Returns the current clock so the caller can chain phases. -/
@@ -140,41 +129,17 @@ def main (args : List String) : IO UInt32 := do
     -- write-back rewrite: struct name → field names in declaration order.
     let structFields : StructFieldNames :=
       structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
-    let (_expr, fnTypes, rawTdefs, procTdefs) ←
-      IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
-        (traitImplConsts := classMode) (nominalKrates := opts.nominalKrates))
-    let fnTypes := dedupByName fnTypes
-    let rawTdefs := dedupByName rawTdefs
-    let procTdefs := dedupByName procTdefs
-    -- A `Deps` field has one type, so every site that uses the name has to
-    -- agree on it. Resolving the crate's trait `impl`s emits their method
-    -- bodies at the concrete self type, and those bodies read the trait items
-    -- of a further `impl` that stays opaque; where the crate is also generic
-    -- over the trait, the same names are used at a type parameter and the two
-    -- readings do not print as one type. The export is then read with every
-    -- trait `impl` opaque, which is uniform.
-    let traitImplNames :=
-      ((HaxAdapter.buildTraitImplMethodMap inputJson).map (·.2.2)).eraseDups
-    -- Under `--emit-classes` the names a generic function calls through a trait
-    -- bound are class items rather than `Deps` fields, so the conflict does
-    -- not arise and the `impl`s stay resolved.
-    let depTypeConflicts :=
-      if traitImplNames.isEmpty || classMode then []
-      else
-        let erased := procTdefs.map fun (n, te) => (n, te.erase)
-        let sl := mkStructLookup structMeta (computeStructPassthrough structMeta erased)
-        -- The `Deps` names are the unqualified heads (`--nominal-crates`).
-        let raw := rawTdefs.map fun (n, te) =>
-          (n, HaxAdapter.tUnqualifyNominalHeads opts.nominalKrates te)
-        traitImplDepTypeConflicts raw traitImplNames sl (newtypes.map (·.1))
-    let (fnTypes, rawTdefs, procTdefs) ←
-      if depTypeConflicts.isEmpty then pure (fnTypes, rawTdefs, procTdefs)
-      else do
-        IO.eprintln s!"INFO trait-impl-opaque: the `Deps` names {depTypeConflicts} are used at two types; every trait `impl` of the crate keeps opaque methods"
-        let (_expr, fnTypes, rawTdefs, procTdefs) ←
-          IO.ofExcept (HaxAdapter.parseHaxFileWithTExpr inputJson structFields
-            (resolveTraitImpls := false) (nominalKrates := opts.nominalKrates))
-        pure (dedupByName fnTypes, dedupByName rawTdefs, dedupByName procTdefs)
+    -- The typed definitions, read again with every trait `impl` opaque when a
+    -- `Deps` name is used at two types (`typedDefsOfExport`).
+    let td ← IO.ofExcept (typedDefsOfExport inputJson structMeta structFields newtypes
+      (classMode := classMode) (nominalKrates := opts.nominalKrates))
+    let depTypeConflicts := td.depTypeConflicts
+    let traitImplNames := td.traitImplNames
+    if !depTypeConflicts.isEmpty then
+      IO.eprintln s!"INFO trait-impl-opaque: the `Deps` names {depTypeConflicts} are used at two types; every trait `impl` of the crate keeps opaque methods"
+    let fnTypes := td.fnTypes
+    let rawTdefs := td.rawTdefs
+    let procTdefs := td.procTdefs
     IO.eprintln s!"INFO defs={procTdefs.length} trait-impl-defs={traitImplNames.length} dep-type-conflicts={depTypeConflicts.length}"
     let t ← phaseTick "adapter-to-texpr" t
 
@@ -210,50 +175,23 @@ def main (args : List String) : IO UInt32 := do
     -- when `x : T` is a newtype struct, so the renderer can emit a
     -- type-aware unwrap `«T.0» x` instead of the polymorphic-identity
     -- `«.0»`. Pass is verified (`tElideToNamedProj_erase`).
-    -- Pre-pipeline normalizations: turn each `&mut` write-back into an
-    -- assignment (`tRebindMutCalls` at the call, `tReturnMutParam` at the
-    -- definition, both reading the signature table below), lower `Fn::call` of
-    -- let-bound `.lam` closures to direct applications, and thread mutations
-    -- across `if`-statement joins. The call rewrite runs before the definition
-    -- rewrite: a body whose own tail is a write-back call has to be an
-    -- assignment before `tReplaceTail` reaches it, or the call is dropped as a
-    -- pure value.
-    -- Calls outside the write-back fragment are first brought into it
-    -- (`tHoistMutCalls`, `tQualifyWritebackFields`, `externalWriteTable`); see
-    -- the normalisation section of `ThreadMutations`.
-    let procTdefs := procTdefs.map fun (n, te) =>
-      (n, tQualifyWritebackFields structFields (tHoistMutCalls fnTypes te))
-    let extWriters := externalWriteTable procTdefs
-    let procTdefs := procTdefs.map fun (n, te) => (n, tRetypeExtWriters extWriters te)
-    -- A parameter written only through a builtin write (`copy_from_slice`
-    -- into `okm[a..b]`) makes its function a write-back function too.
-    let writeFns :=
-      mutWriteFnsExt structFields fnTypes procTdefs (extWriters ++ builtinWriteTable)
-    -- The builtin and external tables are appended to the call-site rebind
-    -- table only, not to `writeReturns`: `tReturnMutParams` rewrites a callee
-    -- to return its written parameters, and these callees have no body in the
-    -- export to rewrite.
-    let writers := mutWriteTable writeFns ++ builtinWriteTable ++ extWriters
-    let tupWriters := mutWriteTupleTable writeFns
-    let writeReturns := mutWriteReturns writeFns
-    IO.eprintln s!"INFO mut-writeback-fns={writers.length + tupWriters.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
+    -- Pre-pipeline normalisation: the write-back tables and the calls through
+    -- `&mut` outside the rewrite (`writebackOf`).
+    let w := writebackOf structFields fnTypes procTdefs
+    let writeFns := w.writeFns
+    let writeReturns := w.writeReturns
+    IO.eprintln s!"INFO mut-writeback-fns={w.writers.length + w.tupWriters.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"
     -- A call through `&mut` that the rewrite leaves as a plain call keeps its
     -- effect inside the callee: the emitted surface would ignore the
     -- computation. Refuse to emit unless asked to.
-    let dropped := procTdefs.flatMap fun (n, te) =>
-      (tDroppedMutCalls fnTypes structFields writers tupWriters te).map fun d => (n, d)
+    let dropped := w.dropped
     for (n, (f, ps)) in dropped do
       IO.eprintln s!"ERROR dropped-writeback: `{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the write-back rewrite; the effect of the call does not reach the caller. The rewrite covers a callee with one `&mut` parameter and result `()` applied to a variable, a field place or a slice range, and a callee with several `&mut` parameters or a value result applied to variables, called in `let`, assignment or statement position."
     IO.eprintln s!"INFO dropped-writeback-calls={dropped.length}"
     if !dropped.isEmpty && !opts.allowDroppedWriteback then
       IO.eprintln "haxpipeT: no output; pass --allow-dropped-writeback to emit anyway"
       return 1
-    let postPipelineTdefs := procTdefs.map fun (n, te) =>
-      let ret := (writeReturns.lookup n).getD ([], false)
-      let te := tReturnMutParams ret.1 ret.2 (tReturnMutParamsAtReturns ret.1 ret.2
-        (tRebindMutCalls structFields writers tupWriters te))
-      (n, tUnqualifyFieldHeads
-        (tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te))))
+    let postPipelineTdefs := postPipeline structFields newtypes w
     IO.eprintln s!"INFO pipeline-defs={postPipelineTdefs.length}"
     let t ← phaseTick "tPipelineFull" t
 
