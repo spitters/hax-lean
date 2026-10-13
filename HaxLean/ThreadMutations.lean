@@ -1103,7 +1103,12 @@ write.
   the stored value of an element or field write (`a[i] = f(&mut x)`), or the
   tail value of a block, is bound by a `let` first, which is a tuple-form call
   site. Rust evaluates the right-hand side of an assignment before the place,
-  so the binding keeps the order of effects.
+  so the binding keeps the order of effects. Such a call in an argument
+  position of another call (`f(g(&mut x), y)`, a method chain
+  `a.send(&mut x).recv(&mut x)`) is bound in front of the enclosing statement
+  when the arguments to its left neither mention a variable it writes nor
+  contain a call with a `&mut` argument (`tLiftGuard`); otherwise it stays in
+  place and `tDroppedMutCalls` reports it.
 * `externalWriteTable`: a callee without a definition in the export (an FFI
   function, a trait method of a type parameter) that takes one `&mut`
   argument, a variable, and returns `()` is a single-form write-back function:
@@ -1158,12 +1163,104 @@ partial def tHoistValue (sigs : List (String × FnTypeInfo)) : TExpr → Option 
   | _ => none
 end
 
+/-- The `k`-th name bound to a call hoisted out of an argument position by
+    `tLiftArgCalls`. -/
+def tLiftTmp (k : Nat) : String := s!"_mutcall_arg{k}"
+
+/-- The variables the call `f args` writes through its `&mut` arguments, by the
+    callee's signature or the argument's type; `none` when one of those
+    arguments is not a plain place (`tMutArgRoot`). -/
+def tCallMutRoots (sigs : List (String × FnTypeInfo)) (f : String) (args : List TExpr) :
+    Option (List String) :=
+  tMutArgRoots args (tMutParamPositions sigs f ++ tMutArgPositions args)
+
+/-- Whether the calls `binds` may be evaluated before the arguments `prev`:
+    every call writes only plain places, no argument of `prev` mentions a
+    variable one of the calls writes, and no argument of `prev` contains a call
+    that passes a `&mut` argument. -/
+def tLiftGuard (sigs : List (String × FnTypeInfo)) (prev : List TExpr)
+    (binds : List (String × TExpr)) : Bool :=
+  let roots := binds.map fun b =>
+    match b.2 with
+    | .mk (.app f args) _ => tCallMutRoots sigs f args
+    | _ => none
+  roots.all Option.isSome
+    && prev.all fun p =>
+      roots.all (fun rs => (rs.getD []).all fun r => !(tVarRefs p).contains r)
+        && (tCallsIn p).all fun c =>
+          tPlaceHead c.1 || (tMutParamPositions sigs c.1 ++ tMutArgPositions c.2.1).isEmpty
+
+/-- `let n₁ := c₁; …; let nₖ := cₖ; e` for `binds = [(n₁, c₁), …, (nₖ, cₖ)]`. -/
+def tWrapLets (binds : List (String × TExpr)) (e : TExpr) : TExpr :=
+  binds.foldr (fun b acc => .mk (.letBind b.1 b.2 acc) acc.ty) e
+
+mutual
+/-- Hoist the `tValueMutCall`s of the argument `a` of a call: such a call,
+    nested in calls and in `&`, `*` and ascriptions, after the calls in its own
+    arguments, becomes a binding `tLiftTmp k := call` and the variable
+    `tLiftTmp k` in its place. Returns the bindings in evaluation order, the
+    rewritten argument and the next unused counter. -/
+partial def tLiftArg (sigs : List (String × FnTypeInfo)) (a : TExpr) (k : Nat) :
+    List (String × TExpr) × TExpr × Nat :=
+  match a with
+  | .mk (.app f args) ty =>
+    let r := tLiftArgList sigs [] args k
+    let c : TExpr := .mk (.app f r.2.1) ty
+    if tValueMutCall sigs f r.2.1 ty then
+      (r.1 ++ [(tLiftTmp r.2.2, c)], .mk (.var (tLiftTmp r.2.2)) ty, r.2.2 + 1)
+    else (r.1, c, r.2.2)
+  | .mk (.borrow e) ty =>
+    let r := tLiftArg sigs e k
+    (r.1, .mk (.borrow r.2.1) ty, r.2.2)
+  | .mk (.deref e) ty =>
+    let r := tLiftArg sigs e k
+    (r.1, .mk (.deref r.2.1) ty, r.2.2)
+  | .mk (.ann e) ty =>
+    let r := tLiftArg sigs e k
+    (r.1, .mk (.ann r.2.1) ty, r.2.2)
+  | _ => ([], a, k)
+
+/-- `tLiftArg` over the arguments `args` of one call, left to right; `prev`
+    holds the rewritten arguments to the left. An argument whose hoisted calls
+    fail `tLiftGuard` against `prev` is kept as it is, with its calls in place. -/
+partial def tLiftArgList (sigs : List (String × FnTypeInfo)) (prev : List TExpr) :
+    List TExpr → Nat → List (String × TExpr) × List TExpr × Nat
+  | [], k => ([], [], k)
+  | a :: rest, k =>
+    let r := tLiftArg sigs a k
+    let (bs, a', k') :=
+      if r.1.isEmpty || tLiftGuard sigs prev r.1 then r else ([], a, k)
+    let s := tLiftArgList sigs (prev ++ [a']) rest k'
+    (bs ++ s.1, a' :: s.2.1, s.2.2)
+end
+
+/-- The statement `e` with the `tValueMutCall`s in the argument positions of
+    its head call hoisted (`tLiftArg`) into `let`s around it; the head call
+    itself stays. A head under an ascription is looked through; under `&` or
+    `*` the operand is an argument position. -/
+def tLiftStmt (sigs : List (String × FnTypeInfo)) (e : TExpr) :
+    List (String × TExpr) × TExpr :=
+  match e with
+  | .mk (.app f args) ty =>
+    let s := tLiftArgList sigs [] args 0
+    (s.1, .mk (.app f s.2.1) ty)
+  | .mk (.ann (.mk (.app f args) ty')) ty =>
+    let s := tLiftArgList sigs [] args 0
+    (s.1, .mk (.ann (.mk (.app f s.2.1) ty')) ty)
+  | .mk (.borrow _) _ | .mk (.deref _) _ =>
+    let s := tLiftArg sigs e 0
+    (s.1, s.2.1)
+  | _ => ([], e)
+
 /-- Bind by a `let` every `tValueMutCall` that is the stored value of an
     element or field write, or the tail value of a block (the body of a `let`,
     the second part of a `seq`, a branch of an `if` or a `match` in tail
     position, or the whole expression). A `let` value, an assignment's
     right-hand side and the head of a `seq` are left as they are: they are
-    tuple-form call sites already. -/
+    tuple-form call sites already. In each of these statement positions, a
+    `tValueMutCall` in an argument position of the statement's head call is
+    bound by a `let` in front of the statement (`tLiftStmt`), when
+    `tLiftGuard` admits evaluating it before the arguments to its left. -/
 partial def tHoistMutCalls (sigs : List (String × FnTypeInfo)) (e : TExpr) : TExpr :=
   go true e
 where
@@ -1171,19 +1268,31 @@ where
   go (tail : Bool) : TExpr → TExpr
     | .mk (.app f args) ty =>
       let e' : TExpr := .mk (.app f (args.map (go false))) ty
-      if tail && tValueMutCall sigs f args ty then
-        .mk (.letBind tHoistTmp e' (.mk (.var tHoistTmp) ty)) ty
+      if tail then
+        let s := tLiftStmt sigs e'
+        tWrapLets s.1
+          (if tValueMutCall sigs f args ty then
+            .mk (.letBind tHoistTmp s.2 (.mk (.var tHoistTmp) ty)) ty
+          else s.2)
       else e'
-    | .mk (.letBind n v b) ty => .mk (.letBind n (go false v) (go tail b)) ty
-    | .mk (.seq a b) ty => .mk (.seq (go false a) (go tail b)) ty
+    | .mk (.letBind n v b) ty =>
+      let s := tLiftStmt sigs (go false v)
+      tWrapLets s.1 (.mk (.letBind n s.2 (go tail b)) ty)
+    | .mk (.seq a b) ty =>
+      let s := tLiftStmt sigs (go false a)
+      tWrapLets s.1 (.mk (.seq s.2 (go tail b)) ty)
     | .mk (.ifThenElse c t f) ty => .mk (.ifThenElse (go false c) (go tail t) (go tail f)) ty
     | .mk (.match_ s arms) ty =>
       .mk (.match_ (go false s) (arms.map fun pe => (pe.1, go tail pe.2))) ty
     | .mk (.assign v rhs) ty =>
       let rhs' := go false rhs
       match tHoistFromUpdate sigs rhs' with
-      | some (call, rhs'') => .mk (.letBind tHoistTmp call (.mk (.assign v rhs'') ty)) ty
-      | none => .mk (.assign v rhs') ty
+      | some (call, rhs'') =>
+        let s := tLiftStmt sigs call
+        tWrapLets s.1 (.mk (.letBind tHoistTmp s.2 (.mk (.assign v rhs'') ty)) ty)
+      | none =>
+        let s := tLiftStmt sigs rhs'
+        tWrapLets s.1 (.mk (.assign v s.2) ty)
     | e => tMapChildren (go false) e
 
 /-- The single-form write-back entries of the callees of `defs` that have no

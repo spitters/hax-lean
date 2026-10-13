@@ -1330,7 +1330,10 @@ def rootKeyAssign : TExpr :=
 * A call with a value result and a `&mut` argument stored into an element
   (`tmp[i] = wots_chain(…, adrs)`, SLH-DSA) or returned as a block's tail
   (`blake2b_finalize(&mut state)`, Argon2) is bound by a `let`
-  (`tHoistMutCalls`), a tuple-form call site.
+  (`tHoistMutCalls`), a tuple-form call site. Such a call in an argument
+  position of another call (a typestate method chain) is bound in front of the
+  statement when the arguments to its left neither read what it writes nor
+  pass a `&mut` argument.
 * A callee outside the export with one `&mut` variable argument and result
   `()` (`jade_sha256(&mut out, input)`, the FFI hash) is a single-form
   write-back function (`externalWriteTable`).
@@ -1369,6 +1372,58 @@ def finalizeTail : TExpr :=
   .letBind "s" (.var "init")
     (.letBind "_mutcall" (.app "finalize" [.borrow (.var "s")]) (.var "_mutcall"))
 #guard tDroppedMutCalls [] [] [] [("finalize", [0], true)] (tHoistMutCalls [] finalizeTail) == []
+
+/-- The reborrowed `&mut` parameter `&mut *ghost`. -/
+def ghostReborrow : TExpr :=
+  let gTy : ImpType := .adt "G" []
+  .mk (.borrow (.mk (.deref (.mk (.var "ghost") (.ref gTy true))) gTy)) (.ref gTy true)
+
+/-- `init.send(&mut *ghost).recv(&mut *ghost, bs).into_signature()`: two value
+    calls with a `&mut` argument, each in an argument position of the next. -/
+def sendRecvChain : TExpr :=
+  let send : TExpr :=
+    .mk (.app "send" [.mk (.var "init") (.adt "Init" []), ghostReborrow]) (.adt "Awaiting" [])
+  let recv : TExpr :=
+    .mk (.app "recv" [send, ghostReborrow, .mk (.var "bs") .unknown]) (.adt "Done" [])
+  .mk (.app "into_signature" [recv]) (.adt "Sig" [])
+
+-- Both calls are bound in front of the statement, in evaluation order.
+#guard (tHoistMutCalls [] sendRecvChain).erase ==
+  .letBind "_mutcall_arg0" (.app "send" [.var "init", .borrow (.deref (.var "ghost"))])
+    (.letBind "_mutcall_arg1"
+      (.app "recv" [.var "_mutcall_arg0", .borrow (.deref (.var "ghost")), .var "bs"])
+      (.app "into_signature" [.var "_mutcall_arg1"]))
+#guard tDroppedMutCalls [] [] [] [("send", [1], true), ("recv", [1], true)]
+  (tHoistMutCalls [] sendRecvChain) == []
+#guard tDroppedMutCalls [] [] [] [("send", [1], true), ("recv", [1], true)] sendRecvChain ==
+  [("recv", [1]), ("send", [1])]
+
+/-- `let y = from_bytes(&squeeze(&mut s)); y`: a value call under `&` in an
+    argument position of a `let` value. -/
+def squeezeUnderBorrow : TExpr :=
+  let sTy : ImpType := .adt "St" []
+  let call : TExpr :=
+    .mk (.app "squeeze" [.mk (.borrow (.mk (.var "s") sTy)) (.ref sTy true)]) bytes32
+  .mk (.letBind "y" (.mk (.app "from_bytes" [.mk (.borrow call) (.ref bytes32 false)]) .unknown)
+    (.mk (.var "y") .unknown)) .unknown
+
+#guard (tHoistMutCalls [] squeezeUnderBorrow).erase ==
+  .letBind "_mutcall_arg0" (.app "squeeze" [.borrow (.var "s")])
+    (.letBind "y" (.app "from_bytes" [.borrow (.var "_mutcall_arg0")]) (.var "y"))
+
+/-- `let y = combine(s, squeeze(&mut s)); y`: the argument left of the call
+    reads `s`, which the call writes. -/
+def readThenWrite : TExpr :=
+  let sTy : ImpType := .adt "St" []
+  let call : TExpr :=
+    .mk (.app "squeeze" [.mk (.borrow (.mk (.var "s") sTy)) (.ref sTy true)]) bytes32
+  .mk (.letBind "y" (.mk (.app "combine" [.mk (.var "s") sTy, call]) .unknown)
+    (.mk (.var "y") .unknown)) .unknown
+
+-- Hoisting would read `s` after the write: the call stays and is reported.
+#guard (tHoistMutCalls [] readThenWrite).erase == readThenWrite.erase
+#guard tDroppedMutCalls [] [] [] [("squeeze", [0], true)] (tHoistMutCalls [] readThenWrite) ==
+  [("squeeze", [0])]
 
 /-- `jade_sha256(&mut out, input); out` with `jade_sha256` outside the export. -/
 def ffiHashCall : TExpr :=
