@@ -538,6 +538,12 @@ instance : Neg (Array Int) where neg a := a.map (- ·)
 @[inline] def div {α : Type} [Div α] (a b : α) : α := a / b
 @[inline] def rem {α : Type} [Mod α] (a b : α) : α := a % b
 @[inline] def neg {α : Type} [Neg α] (a : α) : α := -a
+/-- The square `a * a`, the head of a call of `primeir_hax::Field::square`
+    (`square#p<modulus>`). -/
+@[inline] def square {α : Type} [Mul α] (a : α) : α := a * a
+/-- The double `a + a`, the head of a call of `primeir_hax::Field::double`
+    (`double#p<modulus>`). -/
+@[inline] def double {α : Type} [Add α] (a : α) : α := a + a
 
 -- Comparison (polymorphic: works for Int, Array Int, Array (Array Int), etc.)
 @[inline] def beq {α : Type} [BEq α] (a b : α) : Bool := a == b
