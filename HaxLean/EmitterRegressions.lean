@@ -1870,6 +1870,235 @@ def questionLetOut : ImpExpr := wrapMatchArmsCF (pipeline questionLet)
 
 end QuestionMark
 
+namespace QuestionMarkExport
+
+/-! Rust's `?` as hax 0.4.2 exports it, `match Try::branch(c) { Break(r) =>
+return from_residual(r), Continue(v) => v }`, is read by `parseHaxExpr` and by
+`parseHaxTExpr` as the form of namespace `QuestionMark`
+(`HaxAdapter.readMatch`, `HaxAdapter.tReadMatch`); a `?` in an argument
+position is bound by a `let` in front of the application
+(`HaxAdapter.floatEarlyExitArgs`). -/
+
+open Lean Hax.HaxAdapter
+
+/-- A `DefId` of `krate` with the path segments `segs`, each `(namespace, name)`. -/
+def defIdJ (krate : String) (segs : List (String × String)) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [("krate", Json.str krate),
+    ("path", Json.arr (segs.map fun (ns, n) =>
+      Json.mkObj [("data", Json.mkObj [(ns, Json.str n)])]).toArray)])])]
+
+/-- A type JSON of the kind `kind`. -/
+def tyJ (kind : Json) : Json := Json.mkObj [("value", kind)]
+
+/-- The type JSON of the ADT `krate::name<args>`. -/
+def adtJ (krate name : String) (args : List Json) : Json :=
+  tyJ (Json.mkObj [("Adt", Json.mkObj [("value", Json.mkObj [
+    ("def_id", defIdJ krate [("TypeNs", name)]),
+    ("generic_args", Json.arr (args.map fun t => Json.mkObj [("Type", t)]).toArray)])])])
+
+/-- `u32`. -/
+def u32J : Json := tyJ (Json.mkObj [("Uint", Json.str "U32")])
+
+/-- `Option<t>`. -/
+def optJ (t : Json) : Json := adtJ "core" "Option" [t]
+
+/-- `Result<t, e>`. -/
+def resJ (t e : Json) : Json := adtJ "core" "Result" [t, e]
+
+/-- `core::convert::Infallible`. -/
+def infJ : Json := adtJ "core" "Infallible" []
+
+/-- An expression node of type `ty`. -/
+def nodeJ (ty contents : Json) : Json := Json.mkObj [("ty", ty), ("contents", contents)]
+
+/-- The local variable `n` of type `ty`. -/
+def varJ (ty : Json) (n : String) : Json :=
+  nodeJ ty (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str n)])])])
+
+/-- A call of the function `krate::segs` on `args`, of type `ty`. -/
+def callJ (ty : Json) (krate : String) (segs : List (String × String)) (args : List Json) :
+    Json :=
+  nodeJ ty (Json.mkObj [("Call", Json.mkObj [
+    ("fun", nodeJ (tyJ (Json.str "Never")) (Json.mkObj [("GlobalName", Json.mkObj [
+      ("item", Json.mkObj [("value", Json.mkObj [("def_id", defIdJ krate segs)])])])])),
+    ("args", Json.arr args.toArray)])])
+
+/-- The binding pattern of `n`. -/
+def bindPatJ (n : String) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Binding", Json.mkObj [
+    ("var", Json.mkObj [("name", Json.str n)])])])]
+
+/-- The pattern `ControlFlow::v(sub)`. -/
+def cfPatJ (v : String) (sub : Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Variant", Json.mkObj [
+    ("info", Json.mkObj [("variant", defIdJ "core" [("TypeNs", "ControlFlow"), ("TypeNs", v)])]),
+    ("subpatterns", Json.arr #[Json.mkObj [("pattern", sub)]])])])]
+
+/-- The export of `c?`: `c` has the residual type `resTy` under `Try` and the
+    value type `vTy`, and the function returns `retTy`. -/
+def tryJ (c resTy vTy retTy : Json) : Json :=
+  nodeJ vTy (Json.mkObj [("Match", Json.mkObj [
+    ("scrutinee", callJ (adtJ "core" "ControlFlow" [resTy, vTy]) "core"
+      [("TypeNs", "ops"), ("TypeNs", "Try"), ("ValueNs", "branch")] [c]),
+    ("arms", Json.arr #[
+      Json.mkObj [("pattern", cfPatJ "Break" (bindPatJ "residual")),
+        ("body", nodeJ vTy (Json.mkObj [("NeverToAny", Json.mkObj [("source",
+          nodeJ (tyJ (Json.str "Never")) (Json.mkObj [("Return", Json.mkObj [("value",
+            callJ retTy "core" [("TypeNs", "ops"), ("TypeNs", "FromResidual"),
+              ("ValueNs", "from_residual")] [varJ resTy "residual"])])]))])]))],
+      Json.mkObj [("pattern", cfPatJ "Continue" (bindPatJ "val")),
+        ("body", varJ vTy "val")]])])])
+
+/-- `o?` on `o : Option<u32>` in a function returning `Option<u32>`. -/
+def optTry : Json := tryJ (varJ (optJ u32J) "o") (optJ infJ) u32J (optJ u32J)
+
+/-- `r?` on `r : Result<u32, E>` in a function returning `Result<u32, E>`. -/
+def resTrySame : Json :=
+  tryJ (varJ (resJ u32J (adtJ "k" "E" [])) "r") (resJ infJ (adtJ "k" "E" [])) u32J
+    (resJ u32J (adtJ "k" "E" []))
+
+/-- `r?` on `r : Result<u32, E>` in a function returning `Result<u32, F>`. -/
+def resTryFrom : Json :=
+  tryJ (varJ (resJ u32J (adtJ "k" "E" [])) "r") (resJ infJ (adtJ "k" "E" [])) u32J
+    (resJ u32J (adtJ "k" "F" []))
+
+/-- `g(o?, x)`: the `?` in an argument position. -/
+def argTry : Json :=
+  callJ u32J "k" [("ValueNs", "g")] [optTry, varJ u32J "x"]
+
+/-- `{ let y = g(o?, x); y }`. -/
+def letArgTry : Json :=
+  nodeJ u32J (Json.mkObj [("Block", Json.mkObj [
+    ("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj [("Let", Json.mkObj [
+      ("pattern", bindPatJ "y"), ("initializer", argTry)])])]]),
+    ("expr", varJ u32J "y")])])
+
+/-- `g(o?)?`: a `?` whose operand holds a `?` in an argument position. -/
+def nestedTry : Json :=
+  tryJ (callJ (optJ u32J) "k" [("ValueNs", "g")] [optTry]) (optJ infJ) u32J (optJ u32J)
+
+/-- `h(f(x), o?)`: a call to the left of a `?` argument. -/
+def orderTry : Json :=
+  callJ u32J "k" [("ValueNs", "h")] [callJ u32J "k" [("ValueNs", "f")] [varJ u32J "x"], optTry]
+
+/-- The form of `o?`: `match o | some val => val | none => return None`. -/
+def optTryForm : ImpExpr :=
+  .match_ (.var "o") [(.somePat (.varPat "val"), .var "val"),
+    (.nonePat, .earlyReturn (.app "None" []))]
+
+/-- Whether `parseHaxExpr j` and the erasure of `parseHaxTExpr j` are both `e`. -/
+def parsesTo (j : Json) (e : ImpExpr) : Bool :=
+  (match parseHaxExpr j with | .ok e' => e' == e | .error _ => false) &&
+  (match parseHaxTExpr j with | .ok t => t.erase == e | .error _ => false)
+
+/-- `o?` on an `Option` is a `match` on `o` whose `None` arm returns `None`. -/
+def optionTryParses : Bool := parsesTo optTry optTryForm
+
+/-- `r?` on a `Result` whose error type the function returns is a `match` on
+    `r` whose `Err` arm returns `Err(residual)`. -/
+def resultTryParses : Bool := parsesTo resTrySame
+  (.match_ (.var "r") [(.okPat (.varPat "val"), .var "val"),
+    (.errPat (.varPat "residual"), .earlyReturn (.app "Err" [.var "residual"]))])
+
+/-- `r?` on a `Result` with another error type returns `Err(from(residual))`. -/
+def resultTryFromParses : Bool := parsesTo resTryFrom
+  (.match_ (.var "r") [(.okPat (.varPat "val"), .var "val"),
+    (.errPat (.varPat "residual"), .earlyReturn (.app "Err" [.app "from" [.var "residual"]]))])
+
+/-- `g(o?, x)` binds the `match` by a `let` in front of the call. -/
+def argTryParses : Bool := parsesTo argTry
+  (.letBind "_try_o" optTryForm (.app "g" [.var "_try_o", .var "x"]))
+
+/-- In `let y = g(o?, x)` the `let` of the `match` precedes the statement. -/
+def letArgTryParses : Bool := parsesTo letArgTry
+  (.letBind "_try_o" optTryForm (.letBind "y" (.app "g" [.var "_try_o", .var "x"]) (.var "y")))
+
+/-- In `g(o?)?` the inner `match` is bound in front of the outer one. -/
+def nestedTryParses : Bool := parsesTo nestedTry
+  (.letBind "_try_o" optTryForm (.match_ (.app "g" [.var "_try_o"])
+    [(.somePat (.varPat "val"), .var "val"), (.nonePat, .earlyReturn (.app "None" []))]))
+
+/-- In `h(f(x), o?)` the call `f(x)` is bound before the `match`, keeping the
+    order of evaluation. -/
+def orderTryParses : Bool := parsesTo orderTry
+  (.letBind "_try_arg0" (.app "f" [.var "x"]) (.letBind "_try_o" optTryForm
+    (.app "h" [.var "_try_arg0", .var "_try_o"])))
+
+/-- On the `TExpr` path the returned `None` has the function's return type
+    `Option<u32>` and the `match` the value type `u32`. -/
+def optionTryTyped : Bool :=
+  match parseHaxTExpr optTry with
+  | .ok (.mk (.match_ _ [_, (_, .mk (.earlyReturn (.mk _ nty)) _)]) mty) =>
+    nty == ImpType.adt "Option" [.uint .w32] && mty == ImpType.uint .w32
+  | _ => false
+
+#guard optionTryParses
+#guard resultTryParses
+#guard resultTryFromParses
+#guard argTryParses
+#guard letArgTryParses
+#guard nestedTryParses
+#guard orderTryParses
+#guard optionTryTyped
+
+end QuestionMarkExport
+
+namespace AssocFieldType
+
+/-! A struct field typed by an associated type of a type parameter
+(`state: C::NttForm`) has the type the trait's `impl` blocks of the export give
+the associated type (`HaxAdapter.resolveAssocFieldType`), when they give exactly
+one; otherwise the field keeps the unresolved projection. -/
+
+open Lean
+
+/-- The type JSON of the local struct `name`. -/
+def adtTyJson (name : String) : Json :=
+  Json.mkObj [("value", Json.mkObj [("Adt", Json.mkObj [("value", Json.mkObj [
+    ("def_id", Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+      ("krate", "k"), ("path", Json.arr #[Json.mkObj [("data",
+        Json.mkObj [("TypeNs", .str name)])]])])])]),
+    ("generic_args", Json.arr #[])])])])]
+
+/-- `impl PolyRing for _ { type NttForm = <name>; }`. -/
+def polyRingImplJson (name : String) : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Impl", Json.mkObj [
+    ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id", Json.mkObj [("contents",
+      Json.mkObj [("value", Json.mkObj [("krate", "k"), ("path", Json.arr
+        #[Json.mkObj [("data", Json.mkObj [("TypeNs", "poly")])],
+          Json.mkObj [("data", Json.mkObj [("TypeNs", "PolyRing")])]])])])])])]),
+    ("items", Json.arr #[Json.mkObj [("ident", Json.arr #[Json.str "NttForm", Json.null]),
+      ("kind", Json.mkObj [("Type", Json.mkObj [("ty", adtTyJson name)])])]])])])]
+
+/-- `pub struct Awaiting<C: PolyRing> { state: C::NttForm }`. -/
+def awaitingStructJson : Json :=
+  structItemJson "Awaiting" (Json.mkObj [("Struct", Json.mkObj [("fields", Json.arr
+    #[Json.mkObj [("ident", Json.arr #[Json.str "state", Json.null]),
+      ("ty", Json.mkObj [("value", Json.mkObj [("Alias", nttFormProjJson "C")])])]])])])
+
+/-- The type tag and type of the field `state` of `Awaiting` in an export with
+    the items `impls` beside the struct. -/
+def stateField (impls : List Json) : Option (String × ImpType) := do
+  let si ← (HaxAdapter.parseStructDefsFromJson (Json.arr (#[awaitingStructJson] ++ impls.toArray))).head?
+  let fi ← si.fields.head?
+  pure (fi.typeTag, fi.impType)
+
+-- One `impl` gives `NttForm` the type `Inner`: the field has the struct type `Inner`.
+#guard match stateField [polyRingImplJson "Inner"] with
+  | some ("Inner", .adt "Inner" _) => true
+  | _ => false
+
+-- Two `impl` blocks with different types: the field keeps the projection,
+-- classified by the default `"array"`.
+#guard match stateField [polyRingImplJson "Inner", polyRingImplJson "Other"] with
+  | some ("array", t) => t != .adt "Inner" [] && t != .adt "Other" []
+  | _ => false
+
+-- No `impl`: the field keeps the projection.
+#guard (stateField []).map (·.1) == some "array"
+
+end AssocFieldType
+
 namespace MatchArmMutation
 
 /-- The body of Rust's
@@ -2445,5 +2674,79 @@ def declaredParamsExport : Json :=
 #guard (HaxAdapter.fnDefParams? (Lean.Json.mkObj [("body", Lean.Json.mkObj [
     ("expr", haxVarRef "a"), ("params", Lean.Json.arr #[boolParamJson "a"])])])).map (·.size)
   == some 1
+
+/-! ## Associated types in signatures
+
+A projection `C::NttForm` in the type of a function parameter and of a call
+argument is read at the type the trait `impl` blocks of the export give
+`NttForm` (`HaxAdapter.resolveAssocTypes`), when they give exactly one; with
+two such `impl` blocks it keeps the reading `.unknown`. The call-site types
+are those the `Deps` class of the typed path is printed from
+(`collectTAppCalls`). -/
+
+open Lean in
+/-- The projection type `C::NttForm`. -/
+def nttFormTyJson : Json :=
+  Json.mkObj [("value", Json.mkObj [("Alias", nttFormProjJson "C")])]
+
+open Lean in
+/-- A function parameter `name : C::NttForm`. -/
+def nttFormParamJson (name : String) : Json :=
+  Json.mkObj [("pat", haxNode (Json.mkObj [("Binding", Json.mkObj [
+      ("var", Json.mkObj [("name", Json.str name)])])])),
+    ("ty", nttFormTyJson)]
+
+open Lean in
+/-- A call `h(s)` of a function the export does not define, on the variable
+    `s : C::NttForm`. -/
+def callNttFormJson : Json :=
+  haxNodeT (Json.mkObj [("value", Json.str "Bool")]) (Json.mkObj [("Call", Json.mkObj [
+    ("fun", haxNode (Json.mkObj [("GlobalName", Json.mkObj [("item", Json.mkObj [
+      ("value", Json.mkObj [("def_id", resolvedDefId [defIdSeg "ValueNs" "h"])])])])])),
+    ("args", Json.arr #[haxVarRefT nttFormTyJson "s"])])])
+
+/-- An export defining `g (s : C::NttForm)`, whose body is `h(s)`, beside the
+    items `impls`. -/
+def assocSigExport (impls : List Lean.Json) : Lean.Json :=
+  .arr (#[fnItemWithParams "g" #[nttFormParamJson "s"] callNttFormJson] ++ impls.toArray)
+
+/-- The argument types of the call of `h` recorded by
+    `extractCallSignaturesFromFile`. -/
+def assocCallSigArgs (impls : List Lean.Json) : Option (List ImpType) :=
+  ((HaxAdapter.extractCallSignaturesFromFile (assocSigExport impls)).lookup "h").map
+    (·.paramTypes.map (·.2))
+
+/-- The parameter types of `g` and the argument types of its call of `h` on
+    the typed path (`parseHaxFileWithTExpr`). -/
+def assocTypedSig (impls : List Lean.Json) : Option (List ImpType × List ImpType) :=
+  match HaxAdapter.parseHaxFileWithTExpr (assocSigExport impls) with
+  | .ok (_, fnTypes, rawTdefs, _) => do
+    let ti ← fnTypes.lookup "g"
+    let te ← rawTdefs.lookup "g"
+    let (_, _, argTys, _) ← (collectTAppCalls te).find? (·.1 == "h")
+    pure (ti.paramTypes.map (·.2), argTys)
+  | .error _ => none
+
+/-- Whether a type is the struct type `Inner`. -/
+def isInnerTy : ImpType → Bool
+  | .adt "Inner" _ => true
+  | _ => false
+
+-- One `impl` gives `NttForm` the type `Inner`: the call signature, the
+-- parameter and the call-site argument have the type `Inner`.
+#guard (assocCallSigArgs [AssocFieldType.polyRingImplJson "Inner"]).map (·.map isInnerTy)
+  == some [true]
+#guard (assocTypedSig [AssocFieldType.polyRingImplJson "Inner"]).map
+    (fun (ps, as) => (ps.map isInnerTy, as.map isInnerTy))
+  == some ([true], [true])
+
+-- Two `impl` blocks with different types: the projection stays `.unknown`.
+#guard (assocCallSigArgs [AssocFieldType.polyRingImplJson "Inner",
+    AssocFieldType.polyRingImplJson "Other"]).map (·.map (·.isUnknown))
+  == some [true]
+#guard (assocTypedSig [AssocFieldType.polyRingImplJson "Inner",
+    AssocFieldType.polyRingImplJson "Other"]).map
+    (fun (ps, as) => (ps.map (·.isUnknown), as.map (·.isUnknown)))
+  == some ([true], [true])
 
 end Hax.EmitterRegressions

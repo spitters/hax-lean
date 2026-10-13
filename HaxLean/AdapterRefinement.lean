@@ -572,6 +572,50 @@ inductive JsonRefinesExpr : Json → ImpExpr → Prop where
         armsJ.toList.attach.mapM (fun ⟨a, _⟩ => Hax.HaxAdapter.parseArm a)
           = .ok arms) :
       JsonRefinesExpr j (.match_ scrut arms)
+  /-- Witness-bearing `Call`-tag clause for a call whose arguments may exit
+      early.
+
+      The hax `Call` tag denotes `fn` applied to the arguments `argsJ`,
+      evaluated left to right. When an argument is a `match` with an arm that
+      returns from the function (the reading of a `?`), or carries `let`s with
+      the prefix `tryBindPrefix` at its head, the call denotes the same
+      evaluation with those arguments bound by `let`s in front of the
+      application and read by name: `floatEarlyExitArgs fn args`, where `args`
+      is the parse of `argsJ`. When no argument has that form,
+      `floatEarlyExitArgs fn args = .app fn args` and the clause is
+      `call_payload`. The conclusion is pinned to the parse of `argsJ` by the
+      `mapM` equation. -/
+  | call_float_payload {j : Json} (fn : String) {argsJ : Array Json}
+      {args : List ImpExpr}
+      (h_args_parse :
+        argsJ.toList.attach.mapM (fun ⟨a, _⟩ => Hax.HaxAdapter.parseHaxExpr a)
+          = .ok args) :
+      JsonRefinesExpr j (Hax.HaxAdapter.floatEarlyExitArgs fn args)
+  /-- Witness-bearing `Match`-tag clause covering Rust's `?`.
+
+      hax exports `c?` as `match Try::branch(c) { Break(r) =>
+      return from_residual(r), Continue(p) => b }`. That JSON denotes the
+      `match` on `c` itself: `match c | some p => b | none => return None` for
+      an `Option`, `match c | ok p => b | err r => return Err(r')` for a
+      `Result` (`tryMatch?`), the operand kind read from the scrutinee's `ty`
+      slot and the type of the returned value. Every other `match` denotes
+      `.match_ scrut arms`, with the `let`s of prefix `tryBindPrefix` at the
+      head of `scrut` moved in front when no arm reads their names. The
+      conclusion `readMatch` is pinned to the parses of the scrutinee and the
+      arms; when neither form applies it is `.match_ scrut arms`, the
+      conclusion of `match_payload`. -/
+  | match_read_payload {j j_scrut : Json} {scrut : ImpExpr}
+      {armsJ : Array Json} {arms : List (ImpPat × ImpExpr)}
+      (h_scrut_parse : Hax.HaxAdapter.parseHaxExpr j_scrut = .ok scrut)
+      (h_arms_parse :
+        armsJ.toList.attach.mapM (fun ⟨a, _⟩ => Hax.HaxAdapter.parseArm a)
+          = .ok arms) :
+      JsonRefinesExpr j
+        (Hax.HaxAdapter.readMatch scrut
+          (match j_scrut.getObjVal? "ty" with
+            | .ok t => Hax.HaxAdapter.parseHaxType t
+            | .error _ => .unknown)
+          armsJ.toList arms)
   /-- Witness-bearing `Assign`/`AssignOp`-tag clause (payload-helper variant).
 
       The hax `Assign` and `AssignOp` tags' parser bodies extract `lhs` and
@@ -5466,8 +5510,9 @@ theorem parseHaxExpr_step_for_Adt
     no refinement obligation), extracts `argsJ : Array Json` from
     `data.getObjValAs? (Array Json) "args"`, then threads `argsJ` through
     `argsJ.toList.attach.mapM (fun ⟨a, _⟩ => parseHaxExpr a)` to produce
-    `args : List ImpExpr`, and emits `.app funName args`. Witnessed by
-    `call_payload funName h_args_parse`. -/
+    `args : List ImpExpr`, and emits `floatEarlyExitArgs funName args` (the
+    application with its early-exit arguments bound in front). Witnessed by
+    `call_float_payload funName h_args_parse`. -/
 theorem parseHaxExpr_step_for_Call
     {j contents data : Json} {argsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
@@ -5501,7 +5546,7 @@ theorem parseHaxExpr_step_for_Call
     simp only at h
     injection h with h_eq
     subst h_eq
-    exact .call_payload _ h_p
+    exact .call_float_payload _ h_p
   | .error _, h => cases h
 
 /-- **Step lemma for `Array`** (cascade position 9).
@@ -5733,8 +5778,9 @@ theorem parseHaxExpr_step_for_Block
     recursively parses it as `scrut`. Then extracts `armsJ : Array Json`
     from `data.getObjValAs? (Array Json) "arms"`, threads it through
     `armsJ.toList.attach.mapM (fun ⟨a, _⟩ => parseArm a)` to produce
-    `arms : List (ImpPat × ImpExpr)`. Emits `.match_ scrut arms`.
-    Witnessed by `match_payload h_pscrut h_parms`. -/
+    `arms : List (ImpPat × ImpExpr)`. Emits `readMatch scrut scrutTy armsJ arms`
+    (the desugared `?` on a `Try::branch` scrutinee, `.match_ scrut arms`
+    otherwise). Witnessed by `match_read_payload h_pscrut h_parms`. -/
 theorem parseHaxExpr_step_for_Match
     {j contents data scrutJ : Json} {armsJ : Array Json} {e : ImpExpr}
     (h_contents : j.getObjVal? "contents" = .ok contents)
@@ -5774,13 +5820,13 @@ theorem parseHaxExpr_step_for_Match
   | .ok scrut, h =>
     simp only at h
     rw [h_arms] at h
-    simp only [Except.pure, Except.bind] at h
+    simp only at h
     match h_pa : armsJ.toList.attach.mapM (fun ⟨a, _⟩ => parseArm a), h with
     | .ok arms, h =>
       simp only at h
       injection h with h_eq
       subst h_eq
-      exact .match_payload h_ps h_pa
+      exact .match_read_payload h_ps h_pa
     | .error _, h => cases h
   | .error _, h => cases h
 

@@ -11,6 +11,7 @@ public import HaxLean.TExpr
 public import HaxLean.InlineClosures
 public import HaxLean.JsonSize
 public import Lean.Data.Json
+public import HaxLean.FreeVars
 import HaxLean.InclusiveRange
 
 /-!
@@ -1743,6 +1744,297 @@ def closureParams? (cdata : Json) : Option (List String) :=
     | r => r
   | .error _ => none
 
+/-! ### Rust's `?` operator
+
+hax exports `c?` as `match Try::branch(c) { ControlFlow::Break(r) =>
+return FromResidual::from_residual(r), ControlFlow::Continue(p) => b }`. The
+adapter reads it as a `match` on `c` whose failure arm returns from the
+function: on an `Option`, `match c | some p => b | none => return None`; on a
+`Result`, `match c | ok p => b | err r => return Err(r')`, where `r'` is `r`
+when the function returns the error type of `c` and `from(r)` otherwise. A
+`match` with an early-return arm in an argument position is bound by a `let`
+in front of the application. -/
+
+/-- The operand of a `?`: an `Option`, or a `Result` whose error the function
+    returns through `from` (`convert = true`) or unchanged. -/
+inductive TryOperand where
+  | option
+  | result (convert : Bool)
+  deriving Inhabited, BEq, Repr
+
+/-- A type without its outer references. -/
+def tyWithoutRefs : ImpType → ImpType
+  | .ref t _ => tyWithoutRefs t
+  | t => t
+
+/-- The error type of a `Result` type, under any number of references. -/
+def resultErrTy? (t : ImpType) : Option ImpType :=
+  match tyWithoutRefs t with
+  | .result _ e => some e
+  | .adt "Result" [_, e] => some e
+  | _ => none
+
+/-- The operand of a `?` whose `Try::branch` call has the type `cfTy` and whose
+    failure arm returns a value of the type `retTy`: `option` when the residual
+    type of the `ControlFlow` is an `Option`, `result` when it is a `Result`,
+    converting the error unless `retTy` is a `Result` with the same error
+    type. -/
+def tryOperandOf? (cfTy retTy : ImpType) : Option TryOperand :=
+  let residual? : Option ImpType := match tyWithoutRefs cfTy with
+    | .controlFlow r _ => some r
+    | .adt "ControlFlow" (r :: _) => some r
+    | _ => none
+  match residual?.map tyWithoutRefs with
+  | some (.option _) | some (.adt "Option" _) => some .option
+  | some r@(.result _ _) | some r@(.adt "Result" _) =>
+    match resultErrTy? r, resultErrTy? retTy with
+    | some e, some f => some (.result !(e == f))
+    | _, _ => some (.result true)
+  | _ => none
+
+/-- The type of the value of the first `Return` node of a hax JSON tree, in
+    depth-first order. -/
+partial def returnValueTy? (j : Json) : Option ImpType :=
+  match j.getObjVal? "Return" with
+  | .ok r =>
+    match r.getObjVal? "value" with
+    | .ok v =>
+      match v.getObjVal? "ty" with
+      | .ok t => some (parseHaxType t)
+      | .error _ => none
+    | .error _ => none
+  | .error _ =>
+    match j with
+    | .obj kvs => kvs.toList.findSome? fun (_, v) => returnValueTy? v
+    | .arr items => items.toList.findSome? returnValueTy?
+    | _ => none
+
+/-- The `match` on `c` that reads `c?`, from the arms of the exported `match` on
+    `Try::branch(c)`: a `Break(r)` arm returning `from_residual(r)` and a
+    `Continue(p)` arm with the body `b`. For an `Option` it is
+    `match c | some p => b | none => return None`; for a `Result` it is
+    `match c | ok p => b | err r => return Err(r')`, with `r' = from(r)` when the
+    error converts and `r' = r` otherwise. `none` when the arms have another
+    form. -/
+def tryMatch? (k : TryOperand) (c : ImpExpr) (arms : List (ImpPat × ImpExpr)) :
+    Option ImpExpr := do
+  guard (arms.length == 2)
+  let r ← arms.findSome? fun (p, b) =>
+    match p, b with
+    | .ctorPat "Break" [.varPat r], .earlyReturn (.app "from_residual" [.var r']) =>
+      if r == r' then some r else none
+    | _, _ => none
+  let (q, b) ← arms.findSome? fun (p, b) =>
+    match p with
+    | .ctorPat "Continue" [q] => some (q, b)
+    | _ => none
+  match k with
+  | .option =>
+    pure (.match_ c [(.somePat q, b), (.nonePat, .earlyReturn (.app "None" []))])
+  | .result convert =>
+    let err : ImpExpr := if convert then .app "from" [.var r] else .var r
+    pure (.match_ c [(.okPat q, b), (.errPat (.varPat r), .earlyReturn (.app "Err" [err]))])
+
+/-- The prefix of the names that bind a term moved in front of an application. -/
+def tryBindPrefix : String := "_try_"
+
+/-- Whether a term is a `match` with an arm that returns from the function. -/
+def isEarlyExitMatch : ImpExpr → Bool
+  | .match_ _ arms => arms.any fun (_, b) => (b matches .earlyReturn _)
+  | _ => false
+
+/-- The leading `let`s of a term whose names have the prefix `tryBindPrefix`,
+    and the term under them. -/
+def peelTryLets : ImpExpr → List (String × ImpExpr) × ImpExpr
+  | .letBind n v b =>
+    if n.startsWith tryBindPrefix then
+      let (bs, e) := peelTryLets b
+      ((n, v) :: bs, e)
+    else ([], .letBind n v b)
+  | e => ([], e)
+
+/-- The term `e` under the `let`s `bs`, the first one outermost. -/
+def wrapTryLets (bs : List (String × ImpExpr)) (e : ImpExpr) : ImpExpr :=
+  bs.foldr (fun (n, v) acc => .letBind n v acc) e
+
+/-- `base` when it is not in `avoid`, otherwise `base_k` for the least `k ≥ 1`
+    with `base_k` not in `avoid`. -/
+def freshTryName (avoid : List String) (base : String) : String :=
+  if !avoid.contains base then base else go (avoid.length + 1) 1
+where
+  /-- The first of `base_k`, `base_(k+1)`, … not in `avoid`, within `fuel` steps. -/
+  go : Nat → Nat → String
+    | 0, k => s!"{base}_{k}"
+    | fuel + 1, k =>
+      let n := s!"{base}_{k}"
+      if avoid.contains n then go fuel (k + 1) else n
+
+/-- Whether a term is a literal, a variable or the unit value. -/
+def isAtomicArg : ImpExpr → Bool
+  | .lit _ | .var _ | .unitVal => true
+  | _ => false
+
+/-- The application `f args` with its early-exit arguments in front of it. The
+    `let`s that `peelTryLets` finds at the head of an argument move in front of
+    the application; an argument that `isEarlyExitMatch` is bound by a `let` in
+    front of it and read by name. Every argument before the last such argument
+    that is not atomic (`isAtomicArg`), or is a variable with the prefix
+    `tryBindPrefix`, is bound in front as well, so that the arguments keep their
+    left-to-right order of evaluation. A new name is `_try_<v>` for a `match` on
+    the variable `v` and `_try_arg<i>` for argument `i` otherwise, made distinct
+    from the free variables of the application and the names moved in front
+    (`freshTryName`). -/
+def floatEarlyExitArgs (f : String) (args : List ImpExpr) : ImpExpr :=
+  let peeled := args.map peelTryLets
+  let lifted := peeled.zipIdx.filter fun ((bs, a), _) => !bs.isEmpty || isEarlyExitMatch a
+  match lifted.getLast? with
+  | none => .app f args
+  | some (_, last) =>
+    let avoid0 := freeVars (.app f args) ++ peeled.flatMap fun (bs, _) => bs.map (·.1)
+    let step (acc : List (String × ImpExpr) × List ImpExpr × List String)
+        (x : (List (String × ImpExpr) × ImpExpr) × Nat) :
+        List (String × ImpExpr) × List ImpExpr × List String :=
+      let (binds, out, avoid) := acc
+      let ((bs, a), i) := x
+      if i > last then (binds, out ++ [a], avoid)
+      else
+        let binds := binds ++ bs
+        let prefixedVar := match a with
+          | .var v => v.startsWith tryBindPrefix
+          | _ => false
+        if isEarlyExitMatch a || (i < last && (!isAtomicArg a || prefixedVar)) then
+          let base := match a with
+            | .match_ (.var v) _ => s!"{tryBindPrefix}{v}"
+            | _ => s!"{tryBindPrefix}arg{i}"
+          let n := freshTryName avoid base
+          (binds ++ [(n, a)], out ++ [.var n], n :: avoid)
+        else (binds, out ++ [a], avoid)
+    let (binds, out, _) := peeled.zipIdx.foldl step ([], [], avoid0)
+    wrapTryLets binds (.app f out)
+
+/-- The `match` of `scrut` with `arms`, the `let`s at the head of `scrut` with
+    the prefix `tryBindPrefix` moved in front of it when no arm reads their
+    names. -/
+def matchLiftingTryLets (scrut : ImpExpr) (arms : List (ImpPat × ImpExpr)) : ImpExpr :=
+  let (bs, s) := peelTryLets scrut
+  let armVars := arms.flatMap fun (_, b) => freeVars b
+  if bs.isEmpty || bs.any (fun (n, _) => armVars.contains n) then .match_ scrut arms
+  else wrapTryLets bs (.match_ s arms)
+
+/-- The `match` the adapter reads from an exported `match` on `scrut` with the
+    arms `arms`, `armsJ` being the JSON of the arms and `scrutTy` the type of
+    `scrut`: a `?` on `c` (`scrut = branch(c)`) is `tryMatch?`, and the `let`s
+    with the prefix `tryBindPrefix` at the head of `scrut` move in front of the
+    `match` (`matchLiftingTryLets`). -/
+def readMatch (scrut : ImpExpr) (scrutTy : ImpType) (armsJ : List Json)
+    (arms : List (ImpPat × ImpExpr)) : ImpExpr :=
+  let (bs, s) := peelTryLets scrut
+  let armVars := arms.flatMap fun (_, b) => freeVars b
+  let tryForm? : Option ImpExpr := match s with
+    | .app "branch" [c] =>
+      (tryOperandOf? scrutTy ((returnValueTy? (.arr armsJ.toArray)).getD .unknown)).bind
+        fun k => tryMatch? k c arms
+    | _ => none
+  match tryForm? with
+  | some m =>
+    if bs.any (fun (n, _) => armVars.contains n) then .match_ scrut arms
+    else wrapTryLets bs m
+  | none => matchLiftingTryLets scrut arms
+
+/-! The same for `TExpr`. -/
+
+/-- `tryMatch?` on `TExpr`. The `None` and `Err(r')` values have the type of
+    `from_residual(r)`; `r` has the error type of its residual type and `from(r)`
+    the error type the function returns. -/
+def tTryMatch? (k : TryOperand) (c : TExpr) (arms : List (ImpPat × TExpr)) :
+    Option TExprKind := do
+  guard (arms.length == 2)
+  let (r, rTy, fTy, bTy) ← arms.findSome? fun (p, b) =>
+    match p, b with
+    | .ctorPat "Break" [.varPat r],
+        .mk (.earlyReturn (.mk (.app "from_residual" [.mk (.var r') rTy]) fTy)) bTy =>
+      if r == r' then some (r, rTy, fTy, bTy) else none
+    | _, _ => none
+  let (q, b) ← arms.findSome? fun (p, b) =>
+    match p with
+    | .ctorPat "Continue" [q] => some (q, b)
+    | _ => none
+  match k with
+  | .option =>
+    pure (.match_ c [(.somePat q, b),
+      (.nonePat, .mk (.earlyReturn (.mk (.app "None" []) fTy)) bTy)])
+  | .result convert =>
+    let e : TExpr := .mk (.var r) ((resultErrTy? rTy).getD .unknown)
+    let err : TExpr :=
+      if convert then .mk (.app "from" [e]) ((resultErrTy? fTy).getD .unknown) else e
+    pure (.match_ c [(.okPat q, b),
+      (.errPat (.varPat r), .mk (.earlyReturn (.mk (.app "Err" [err]) fTy)) bTy)])
+
+/-- `isEarlyExitMatch` on `TExpr`. -/
+def tIsEarlyExitMatch : TExpr → Bool
+  | .mk (.match_ _ arms) _ => arms.any fun (_, b) => (b.kind matches .earlyReturn _)
+  | _ => false
+
+/-- `peelTryLets` on `TExpr`. -/
+def tPeelTryLets : TExpr → List (String × TExpr) × TExpr
+  | .mk (.letBind n v b) ty =>
+    if n.startsWith tryBindPrefix then
+      let (bs, e) := tPeelTryLets b
+      ((n, v) :: bs, e)
+    else ([], .mk (.letBind n v b) ty)
+  | e => ([], e)
+
+/-- `wrapTryLets` on `TExpr`: each `let` has the type of `e`. -/
+def tWrapTryLets (bs : List (String × TExpr)) (e : TExpr) : TExpr :=
+  bs.foldr (fun (n, v) acc => .mk (.letBind n v acc) e.ty) e
+
+/-- `floatEarlyExitArgs` on `TExpr`, for an application of type `ty`. -/
+def tFloatEarlyExitArgs (f : String) (args : List TExpr) (ty : ImpType) : TExpr :=
+  let peeled := args.map tPeelTryLets
+  let lifted := peeled.zipIdx.filter fun ((bs, a), _) => !bs.isEmpty || tIsEarlyExitMatch a
+  match lifted.getLast? with
+  | none => .mk (.app f args) ty
+  | some (_, last) =>
+    let avoid0 := freeVars (TExpr.mk (.app f args) ty).erase ++
+      peeled.flatMap fun (bs, _) => bs.map (·.1)
+    let step (acc : List (String × TExpr) × List TExpr × List String)
+        (x : (List (String × TExpr) × TExpr) × Nat) :
+        List (String × TExpr) × List TExpr × List String :=
+      let (binds, out, avoid) := acc
+      let ((bs, a), i) := x
+      if i > last then (binds, out ++ [a], avoid)
+      else
+        let binds := binds ++ bs
+        let prefixedVar := match a.kind with
+          | .var v => v.startsWith tryBindPrefix
+          | _ => false
+        if tIsEarlyExitMatch a || (i < last && (!isAtomicArg a.erase || prefixedVar)) then
+          let base := match a.kind with
+            | .match_ (.mk (.var v) _) _ => s!"{tryBindPrefix}{v}"
+            | _ => s!"{tryBindPrefix}arg{i}"
+          let n := freshTryName avoid base
+          (binds ++ [(n, a)], out ++ [.mk (.var n) a.ty], n :: avoid)
+        else (binds, out ++ [a], avoid)
+    let (binds, out, _) := peeled.zipIdx.foldl step ([], [], avoid0)
+    tWrapTryLets binds (.mk (.app f out) ty)
+
+/-- `readMatch` on `TExpr`, for a `match` of type `ty`: the operand of a `?` is
+    read from the type of `branch(c)` and the type of `from_residual(r)`. -/
+def tReadMatch (scrut : TExpr) (arms : List (ImpPat × TExpr)) (ty : ImpType) : TExpr :=
+  let (bs, s) := tPeelTryLets scrut
+  let armVars := arms.flatMap fun (_, b) => freeVars b.erase
+  let retTy : ImpType := (arms.findSome? fun (_, b) =>
+    match b with
+    | .mk (.earlyReturn (.mk (.app "from_residual" _) fTy)) _ => some fTy
+    | _ => none).getD .unknown
+  let tryForm? : Option TExprKind := match s.kind with
+    | .app "branch" [c] => (tryOperandOf? s.ty retTy).bind fun k => tTryMatch? k c arms
+    | _ => none
+  let m : TExpr := .mk (tryForm?.getD (.match_ s arms)) ty
+  if bs.isEmpty then .mk (tryForm?.getD (.match_ scrut arms)) ty
+  else if bs.any (fun (n, _) => armVars.contains n) then .mk (.match_ scrut arms) ty
+  else tWrapTryLets bs m
+
 open Hax.JsonSize
 
 /-! ### `parseHaxExpr` and friends (mutually recursive on JSON sub-tree). -/
@@ -1824,7 +2116,7 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
     match h_Call_args : data.getObjValAs? (Array Json) "args" with
     | .ok argsJ =>
       let args ← argsJ.toList.attach.mapM (fun ⟨a, ha⟩ => parseHaxExpr a)
-      return .app funName args
+      return floatEarlyExitArgs funName args
     | .error e => throw e
   | .error _ =>
   match h_Let : j.getObjVal? "Let" with
@@ -1876,7 +2168,10 @@ def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
       match h_Match_arms : data.getObjValAs? (Array Json) "arms" with
       | .ok armsJ =>
         let arms ← armsJ.toList.attach.mapM (fun ⟨a, ha⟩ => parseArm a)
-        return .match_ scrut arms
+        let scrutTy := match scrutJ.getObjVal? "ty" with
+          | .ok t => parseHaxType t
+          | .error _ => .unknown
+        return readMatch scrut scrutTy armsJ.toList arms
       | .error e => throw e
     | .error e => throw e
   | .error _ =>
@@ -2248,25 +2543,29 @@ def parseStmt (j : Json) : Except String ImpExpr := do
         | .ok (.null) => pure .unitVal
         | .ok e => parseHaxExpr e
         | _ => pure .unitVal
+      -- The `let`s that `floatEarlyExitArgs` put at the head of the initializer
+      -- go in front of the statement.
+      let (tryBinds, init) := peelTryLets init
       -- Handle tuple destructuring: let (a, b) = rhs → let _tup := rhs; let a := _tup.1; let b := _tup.2
       -- Uses nested letBind so stmtsToSeq can connect the tail properly.
-      match pat with
-      | .tuplePat pats =>
-        let tmpName := "_tup"
-        let bindings := tupleDestructBinds tmpName pats 0
-        let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
-        return .letBind tmpName init inner
-      | .varPat n =>
-        return .letBind n init .unitVal  -- body filled in by stmtsToSeq
-      | _ =>
-        -- Struct destructuring: let S { x, .. } = init → let _st := init; let x := _st.x
-        match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
-        | some fields =>
-          let bindings := structDestructBinds "_st" fields
+      let stmt : ImpExpr := match pat with
+        | .tuplePat pats =>
+          let tmpName := "_tup"
+          let bindings := tupleDestructBinds tmpName pats 0
           let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
-          return .letBind "_st" init inner
-        | none =>
-          return .letBind "_let" init .unitVal
+          .letBind tmpName init inner
+        | .varPat n =>
+          .letBind n init .unitVal  -- body filled in by stmtsToSeq
+        | _ =>
+          -- Struct destructuring: let S { x, .. } = init → let _st := init; let x := _st.x
+          match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
+          | some fields =>
+            let bindings := structDestructBinds "_st" fields
+            let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
+            .letBind "_st" init inner
+          | none =>
+            .letBind "_let" init .unitVal
+      return wrapTryLets tryBinds stmt
     | .error _ => return .unitVal
   | .error _ => return .unitVal
 termination_by jsonSize j
@@ -2941,6 +3240,105 @@ def flattenModItems (j : Json) : Json :=
   | .arr items => .arr (flattenModItemsAux items (#[], {})).1
   | _ => j
 
+/-- Every item of a hax export, at the top level or under a `Mod`. -/
+partial def exportItems (j : Json) : List Json :=
+  match j with
+  | .arr items => items.toList.flatMap fun it =>
+    let sub : List Json :=
+      match (it.getObjVal? "kind" >>= (·.getObjVal? "Mod")) with
+      | .ok (.arr modData) =>
+        match modData.toList[1]? with
+        | some s => exportItems s
+        | none => []
+      | .ok modData =>
+        match modData.getObjValAs? (Array Json) "items" with
+        | .ok s => exportItems (.arr s)
+        | _ => []
+      | _ => []
+    it :: sub
+  | _ => []
+
+/-! ## Associated types of trait `impl` blocks
+
+A projection type `P::A` (an `Alias` node) of a trait whose `impl` blocks in
+the export give the associated type `A` exactly one type is read at that type:
+in struct fields (`parseStructDefsFromJson`), and in every type of the item
+signatures, call sites and expressions read by the export-level parsers
+(`resolveAssocTypes`). -/
+
+/-- The trait and associated-item short names of a projection type `P::A`,
+    from the value of its `Alias` node: the trait of the projection's
+    `impl_expr` and the leaf name of its `assoc_item`. -/
+def aliasProjTraitItem (alias : Json) : Option (String × String) := do
+  let kind ← (alias.getObjVal? "kind").toOption
+  let proj ← (kind.getObjVal? "Projection").toOption
+  let ie ← (proj.getObjVal? "impl_expr").toOption
+  let tr ← (ie.getObjVal? "trait").toOption
+  let tv ← (tr.getObjVal? "value").toOption
+  let tvv ← (tv.getObjVal? "value").toOption
+  let traitName ← (tvv.getObjVal? "def_id").toOption >>= defIdLeafName
+  let item ← (proj.getObjVal? "assoc_item").toOption
+  let itemName ← (item.getObjVal? "def_id").toOption >>= defIdLeafName
+  pure (traitName, itemName)
+
+/-- The associated types defined by the trait `impl` blocks of an export, as
+    `(trait, associated type, type)`: the short names of the `impl`'s trait and
+    of each of its `Type` items, and the item's `ty`, without duplicates. -/
+def implAssocTypes (j : Json) : List (String × String × Json) :=
+  ((exportItems j).flatMap fun it => (do
+    let kind ← (it.getObjVal? "kind").toOption
+    let impl ← (kind.getObjVal? "Impl").toOption
+    let tr ← (impl.getObjVal? "of_trait").toOption
+    let tv ← (tr.getObjVal? "value").toOption
+    let traitName ← (tv.getObjVal? "def_id").toOption >>= defIdLeafName
+    let implItems ← (impl.getObjValAs? (Array Json) "items").toOption
+    pure (implItems.toList.filterMap fun (ii : Json) => do
+      let ik ← (ii.getObjVal? "kind").toOption
+      let tyItem ← (ik.getObjVal? "Type").toOption
+      let ty ← (tyItem.getObjVal? "ty").toOption
+      let name ← match ii.getObjVal? "ident" with
+        | .ok (.arr identPair) => match identPair.toList with
+          | (.str n) :: _ => some n
+          | _ => none
+        | _ => none
+      pure (traitName, name, ty))).getD []).eraseDups
+
+/-- The type of a projection `P::A` (a type node whose value is an `Alias`) of a
+    trait whose `impl` blocks in `assoc` (`implAssocTypes`) give `A` exactly one
+    type; `none` for any other type node. -/
+def resolveAssocType? (assoc : List (String × String × Json)) (tyJ : Json) :
+    Option Json := do
+  let v ← (tyJ.getObjVal? "value").toOption
+  let alias ← (v.getObjVal? "Alias").toOption
+  let (t, a) ← aliasProjTraitItem alias
+  match (assoc.filter fun (t', a', _) => t' == t && a' == a).map (·.2.2) with
+  | [ty] => some ty
+  | _ => none
+
+/-- The type of a struct field: the type `resolveAssocType?` gives a
+    projection, any other type unchanged. -/
+def resolveAssocFieldType (assoc : List (String × String × Json)) (tyJ : Json) : Json :=
+  (resolveAssocType? assoc tyJ).getD tyJ
+
+/-- An export with every type node that `resolveAssocType?` resolves, at any
+    depth, replaced by its resolution under the export's associated types
+    (`implAssocTypes`). An export whose trait `impl` blocks define no
+    associated type is returned unchanged. The replacement types are not
+    rewritten further. -/
+partial def resolveAssocTypes (j : Json) : Json :=
+  let assoc := implAssocTypes j
+  if assoc.isEmpty then j else go assoc j
+where
+  /-- The rewrite of `resolveAssocTypes` under the associated types `assoc`. -/
+  go (assoc : List (String × String × Json)) (j : Json) : Json :=
+    match j with
+    | .arr xs => .arr (xs.map (go assoc))
+    | .obj t =>
+      match resolveAssocType? assoc j with
+      | some ty => ty
+      | none => Json.mkObj (t.toList.map fun (k, v) => (k, go assoc v))
+    | _ => j
+
 /-- Extract the function name from a hax `Fn` item's `ident` field.
     Format: `[name_string, span_object]`. -/
 def extractFnName (ident : Json) : String :=
@@ -3146,7 +3544,8 @@ partial def parseHaxItemWithTypes (j : Json) :
 
 /-- Parse a full hax export with per-function type information.
     Returns both the combined ImpExpr and a list of (name, FnTypeInfo).
-    Recurses into Mod items to find nested functions/constants. -/
+    Recurses into Mod items to find nested functions/constants. Projection
+    types are read at the types `resolveAssocTypes` gives them. -/
 partial def parseHaxFileWithTypes (j : Json) :
     Except String (ImpExpr × List (String × FnTypeInfo)) := do
   let rec parseItemsWithTypes (items : List Json) :
@@ -3184,7 +3583,7 @@ partial def parseHaxFileWithTypes (j : Json) :
             pure ()
         | none => pure ()
     return result
-  match j with
+  match resolveAssocTypes j with
   | .arr items =>
     let parsed ← parseItemsWithTypes items.toList
     match parsed with
@@ -3318,8 +3717,10 @@ partial def extractCallSigsItem (item : Json)
     of a call to a `Fn` item of the export named and typed after its declared
     parameters (`localFnParamSigs`, `callParamSig`).
     Returns deduplicated map: functionName → FnTypeInfo.
-    When multiple call sites exist, keeps the one with the most non-unknown arg types. -/
+    When multiple call sites exist, keeps the one with the most non-unknown arg types.
+    Projection types are read at the types `resolveAssocTypes` gives them. -/
 partial def extractCallSignaturesFromFile (j : Json) : List (String × FnTypeInfo) :=
+  let j := resolveAssocTypes j
   let decls := match j with
     | Json.arr items => localFnParamSigs items.toList
     | _ => []
@@ -3414,9 +3815,10 @@ partial def extractVarRefTypesItem (item : Json) : List (String × ImpType) :=
   | _ => []
 
 /-- Extract variable reference types from a full hax export JSON.
-    Returns deduplicated map: variableName → ImpType. -/
+    Returns deduplicated map: variableName → ImpType. Projection types are
+    read at the types `resolveAssocTypes` gives them. -/
 partial def extractVarRefTypesFromFile (j : Json) : List (String × ImpType) :=
-  let raw : List (String × ImpType) := match j with
+  let raw : List (String × ImpType) := match resolveAssocTypes j with
     | Json.arr items => items.toList.flatMap fun item =>
       extractVarRefTypesItem item ++
       (match item.getObjVal? "kind" with
@@ -3447,9 +3849,10 @@ partial def extractCallRetTypesItem (item : Json) : List (String × ImpType) :=
   | _ => []
 
 /-- Extract call return types from a full hax export JSON.
-    Returns deduplicated map: functionName → ImpType. -/
+    Returns deduplicated map: functionName → ImpType. Projection types are
+    read at the types `resolveAssocTypes` gives them. -/
 partial def extractCallReturnTypesFromFile (j : Json) : List (String × ImpType) :=
-  let raw := match j with
+  let raw := match resolveAssocTypes j with
     | .arr items => items.toList.flatMap extractCallRetTypesItem
     | _ => []
   -- Deduplicate: keep first occurrence per function name
@@ -3729,7 +4132,7 @@ where
           if (resolveTraitImplCall funJ implMap).isSome then funName''
           else qualifyNominalHead q funName''
         | none => funName''
-      return .app funName'' args
+      return (tFloatEarlyExitArgs funName'' args (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Let" then
       let exprJ ← data.getObjVal? "expr"
@@ -3809,7 +4212,7 @@ where
       let scrut ← parseHaxTExpr (← data.getObjVal? "scrutinee") implMap
       let armsJ ← data.getObjValAs? (Array Json) "arms"
       let arms ← armsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseTArm a)
-      return .match_ scrut arms
+      return (tReadMatch scrut arms (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Tuple" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
@@ -4168,24 +4571,28 @@ where
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
         | .ok e => parseHaxTExpr e implMap
         | _ => pure (TExpr.mk .unitVal .unit)
-      match pat with
-      | .tuplePat pats =>
-        let tmpName := "_tup"
-        let bindings := tTupleDestructBinds tmpName init.ty pats 0
-        let inner := bindings.foldr (fun (n, proj) acc =>
-          TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
-        return TExpr.mk (.letBind tmpName init inner) .unknown
-      | .varPat n =>
-        return TExpr.mk (.letBind n init (TExpr.mk .unitVal .unit)) .unknown
-      | _ =>
-        match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
-        | some fields =>
-          let bindings := tStructDestructBinds "_st" init.ty fields
+      -- The `let`s that `tFloatEarlyExitArgs` put at the head of the
+      -- initializer go in front of the statement.
+      let (tryBinds, init) := tPeelTryLets init
+      let stmt : TExpr := match pat with
+        | .tuplePat pats =>
+          let tmpName := "_tup"
+          let bindings := tTupleDestructBinds tmpName init.ty pats 0
           let inner := bindings.foldr (fun (n, proj) acc =>
             TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
-          return TExpr.mk (.letBind "_st" init inner) .unknown
-        | none =>
-          return TExpr.mk (.letBind "_let" init (TExpr.mk .unitVal .unit)) .unknown
+          TExpr.mk (.letBind tmpName init inner) .unknown
+        | .varPat n =>
+          TExpr.mk (.letBind n init (TExpr.mk .unitVal .unit)) .unknown
+        | _ =>
+          match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
+          | some fields =>
+            let bindings := tStructDestructBinds "_st" init.ty fields
+            let inner := bindings.foldr (fun (n, proj) acc =>
+              TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
+            TExpr.mk (.letBind "_st" init inner) .unknown
+          | none =>
+            TExpr.mk (.letBind "_let" init (TExpr.mk .unitVal .unit)) .unknown
+      return tWrapTryLets tryBinds stmt
     else
       return TExpr.mk .unitVal .unit
 
@@ -5079,24 +5486,6 @@ crate whose self type is a newtype over `u64` takes the head
 whole export (`tEraseFieldNewtypes`), so the operands and the result of such a
 call are `u64` values. -/
 
-/-- Every item of a hax export, at the top level or under a `Mod`. -/
-partial def exportItems (j : Json) : List Json :=
-  match j with
-  | .arr items => items.toList.flatMap fun it =>
-    let sub : List Json :=
-      match (it.getObjVal? "kind" >>= (·.getObjVal? "Mod")) with
-      | .ok (.arr modData) =>
-        match modData.toList[1]? with
-        | some s => exportItems s
-        | none => []
-      | .ok modData =>
-        match modData.getObjValAs? (Array Json) "items" with
-        | .ok s => exportItems (.arr s)
-        | _ => []
-      | _ => []
-    it :: sub
-  | _ => []
-
 /-- The top-level constants of a hax export (the four-element `Const` form
     `[ident, generics, ty, body]`), as `(name, body)`. -/
 def exportConstBodies (j : Json) : List (String × Json) :=
@@ -5250,12 +5639,15 @@ partial def tEraseFieldNewtypes (names : List String) (e : TExpr) : TExpr :=
     A call of a method of `primeir_hax::Field` resolved to an `impl` of
     `buildFieldImplMap` takes its modulus-tagged head (`fieldTaggedHead?`),
     and the self types of those `impl`s are erased to `u64` in every definition
-    and signature (`tEraseFieldNewtypes`), whatever the other flags. -/
+    and signature (`tEraseFieldNewtypes`), whatever the other flags.
+
+    Projection types are read at the types `resolveAssocTypes` gives them. -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
     (nominalKrates : List String := []) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
+  let j := resolveAssocTypes j
   -- Build the impl-self-type map once from the full JSON. This lets the
   -- recursive parse disambiguate user-defined methods (e.g. `Crs::len`)
   -- from stdlib ones (`slice::len`) at every Call node. `structFields`
@@ -5446,8 +5838,10 @@ def classifyFieldType (tyVal : Json) : String :=
   else "array"  -- default to array for unknown types
 
 /-- Parse struct definitions from a hax JSON export array.
-    Returns a list of `StructInfo` for all struct items. -/
-partial def parseStructDefs (items : List Json) : List StructInfo :=
+    Returns a list of `StructInfo` for all struct items. A field typed by an
+    associated type is read at the type `resolveAssocFieldType assoc` gives. -/
+partial def parseStructDefs (items : List Json)
+    (assoc : List (String × String × Json) := []) : List StructInfo :=
   let parseOneStruct (structData : Array Json) : Option StructInfo :=
     let name := match structData.toList with
       | (Json.arr nameSpan) :: _ => match nameSpan.toList with
@@ -5466,7 +5860,7 @@ partial def parseStructDefs (items : List Json) : List StructInfo :=
           | _ => ""
         if ident.isEmpty then none
         else
-          let ty := (fj.getObjVal? "ty").toOption
+          let ty := (fj.getObjVal? "ty").toOption.map (resolveAssocFieldType assoc)
           let typeTag := match ty with
             | some tyJ =>
               let tyVal := (tyJ.getObjVal? "value").toOption
@@ -5512,7 +5906,7 @@ partial def parseStructDefs (items : List Json) : List StructInfo :=
       let modStructs := match kindJ.getObjVal? "Mod" with
         | Except.ok (Json.arr modData) =>
           match modData.toList[1]? with
-          | some (Json.arr subItems) => parseStructDefs subItems.toList
+          | some (Json.arr subItems) => parseStructDefs subItems.toList assoc
           | _ => []
         | _ => []
       let thisStruct := match kindJ.getObjVal? "Struct" with
@@ -5521,10 +5915,11 @@ partial def parseStructDefs (items : List Json) : List StructInfo :=
       acc ++ modStructs ++ thisStruct.toList
     | none => acc) []
 
-/-- Parse struct defs from a top-level hax JSON (array of items). -/
+/-- Parse struct defs from a top-level hax JSON (array of items), with the
+    associated types of the export's trait `impl` blocks (`implAssocTypes`). -/
 def parseStructDefsFromJson (j : Json) : List StructInfo :=
   let raw := match j with
-    | .arr items => parseStructDefs items.toList
+    | .arr items => parseStructDefs items.toList (implAssocTypes j)
     | _ => []
   -- Deduplicate by struct name (keep first occurrence)
   raw.foldl (fun acc si =>
