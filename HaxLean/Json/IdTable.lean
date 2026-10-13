@@ -66,10 +66,11 @@ def tableEntryValue : Json → Option Json
 
 /-- The inline form of a hax frontend export. An export `[table, items]`
     written with `--use-ids` has its table resolved in id order and
-    substituted into `items`; any other value is returned unchanged. -/
+    substituted into `items`, an item array (hax 0.3) or the object
+    `{"Legacy": items}` (hax 0.4); any other value is returned unchanged. -/
 def resolveIds (j : Json) : Json :=
   match j with
-  | .arr #[.arr table, .arr items] =>
+  | .arr #[.arr table, items@(.arr _)] | .arr #[.arr table, items@(.obj _)] =>
     match table[0]? >>= tableEntryValue with
     | none => j
     | some _ =>
@@ -77,7 +78,7 @@ def resolveIds (j : Json) : Json :=
         match tableEntryValue entry with
         | some v => acc.push (substIds acc v)
         | none => acc.push .null
-      substIds tbl (.arr items)
+      substIds tbl items
   | _ => j
 
 end Hax
