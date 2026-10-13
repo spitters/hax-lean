@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.HaxAdapter
+import all HaxLean.HaxAdapter
 import all Lean.Data.Json.Basic
 import Std.Data.TreeMap.Raw.Lemmas
 
@@ -2112,9 +2113,9 @@ The lemmas all share the same template:
    reduce `parseHaxExpr j` to `parseExprKind j contents`.
 2. Derive `contents = .obj kvs` from the active tag's `getObjVal?`
    succeeding (only objects support key extraction).
-3. `unfold parseExprKind at h; dsimp only at h` — unfold the body
-   and reduce the early `match j with | .str "Todo" => …` against
-   `.obj kvs`.
+3. `unfold_pek h kvs; dsimp only at h` — unfold the body, close the
+   `UpvarRef` arm (its output is a `.var`), and reduce the early
+   `match j.getStr? with | .ok "Todo" => …` against `.obj kvs`.
 4. Rewrite each earlier-cascade `getObjVal? <key>` to `.error _`,
    then rewrite the active tag's `getObjVal?` to `.ok data`.
 5. `dsimp only [pure, bind]; simp only [Except.pure]; injection h` —
@@ -2139,6 +2140,36 @@ cascades. The full 41-tag step lemma will instantiate this template
 once per tag (see "Estimated total lines" in the loop state file).
 -/
 
+/-- `getStr?` on an object is an error; this reduces the `Todo` early exit of
+    `parseExprKind` on `.obj kvs`. -/
+@[simp] theorem getStr?_obj (kvs : Std.TreeMap.Raw String Json compare) :
+    (Json.obj kvs).getStr? = .error "String expected" := by
+  simp [Json.getStr?]; rfl
+
+/-- `unfold_pek h kvs` unfolds `parseExprKind` in the hypothesis
+    `h : parseExprKind outer (.obj kvs) = .ok e` with the goal
+    `JsonRefinesExpr _ e`. It splits on the `UpvarRef` key: when that key is
+    present, the parser output is a `.var` (through the `VarRef` or the
+    `UpvarRef` arm) and the goal is closed by `var_any`; otherwise `h` is the
+    unfolded body with the `UpvarRef` lookup rewritten to `.error _`. -/
+macro "unfold_pek " h:ident kvs:ident : tactic => `(tactic| (
+  rcases hU : (Lean.Json.obj $kvs).getObjVal? "UpvarRef" with eU | dU
+  rotate_left
+  · unfold parseExprKind at $h:ident
+    simp only [getStr?_obj] at $h:ident
+    rcases hV : (Lean.Json.obj $kvs).getObjVal? "VarRef" with eV | dV
+    · rw [hV, hU] at $h:ident
+      simp only [pure, Except.pure, Except.ok.injEq] at $h:ident
+      subst $h:ident
+      exact .var_any _
+    · rw [hV] at $h:ident
+      simp only [pure, Except.pure, Except.ok.injEq] at $h:ident
+      subst $h:ident
+      exact .var_any _
+  unfold parseExprKind at $h:ident
+  simp only [getStr?_obj] at $h:ident
+  rw [hU] at $h:ident))
+
 /-- **Pilot step lemma for `Todo`** (early-exit; cascade depth 0).
 
     When `j`'s contents is the bare string `.str "Todo"`,
@@ -2153,7 +2184,7 @@ theorem parseHaxExpr_step_for_Todo
   rw [h_contents] at h
   simp only at h
   rw [parseExprKind.eq_def] at h
-  simp [pure, Except.pure] at h
+  simp [pure, Except.pure, Json.getStr?] at h
   subst h
   exact .app_empty "hax_unsupported_Todo"
 
@@ -2176,7 +2207,7 @@ theorem parseHaxExpr_step_for_VarRef
     | obj kvs => exact ⟨kvs, rfl⟩
     | _ => simp [Lean.Json.getObjVal?] at h_VarRef
   obtain ⟨kvs, rfl⟩ := h_obj
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   rw [h_VarRef] at h
   dsimp only [pure, bind] at h
@@ -2205,7 +2236,7 @@ theorem parseHaxExpr_step_for_GlobalName
     | obj kvs => exact ⟨kvs, rfl⟩
     | _ => simp [Lean.Json.getObjVal?] at h_GlobalName
   obtain ⟨kvs, rfl⟩ := h_obj
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨err, h_VR_eq⟩ : ∃ err, (Lean.Json.obj kvs).getObjVal? "VarRef" = .error err := by
     match heq : (Lean.Json.obj kvs).getObjVal? "VarRef" with
@@ -2255,7 +2286,7 @@ theorem parseHaxExpr_step_for_Continue
     | obj kvs => exact ⟨kvs, rfl⟩
     | _ => simp [Lean.Json.getObjVal?] at h_Continue
   obtain ⟨kvs, rfl⟩ := h_obj
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   -- Reduce all 16 prior `match` blocks to their `.error _` branches.
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
@@ -2354,7 +2385,7 @@ theorem parseHaxExpr_step_for_NamedConst
     | obj kvs => exact ⟨kvs, rfl⟩
     | _ => simp [Lean.Json.getObjVal?] at h_NC
   obtain ⟨kvs, rfl⟩ := h_obj
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   -- Helper to convert "not .ok" hypothesis to ".error _" equation.
   have mk_err : ∀ k, (∀ d, (Lean.Json.obj kvs).getObjVal? k ≠ .ok d) →
@@ -2559,7 +2590,7 @@ theorem parseHaxExpr_step_for_ConstBlock
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_CB
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -2670,7 +2701,7 @@ theorem parseHaxExpr_step_for_Break_unit
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Break
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop⟩ := h_prior_err
@@ -2733,7 +2764,7 @@ theorem parseHaxExpr_step_for_Return_unit
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Return
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con⟩ :=
@@ -2817,7 +2848,7 @@ theorem parseHaxExpr_step_for_ConstParam
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_CP
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -2923,7 +2954,7 @@ theorem parseHaxExpr_step_for_ConstRef
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_CR
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3031,7 +3062,7 @@ theorem parseHaxExpr_step_for_StaticRef
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_SR
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3143,7 +3174,7 @@ theorem parseHaxExpr_step_for_Use
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Use
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3224,7 +3255,7 @@ theorem parseHaxExpr_step_for_NeverToAny
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_NTA
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3307,7 +3338,7 @@ theorem parseHaxExpr_step_for_Box
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Box
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3394,7 +3425,7 @@ theorem parseHaxExpr_step_for_Closure
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Cls
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3435,10 +3466,12 @@ theorem parseHaxExpr_step_for_Closure
   rw [h_Cls] at h
   dsimp only [pure, bind] at h
   rw [h_body] at h
+  simp only at h
   cases hp : parseHaxExpr bodyJ with
-  | error msg => rw [hp] at h; cases h
+  | error msg => rw [hp] at h; simp [Except.bind] at h
   | ok b =>
     rw [hp] at h
+    simp only [Except.bind] at h
     cases hn : closureParams? data with
     | none =>
       rw [hn] at h
@@ -3499,7 +3532,7 @@ theorem parseHaxExpr_step_for_PlaceTypeAscription
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_PTA
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3593,7 +3626,7 @@ theorem parseHaxExpr_step_for_ValueTypeAscription
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_VTA
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3690,7 +3723,7 @@ theorem parseHaxExpr_step_for_PointerCoercion
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_PC
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -3781,7 +3814,7 @@ theorem parseHaxExpr_step_for_Borrow
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Borrow
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp⟩ := h_prior_err
@@ -3841,7 +3874,7 @@ theorem parseHaxExpr_step_for_Deref
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Deref
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor⟩ := h_prior_err
@@ -3903,7 +3936,7 @@ theorem parseHaxExpr_step_for_Loop
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Loop
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf⟩ := h_prior_err
@@ -3973,7 +4006,7 @@ theorem parseHaxExpr_step_for_Field
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Field
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -4053,7 +4086,7 @@ theorem parseHaxExpr_step_for_TupleField
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_TF
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -4136,7 +4169,7 @@ theorem parseHaxExpr_step_for_Cast
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Cast
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -4241,7 +4274,7 @@ theorem parseHaxExpr_step_for_Yield
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Yield
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -4337,7 +4370,7 @@ theorem parseHaxExpr_step_for_Break_value
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Break
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop⟩ := h_prior_err
@@ -4443,7 +4476,7 @@ theorem parseHaxExpr_step_for_Break_no_value
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Break
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop⟩ := h_prior_err
@@ -4508,7 +4541,7 @@ theorem parseHaxExpr_step_for_Return_value
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Return
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con⟩ :=
@@ -4618,7 +4651,7 @@ theorem parseHaxExpr_step_for_Return_no_value
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Return
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con⟩ :=
@@ -4709,7 +4742,7 @@ theorem parseHaxExpr_step_for_Unary
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Unary
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup, h_Arr,
           h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con, h_Ret, h_Bin,
@@ -4788,7 +4821,7 @@ theorem parseHaxExpr_step_for_Binary
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Binary
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup, h_Arr,
           h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con, h_Ret⟩ := h_prior_err
@@ -4870,7 +4903,7 @@ theorem parseHaxExpr_step_for_LogicalOp
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_LO
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup, h_Arr,
           h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con, h_Ret,
@@ -4957,7 +4990,7 @@ theorem parseHaxExpr_step_for_Index
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Index
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup, h_Arr,
           h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con, h_Ret, h_Bin,
@@ -5058,7 +5091,7 @@ theorem parseHaxExpr_step_for_Repeat
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Repeat
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup, h_Arr,
           h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con, h_Ret, h_Bin,
@@ -5141,7 +5174,7 @@ theorem parseHaxExpr_step_for_If_null_else
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_If
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5199,7 +5232,7 @@ theorem parseHaxExpr_step_for_If_value_else
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_If
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5300,7 +5333,7 @@ theorem parseHaxExpr_step_for_If_no_else
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_If
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5388,7 +5421,7 @@ theorem parseHaxExpr_step_for_Adt
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Adt
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk,
@@ -5451,7 +5484,7 @@ theorem parseHaxExpr_step_for_Call
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Call
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5498,7 +5531,7 @@ theorem parseHaxExpr_step_for_Array
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Array
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup⟩ :=
     h_prior_err
@@ -5552,7 +5585,7 @@ theorem parseHaxExpr_step_for_Tuple
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Tuple
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5592,8 +5625,10 @@ theorem parseHaxExpr_step_for_Tuple
     parses it as `rhs`, then dispatches on the `pat` shape:
     * `.tuplePat _` → `.letBind "_tup" rhs (foldr ...)`
     * `.varPat n` → `.letBind n rhs .unitVal`
+    * a struct pattern (`structPatFields?`) → `.letBind "_st" rhs (foldr ...)`
+      over `structDestructBinds "_st" fields`
     * other → `.letBind "_let" rhs .unitVal`
-    All three shapes are `.letBind _ rhs _`. Witnessed by `let_payload n h_p`
+    All four shapes are `.letBind _ rhs _`. Witnessed by `let_payload n h_p`
     with the strong-IH supplying the rhs parse-equation. -/
 theorem parseHaxExpr_step_for_Let
     {j contents data rhsJ : Json} {e : ImpExpr}
@@ -5612,7 +5647,7 @@ theorem parseHaxExpr_step_for_Let
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Let
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5629,8 +5664,10 @@ theorem parseHaxExpr_step_for_Let
   | .ok rhs, h =>
     simp only at h
     -- Inner pattern dispatch: all three branches produce `.letBind _ rhs _`.
-    split at h <;> (injection h with h_eq; subst h_eq;
-                    exact .let_payload _ h_p)
+    split at h <;> first
+      | (injection h with h_eq; subst h_eq; exact .let_payload _ h_p)
+      | (split at h <;> (injection h with h_eq; subst h_eq;
+                         exact .let_payload _ h_p))
   | .error _, h => cases h
 
 /-- **Step lemma for `Block`** (cascade position 6).
@@ -5659,7 +5696,7 @@ theorem parseHaxExpr_step_for_Block
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Block
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5718,7 +5755,7 @@ theorem parseHaxExpr_step_for_Match
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Match
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -5780,7 +5817,7 @@ theorem parseHaxExpr_step_for_Assign
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Assign
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr⟩ := h_prior_err
@@ -5808,8 +5845,10 @@ theorem parseHaxExpr_step_for_Assign
     | .ok rhs, h =>
       simp only at h
       -- Inner dispatch on lhs' shape: all branches produce `.assign _ _`.
-      split at h <;> (injection h with h_eq; subst h_eq;
-                      exact .assign_payload _ h_pr)
+      split at h <;> first
+        | (injection h with h_eq; subst h_eq; exact .assign_payload _ h_pr)
+        | (split at h <;> (injection h with h_eq; subst h_eq;
+                           exact .assign_payload _ h_pr))
     | .error _, h => cases h
   | .error _, h => cases h
 
@@ -5843,7 +5882,7 @@ theorem parseHaxExpr_step_for_AssignOp
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_AssignOp
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg⟩ := h_prior_err
@@ -5872,8 +5911,10 @@ theorem parseHaxExpr_step_for_AssignOp
     | .ok rhs, h =>
       simp only at h
       -- Inner dispatch on lhs' shape: all branches produce `.assign _ _`.
-      split at h <;> (injection h with h_eq; subst h_eq;
-                      exact .assign_payload _ h_pr)
+      split at h <;> first
+        | (injection h with h_eq; subst h_eq; exact .assign_payload _ h_pr)
+        | (split at h <;> (injection h with h_eq; subst h_eq;
+                           exact .assign_payload _ h_pr))
     | .error _, h => cases h
   | .error _, h => cases h
 
@@ -5907,7 +5948,7 @@ theorem parseHaxExpr_step_for_Literal
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Literal
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
   obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
@@ -5975,7 +6016,7 @@ theorem parseHaxExpr_step_for_Todo_obj
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Todo
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat,
           h_Tup, h_Arr, h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con,
@@ -6073,7 +6114,7 @@ theorem parseHaxExpr_step_for_Block_no_stmts
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Block
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let⟩ := h_prior_err
   obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR
@@ -6149,7 +6190,7 @@ theorem parseHaxExpr_step_for_Repeat_no_count
   rw [h_contents] at h
   simp only at h
   obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Repeat
-  unfold parseExprKind at h
+  unfold_pek h kvs
   dsimp only at h
   obtain ⟨h_VR, h_GN, h_Lit, h_If, h_Call, h_Let, h_Blk, h_Mat, h_Tup, h_Arr,
           h_Asg, h_AOp, h_Bor, h_Drf, h_Lop, h_Brk, h_Con, h_Ret, h_Bin,
@@ -6218,45 +6259,52 @@ theorem getObjValAs_error_of_not_ok {α : Type} [Lean.FromJson α]
   | .ok d => exact absurd heq (h d)
   | .error err => exact ⟨err, rfl⟩
 
-set_option maxHeartbeats 1000000 in
-theorem parseHaxExpr_step :
-    ∀ j : Json,
-      (∀ j', jsonSize j' < jsonSize j →
-        ∀ e', parseHaxExpr j' = .ok e' → JsonRefinesExpr j' e') →
-      ∀ e, parseHaxExpr j = .ok e → JsonRefinesExpr j e := by
-  intro j ih e h
-  -- Step 1: contents must extract.
-  match h_c : j.getObjVal? "contents" with
-  | .error _ =>
-    rw [parseHaxExpr] at h
-    rw [h_c] at h
-    simp at h
-  | .ok contents =>
-    -- Step 2: dispatch on contents shape.
-    -- 2a: leading Todo str-match early-exit
-    by_cases h_todo : contents = .str "Todo"
-    · subst h_todo
-      exact parseHaxExpr_step_for_Todo h_c h
-    -- 2b: cascade through obj-tags. Each "no .ok" branch manufactures
-    -- a `∀ d, ... ≠ .ok d` hypothesis and recurses.
-    match h_VR : contents.getObjVal? "VarRef" with
-    | .ok data => exact parseHaxExpr_step_for_VarRef h_c h_VR h
-    | .error _ =>
-    have h_VR_err : ∀ d, contents.getObjVal? "VarRef" ≠ .ok d := by
-      intro d hd; rw [h_VR] at hd; cases hd
-    match h_GN : contents.getObjVal? "GlobalName" with
-    | .ok data => exact parseHaxExpr_step_for_GlobalName h_c h_VR_err h_GN h
-    | .error _ =>
-    have h_GN_err : ∀ d, contents.getObjVal? "GlobalName" ≠ .ok d := by
-      intro d hd; rw [h_GN] at hd; cases hd
-    match h_Lit : contents.getObjVal? "Literal" with
-    | .ok data => exact parseHaxExpr_step_for_Literal h_c h_VR_err h_GN_err h_Lit h
-    | .error _ =>
-    have h_Lit_err : ∀ d, contents.getObjVal? "Literal" ≠ .ok d := by
-      intro d hd; rw [h_Lit] at hd; cases hd
-    -- Tag 3: If has 3 variants based on else_opt slot (.null / .ok e / .error)
-    match h_If : contents.getObjVal? "If" with
-    | .ok data =>
+/-! ### Branches of the step lemma
+
+`parseExprKind` tries the tags of `ExprKind` in a fixed order. For each tag
+`T`, `parseHaxExpr_step_branch_T` closes the step goal of `parseHaxExpr_step`
+when every tag before `T` is absent from `contents` and `T` is present; the
+section variable `h_X_err` records the absence of the tag `X`.
+`parseHaxExpr_step_branch_none` closes it when every tag is absent. -/
+
+section StepBranches
+
+variable {j contents data : Json} {e : ImpExpr}
+  (ih : ∀ j', jsonSize j' < jsonSize j →
+    ∀ e', parseHaxExpr j' = .ok e' → JsonRefinesExpr j' e')
+  (h_c : j.getObjVal? "contents" = .ok contents)
+  (h : parseHaxExpr j = .ok e)
+include ih h_c h
+
+/-- Step goal when `VarRef` is present in `contents`. -/
+theorem parseHaxExpr_step_branch_VarRef (h_VR : contents.getObjVal? "VarRef" = .ok data) :
+    JsonRefinesExpr j e :=
+  parseHaxExpr_step_for_VarRef h_c h_VR h
+
+variable (h_VR_err : ∀ d, contents.getObjVal? "VarRef" ≠ .ok d)
+include h_VR_err
+
+/-- Step goal when `GlobalName` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_GlobalName
+    (h_GN : contents.getObjVal? "GlobalName" = .ok data) :
+    JsonRefinesExpr j e :=
+  parseHaxExpr_step_for_GlobalName h_c h_VR_err h_GN h
+
+variable (h_GN_err : ∀ d, contents.getObjVal? "GlobalName" ≠ .ok d)
+include h_GN_err
+
+/-- Step goal when `Literal` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Literal
+    (h_Lit : contents.getObjVal? "Literal" = .ok data) :
+    JsonRefinesExpr j e :=
+  parseHaxExpr_step_for_Literal h_c h_VR_err h_GN_err h_Lit h
+
+variable (h_Lit_err : ∀ d, contents.getObjVal? "Literal" ≠ .ok d)
+include h_Lit_err
+
+/-- Step goal when `If` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_If (h_If : contents.getObjVal? "If" = .ok data) :
+    JsonRefinesExpr j e := by
       -- Extract cond, then, else_opt slots, dispatch to the right variant
       match h_cond : data.getObjVal? "cond" with
       | .error _ =>
@@ -6265,7 +6313,7 @@ theorem parseHaxExpr_step :
         rw [h_c] at h
         simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_If
-        unfold parseExprKind at h
+        unfold_pek h kvs
         dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
@@ -6283,7 +6331,7 @@ theorem parseHaxExpr_step :
           rw [h_c] at h
           simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_If
-          unfold parseExprKind at h
+          unfold_pek h kvs
           dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
@@ -6333,12 +6381,13 @@ theorem parseHaxExpr_step :
             exact parseHaxExpr_step_for_If_no_else h_c ⟨h_VR_err, h_GN_err, h_Lit_err⟩
               h_If h_cond h_thn (fun d hd => by rw [h_else] at hd; cases hd)
               ih_cond ih_thn h
-    | .error _ =>
-    have h_If_err : ∀ d, contents.getObjVal? "If" ≠ .ok d := by
-      intro d hd; rw [h_If] at hd; cases hd
-    -- Tag 4: Call
-    match h_Call : contents.getObjVal? "Call" with
-    | .ok data =>
+
+variable (h_If_err : ∀ d, contents.getObjVal? "If" ≠ .ok d)
+include h_If_err
+
+/-- Step goal when `Call` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Call (h_Call : contents.getObjVal? "Call" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_args : data.getObjValAs? (Array Json) "args" with
       | .ok argsJ =>
         exact parseHaxExpr_step_for_Call h_c ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err⟩
@@ -6347,7 +6396,7 @@ theorem parseHaxExpr_step :
         -- Parser throws on missing args — contradicts h
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Call
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6356,12 +6405,13 @@ theorem parseHaxExpr_step :
         rw [h_Call] at h; dsimp only [pure, bind] at h
         rw [h_args] at h; simp only [Except.bind] at h
         cases h
-    | .error _ =>
-    have h_Call_err : ∀ d, contents.getObjVal? "Call" ≠ .ok d := by
-      intro d hd; rw [h_Call] at hd; cases hd
-    -- Tag 5: Let
-    match h_Let : contents.getObjVal? "Let" with
-    | .ok data =>
+
+variable (h_Call_err : ∀ d, contents.getObjVal? "Call" ≠ .ok d)
+include h_Call_err
+
+/-- Step goal when `Let` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Let (h_Let : contents.getObjVal? "Let" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_expr : data.getObjVal? "expr" with
       | .ok rhsJ =>
         exact parseHaxExpr_step_for_Let h_c ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err⟩
@@ -6369,7 +6419,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Let
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6379,12 +6429,13 @@ theorem parseHaxExpr_step :
         rw [h_Let] at h; dsimp only [pure, bind] at h
         rw [h_expr] at h; simp only [Except.bind] at h
         cases h
-    | .error _ =>
-    have h_Let_err : ∀ d, contents.getObjVal? "Let" ≠ .ok d := by
-      intro d hd; rw [h_Let] at hd; cases hd
-    -- Tag 6: Block (with Block_no_stmts variant)
-    match h_Block : contents.getObjVal? "Block" with
-    | .ok data =>
+
+variable (h_Let_err : ∀ d, contents.getObjVal? "Let" ≠ .ok d)
+include h_Let_err
+
+/-- Step goal when `Block` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Block (h_Block : contents.getObjVal? "Block" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_stmts : data.getObjValAs? (Array Json) "stmts" with
       | .ok stmtsJ =>
         exact parseHaxExpr_step_for_Block h_c
@@ -6396,12 +6447,13 @@ theorem parseHaxExpr_step :
         exact parseHaxExpr_step_for_Block_no_stmts h_c
           ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err⟩
           h_Block h_stmts_err h
-    | .error _ =>
-    have h_Block_err : ∀ d, contents.getObjVal? "Block" ≠ .ok d := by
-      intro d hd; rw [h_Block] at hd; cases hd
-    -- Tag 7: Match
-    match h_Match : contents.getObjVal? "Match" with
-    | .ok data =>
+
+variable (h_Block_err : ∀ d, contents.getObjVal? "Block" ≠ .ok d)
+include h_Block_err
+
+/-- Step goal when `Match` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Match (h_Match : contents.getObjVal? "Match" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_scrut : data.getObjVal? "scrutinee" with
       | .ok scrutJ =>
         match h_arms : data.getObjValAs? (Array Json) "arms" with
@@ -6412,7 +6464,7 @@ theorem parseHaxExpr_step :
         | .error _ =>
           rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Match
-          unfold parseExprKind at h; dsimp only at h
+          unfold_pek h kvs; dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
           obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6429,7 +6481,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Match
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6440,12 +6492,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7] at h
         rw [h_Match] at h; dsimp only [pure, bind] at h
         rw [h_scrut] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Match_err : ∀ d, contents.getObjVal? "Match" ≠ .ok d := by
-      intro d hd; rw [h_Match] at hd; cases hd
-    -- Tag 8: Tuple
-    match h_Tuple : contents.getObjVal? "Tuple" with
-    | .ok data =>
+
+variable (h_Match_err : ∀ d, contents.getObjVal? "Match" ≠ .ok d)
+include h_Match_err
+
+/-- Step goal when `Tuple` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Tuple (h_Tuple : contents.getObjVal? "Tuple" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_fields : data.getObjValAs? (Array Json) "fields" with
       | .ok fieldsJ =>
         exact parseHaxExpr_step_for_Tuple h_c
@@ -6454,7 +6507,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Tuple
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6466,12 +6519,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8] at h
         rw [h_Tuple] at h; dsimp only [pure, bind] at h
         rw [h_fields] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Tuple_err : ∀ d, contents.getObjVal? "Tuple" ≠ .ok d := by
-      intro d hd; rw [h_Tuple] at hd; cases hd
-    -- Tag 9: Array
-    match h_Array : contents.getObjVal? "Array" with
-    | .ok data =>
+
+variable (h_Tuple_err : ∀ d, contents.getObjVal? "Tuple" ≠ .ok d)
+include h_Tuple_err
+
+/-- Step goal when `Array` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Array (h_Array : contents.getObjVal? "Array" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_fields : data.getObjValAs? (Array Json) "fields" with
       | .ok fieldsJ =>
         exact parseHaxExpr_step_for_Array h_c
@@ -6480,7 +6534,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Array
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6493,12 +6547,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9] at h
         rw [h_Array] at h; dsimp only [pure, bind] at h
         rw [h_fields] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Array_err : ∀ d, contents.getObjVal? "Array" ≠ .ok d := by
-      intro d hd; rw [h_Array] at hd; cases hd
-    -- Tag 10: Assign
-    match h_Assign : contents.getObjVal? "Assign" with
-    | .ok data =>
+
+variable (h_Array_err : ∀ d, contents.getObjVal? "Array" ≠ .ok d)
+include h_Array_err
+
+/-- Step goal when `Assign` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Assign (h_Assign : contents.getObjVal? "Assign" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         match h_rhs : data.getObjVal? "rhs" with
@@ -6509,7 +6564,7 @@ theorem parseHaxExpr_step :
         | .error _ =>
           rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Assign
-          unfold parseExprKind at h; dsimp only at h
+          unfold_pek h kvs; dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
           obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6529,7 +6584,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Assign
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6543,12 +6598,14 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10] at h
         rw [h_Assign] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Assign_err : ∀ d, contents.getObjVal? "Assign" ≠ .ok d := by
-      intro d hd; rw [h_Assign] at hd; cases hd
-    -- Tag 11: AssignOp
-    match h_AssignOp : contents.getObjVal? "AssignOp" with
-    | .ok data =>
+
+variable (h_Assign_err : ∀ d, contents.getObjVal? "Assign" ≠ .ok d)
+include h_Assign_err
+
+/-- Step goal when `AssignOp` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_AssignOp
+    (h_AssignOp : contents.getObjVal? "AssignOp" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         match h_rhs : data.getObjVal? "rhs" with
@@ -6559,7 +6616,7 @@ theorem parseHaxExpr_step :
         | .error _ =>
           rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_AssignOp
-          unfold parseExprKind at h; dsimp only at h
+          unfold_pek h kvs; dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
           obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6580,7 +6637,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_AssignOp
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6595,12 +6652,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11] at h
         rw [h_AssignOp] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_AssignOp_err : ∀ d, contents.getObjVal? "AssignOp" ≠ .ok d := by
-      intro d hd; rw [h_AssignOp] at hd; cases hd
-    -- Tag 12: Borrow (with strong-IH on inner arg)
-    match h_Borrow : contents.getObjVal? "Borrow" with
-    | .ok data =>
+
+variable (h_AssignOp_err : ∀ d, contents.getObjVal? "AssignOp" ≠ .ok d)
+include h_AssignOp_err
+
+/-- Step goal when `Borrow` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Borrow (h_Borrow : contents.getObjVal? "Borrow" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_arg : data.getObjVal? "arg" with
       | .ok argJ =>
         have h_arg_lt : jsonSize argJ < jsonSize j :=
@@ -6614,7 +6672,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Borrow
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6630,12 +6688,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12] at h
         rw [h_Borrow] at h; dsimp only [pure, bind] at h
         rw [h_arg] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Borrow_err : ∀ d, contents.getObjVal? "Borrow" ≠ .ok d := by
-      intro d hd; rw [h_Borrow] at hd; cases hd
-    -- Tag 13: Deref
-    match h_Deref : contents.getObjVal? "Deref" with
-    | .ok data =>
+
+variable (h_Borrow_err : ∀ d, contents.getObjVal? "Borrow" ≠ .ok d)
+include h_Borrow_err
+
+/-- Step goal when `Deref` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Deref (h_Deref : contents.getObjVal? "Deref" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_arg : data.getObjVal? "arg" with
       | .ok argJ =>
         have h_arg_lt : jsonSize argJ < jsonSize j :=
@@ -6649,7 +6708,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Deref
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6666,12 +6725,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13] at h
         rw [h_Deref] at h; dsimp only [pure, bind] at h
         rw [h_arg] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Deref_err : ∀ d, contents.getObjVal? "Deref" ≠ .ok d := by
-      intro d hd; rw [h_Deref] at hd; cases hd
-    -- Tag 14: Loop
-    match h_Loop : contents.getObjVal? "Loop" with
-    | .ok data =>
+
+variable (h_Deref_err : ∀ d, contents.getObjVal? "Deref" ≠ .ok d)
+include h_Deref_err
+
+/-- Step goal when `Loop` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Loop (h_Loop : contents.getObjVal? "Loop" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_body : data.getObjVal? "body" with
       | .ok bodyJ =>
         have h_body_lt : jsonSize bodyJ < jsonSize j :=
@@ -6685,7 +6745,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Loop
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6703,12 +6763,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14] at h
         rw [h_Loop] at h; dsimp only [pure, bind] at h
         rw [h_body] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Loop_err : ∀ d, contents.getObjVal? "Loop" ≠ .ok d := by
-      intro d hd; rw [h_Loop] at hd; cases hd
-    -- Tag 15: Break (3 variants — value-non-null, unit/null, no-value)
-    match h_Break : contents.getObjVal? "Break" with
-    | .ok data =>
+
+variable (h_Loop_err : ∀ d, contents.getObjVal? "Loop" ≠ .ok d)
+include h_Loop_err
+
+/-- Step goal when `Break` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Break (h_Break : contents.getObjVal? "Break" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_value : data.getObjVal? "value" with
       | .ok vJ =>
         by_cases h_n : vJ = .null
@@ -6728,21 +6789,24 @@ theorem parseHaxExpr_step :
         exact parseHaxExpr_step_for_Break_no_value h_c
           ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err⟩
           h_Break (fun ss hs => by rw [h_value] at hs; cases hs) h
-    | .error _ =>
-    have h_Break_err : ∀ d, contents.getObjVal? "Break" ≠ .ok d := by
-      intro d hd; rw [h_Break] at hd; cases hd
-    -- Tag 16: Continue
-    match h_Continue : contents.getObjVal? "Continue" with
-    | .ok data =>
+
+variable (h_Break_err : ∀ d, contents.getObjVal? "Break" ≠ .ok d)
+include h_Break_err
+
+/-- Step goal when `Continue` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Continue
+    (h_Continue : contents.getObjVal? "Continue" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_Continue h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err⟩
         h_Continue h
-    | .error _ =>
-    have h_Continue_err : ∀ d, contents.getObjVal? "Continue" ≠ .ok d := by
-      intro d hd; rw [h_Continue] at hd; cases hd
-    -- Tag 17: Return (3 variants)
-    match h_Return : contents.getObjVal? "Return" with
-    | .ok data =>
+
+variable (h_Continue_err : ∀ d, contents.getObjVal? "Continue" ≠ .ok d)
+include h_Continue_err
+
+/-- Step goal when `Return` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Return (h_Return : contents.getObjVal? "Return" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_value : data.getObjVal? "value" with
       | .ok vJ =>
         by_cases h_n : vJ = .null
@@ -6762,12 +6826,13 @@ theorem parseHaxExpr_step :
         exact parseHaxExpr_step_for_Return_no_value h_c
           ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err⟩
           h_Return (fun ss hs => by rw [h_value] at hs; cases hs) h
-    | .error _ =>
-    have h_Return_err : ∀ d, contents.getObjVal? "Return" ≠ .ok d := by
-      intro d hd; rw [h_Return] at hd; cases hd
-    -- Tag 18: Binary (lhs + rhs, both with IH)
-    match h_Binary : contents.getObjVal? "Binary" with
-    | .ok data =>
+
+variable (h_Return_err : ∀ d, contents.getObjVal? "Return" ≠ .ok d)
+include h_Return_err
+
+/-- Step goal when `Binary` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Binary (h_Binary : contents.getObjVal? "Binary" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         match h_rhs : data.getObjVal? "rhs" with
@@ -6788,7 +6853,7 @@ theorem parseHaxExpr_step :
         | .error _ =>
           rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Binary
-          unfold parseExprKind at h; dsimp only at h
+          unfold_pek h kvs; dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
           obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6816,7 +6881,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Binary
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6838,12 +6903,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18] at h
         rw [h_Binary] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Binary_err : ∀ d, contents.getObjVal? "Binary" ≠ .ok d := by
-      intro d hd; rw [h_Binary] at hd; cases hd
-    -- Tag 19: LogicalOp (mirror of Binary)
-    match h_LO : contents.getObjVal? "LogicalOp" with
-    | .ok data =>
+
+variable (h_Binary_err : ∀ d, contents.getObjVal? "Binary" ≠ .ok d)
+include h_Binary_err
+
+/-- Step goal when `LogicalOp` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_LogicalOp (h_LO : contents.getObjVal? "LogicalOp" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         match h_rhs : data.getObjVal? "rhs" with
@@ -6862,7 +6928,7 @@ theorem parseHaxExpr_step :
         | .error _ =>
           rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_LO
-          unfold parseExprKind at h; dsimp only at h
+          unfold_pek h kvs; dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
           obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6891,7 +6957,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_LO
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6914,12 +6980,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19] at h
         rw [h_LO] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_LO_err : ∀ d, contents.getObjVal? "LogicalOp" ≠ .ok d := by
-      intro d hd; rw [h_LO] at hd; cases hd
-    -- Tag 20: Unary
-    match h_Unary : contents.getObjVal? "Unary" with
-    | .ok data =>
+
+variable (h_LO_err : ∀ d, contents.getObjVal? "LogicalOp" ≠ .ok d)
+include h_LO_err
+
+/-- Step goal when `Unary` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Unary (h_Unary : contents.getObjVal? "Unary" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_arg : data.getObjVal? "arg" with
       | .ok argJ =>
         have ih_arg : ∀ e', parseHaxExpr argJ = .ok e' → JsonRefinesExpr argJ e' :=
@@ -6932,7 +6999,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Unary
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6956,12 +7023,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20] at h
         rw [h_Unary] at h; dsimp only [pure, bind] at h
         rw [h_arg] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Unary_err : ∀ d, contents.getObjVal? "Unary" ≠ .ok d := by
-      intro d hd; rw [h_Unary] at hd; cases hd
-    -- Tag 21: Field
-    match h_Field : contents.getObjVal? "Field" with
-    | .ok data =>
+
+variable (h_Unary_err : ∀ d, contents.getObjVal? "Unary" ≠ .ok d)
+include h_Unary_err
+
+/-- Step goal when `Field` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Field (h_Field : contents.getObjVal? "Field" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         have ih_lhs : ∀ e', parseHaxExpr lhsJ = .ok e' → JsonRefinesExpr lhsJ e' :=
@@ -6974,7 +7042,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Field
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -6999,12 +7067,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21] at h
         rw [h_Field] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Field_err : ∀ d, contents.getObjVal? "Field" ≠ .ok d := by
-      intro d hd; rw [h_Field] at hd; cases hd
-    -- Tag 22: TupleField
-    match h_TF : contents.getObjVal? "TupleField" with
-    | .ok data =>
+
+variable (h_Field_err : ∀ d, contents.getObjVal? "Field" ≠ .ok d)
+include h_Field_err
+
+/-- Step goal when `TupleField` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_TupleField (h_TF : contents.getObjVal? "TupleField" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         have ih_lhs : ∀ e', parseHaxExpr lhsJ = .ok e' → JsonRefinesExpr lhsJ e' :=
@@ -7017,7 +7086,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_TF
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7043,12 +7112,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22] at h
         rw [h_TF] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_TF_err : ∀ d, contents.getObjVal? "TupleField" ≠ .ok d := by
-      intro d hd; rw [h_TF] at hd; cases hd
-    -- Tag 23: Index (2 slots: lhs + index)
-    match h_Index : contents.getObjVal? "Index" with
-    | .ok data =>
+
+variable (h_TF_err : ∀ d, contents.getObjVal? "TupleField" ≠ .ok d)
+include h_TF_err
+
+/-- Step goal when `Index` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Index (h_Index : contents.getObjVal? "Index" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_lhs : data.getObjVal? "lhs" with
       | .ok lhsJ =>
         match h_idx : data.getObjVal? "index" with
@@ -7067,7 +7137,7 @@ theorem parseHaxExpr_step :
         | .error _ =>
           rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
           obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Index
-          unfold parseExprKind at h; dsimp only at h
+          unfold_pek h kvs; dsimp only at h
           obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
           obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
           obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7100,7 +7170,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Index
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7127,12 +7197,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23] at h
         rw [h_Index] at h; dsimp only [pure, bind] at h
         rw [h_lhs] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Index_err : ∀ d, contents.getObjVal? "Index" ≠ .ok d := by
-      intro d hd; rw [h_Index] at hd; cases hd
-    -- Tag 24: Cast
-    match h_Cast : contents.getObjVal? "Cast" with
-    | .ok data =>
+
+variable (h_Index_err : ∀ d, contents.getObjVal? "Index" ≠ .ok d)
+include h_Index_err
+
+/-- Step goal when `Cast` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Cast (h_Cast : contents.getObjVal? "Cast" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_src : data.getObjVal? "source" with
       | .ok srcJ =>
         have ih_src : ∀ e', parseHaxExpr srcJ = .ok e' → JsonRefinesExpr srcJ e' :=
@@ -7145,7 +7216,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Cast
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7173,12 +7244,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24] at h
         rw [h_Cast] at h; dsimp only [pure, bind] at h
         rw [h_src] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Cast_err : ∀ d, contents.getObjVal? "Cast" ≠ .ok d := by
-      intro d hd; rw [h_Cast] at hd; cases hd
-    -- Tag 25: Use
-    match h_Use : contents.getObjVal? "Use" with
-    | .ok data =>
+
+variable (h_Cast_err : ∀ d, contents.getObjVal? "Cast" ≠ .ok d)
+include h_Cast_err
+
+/-- Step goal when `Use` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Use (h_Use : contents.getObjVal? "Use" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_src : data.getObjVal? "source" with
       | .ok srcJ =>
         have ih_src : ∀ e', parseHaxExpr srcJ = .ok e' → JsonRefinesExpr srcJ e' :=
@@ -7191,7 +7263,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Use
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7220,12 +7292,14 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25] at h
         rw [h_Use] at h; dsimp only [pure, bind] at h
         rw [h_src] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Use_err : ∀ d, contents.getObjVal? "Use" ≠ .ok d := by
-      intro d hd; rw [h_Use] at hd; cases hd
-    -- Tag 26: NeverToAny
-    match h_NTA : contents.getObjVal? "NeverToAny" with
-    | .ok data =>
+
+variable (h_Use_err : ∀ d, contents.getObjVal? "Use" ≠ .ok d)
+include h_Use_err
+
+/-- Step goal when `NeverToAny` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_NeverToAny
+    (h_NTA : contents.getObjVal? "NeverToAny" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_src : data.getObjVal? "source" with
       | .ok srcJ =>
         have ih_src : ∀ e', parseHaxExpr srcJ = .ok e' → JsonRefinesExpr srcJ e' :=
@@ -7238,7 +7312,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_NTA
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7268,12 +7342,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26] at h
         rw [h_NTA] at h; dsimp only [pure, bind] at h
         rw [h_src] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_NTA_err : ∀ d, contents.getObjVal? "NeverToAny" ≠ .ok d := by
-      intro d hd; rw [h_NTA] at hd; cases hd
-    -- Tag 27: Box
-    match h_Box : contents.getObjVal? "Box" with
-    | .ok data =>
+
+variable (h_NTA_err : ∀ d, contents.getObjVal? "NeverToAny" ≠ .ok d)
+include h_NTA_err
+
+/-- Step goal when `Box` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Box (h_Box : contents.getObjVal? "Box" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_v : data.getObjVal? "value" with
       | .ok vJ =>
         have ih_v : ∀ e', parseHaxExpr vJ = .ok e' → JsonRefinesExpr vJ e' :=
@@ -7286,7 +7361,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Box
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7317,21 +7392,23 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27] at h
         rw [h_Box] at h; dsimp only [pure, bind] at h
         rw [h_v] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Box_err : ∀ d, contents.getObjVal? "Box" ≠ .ok d := by
-      intro d hd; rw [h_Box] at hd; cases hd
-    -- Tag 28: Adt (no slot, no ih)
-    match h_Adt : contents.getObjVal? "Adt" with
-    | .ok data =>
+
+variable (h_Box_err : ∀ d, contents.getObjVal? "Box" ≠ .ok d)
+include h_Box_err
+
+/-- Step goal when `Adt` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Adt (h_Adt : contents.getObjVal? "Adt" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_Adt h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err⟩
         h_Adt h
-    | .error _ =>
-    have h_Adt_err : ∀ d, contents.getObjVal? "Adt" ≠ .ok d := by
-      intro d hd; rw [h_Adt] at hd; cases hd
-    -- Tag 29: Closure
-    match h_Cls : contents.getObjVal? "Closure" with
-    | .ok data =>
+
+variable (h_Adt_err : ∀ d, contents.getObjVal? "Adt" ≠ .ok d)
+include h_Adt_err
+
+/-- Step goal when `Closure` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Closure (h_Cls : contents.getObjVal? "Closure" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_body : data.getObjVal? "body" with
       | .ok bodyJ =>
         have ih_body : ∀ e', parseHaxExpr bodyJ = .ok e' → JsonRefinesExpr bodyJ e' :=
@@ -7344,7 +7421,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Cls
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7377,12 +7454,13 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29] at h
         rw [h_Cls] at h; dsimp only [pure, bind] at h
         rw [h_body] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Cls_err : ∀ d, contents.getObjVal? "Closure" ≠ .ok d := by
-      intro d hd; rw [h_Cls] at hd; cases hd
-    -- Tag 30: Repeat (with Repeat_no_count fall-through variant)
-    match h_Repeat : contents.getObjVal? "Repeat" with
-    | .ok data =>
+
+variable (h_Cls_err : ∀ d, contents.getObjVal? "Closure" ≠ .ok d)
+include h_Cls_err
+
+/-- Step goal when `Repeat` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Repeat (h_Repeat : contents.getObjVal? "Repeat" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_value : data.getObjVal? "value" with
       | .ok vJ =>
         have ih_value : ∀ e', parseHaxExpr vJ = .ok e' → JsonRefinesExpr vJ e' :=
@@ -7407,7 +7485,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Repeat
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7441,12 +7519,14 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29, e30] at h
         rw [h_Repeat] at h; dsimp only [pure, bind] at h
         rw [h_value] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Repeat_err : ∀ d, contents.getObjVal? "Repeat" ≠ .ok d := by
-      intro d hd; rw [h_Repeat] at hd; cases hd
-    -- Tag 31: PlaceTypeAscription
-    match h_PTA : contents.getObjVal? "PlaceTypeAscription" with
-    | .ok data =>
+
+variable (h_Repeat_err : ∀ d, contents.getObjVal? "Repeat" ≠ .ok d)
+include h_Repeat_err
+
+/-- Step goal when `PlaceTypeAscription` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_PlaceTypeAscription
+    (h_PTA : contents.getObjVal? "PlaceTypeAscription" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_src : data.getObjVal? "source" with
       | .ok srcJ =>
         have ih_src : ∀ e', parseHaxExpr srcJ = .ok e' → JsonRefinesExpr srcJ e' :=
@@ -7459,7 +7539,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_PTA
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7494,12 +7574,14 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29, e30, e31] at h
         rw [h_PTA] at h; dsimp only [pure, bind] at h
         rw [h_src] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_PTA_err : ∀ d, contents.getObjVal? "PlaceTypeAscription" ≠ .ok d := by
-      intro d hd; rw [h_PTA] at hd; cases hd
-    -- Tag 32: ValueTypeAscription
-    match h_VTA : contents.getObjVal? "ValueTypeAscription" with
-    | .ok data =>
+
+variable (h_PTA_err : ∀ d, contents.getObjVal? "PlaceTypeAscription" ≠ .ok d)
+include h_PTA_err
+
+/-- Step goal when `ValueTypeAscription` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_ValueTypeAscription
+    (h_VTA : contents.getObjVal? "ValueTypeAscription" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_src : data.getObjVal? "source" with
       | .ok srcJ =>
         have ih_src : ∀ e', parseHaxExpr srcJ = .ok e' → JsonRefinesExpr srcJ e' :=
@@ -7512,7 +7594,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_VTA
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7548,12 +7630,14 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29, e30, e31, e32] at h
         rw [h_VTA] at h; dsimp only [pure, bind] at h
         rw [h_src] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_VTA_err : ∀ d, contents.getObjVal? "ValueTypeAscription" ≠ .ok d := by
-      intro d hd; rw [h_VTA] at hd; cases hd
-    -- Tag 33: PointerCoercion
-    match h_PC : contents.getObjVal? "PointerCoercion" with
-    | .ok data =>
+
+variable (h_VTA_err : ∀ d, contents.getObjVal? "ValueTypeAscription" ≠ .ok d)
+include h_VTA_err
+
+/-- Step goal when `PointerCoercion` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_PointerCoercion
+    (h_PC : contents.getObjVal? "PointerCoercion" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_src : data.getObjVal? "source" with
       | .ok srcJ =>
         have ih_src : ∀ e', parseHaxExpr srcJ = .ok e' → JsonRefinesExpr srcJ e' :=
@@ -7566,7 +7650,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_PC
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7603,57 +7687,67 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29, e30, e31, e32, e33] at h
         rw [h_PC] at h; dsimp only [pure, bind] at h
         rw [h_src] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_PC_err : ∀ d, contents.getObjVal? "PointerCoercion" ≠ .ok d := by
-      intro d hd; rw [h_PC] at hd; cases hd
-    -- Tag 34: ConstBlock (base case, no slot)
-    match h_CB : contents.getObjVal? "ConstBlock" with
-    | .ok data =>
+
+variable (h_PC_err : ∀ d, contents.getObjVal? "PointerCoercion" ≠ .ok d)
+include h_PC_err
+
+/-- Step goal when `ConstBlock` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_ConstBlock
+    (h_CB : contents.getObjVal? "ConstBlock" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_ConstBlock h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err, h_Adt_err, h_Cls_err, h_Repeat_err, h_PTA_err, h_VTA_err, h_PC_err⟩
         h_CB h
-    | .error _ =>
-    have h_CB_err : ∀ d, contents.getObjVal? "ConstBlock" ≠ .ok d := by
-      intro d hd; rw [h_CB] at hd; cases hd
-    -- Tag 35: NamedConst (base case)
-    match h_NC : contents.getObjVal? "NamedConst" with
-    | .ok data =>
+
+variable (h_CB_err : ∀ d, contents.getObjVal? "ConstBlock" ≠ .ok d)
+include h_CB_err
+
+/-- Step goal when `NamedConst` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_NamedConst
+    (h_NC : contents.getObjVal? "NamedConst" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_NamedConst h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err, h_Adt_err, h_Cls_err, h_Repeat_err, h_PTA_err, h_VTA_err, h_PC_err, h_CB_err⟩
         h_NC h
-    | .error _ =>
-    have h_NC_err : ∀ d, contents.getObjVal? "NamedConst" ≠ .ok d := by
-      intro d hd; rw [h_NC] at hd; cases hd
-    -- Tag 36: ConstParam (base case)
-    match h_CP : contents.getObjVal? "ConstParam" with
-    | .ok data =>
+
+variable (h_NC_err : ∀ d, contents.getObjVal? "NamedConst" ≠ .ok d)
+include h_NC_err
+
+/-- Step goal when `ConstParam` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_ConstParam
+    (h_CP : contents.getObjVal? "ConstParam" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_ConstParam h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err, h_Adt_err, h_Cls_err, h_Repeat_err, h_PTA_err, h_VTA_err, h_PC_err, h_CB_err, h_NC_err⟩
         h_CP h
-    | .error _ =>
-    have h_CP_err : ∀ d, contents.getObjVal? "ConstParam" ≠ .ok d := by
-      intro d hd; rw [h_CP] at hd; cases hd
-    -- Tag 37: ConstRef (base case)
-    match h_CR : contents.getObjVal? "ConstRef" with
-    | .ok data =>
+
+variable (h_CP_err : ∀ d, contents.getObjVal? "ConstParam" ≠ .ok d)
+include h_CP_err
+
+/-- Step goal when `ConstRef` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_ConstRef (h_CR : contents.getObjVal? "ConstRef" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_ConstRef h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err, h_Adt_err, h_Cls_err, h_Repeat_err, h_PTA_err, h_VTA_err, h_PC_err, h_CB_err, h_NC_err, h_CP_err⟩
         h_CR h
-    | .error _ =>
-    have h_CR_err : ∀ d, contents.getObjVal? "ConstRef" ≠ .ok d := by
-      intro d hd; rw [h_CR] at hd; cases hd
-    -- Tag 38: StaticRef (base case)
-    match h_SR : contents.getObjVal? "StaticRef" with
-    | .ok data =>
+
+variable (h_CR_err : ∀ d, contents.getObjVal? "ConstRef" ≠ .ok d)
+include h_CR_err
+
+/-- Step goal when `StaticRef` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_StaticRef
+    (h_SR : contents.getObjVal? "StaticRef" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_StaticRef h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err, h_Adt_err, h_Cls_err, h_Repeat_err, h_PTA_err, h_VTA_err, h_PC_err, h_CB_err, h_NC_err, h_CP_err, h_CR_err⟩
         h_SR h
-    | .error _ =>
-    have h_SR_err : ∀ d, contents.getObjVal? "StaticRef" ≠ .ok d := by
-      intro d hd; rw [h_SR] at hd; cases hd
-    -- Tag 39: Yield (1 slot + ih)
-    match h_Yield : contents.getObjVal? "Yield" with
-    | .ok data =>
+
+variable (h_SR_err : ∀ d, contents.getObjVal? "StaticRef" ≠ .ok d)
+include h_SR_err
+
+/-- Step goal when `Yield` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Yield (h_Yield : contents.getObjVal? "Yield" = .ok data) :
+    JsonRefinesExpr j e := by
       match h_v : data.getObjVal? "value" with
       | .ok vJ =>
         have ih_v : ∀ e', parseHaxExpr vJ = .ok e' → JsonRefinesExpr vJ e' :=
@@ -7666,7 +7760,7 @@ theorem parseHaxExpr_step :
       | .error _ =>
         rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
         obtain ⟨kvs, rfl⟩ := obj_of_getObjVal_ok h_Yield
-        unfold parseExprKind at h; dsimp only at h
+        unfold_pek h kvs; dsimp only at h
         obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
         obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
         obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7709,32 +7803,29 @@ theorem parseHaxExpr_step :
         rw [e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16, e17, e18, e19, e20, e21, e22, e23, e24, e25, e26, e27, e28, e29, e30, e31, e32, e33, e34, e35, e36, e37, e38, e39] at h
         rw [h_Yield] at h; dsimp only [pure, bind] at h
         rw [h_v] at h; simp only [Except.bind] at h; cases h
-    | .error _ =>
-    have h_Yield_err : ∀ d, contents.getObjVal? "Yield" ≠ .ok d := by
-      intro d hd; rw [h_Yield] at hd; cases hd
-    -- Tag 40: Todo (obj-variant) — last cascade tag
-    match h_Todo : contents.getObjVal? "Todo" with
-    | .ok data =>
+
+variable (h_Yield_err : ∀ d, contents.getObjVal? "Yield" ≠ .ok d)
+include h_Yield_err
+
+/-- Step goal when `Todo` is the first cascade tag present in `contents`. -/
+theorem parseHaxExpr_step_branch_Todo (h_Todo : contents.getObjVal? "Todo" = .ok data) :
+    JsonRefinesExpr j e := by
       exact parseHaxExpr_step_for_Todo_obj h_c
         ⟨h_VR_err, h_GN_err, h_Lit_err, h_If_err, h_Call_err, h_Let_err, h_Block_err, h_Match_err, h_Tuple_err, h_Array_err, h_Assign_err, h_AssignOp_err, h_Borrow_err, h_Deref_err, h_Loop_err, h_Break_err, h_Continue_err, h_Return_err, h_Binary_err, h_LO_err, h_Unary_err, h_Field_err, h_TF_err, h_Index_err, h_Cast_err, h_Use_err, h_NTA_err, h_Box_err, h_Adt_err, h_Cls_err, h_Repeat_err, h_PTA_err, h_VTA_err, h_PC_err, h_CB_err, h_NC_err, h_CP_err, h_CR_err, h_SR_err, h_Yield_err⟩
         h_Todo h
-    | .error _ =>
-    -- Terminal: all 41 cascade tags fail, parser throws "unknown ExprKind" —
-    -- contradicts h.
-    have h_Todo_err : ∀ d, contents.getObjVal? "Todo" ≠ .ok d := by
-      intro d hd; rw [h_Todo] at hd; cases hd
+
+variable (h_Todo_err : ∀ d, contents.getObjVal? "Todo" ≠ .ok d)
+include h_Todo_err
+
+/-- Step goal when no cascade tag is present in `contents` and `contents` is not
+    the string `"Todo"`: the parser throws, so `h` is contradictory. -/
+theorem parseHaxExpr_step_branch_none (h_todo : ¬contents = .str "Todo") :
+    JsonRefinesExpr j e := by
     rw [parseHaxExpr] at h; rw [h_c] at h; simp only at h
-    -- contents must be .obj (otherwise getObjVal? fails everywhere — but
-    -- we can't derive that without an .ok somewhere). Extract via h_todo
-    -- being false implies contents is not .str "Todo", so we need another
-    -- route: just use the fact that any .ok would have matched one of
-    -- the cascade arms.
-    -- Simplest path: contents must be .obj (otherwise the obj-cascade can't
-    -- have all .error results meaningfully). Use cases on contents directly.
     cases hcontents : contents with
     | obj kvs =>
       subst hcontents
-      unfold parseExprKind at h; dsimp only at h
+      unfold_pek h kvs; dsimp only at h
       obtain ⟨_, e1⟩ := getObjVal_error_of_not_ok h_VR_err
       obtain ⟨_, e2⟩ := getObjVal_error_of_not_ok h_GN_err
       obtain ⟨_, e3⟩ := getObjVal_error_of_not_ok h_Lit_err
@@ -7828,6 +7919,20 @@ theorem parseHaxExpr_step :
       · -- Todo .error branch — parser falls to throw arm
         simp only [throw, throwThe, MonadExceptOf.throw, Except.bind] at h
         cases h
+    | str s =>
+      -- contents is a string other than "Todo": the unit-variant match falls
+      -- through, every getObjVal? on a string returns .error, and the final
+      -- throw arm fires.
+      subst hcontents
+      have hs : s ≠ "Todo" := fun h' => h_todo (h' ▸ rfl)
+      unfold parseExprKind at h
+      simp only [Lean.Json.getStr?] at h
+      split at h
+      · rename_i h'
+        cases h'
+        exact absurd rfl hs
+      · simp only [pure, bind, Except.pure, Except.bind, Lean.Json.getObjVal?] at h
+        cases h
     | _ =>
       -- contents not obj — but then h_VR : (...).getObjVal? "VarRef" would
       -- have been .error too. After unfolding parseExprKind, the cascade
@@ -7835,8 +7940,84 @@ theorem parseHaxExpr_step :
       -- final throw arm fires.
       subst hcontents
       unfold parseExprKind at h
-      simp only [pure, bind, Except.pure, Except.bind, Lean.Json.getObjVal?] at h
+      simp only [pure, bind, Except.pure, Except.bind, Lean.Json.getObjVal?,
+        Lean.Json.getStr?] at h
       cases h
+
+end StepBranches
+
+/-- `step_tag hT "T" br` splits on `contents.getObjVal? "T"`. When the lookup
+    succeeds, the branch lemma `br` closes the goal from the hypotheses in
+    context; otherwise the hypothesis `∀ d, contents.getObjVal? "T" ≠ .ok d`
+    is added for the remaining tags. -/
+macro "step_tag " hT:ident key:str br:ident : tactic => `(tactic| (
+  rcases $hT:ident : ($(Lean.mkIdent `contents)).getObjVal? $key with _ | _
+  rotate_left
+  · apply $br <;> assumption
+  have : ∀ d, ($(Lean.mkIdent `contents)).getObjVal? $key ≠ .ok d := by
+    intro d hd; rw [$hT:ident] at hd; cases hd))
+
+/-- The step of the strong induction behind `parseHaxExpr_refines_unconditional`:
+    a parse of `j` refines `j` when every parse of a smaller node refines it.
+    The proof follows the tag cascade of `parseExprKind` and closes each case
+    with its `parseHaxExpr_step_branch_*` lemma. -/
+theorem parseHaxExpr_step :
+    ∀ j : Json,
+      (∀ j', jsonSize j' < jsonSize j →
+        ∀ e', parseHaxExpr j' = .ok e' → JsonRefinesExpr j' e') →
+      ∀ e, parseHaxExpr j = .ok e → JsonRefinesExpr j e := by
+  intro j ih e h
+  match h_c : j.getObjVal? "contents" with
+  | .error _ =>
+    rw [parseHaxExpr] at h
+    rw [h_c] at h
+    simp at h
+  | .ok contents =>
+    by_cases h_todo : contents = .str "Todo"
+    · subst h_todo
+      exact parseHaxExpr_step_for_Todo h_c h
+    step_tag h_VR "VarRef" parseHaxExpr_step_branch_VarRef
+    step_tag h_GN "GlobalName" parseHaxExpr_step_branch_GlobalName
+    step_tag h_Lit "Literal" parseHaxExpr_step_branch_Literal
+    step_tag h_If "If" parseHaxExpr_step_branch_If
+    step_tag h_Call "Call" parseHaxExpr_step_branch_Call
+    step_tag h_Let "Let" parseHaxExpr_step_branch_Let
+    step_tag h_Block "Block" parseHaxExpr_step_branch_Block
+    step_tag h_Match "Match" parseHaxExpr_step_branch_Match
+    step_tag h_Tuple "Tuple" parseHaxExpr_step_branch_Tuple
+    step_tag h_Array "Array" parseHaxExpr_step_branch_Array
+    step_tag h_Assign "Assign" parseHaxExpr_step_branch_Assign
+    step_tag h_AssignOp "AssignOp" parseHaxExpr_step_branch_AssignOp
+    step_tag h_Borrow "Borrow" parseHaxExpr_step_branch_Borrow
+    step_tag h_Deref "Deref" parseHaxExpr_step_branch_Deref
+    step_tag h_Loop "Loop" parseHaxExpr_step_branch_Loop
+    step_tag h_Break "Break" parseHaxExpr_step_branch_Break
+    step_tag h_Continue "Continue" parseHaxExpr_step_branch_Continue
+    step_tag h_Return "Return" parseHaxExpr_step_branch_Return
+    step_tag h_Binary "Binary" parseHaxExpr_step_branch_Binary
+    step_tag h_LO "LogicalOp" parseHaxExpr_step_branch_LogicalOp
+    step_tag h_Unary "Unary" parseHaxExpr_step_branch_Unary
+    step_tag h_Field "Field" parseHaxExpr_step_branch_Field
+    step_tag h_TF "TupleField" parseHaxExpr_step_branch_TupleField
+    step_tag h_Index "Index" parseHaxExpr_step_branch_Index
+    step_tag h_Cast "Cast" parseHaxExpr_step_branch_Cast
+    step_tag h_Use "Use" parseHaxExpr_step_branch_Use
+    step_tag h_NTA "NeverToAny" parseHaxExpr_step_branch_NeverToAny
+    step_tag h_Box "Box" parseHaxExpr_step_branch_Box
+    step_tag h_Adt "Adt" parseHaxExpr_step_branch_Adt
+    step_tag h_Cls "Closure" parseHaxExpr_step_branch_Closure
+    step_tag h_Repeat "Repeat" parseHaxExpr_step_branch_Repeat
+    step_tag h_PTA "PlaceTypeAscription" parseHaxExpr_step_branch_PlaceTypeAscription
+    step_tag h_VTA "ValueTypeAscription" parseHaxExpr_step_branch_ValueTypeAscription
+    step_tag h_PC "PointerCoercion" parseHaxExpr_step_branch_PointerCoercion
+    step_tag h_CB "ConstBlock" parseHaxExpr_step_branch_ConstBlock
+    step_tag h_NC "NamedConst" parseHaxExpr_step_branch_NamedConst
+    step_tag h_CP "ConstParam" parseHaxExpr_step_branch_ConstParam
+    step_tag h_CR "ConstRef" parseHaxExpr_step_branch_ConstRef
+    step_tag h_SR "StaticRef" parseHaxExpr_step_branch_StaticRef
+    step_tag h_Yield "Yield" parseHaxExpr_step_branch_Yield
+    step_tag h_Todo "Todo" parseHaxExpr_step_branch_Todo
+    apply parseHaxExpr_step_branch_none ih h_c h <;> assumption
 
 /-- **Path A unconditional headline theorem.**
 
