@@ -1111,9 +1111,11 @@ write.
   place and `tDroppedMutCalls` reports it.
 * `externalWriteTable`: a callee without a definition in the export (an FFI
   function, a trait method of a type parameter) that takes one `&mut`
-  argument, a variable, and returns `()` is a single-form write-back function:
-  its call rebinds the variable to the call's value, which is the variable's
-  new value. `tRetypeExtWriters` gives such a call the variable's type.
+  argument, a variable or a field of a variable (`sho.hasher.update(x)`), and
+  returns `()` is a single-form write-back function: its call rebinds the
+  variable to the call's value, which is the variable's new value, or, for a
+  field place, rebinds the root variable to its field update with that value.
+  `tRetypeExtWriters` gives such a call the type of the written place.
 * `tQualifyWritebackFields`: the field of a `&mut root.f` argument whose name
   several structs declare is resolved by the type of `root` and written
   `.S.f`, which `resolveStructField` reads as field `f` of `S`;
@@ -1299,8 +1301,12 @@ where
     definition among `defs` (an FFI function, a trait method without a body;
     not a place head, not in `builtinWriteTable`): a callee every call of which
     passes exactly one `&mut` argument, at the same position, whose place is a
-    variable, and returns `()`. A callee with a call of another shape is left
-    out, and its calls stay reported by `tDroppedMutCalls`. -/
+    variable (`tMutArgRoot`) or a field of a variable (`tMutArgField`,
+    `&mut root.f`), and returns `()`. `tRebindCall` rebinds the variable to the
+    call's value, or the variable to its field update with the call's value as
+    the field's new value. A callee with a call of another shape (an element
+    place, a deeper field path, a deref of a non-local reference) is left out,
+    and its calls stay reported by `tDroppedMutCalls`. -/
 def externalWriteTable (defs : List (String × TExpr)) :
     List (String × Nat) :=
   let calls := (defs.flatMap fun d => tCallsIn d.2).filter fun c =>
@@ -1308,7 +1314,10 @@ def externalWriteTable (defs : List (String × TExpr)) :
       && (builtinWriteTable.lookup c.1).isNone && !(tMutArgPositions c.2.1).isEmpty
   let shape : String × List TExpr × ImpType → Option Nat := fun c =>
     match tMutArgPositions c.2.1, c.2.2 with
-    | [p], .unit => if ((c.2.1[p]?).bind tMutArgRoot).isSome then some p else none
+    | [p], .unit =>
+      match c.2.1[p]? with
+      | some a => if (tMutArgRoot a).isSome || (tMutArgField a).isSome then some p else none
+      | none => none
     | _, _ => none
   let heads := (calls.map (·.1)).eraseDups
   heads.filterMap fun f =>
@@ -1316,8 +1325,9 @@ def externalWriteTable (defs : List (String × TExpr)) :
     | some p :: rest => if rest.all (· == some p) then some (f, p) else none
     | _ => none
 
-/-- Give each call of an `ext` callee the type of the variable it writes back,
-    the type of the call's value under the write-back rewrite. -/
+/-- Give each call of an `ext` callee the type of the place it writes back (a
+    variable or a field), the type of the call's value under the write-back
+    rewrite. -/
 partial def tRetypeExtWriters (ext : List (String × Nat)) : TExpr → TExpr
   | .mk (.app f args) ty =>
     let args' := args.map (tRetypeExtWriters ext)
