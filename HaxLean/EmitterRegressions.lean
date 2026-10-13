@@ -2048,7 +2048,8 @@ namespace AssocFieldType
 /-! A struct field typed by an associated type of a type parameter
 (`state: C::NttForm`) has the type the trait's `impl` blocks of the export give
 the associated type (`HaxAdapter.resolveAssocFieldType`), when they give exactly
-one; otherwise the field keeps the unresolved projection. -/
+one; otherwise the field has the opaque type `<Trait>_<Item>`
+(`HaxAdapter.assocOpaqueName`). -/
 
 open Lean
 
@@ -2088,14 +2089,29 @@ def stateField (impls : List Json) : Option (String × ImpType) := do
   | some ("Inner", .adt "Inner" _) => true
   | _ => false
 
--- Two `impl` blocks with different types: the field keeps the projection,
--- classified by the default `"array"`.
+-- Two `impl` blocks with different types: the field has the opaque type
+-- `PolyRing_NttForm` of the projection.
 #guard match stateField [polyRingImplJson "Inner", polyRingImplJson "Other"] with
-  | some ("array", t) => t != .adt "Inner" [] && t != .adt "Other" []
+  | some ("array", .adt "PolyRing_NttForm" []) => true
   | _ => false
 
--- No `impl`: the field keeps the projection.
-#guard (stateField []).map (·.1) == some "array"
+-- No `impl`: the field has the opaque type `PolyRing_NttForm`.
+#guard match stateField [] with
+  | some ("array", .adt "PolyRing_NttForm" []) => true
+  | _ => false
+
+-- The projection on any type parameter is the one opaque type.
+#guard match HaxAdapter.parseHaxType
+    (Json.mkObj [("value", Json.mkObj [("Alias", nttFormProjJson "D")])]) with
+  | .adt "PolyRing_NttForm" [] => true | _ => false
+
+-- The opaque type is printed by its name in a struct field and in a signature,
+-- and is collected for its `axiom PolyRing_NttForm : Type` declaration.
+#guard typeTagToLean [] "array" (.adt "PolyRing_NttForm" []) == "PolyRing_NttForm"
+#guard (ImpType.adt "Option" [.adt "PolyRing_NttForm" []]).toLeanTypeStrSurface
+  == "Option (PolyRing_NttForm)"
+#guard (ImpType.ref (.adt "PolyRing_NttForm" []) false).collectOpaqueAdtNames
+  == ["PolyRing_NttForm"]
 
 end AssocFieldType
 
@@ -2680,7 +2696,8 @@ def declaredParamsExport : Json :=
 A projection `C::NttForm` in the type of a function parameter and of a call
 argument is read at the type the trait `impl` blocks of the export give
 `NttForm` (`HaxAdapter.resolveAssocTypes`), when they give exactly one; with
-two such `impl` blocks it keeps the reading `.unknown`. The call-site types
+no or two such `impl` blocks it is the opaque type `PolyRing_NttForm`
+(`HaxAdapter.assocOpaqueName`). The call-site types
 are those the `Deps` class of the typed path is printed from
 (`collectTAppCalls`). -/
 
@@ -2740,13 +2757,24 @@ def isInnerTy : ImpType → Bool
     (fun (ps, as) => (ps.map isInnerTy, as.map isInnerTy))
   == some ([true], [true])
 
--- Two `impl` blocks with different types: the projection stays `.unknown`.
+/-- Whether a type is the opaque type `PolyRing_NttForm` of the projection. -/
+def isNttFormTy : ImpType → Bool
+  | .adt "PolyRing_NttForm" [] => true
+  | _ => false
+
+-- Two `impl` blocks with different types: the call signature, the parameter
+-- and the call-site argument have the opaque type `PolyRing_NttForm`.
 #guard (assocCallSigArgs [AssocFieldType.polyRingImplJson "Inner",
-    AssocFieldType.polyRingImplJson "Other"]).map (·.map (·.isUnknown))
+    AssocFieldType.polyRingImplJson "Other"]).map (·.map isNttFormTy)
   == some [true]
 #guard (assocTypedSig [AssocFieldType.polyRingImplJson "Inner",
     AssocFieldType.polyRingImplJson "Other"]).map
-    (fun (ps, as) => (ps.map (·.isUnknown), as.map (·.isUnknown)))
+    (fun (ps, as) => (ps.map isNttFormTy, as.map isNttFormTy))
+  == some ([true], [true])
+
+-- No `impl`: the same opaque type.
+#guard (assocTypedSig []).map
+    (fun (ps, as) => (ps.map isNttFormTy, as.map isNttFormTy))
   == some ([true], [true])
 
 end Hax.EmitterRegressions

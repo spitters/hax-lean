@@ -1263,8 +1263,31 @@ def extractGenericArgs (adtInner : Json) : Array Json :=
   | .ok args => args
   | _ => #[]
 
+/-- The trait and associated-item short names of a projection type `P::A`,
+    from the value of its `Alias` node: the trait of the projection's
+    `impl_expr` and the leaf name of its `assoc_item`. -/
+def aliasProjTraitItem (alias : Json) : Option (String × String) := do
+  let kind ← (alias.getObjVal? "kind").toOption
+  let proj ← (kind.getObjVal? "Projection").toOption
+  let ie ← (proj.getObjVal? "impl_expr").toOption
+  let tr ← (ie.getObjVal? "trait").toOption
+  let tv ← (tr.getObjVal? "value").toOption
+  let tvv ← (tv.getObjVal? "value").toOption
+  let traitName ← (tvv.getObjVal? "def_id").toOption >>= defIdLeafName
+  let item ← (proj.getObjVal? "assoc_item").toOption
+  let itemName ← (item.getObjVal? "def_id").toOption >>= defIdLeafName
+  pure (traitName, itemName)
+
+/-- The name of the opaque type that stands for a projection `P::A` of the
+    trait `T`: `T_A`. Every occurrence of the projection, whatever the type
+    parameter `P`, is read as the ADT of this name, which the emitter declares
+    as `axiom T_A : Type`. -/
+def assocOpaqueName (traitName itemName : String) : String :=
+  s!"{traitName}_{itemName}"
+
 /-- Map hax's TyKind to our ImpType.
-    Hax types are wrapped as `{id: N, value: TyKind}`. -/
+    Hax types are wrapped as `{id: N, value: TyKind}`. A projection `P::A` of
+    a trait `T` (an `Alias` node) is the opaque ADT `assocOpaqueName T A`. -/
 partial def parseHaxType (j : Json) : ImpType :=
   -- Unwrap {id, value} wrapper from hax JSON (primary format)
   let tyKind := match j.getObjVal? "value" with
@@ -1384,6 +1407,10 @@ partial def parseHaxType (j : Json) : ImpType :=
       | some n => .adt n typeArgs
       | none => .adt "unknown" typeArgs
     else if let .ok _ := tyKind.getObjVal? "Arrow" then .unknown
+    else if let .ok alias := tyKind.getObjVal? "Alias" then
+      match aliasProjTraitItem alias with
+      | some (t, a) => .adt (assocOpaqueName t a) []
+      | none => .unknown
     else .unknown
 
 /-- The hax type of an expression's `ty` field, `.unknown` when absent. -/
@@ -3264,22 +3291,8 @@ A projection type `P::A` (an `Alias` node) of a trait whose `impl` blocks in
 the export give the associated type `A` exactly one type is read at that type:
 in struct fields (`parseStructDefsFromJson`), and in every type of the item
 signatures, call sites and expressions read by the export-level parsers
-(`resolveAssocTypes`). -/
-
-/-- The trait and associated-item short names of a projection type `P::A`,
-    from the value of its `Alias` node: the trait of the projection's
-    `impl_expr` and the leaf name of its `assoc_item`. -/
-def aliasProjTraitItem (alias : Json) : Option (String × String) := do
-  let kind ← (alias.getObjVal? "kind").toOption
-  let proj ← (kind.getObjVal? "Projection").toOption
-  let ie ← (proj.getObjVal? "impl_expr").toOption
-  let tr ← (ie.getObjVal? "trait").toOption
-  let tv ← (tr.getObjVal? "value").toOption
-  let tvv ← (tv.getObjVal? "value").toOption
-  let traitName ← (tvv.getObjVal? "def_id").toOption >>= defIdLeafName
-  let item ← (proj.getObjVal? "assoc_item").toOption
-  let itemName ← (item.getObjVal? "def_id").toOption >>= defIdLeafName
-  pure (traitName, itemName)
+(`resolveAssocTypes`). Any other projection of a trait `T` is read by
+`parseHaxType` as the opaque type `T_A` (`assocOpaqueName`). -/
 
 /-- The associated types defined by the trait `impl` blocks of an export, as
     `(trait, associated type, type)`: the short names of the `impl`'s trait and
