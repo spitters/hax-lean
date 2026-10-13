@@ -1334,9 +1334,10 @@ def rootKeyAssign : TExpr :=
   position of another call (a typestate method chain) is bound in front of the
   statement when the arguments to its left neither read what it writes nor
   pass a `&mut` argument.
-* A callee outside the export with one `&mut` variable argument and result
-  `()` (`jade_sha256(&mut out, input)`, the FFI hash) is a single-form
-  write-back function (`externalWriteTable`).
+* A callee outside the export with one `&mut` argument, a variable or a field
+  of a variable, and result `()` (`jade_sha256(&mut out, input)`, the FFI
+  hash; `sho.hasher.update(x)`, a trait method in zkgroup) is a single-form
+  write-back function (`externalWriteTable`); an element place is not.
 * A `&mut state.h` argument whose field name two structs declare (Classic
   McEliece) is resolved by the type of `state` (`tQualifyWritebackFields`). -/
 
@@ -1443,6 +1444,43 @@ def ffiHashCall : TExpr :=
   | .mk (.seq (.mk (.app _ _) ty) _) _ => ty == bytes32
   | _ => false
 #guard tDroppedMutCalls [] [] [("jade_sha256", 0)] [] ffiHashCall == []
+
+/-- The struct `Sho` with its fields. -/
+def shoFields : StructFieldNames := [("Sho", ["hasher", "mode"])]
+
+/-- `sho.hasher.update(x); sho` with the trait method `update` outside the
+    export, called on the field place `sho.hasher` (zkgroup, `sho_absorb`). -/
+def shoAbsorb : TExpr :=
+  let shoTy : ImpType := .adt "Sho" []
+  let hTy : ImpType := .adt "Hasher" []
+  let place : TExpr := .mk (.app ".hasher" [.mk (.var "sho") shoTy]) hTy
+  .mk (.seq
+    (.mk (.app "update" [.mk (.borrow place) (.ref hTy true), .mk (.var "x") .unknown]) .unit)
+    (.mk (.var "sho") shoTy)) shoTy
+
+-- `update` is a single-form write-back function of position 0.
+#guard externalWriteTable [("sho_absorb", shoAbsorb)] == [("update", 0)]
+
+-- The call is typed as the field and rebinds `sho` by a field update; nothing
+-- is dropped.
+#guard (tRebindMutCalls shoFields [("update", 0)] []
+    (tRetypeExtWriters [("update", 0)] shoAbsorb)).erase ==
+  .seq (.assign "sho" (.app "struct_update#Sho#0#2"
+    [.var "sho", .app "update" [.borrow (.app ".hasher" [.var "sho"]), .var "x"]])) (.var "sho")
+#guard match tRetypeExtWriters [("update", 0)] shoAbsorb with
+  | .mk (.seq (.mk (.app _ _) ty) _) _ => ty == .adt "Hasher" []
+  | _ => false
+#guard tDroppedMutCalls [] shoFields [("update", 0)] [] shoAbsorb == []
+
+/-- `update(&mut a[i], x)`: an element place, which no write-back covers. -/
+def elemExtWrite : TExpr :=
+  let hTy : ImpType := .adt "Hasher" []
+  let place : TExpr :=
+    .mk (.app "index_mut" [.mk (.var "a") (.array hTy 4), .mk (.var "i") .int]) hTy
+  .mk (.app "update" [.mk (.borrow place) (.ref hTy true), .mk (.var "x") .unknown]) .unit
+
+-- An element place stays refused: `update` is not an external writer.
+#guard externalWriteTable [("absorb_elem", elemExtWrite)] == []
 
 /-- Two structs declaring a field `h`. -/
 def shaFields : StructFieldNames := [("Sha", ["h", "buf"]), ("Toy", ["h"])]
