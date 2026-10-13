@@ -2393,4 +2393,57 @@ def ghashExport (bound : Bool) : Json :=
 #guard HaxAdapter.buildTraitImplMethodMap (ghashExport false)
   == [(7, "ghash_multiply", "GcmCrypto_ghash_multiply")]
 
+/-! ## Call signatures from declared parameters
+
+The signature `extractCallSignaturesFromFile` records for a call to a `Fn` item
+of the export names its parameters after the item's `params`, and takes the
+declared type of a parameter whose argument type is unknown. A call to a
+function the export does not define keeps the positional names `arg{i}`.
+`fnDefParams?` reads the `params` of the item body when the definition has no
+`params` field. -/
+
+open Lean in
+/-- A function parameter `name : bool` as hax exports it. -/
+def boolParamJson (name : String) : Json :=
+  Json.mkObj [("pat", haxNode (Json.mkObj [("Binding", Json.mkObj [
+      ("var", Json.mkObj [("name", Json.str name)])])])),
+    ("ty", Json.mkObj [("value", Json.str "Bool")])]
+
+open Lean in
+/-- A top-level `Fn` item `nm` of crate `k` with parameters `params` and body
+    expression `body`, in the hax 0.4 item-body form. -/
+def fnItemWithParams (nm : String) (params : Array Json) (body : Json) : Json :=
+  Json.mkObj [
+    ("def_id", resolvedDefId [defIdSeg "ValueNs" nm]),
+    ("kind", Json.mkObj [("Fn", Json.mkObj [
+      ("ident", Json.arr #[Json.str nm]),
+      ("def", Json.mkObj [("params", Json.arr params),
+        ("body", Json.mkObj [("expr", body), ("params", Json.arr params)])])])])]
+
+open Lean in
+/-- A call of the function `nm` of crate `k` on a `bool` argument and an
+    argument of unknown type (`Never`). -/
+def callTwoJson (nm : String) : Json :=
+  haxNodeT (Json.mkObj [("value", Json.str "Bool")]) (Json.mkObj [("Call", Json.mkObj [
+    ("fun", haxNode (Json.mkObj [("GlobalName", Json.mkObj [("item", Json.mkObj [
+      ("value", Json.mkObj [("def_id", resolvedDefId [defIdSeg "ValueNs" nm])])])])])),
+    ("args", Json.arr #[haxVarRefT (Json.mkObj [("value", Json.str "Bool")]) "x",
+      haxVarRefT (Json.mkObj [("value", Json.str "Never")]) "y"])])])
+
+open Lean in
+/-- An export defining `f (a k : bool)` and `g`, whose body calls `f` and the
+    function `h` the export does not define. -/
+def declaredParamsExport : Json :=
+  Json.arr #[fnItemWithParams "f" #[boolParamJson "a", boolParamJson "k"] (haxVarRef "a"),
+    fnItemWithParams "g" #[] (haxNode (Json.mkObj [("Tuple", Json.arr #[
+      callTwoJson "f", callTwoJson "h"])]))]
+
+#guard (HaxAdapter.extractCallSignaturesFromFile declaredParamsExport).map (fun (n, ti) =>
+    (n, ti.paramTypes.map fun (p, t) => (p, t.isUnknown)))
+  == [("f", [("a", false), ("k", false)]), ("h", [("arg0", false), ("arg1", true)])]
+
+#guard (HaxAdapter.fnDefParams? (Lean.Json.mkObj [("body", Lean.Json.mkObj [
+    ("expr", haxVarRef "a"), ("params", Lean.Json.arr #[boolParamJson "a"])])])).map (·.size)
+  == some 1
+
 end Hax.EmitterRegressions

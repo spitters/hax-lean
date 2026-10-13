@@ -2995,6 +2995,68 @@ def extractParamTypes (params : Array Json) : List (String × ImpType) :=
       | _ => .unknown
     name.map (·, ty)
 
+/-- The parameter list of a hax function definition `defLike` (the `def`
+    object of a `Fn` item, or the `Fn` payload of an `impl` method): its
+    `params` field, and when that field is absent the `params` of its item
+    body (`ThirBody.params` of a hax 0.4 export). `none` when neither is
+    present. -/
+def fnDefParams? (defLike : Json) : Option (Array Json) :=
+  match defLike.getObjValAs? (Array Json) "params" with
+  | .ok ps => some ps
+  | .error _ =>
+    match defLike.getObjVal? "body" with
+    | .ok b => (b.getObjValAs? (Array Json) "params").toOption
+    | .error _ => none
+
+/-- The declared parameters of a hax function definition, one `(name, type)`
+    pair per parameter in order. The name is the variable a `Binding` pattern
+    binds, and `arg{i}` for the parameter at position `i` whose pattern binds
+    no single variable; the type is `parseHaxType` of its `ty` field. -/
+def declaredParamSig (params : Array Json) : List (String × ImpType) :=
+  (params.toList.zip (List.range params.size)).map fun (p, i) =>
+    let name := match extractParamNames #[p] with
+      | [n] => n
+      | _ => s!"arg{i}"
+    let ty := match p.getObjVal? "ty" with
+      | .ok tyJ => parseHaxType tyJ
+      | _ => .unknown
+    (name, ty)
+
+/-- The identity of a hax `DefId` as a string: its crate followed by the
+    compressed JSON of its `path` (each segment with its disambiguator). The
+    `DefId` is read through a `{contents: {value: _}}` wrapper when one is
+    present. `none` when the crate or the path is missing. -/
+def defIdKey? (defId : Json) : Option String :=
+  let inner := match defId.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
+    | _ => defId
+  match inner.getObjValAs? String "krate", inner.getObjVal? "path" with
+  | .ok k, .ok p => some s!"{k}::{p.compress}"
+  | _, _ => none
+
+/-- The declared parameters (`declaredParamSig`) of every `Fn` item of a hax
+    export with a `def` field, keyed by `defIdKey?` of the item's `def_id`,
+    recursing into the sub-item lists of `Mod` items. -/
+partial def localFnParamSigs (items : List Json) : List (String × List (String × ImpType)) :=
+  items.flatMap fun (item : Json) =>
+    match item.getObjVal? "kind" with
+    | .ok kind =>
+      match kind.getObjVal? "Fn" with
+      | .ok fnData =>
+        let key := (item.getObjVal? "def_id").toOption.bind defIdKey?
+        let params := (fnData.getObjVal? "def").toOption.bind fnDefParams?
+        match key, params with
+        | some k, some ps => [(k, declaredParamSig ps)]
+        | _, _ => []
+      | .error _ =>
+        match kind.getObjVal? "Mod" with
+        | .ok (Json.arr modData) =>
+          match modData.toList[1]? with
+          | some (Json.arr subItems) => localFnParamSigs subItems.toList
+          | _ => []
+        | _ => []
+    | .error _ => []
+
 /-- Wrap a function body in parameter bindings.
     Emits `letBind "param" (var "param") body` for each parameter,
     which the pipeline processes as identity bindings.
@@ -3013,9 +3075,9 @@ partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr))
       | _ => "unknown_fn"
     -- Extract parameter names
     let paramNames := match fnData.getObjVal? "def" with
-      | .ok def_ => match def_.getObjValAs? (Array Json) "params" with
-        | .ok params => extractParamNames params
-        | _ => []
+      | .ok def_ => match fnDefParams? def_ with
+        | some params => extractParamNames params
+        | none => []
       | _ => []
     let body ← match fnData.getObjVal? "def" with
       | .ok def_ => parseHaxExpr (thirBodyExpr (← def_.getObjVal? "body"))
@@ -3053,15 +3115,11 @@ partial def parseHaxItemWithTypes (j : Json) :
     let def_ := match fnData.getObjVal? "def" with
       | .ok d => some d
       | _ => none
-    let paramNames := match def_ with
-      | some d => match d.getObjValAs? (Array Json) "params" with
-        | .ok params => extractParamNames params
-        | _ => []
+    let paramNames := match def_ >>= fnDefParams? with
+      | some params => extractParamNames params
       | none => []
-    let paramTypes := match def_ with
-      | some d => match d.getObjValAs? (Array Json) "params" with
-        | .ok params => extractParamTypes params
-        | _ => []
+    let paramTypes := match def_ >>= fnDefParams? with
+      | some params => extractParamTypes params
       | none => []
     let retType := match def_ with
       | some d => match d.getObjVal? "ret" with
@@ -3166,51 +3224,84 @@ partial def collectCallReturnTypes (j : Json) : List (String × ImpType) :=
   | .arr items => items.toList.flatMap collectCallReturnTypes
   | _ => []
 
+/-- The `defIdKey?` of the callee of a hax `Call`, read from its `fun`
+    expression when that is a `GlobalName` (the same `def_id` lookup as
+    `extractCallName`). -/
+def calleeDefIdKey? (funJ : Json) : Option String := do
+  let contents ← (funJ.getObjVal? "contents").toOption
+  let gn ← (contents.getObjVal? "GlobalName").toOption
+  let item ← (gn.getObjVal? "item").toOption
+  let defId ← match item.getObjVal? "value" with
+    | .ok v => match v.getObjVal? "def_id" with
+      | .ok d => some d
+      | _ => item.getObjVal? "def_id" |>.toOption
+    | _ => item.getObjVal? "def_id" |>.toOption
+  defIdKey? defId
+
+/-- The parameters of the signature of a call with argument types `argTypes`
+    to a callee with declared parameters `decl` (`declaredParamSig`). With
+    one declared parameter per argument, parameter `i` is named after the
+    declared parameter and has the argument type, or the declared type when
+    the argument type is unknown. Otherwise parameter `i` is named `arg{i}`
+    and has the argument type. -/
+def callParamSig (decl : Option (List (String × ImpType))) (argTypes : List ImpType) :
+    List (String × ImpType) :=
+  match decl with
+  | some ds =>
+    if ds.length == argTypes.length then
+      (ds.zip argTypes).map fun ((n, dty), aty) => (n, if aty.isUnknown then dty else aty)
+    else (argTypes.zip (List.range argTypes.length)).map fun (t, i) => (s!"arg{i}", t)
+  | none => (argTypes.zip (List.range argTypes.length)).map fun (t, i) => (s!"arg{i}", t)
+
 /-- Collect full type signatures (argument types + return type) for function calls
     from the hax JSON expression tree. For each Call node, extracts the `ty` of each
-    argument and the `ty` of the call itself (return type).
-    Returns: functionName → FnTypeInfo (paramTypes named "arg0".."argN", retType). -/
-partial def collectCallSignatures (j : Json) : List (String × FnTypeInfo) :=
+    argument and the `ty` of the call itself (return type); the parameters are
+    `callParamSig` of the callee's entry in `decls` (keyed by `defIdKey?`, from
+    `localFnParamSigs`) and the argument types.
+    Returns: functionName → FnTypeInfo. -/
+partial def collectCallSignatures (j : Json)
+    (decls : List (String × List (String × ImpType)) := []) : List (String × FnTypeInfo) :=
   match j with
   | .obj _ =>
     let callSigs := match j.getObjVal? "contents" with
       | .ok contents =>
         match contents.getObjVal? "Call" with
         | .ok callData =>
-          let funName := extractCallName (match callData.getObjVal? "fun" with
-            | .ok f => f | _ => .null)
+          let funJ := match callData.getObjVal? "fun" with
+            | .ok f => f | _ => .null
+          let funName := extractCallName funJ
           let retType := match j.getObjVal? "ty" with
             | .ok tyJ => parseHaxType tyJ
             | _ => .unknown
-          let argTypes := match callData.getObjValAs? (Array Json) "args" with
-            | .ok args =>
-              let argList := args.toList
-              (argList.zip (List.range argList.length)).map fun (arg, i) =>
-                let ty := match arg.getObjVal? "ty" with
-                  | .ok tyJ => parseHaxType tyJ
-                  | _ => .unknown
-                (s!"arg{i}", ty)
+          let argTys : List ImpType := match callData.getObjValAs? (Array Json) "args" with
+            | .ok args => args.toList.map fun arg =>
+                match arg.getObjVal? "ty" with
+                | .ok tyJ => parseHaxType tyJ
+                | _ => .unknown
             | _ => []
+          let decl := (calleeDefIdKey? funJ).bind fun k => (decls.find? (·.1 == k)).map (·.2)
           if funName != "unknown_fn" && funName != "indirect_call" then
-            [(funName, ⟨argTypes, retType⟩)]
+            [(funName, ⟨callParamSig decl argTys, retType⟩)]
           else []
         | _ => []
       | _ => []
     let childSigs := j.getObj?.toOption.map (fun obj =>
-      obj.toList.flatMap fun (_, v) => collectCallSignatures v) |>.getD []
+      obj.toList.flatMap fun (_, v) => collectCallSignatures v decls) |>.getD []
     callSigs ++ childSigs
-  | .arr items => items.toList.flatMap collectCallSignatures
+  | .arr items => items.toList.flatMap (collectCallSignatures · decls)
   | _ => []
 
-/-- Extract call signatures from a single hax JSON item (Fn). -/
-partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
+/-- Extract call signatures from a single hax JSON item (Fn), with callee
+    parameters from `decls` (`collectCallSignatures`). -/
+partial def extractCallSigsItem (item : Json)
+    (decls : List (String × List (String × ImpType)) := []) : List (String × FnTypeInfo) :=
   match item.getObjVal? "kind" with
   | .ok kind =>
     match kind.getObjVal? "Fn" with
     | .ok fnData =>
       match fnData.getObjVal? "def" with
       | .ok d => match d.getObjVal? "body" with
-        | .ok body => collectCallSignatures (thirBodyExpr body)
+        | .ok body => collectCallSignatures (thirBodyExpr body) decls
         | _ => []
       | _ => []
     | _ =>
@@ -3218,25 +3309,30 @@ partial def extractCallSigsItem (item : Json) : List (String × FnTypeInfo) :=
       match kind.getObjVal? "Const" with
       | .ok (.arr constData) =>
         match constData.toList[3]? with
-        | some bodyJ => collectCallSignatures (thirBodyExpr bodyJ)
+        | some bodyJ => collectCallSignatures (thirBodyExpr bodyJ) decls
         | none => []
       | _ => []
   | _ => []
 
-/-- Extract call signatures from a full hax export JSON.
+/-- Extract call signatures from a full hax export JSON, with the parameters
+    of a call to a `Fn` item of the export named and typed after its declared
+    parameters (`localFnParamSigs`, `callParamSig`).
     Returns deduplicated map: functionName → FnTypeInfo.
     When multiple call sites exist, keeps the one with the most non-unknown arg types. -/
 partial def extractCallSignaturesFromFile (j : Json) : List (String × FnTypeInfo) :=
+  let decls := match j with
+    | Json.arr items => localFnParamSigs items.toList
+    | _ => []
   let raw : List (String × FnTypeInfo) := match j with
     | Json.arr items => items.toList.flatMap fun item =>
-      extractCallSigsItem item ++
+      extractCallSigsItem item decls ++
       -- Also recurse into Mod items
       (match item.getObjVal? "kind" with
        | .ok kind =>
          match kind.getObjVal? "Mod" with
          | .ok (Json.arr modData) =>
            match modData.toList[1]? with
-           | some (Json.arr subItems) => subItems.toList.flatMap extractCallSigsItem
+           | some (Json.arr subItems) => subItems.toList.flatMap (extractCallSigsItem · decls)
            | _ => []
          | _ => []
        | _ => ([] : List (String × FnTypeInfo)))
@@ -4580,12 +4676,12 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     let defLike : Json := match fnData.getObjVal? "def" with
       | .ok d => d
       | _ => fnData
-    let paramNames := match defLike.getObjValAs? (Array Json) "params" with
-      | .ok params => extractParamNames params
-      | _ => []
-    let paramTypes := match defLike.getObjValAs? (Array Json) "params" with
-      | .ok params => extractParamTypes params
-      | _ => []
+    let paramNames := match fnDefParams? defLike with
+      | some params => extractParamNames params
+      | none => []
+    let paramTypes := match fnDefParams? defLike with
+      | some params => extractParamTypes params
+      | none => []
     let retType := match defLike.getObjVal? "ret" with
       | .ok retJ => parseHaxType retJ
       | _ => .unknown
