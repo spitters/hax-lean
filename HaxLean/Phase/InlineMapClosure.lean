@@ -36,7 +36,8 @@ rewritten `map` binding on the statement spine as the binding of `y` to that arr
 every other expression by `denote'`.
 
 **Builtins.** The loop reads `len`, `index` and `array_update`; `ArrayOps bi` states that
-`bi` answers them as `Hax.widthArrayOps` does on arrays (`arrayOps_widthArrayOps`).
+`bi` answers them as `Hax.widthArrayOps` does on arrays (`arrayOps_widthArrayOps`), the
+length as an `int` value or a `usize` word, both of which a loop bound reads.
 
 **Agreement.** The loop leaves `i`, `x` and `n` bound. From one environment, every run
 of the reference reading that does not end in an error is matched by the run of the
@@ -63,17 +64,19 @@ open ContinueFlag (var_run lit_run unitVal_run letBind_run seq_run app_run args_
 
 /-! ## The builtins the loop reads -/
 
-/-- `bi` answers `len`, `index` at an integer and `array_update` at an integer on an array
-    as `widthArrayOps` does. -/
+/-- `bi` answers `index` at an integer and `array_update` at an integer on an array as
+    `widthArrayOps` does, and `len` on an array by its length as an `int` value
+    (`hax64Builtins`) or as a `usize` word (`widthArrayOps`). -/
 structure ArrayOps (bi : Builtins) : Prop where
-  len : ∀ vs : List Value, bi "len" [.array vs] = some (.uint .wsize vs.length)
+  len : ∀ vs : List Value, bi "len" [.array vs] = some (.int vs.length) ∨
+    bi "len" [.array vs] = some (.uint .wsize vs.length)
   index : ∀ (vs : List Value) (j : Nat) (h : j < vs.length), vs[j].isControlFlow = false →
     bi "index" [.array vs, .int j] = some vs[j]
   update : ∀ (vs : List Value) (j : Nat) (v : Value), j < vs.length →
     bi "array_update" [.array vs, .int j, v] = some (.array (vs.set j v))
 
 theorem arrayOps_widthArrayOps : ArrayOps widthArrayOps where
-  len vs := rfl
+  len vs := .inr rfl
   index vs j h hcf := by
     simp [widthArrayOps, h]; revert hcf; cases vs[j] <;> simp [Value.isControlFlow]
   update vs j v h := by
@@ -300,22 +303,32 @@ theorem mapStmt_run (hbi : ArrayOps bi) (y s i x n p : String) (body : ImpExpr)
     simpa using this
   simp only [mapStmt]
   rw [letBind_run, app_run, args_cons_run, var_run, hρs]
-  simp only [args_nil_run, Option.map_some, hbi.len]
-  generalize hρ1 : ρ.extend n (.uint .wsize vs.length) = ρ1
+  suffices hsuf : ∀ lv : Value, (lv = .int vs.length ∨ lv = .uint .wsize vs.length) →
+      ∃ E', (denote' bi fuel (.seq (.letBind y (.var s) .unitVal)
+        (.forFold i (.lit (.int 0)) (.var n)
+          (.letBind x (.app "index" [.var s, .var i])
+            (.letBind y (.app "array_update" [.var y, .var i, subst [p] [.var x] body])
+              .unitVal))))).run (ρ.extend n lv) = (.val .unit, E') ∧
+        ∀ z, z ≠ i → z ≠ x → z ≠ n → E' z = (ρ.extend y (.array ws)) z by
+    rcases hbi.len vs with h | h <;> simp only [args_nil_run, Option.map_some, h] <;>
+      exact hsuf _ (by simp)
+  intro lv hlvn
+  generalize hρ1 : ρ.extend n lv = ρ1
   have hρ1s : ρ1 s = some (.array vs) := by
     rw [← hρ1]; simp only [Env.extend, beq_iff_eq, hsn, if_false]; exact hρs
-  have hρ1n : ρ1 n = some (.uint .wsize vs.length) := by
+  have hρ1n : ρ1 n = some lv := by
     rw [← hρ1]; exact Env.extend_same _ _ _
-  rw [seq_run, letBind_run, var_run, hρ1s]
-  simp only [unitVal_run]
-  have hn0 : (ρ1.extend y (.array vs)) n = some (.uint .wsize vs.length) := by
+  have hn0 : (ρ1.extend y (.array vs)) n = some lv := by
     simp only [Env.extend, beq_iff_eq, hny, if_false, hρ1n]
   have hff : ∀ (B : ImpExpr), (denote' bi fuel (.forFold i (.lit (.int 0))
       (.var n) B)).run (ρ1.extend y (.array vs)) =
       (denoteForLoop' bi fuel i 0 vs.length B).run (ρ1.extend y (.array vs)) := by
     intro B
+    rcases hlvn with rfl | rfl <;>
     simp only [denote', StateT.run, bind, StateT.bind, pure, StateT.pure, get, getThe,
       MonadStateOf.get, StateT.get, Value.ofLit, hn0]
+  rw [seq_run, letBind_run, var_run, hρ1s]
+  simp only [unitVal_run]
   rw [hff]
   obtain ⟨E', hrun, hE', hEy⟩ := loop_run bi hbi y s i x p body hpure fuel ρ1 ρ vs ws hlen
     hvals

@@ -1361,6 +1361,7 @@ end FieldTag
       more, and the truncations `cast#8`, `cast#32` of a non-negative value;
     * `none` on the array constructors `array_lit` and `repeat`, which `hax64Builtins`
       reads from `widthArrayOps`;
+    * `len` of an array, its length as an `int` value, the encoding of a `u64` word;
     * every other call as `hax64NarrowOps`.
 
     A head `FieldTag.fieldTag?` reads as a method of the prime-field interface at a modulus
@@ -1373,6 +1374,7 @@ def hax64WordOps (f : String) (args : List Value) : Option Value :=
   match f, args with
   | "array_lit", _ => none
   | "repeat", _ => none
+  | "len", [.array vs] => some (.int vs.length)
   | "wrapping_add#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
   | "wrapping_sub#64", [.int a, .int b] => u64BinOp a b fun x y =>
       some ((x % 2 ^ 64 + 2 ^ 64 - y % 2 ^ 64) % 2 ^ 64)
@@ -2243,6 +2245,10 @@ theorem hax64WordOps_index (vs : List Value) :
 theorem hax64WordOps_arrayLit (vals : List Value) : hax64WordOps "array_lit" vals = none := rfl
 
 theorem hax64WordOps_repeat (vals : List Value) : hax64WordOps "repeat" vals = none := rfl
+
+/-- `len` of an array in `hax64Builtins` is its length as an `int` value. -/
+theorem hax64Builtins_arrayLen (vs : List Value) :
+    hax64Builtins "len" [.array vs] = some (.int vs.length) := rfl
 
 theorem hax64WordOps_array_update (vs : List Value) (v : Value) :
     hax64WordOps "array_update" [.array vs, .int a, v] = none := rfl
