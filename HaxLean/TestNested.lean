@@ -3,6 +3,10 @@ module
 public import HaxLean.SemanticsCF
 public import HaxLean.Phase.FunctionalizeLoops
 public import HaxLean.Phase.CfIntoMonads
+public meta import HaxLean.Semantics
+public meta import HaxLean.SemanticsCF
+public meta import HaxLean.Phase.FunctionalizeLoops
+public meta import HaxLean.Phase.CfIntoMonads
 
 
 @[expose] public section
