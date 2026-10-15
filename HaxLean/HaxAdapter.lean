@@ -402,11 +402,13 @@ structure ImplSelfTypeMap where
       the call takes when the list is empty (`nominalTraitQualifier?`). -/
   nominalKrates : List String := []
   /-- The local `impl primeir_hax::Field for T` blocks whose self type `T` is
-      a newtype over `u64`, as `(impl interning id, T, modulus)`
-      (`buildFieldImplMap`). A call of a method of `fieldTaggedMethods`
-      resolved to one of them takes the head `fieldTagHead` of its modulus,
-      and a read of its `ZERO` or `ONE` is the literal `0` or `1`. -/
-  fieldImpls : List (Nat × String × Nat) := []
+      a newtype over `u64` or over `[u64; n]`, as
+      `(impl interning id, T, modulus, number of limbs)`, the number of limbs
+      `1` for `u64` (`buildFieldImplMap`). A call of a method of
+      `fieldTaggedMethods` resolved to one of them takes the head
+      `fieldTagHead` of its modulus, and a read of its `ZERO` or `ONE` is the
+      literal of `0` or `1` (`fieldConstLit?`). -/
+  fieldImpls : List (Nat × String × Nat × Nat) := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -927,19 +929,28 @@ def fieldTaggedHead? (funJ : Json) (nArgs : Nat) (m : ImplSelfTypeMap) : Option 
   let arity ← fieldTaggedMethods.lookup method
   guard (arity == nArgs)
   let entry ← m.fieldImpls.find? (·.1 == implId)
-  pure (fieldTagHead method entry.2.2)
+  pure (fieldTagHead method entry.2.2.1)
 
-/-- The value of a read of the associated constant `ZERO` (`0`) or `ONE` (`1`)
-    of an `impl` of `m.fieldImpls`, from the `NamedConst` or `GlobalName` node
-    of the read. `none` for any other read. -/
-def fieldConstLit? (globalName : Json) (m : ImplSelfTypeMap) : Option Int := do
+/-- The literal of a field element `v < 2^64` in `n` limbs: the integer
+    literal `v` for one limb, and the array literal of the `n` little-endian
+    `u64` limbs of `v` (`v`, then `0`s) otherwise. -/
+def fieldLimbsLit (v : Int) (n : Nat) : TExprKind :=
+  if n ≤ 1 then .lit (.int v)
+  else .app "array_lit"
+    ((List.range n).map fun i => .mk (.lit (.int (if i = 0 then v else 0))) (.uint .w64))
+
+/-- The literal of a read of the associated constant `ZERO` (`0`) or `ONE`
+    (`1`) of an `impl` of `m.fieldImpls`, in the limbs of the `impl`
+    (`fieldLimbsLit`), from the `NamedConst` or `GlobalName` node of the read.
+    `none` for any other read. -/
+def fieldConstLit? (globalName : Json) (m : ImplSelfTypeMap) : Option TExprKind := do
   guard (!m.fieldImpls.isEmpty)
   let (implId, item) ← traitCallImplMethod
     (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])])
-  guard (m.fieldImpls.any (·.1 == implId))
+  let entry ← m.fieldImpls.find? (·.1 == implId)
   match item with
-  | "ZERO" => some 0
-  | "ONE" => some 1
+  | "ZERO" => some (fieldLimbsLit 0 entry.2.2.2)
+  | "ONE" => some (fieldLimbsLit 1 entry.2.2.2)
   | _ => none
 
 /-- The qualifier `krate::Trait` of a call whose callee is a method declared by
@@ -1069,10 +1080,11 @@ def classItemRef? (f : String) : Option String :=
     self type is a type variable, since a nullary class item does not
     determine its instance and two classes may declare an item of one name; a
     variable otherwise. A read of `ZERO` or `ONE` of a field `impl`
-    (`fieldConstLit?`) is the literal `0` or `1`. -/
+    (`fieldConstLit?`) is the literal of `0` or `1` in the limbs of the
+    `impl`. -/
 def constReadKind (globalName : Json) (m : ImplSelfTypeMap) (name : String) : TExprKind :=
   match fieldConstLit? globalName m with
-  | some v => .lit (.int v)
+  | some k => k
   | none =>
   match resolveTraitImplConstRef globalName m with
   | some n => .var n
@@ -5494,10 +5506,12 @@ partial def buildNewtypeMap (j : Json) : NewtypeMap :=
 /-! ## Modulus-tagged field operations
 
 A call of a method of `primeir_hax::Field` that resolves to an `impl` of the
-crate whose self type is a newtype over `u64` takes the head
-`<method>#p<modulus>` (`fieldTagHead`); the newtype is erased to `u64` in the
-whole export (`tEraseFieldNewtypes`), so the operands and the result of such a
-call are `u64` values. -/
+crate whose self type is a newtype over `u64` (a modulus below `2^64`) or over
+`[u64; n]` (a modulus `p ≥ 2^64`, `n` the least number of words with
+`p ≤ 2^(64 n)`) takes the head `<method>#p<modulus>` (`fieldTagHead`); the
+newtype is erased to its inner type in the whole export
+(`tEraseFieldNewtypes`), so the operands and the result of such a call are
+`u64` values, or arrays of `n` little-endian `u64` limbs. -/
 
 /-- The top-level constants of a hax export (the four-element `Const` form
     `[ident, generics, ty, body]`), as `(name, body)`. -/
@@ -5546,13 +5560,32 @@ def isPrimeirFieldImpl (impl : Json) : Bool :=
     guard (defIdLeafName defId == some "Field")
   r.isSome
 
+/-- The number of limbs of an element of the prime field of modulus `p` whose
+    self type has the inner type `inner`: `1` when `inner` is `u64` and
+    `p < 2^64`; `n` when `inner` is `[u64; n]`, `p ≥ 2^64` and `n` is the least
+    number of `64`-bit words with `p ≤ 2^(64 n)`. `none` otherwise. -/
+def fieldReprLimbs? (inner : ImpType) (p : Nat) : Option Nat :=
+  match inner with
+  | .uint .w64 => if p < 2 ^ 64 then some 1 else none
+  | .array (.uint .w64) n =>
+    if 2 ^ 64 ≤ p ∧ 2 ^ (64 * (n - 1)) < p ∧ p ≤ 2 ^ (64 * n) then some n else none
+  | _ => none
+
+/-- The inner type of a field newtype with `n` limbs: `u64` for one limb,
+    `[u64; n]` otherwise. -/
+def fieldReprTy (n : Nat) : ImpType :=
+  if n ≤ 1 then .uint .w64 else .array (.uint .w64) n
+
 /-- The local `impl primeir_hax::Field for T` blocks of a hax export whose self
-    type `T` is a newtype over `u64` in `newtypes`, as
-    `(impl interning id, T, modulus)`. The modulus is the value of the `impl`'s
-    `MODULUS_LE` constant read as little-endian base-`2^64` limbs
-    (`constLimbs`); an `impl` whose `MODULUS_LE` does not evaluate to limbs
-    below `2^64` denoting a number at least `2` is not listed. -/
-def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) : List (Nat × String × Nat) :=
+    type `T` is a newtype in `newtypes` over `u64` or over `[u64; n]`, as
+    `(impl interning id, T, modulus, number of limbs)`. The modulus is the value
+    of the `impl`'s `MODULUS_LE` constant read as little-endian base-`2^64`
+    limbs (`constLimbs`); an `impl` whose `MODULUS_LE` does not evaluate to
+    limbs below `2^64` denoting a number at least `2`, or whose inner type is
+    not the representation of that modulus (`fieldReprLimbs?`), is not
+    listed. -/
+def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) :
+    List (Nat × String × Nat × Nat) :=
   let consts := exportConstBodies j
   (exportItems j).filterMap fun it => do
     let kind ← (it.getObjVal? "kind").toOption
@@ -5566,7 +5599,7 @@ def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) : List (Nat × String �
     let stVal ← (selfTy.getObjVal? "value").toOption
     let adt ← (stVal.getObjVal? "Adt").toOption
     let sn ← extractAdtShortName adt
-    guard (newtypes.lookup sn == some (.uint .w64))
+    let inner ← newtypes.lookup sn
     let implItems ← (impl.getObjValAs? (Array Json) "items").toOption
     let modItem ← implItems.find? fun ii =>
       (ii.getObjVal? "ident").toOption.map extractFnName == some "MODULUS_LE"
@@ -5579,16 +5612,19 @@ def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) : List (Nat × String �
     guard (limbs.all (· < 2 ^ 64))
     let p := limbs.foldr (fun l acc => l + 2 ^ 64 * acc) 0
     guard (2 ≤ p)
-    pure (implId, sn, p)
+    let n ← fieldReprLimbs? inner p
+    pure (implId, sn, p, n)
 
 /-- The last `::` segment of a name. -/
 def lastPathSegment (n : String) : String := ((n.splitOn "::").getLast?).getD n
 
-/-- `ty` with every type of `names` (newtypes over `u64`) replaced by `u64`. -/
-partial def eraseFieldNewtypeTy (names : List String) : ImpType → ImpType
+/-- `ty` with every type of `names` (field newtypes, each with its inner type)
+    replaced by its inner type. -/
+partial def eraseFieldNewtypeTy (names : List (String × ImpType)) : ImpType → ImpType
   | .adt n args =>
-    if args.isEmpty && names.contains (lastPathSegment n) then .uint .w64
-    else .adt n (args.map (eraseFieldNewtypeTy names))
+    match (if args.isEmpty then names.lookup (lastPathSegment n) else none) with
+    | some inner => inner
+    | none => .adt n (args.map (eraseFieldNewtypeTy names))
   | .tuple es => .tuple (es.map (eraseFieldNewtypeTy names))
   | .option t => .option (eraseFieldNewtypeTy names t)
   | .result a b => .result (eraseFieldNewtypeTy names a) (eraseFieldNewtypeTy names b)
@@ -5601,24 +5637,24 @@ partial def eraseFieldNewtypeTy (names : List String) : ImpType → ImpType
   | t => t
 
 /-- Whether `ty` is a type of `names`, or a reference to one. -/
-def isFieldNewtypeTy (names : List String) : ImpType → Bool
-  | .adt n [] => names.contains (lastPathSegment n)
+def isFieldNewtypeTy (names : List (String × ImpType)) : ImpType → Bool
+  | .adt n [] => names.any (·.1 == lastPathSegment n)
   | .ref t _ => isFieldNewtypeTy names t
   | _ => false
 
-/-- A typed expression with the newtypes `names` over `u64` erased: a
-    construction `T(x)` with `x : u64` is `x`, a projection `x.0` of an
-    `x : T` is `x`, and every type of `names` in a node's type is `u64`
-    (`eraseFieldNewtypeTy`). -/
-partial def tEraseFieldNewtypes (names : List String) (e : TExpr) : TExpr :=
+/-- A typed expression with the field newtypes `names` erased: a construction
+    `T(x)` with `x` of the inner type of `T` is `x`, a projection `x.0` of an
+    `x : T` is `x`, and every type of `names` in a node's type is its inner
+    type (`eraseFieldNewtypeTy`). -/
+partial def tEraseFieldNewtypes (names : List (String × ImpType)) (e : TExpr) : TExpr :=
   let go := tEraseFieldNewtypes names
   let rest : Unit → TExpr := fun _ =>
     match tMapChildren go e with
     | .mk k ty => .mk k (eraseFieldNewtypeTy names ty)
   match e with
   | .mk (.app f [x]) ty =>
-    if names.contains (lastPathSegment f) && isFieldNewtypeTy names ty
-        && x.ty == .uint .w64 then go x
+    if (names.lookup (lastPathSegment f)).any (· == x.ty) && isFieldNewtypeTy names ty
+    then go x
     else if f == ".0" && isFieldNewtypeTy names x.ty then go x
     else rest ()
   | .mk (.proj x 0) _ => if isFieldNewtypeTy names x.ty then go x else rest ()
@@ -5651,8 +5687,9 @@ partial def tEraseFieldNewtypes (names : List String) (e : TExpr) : TExpr :=
 
     A call of a method of `primeir_hax::Field` resolved to an `impl` of
     `buildFieldImplMap` takes its modulus-tagged head (`fieldTaggedHead?`),
-    and the self types of those `impl`s are erased to `u64` in every definition
-    and signature (`tEraseFieldNewtypes`), whatever the other flags.
+    and the self types of those `impl`s are erased to their inner types, `u64`
+    or `[u64; n]`, in every definition and signature (`tEraseFieldNewtypes`),
+    whatever the other flags.
 
     Projection types are read at the types `resolveAssocTypes` gives them. -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
@@ -5673,7 +5710,7 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
       traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else []
       localBoundConstCalls := traitImplConsts, nominalKrates := nominalKrates
       fieldImpls := buildFieldImplMap j (buildNewtypeMap j) }
-  let fieldNewtypes := (implMap.fieldImpls.map (·.2.1)).eraseDups
+  let fieldNewtypes := (implMap.fieldImpls.map fun e => (e.2.1, fieldReprTy e.2.2.2)).eraseDups
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []

@@ -274,4 +274,109 @@ theorem fullBuiltins_deepNoControlFlow :
       simp [hpo] at h
       exact Hax.Builtins.defaultBuiltins_deepNoControlFlow f args _ h hargs
 
+/-! ## 4. The runtime field operations
+
+A modulus-tagged head of the method `m` at the modulus `p` prints as the runtime function
+`fieldN m p` at a modulus below `2^64` and as `fieldW m p` at a modulus `p ≥ 2^64`
+(`fieldRuntimeHead?`). On canonical representatives these functions compute the arms
+`FieldTag.fieldArm` and `FieldTag.fieldArmWide` of the semantics. -/
+
+namespace FieldTag
+
+/-- The runtime function of the method `m` on integers: `Hax.field_<m>`; a method with one
+    argument does not read its second argument. -/
+def fieldN : FieldMethod → Nat → Int → Int → Int
+  | .add => Hax.field_add
+  | .sub => Hax.field_sub
+  | .mul => Hax.field_mul
+  | .neg => fun p a _ => Hax.field_neg p a
+  | .square => fun p a _ => Hax.field_square p a
+  | .double => fun p a _ => Hax.field_double p a
+
+/-- The runtime function of the method `m` on limb arrays: `Hax.field_<m>_wide`; a method with
+    one argument does not read its second argument. -/
+def fieldW : FieldMethod → Nat → Array Int → Array Int → Array Int
+  | .add => Hax.field_add_wide
+  | .sub => Hax.field_sub_wide
+  | .mul => Hax.field_mul_wide
+  | .neg => fun p a _ => Hax.field_neg_wide p a
+  | .square => fun p a _ => Hax.field_square_wide p a
+  | .double => fun p a _ => Hax.field_double_wide p a
+
+/-- On numbers, the runtime function of a method is its value `fieldVal`. -/
+theorem fieldN_natCast (m : FieldMethod) (p a b : Nat) :
+    fieldN m p a b = (fieldVal m p a b : Int) := by
+  cases m <;> rfl
+
+/-- **The integer runtime function of a method computes its arm**: on numbers `a`, and `b` for
+    a method with two arguments, below `p`, the arm `fieldArm m p a b` is the integer
+    `fieldN m p a b`. -/
+theorem fieldN_eq_fieldArm {m : FieldMethod} {p a b : Nat} (ha : a < p)
+    (hb : m.binary = true → b < p) :
+    fieldArm m p a b = some (.int (fieldN m p a b)) := by
+  rw [fieldN_natCast]
+  unfold fieldArm
+  rw [if_pos ⟨ha, hb⟩]
+
+/-- At a modulus below `2^64`, a tagged head on numbers below `p` is the integer runtime
+    function of its method. -/
+theorem fieldCall_fieldArgs_eq_fieldN {m : FieldMethod} {p : Nat} (hp : p < 2 ^ 64) {a b : Nat}
+    (ha : a < p) (hb : m.binary = true → b < p) :
+    fieldCall m p (fieldArgs m a b) = some (.int (fieldN m p a b)) := by
+  rw [fieldCall_fieldArgs hp, fieldN_eq_fieldArm ha hb]
+
+/-- The runtime function of a method on limb arrays is the limbs, in as many words as its first
+    argument has, of the integer runtime function at the numbers of the arrays. -/
+theorem fieldW_eq (m : FieldMethod) (p : Nat) (x y : Array Int) :
+    fieldW m p x y = (Hax.fieldNatLimbs x.size
+      (fieldN m p (Hax.fieldLimbsNat x.toList) (Hax.fieldLimbsNat y.toList)).toNat).toArray := by
+  cases m <;> rfl
+
+/-- The limbs of the semantics are the integers of the runtime limbs. -/
+theorem limbsOf_eq_map : ∀ (n a : Nat), limbsOf n a = (Hax.fieldNatLimbs n a).map .int
+  | 0, _ => rfl
+  | n + 1, a => by
+      simp only [limbsOf, Hax.fieldNatLimbs, List.map_cons, limbsOf_eq_map n]
+
+/-- There are `n` runtime limbs in `n` words. -/
+theorem length_fieldNatLimbs : ∀ (n a : Nat), (Hax.fieldNatLimbs n a).length = n
+  | 0, _ => rfl
+  | n + 1, a => by simp [Hax.fieldNatLimbs, length_fieldNatLimbs n]
+
+/-- The runtime limbs of `a` in `n` words denote `a mod 2^(64 n)`. -/
+theorem fieldLimbsNat_fieldNatLimbs : ∀ (n a : Nat),
+    Hax.fieldLimbsNat (Hax.fieldNatLimbs n a) = a % 2 ^ (64 * n)
+  | 0, a => by simp [Hax.fieldNatLimbs, Hax.fieldLimbsNat, Nat.mod_one]
+  | n + 1, a => by
+      simp only [Hax.fieldNatLimbs, Hax.fieldLimbsNat, Int.toNat_natCast,
+        fieldLimbsNat_fieldNatLimbs n]
+      rw [Nat.mul_succ, Nat.add_comm (64 * n) 64, Nat.pow_add, Nat.mod_mul]
+
+/-- **The limb array of `a` at the modulus `p`**: its runtime limbs in `fieldLimbs p` words. -/
+def limbArr (p a : Nat) : Array Int := (Hax.fieldNatLimbs (fieldLimbs p) a).toArray
+
+/-- **The limb-array runtime function of a method computes its wide arm**: on numbers `a`, and
+    `b` for a method with two arguments, below `p`, the arm `fieldArmWide m p a b` is the array
+    of the integers of `fieldW m p` at the limb arrays of `a` and `b`. -/
+theorem fieldW_eq_fieldArmWide {m : FieldMethod} {p a b : Nat} (ha : a < p) (hb : b < p) :
+    fieldArmWide m p a b =
+      some (.array ((fieldW m p (limbArr p a) (limbArr p b)).toList.map .int)) := by
+  have hpow := le_pow_fieldLimbs p
+  unfold fieldArmWide
+  rw [if_pos ⟨ha, fun _ => hb⟩, fieldW_eq]
+  simp only [limbArr, List.size_toArray, List.toList_toArray, length_fieldNatLimbs,
+    fieldLimbsNat_fieldNatLimbs, Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le ha hpow),
+    Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le hb hpow), fieldN_natCast, Int.toNat_natCast,
+    limbsOf_eq_map]
+
+/-- At a modulus `p ≥ 2^64`, a tagged head on the limbs of numbers below `p` is the limb-array
+    runtime function of its method. -/
+theorem fieldCall_fieldArgsWide_eq_fieldW {m : FieldMethod} {p : Nat} (hp : 2 ^ 64 ≤ p)
+    {a b : Nat} (ha : a < p) (hb : b < p) :
+    fieldCall m p (fieldArgsWide m (fieldLimbs p) a b) =
+      some (.array ((fieldW m p (limbArr p a) (limbArr p b)).toList.map .int)) := by
+  rw [fieldCall_fieldArgsWide hp ha hb, fieldW_eq_fieldArmWide ha hb]
+
+end FieldTag
+
 end Hax

@@ -2777,4 +2777,135 @@ def isNttFormTy : ImpType → Bool
     (fun (ps, as) => (ps.map isNttFormTy, as.map isNttFormTy))
   == some ([true], [true])
 
+/-! ## Modulus-tagged field calls
+
+A call of a `primeir_hax::Field` method resolved to a field `impl` of the crate
+takes the head `<method>#p<modulus>`. The head prints as the runtime field
+operation: `Hax.field_<method> p` on integers at a modulus below `2^64`, and
+`Hax.field_<method>_wide p` on limb arrays at a modulus `p ≥ 2^64`. An `impl`
+on a newtype over `[u64; n]` is a field `impl` when `n` is the number of
+`64`-bit limbs of its modulus; its `ZERO` and `ONE` are limb-array literals,
+and the newtype is erased to `[u64; n]`. -/
+
+namespace FieldTagged
+
+-- The narrow heads print as the integer field operations.
+#guard widthAwareRuntime "mul#p2013265921" == "Hax.field_mul 2013265921"
+#guard widthAwareRuntime "square#p2013265921" == "Hax.field_square 2013265921"
+#guard toLean (.app "mul#p2013265921" [.var "beta", .var "inv2"]) ==
+  "Hax.field_mul 2013265921 beta inv2"
+-- The wide heads (`2^130 - 5`) print as the limb-array field operations.
+#guard widthAwareRuntime "mul#p1361129467683753853853498429727072845819" ==
+  "Hax.field_mul_wide 1361129467683753853853498429727072845819"
+#guard widthAwareRuntime "neg#p1361129467683753853853498429727072845819" ==
+  "Hax.field_neg_wide 1361129467683753853853498429727072845819"
+-- A head of a method outside the field interface, or a tag that is not a
+-- modulus, keeps its rendering.
+#guard widthAwareRuntime "wrapping_add#64" == "Hax.wrapping_add_w 64"
+#guard widthAwareRuntime "mul#pq" == "Hax.mul"
+
+/-- The modulus `2^130 - 5`. -/
+def p130 : Nat := 2 ^ 130 - 5
+
+open Lean in
+/-- The type `u64`. -/
+def u64TyJson : Json := intTyJson "Uint" "U64"
+
+open Lean in
+/-- The type `[u64; n]`. -/
+def u64ArrTyJson (n : Nat) : Json :=
+  Json.mkObj [("Array", Json.mkObj [("generic_args", Json.arr
+    #[Json.mkObj [("Type", u64TyJson)],
+      Json.mkObj [("Const", Json.mkObj [("contents", Json.mkObj [("Literal", Json.mkObj [
+        ("Int", Json.mkObj [("Uint", Json.arr #[Json.str (toString n), Json.str "Usize"])])])])])]])])]
+
+open Lean in
+/-- The `u64` literal `n`. -/
+def u64LitJson (n : Nat) : Json :=
+  haxNodeT u64TyJson (Json.mkObj [("Literal", Json.mkObj [("lit", Json.mkObj [("node",
+    Json.mkObj [("Int", Json.arr #[Json.str (toString n), Json.str "U64"])])])])])
+
+open Lean in
+/-- `pub struct <name>(<inner>);`. -/
+def newtypeJson (name : String) (inner : Json) : Json :=
+  structItemJson name (Json.mkObj [("Tuple", Json.arr #[Json.arr #[Json.mkObj [("ty", inner)]]])])
+
+open Lean in
+/-- `impl primeir_hax::Field for <self> { const MODULUS_LE = [<limbs>]; }`, with the
+    interning id `id`. -/
+def fieldImplJson (id : Nat) (self : String) (limbs : List Nat) : Json :=
+  let body := haxNodeT (u64ArrTyJson limbs.length)
+    (Json.mkObj [("Array", Json.mkObj [("fields", Json.arr (limbs.map u64LitJson).toArray)])])
+  Json.mkObj [
+    ("owner_id", Json.mkObj [("contents", Json.mkObj [("id", Json.num id),
+      ("value", Json.mkObj [("is_local", Json.bool true)])])]),
+    ("kind", Json.mkObj [("Impl", Json.mkObj [
+      ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id", Json.mkObj [("contents",
+        Json.mkObj [("value", mkDefIdJson "primeir_hax" [defIdSeg "TypeNs" "Field"])])])])]),
+      ("self_ty", AssocFieldType.adtTyJson self),
+      ("items", Json.arr #[Json.mkObj [("ident", Json.arr #[Json.str "MODULUS_LE", Json.null]),
+        ("kind", Json.mkObj [("Const", Json.arr #[Json.null, body])])]])])])]
+
+/-- The field `impl` map of an export of the items `items`. -/
+def fieldImpls (items : List Lean.Json) : List (Nat × String × Nat × Nat) :=
+  let j := Lean.Json.arr items.toArray
+  HaxAdapter.buildFieldImplMap j (HaxAdapter.buildNewtypeMap j)
+
+/-- The little-endian limbs of `2^130 - 5`. -/
+def p130Limbs : List Nat := [2 ^ 64 - 5, 2 ^ 64 - 1, 3]
+
+-- A newtype over `[u64; 3]` at `2^130 - 5` is a field `impl` with three limbs.
+#guard fieldImpls [newtypeJson "Fe130" (u64ArrTyJson 3), fieldImplJson 7 "Fe130" p130Limbs]
+  == [(7, "Fe130", p130, 3)]
+-- A newtype over `u64` at a modulus below `2^64` is a field `impl` with one limb.
+#guard fieldImpls [newtypeJson "BabyBear" u64TyJson, fieldImplJson 5 "BabyBear" [2013265921]]
+  == [(5, "BabyBear", 2013265921, 1)]
+-- A limb count that is not the one of the modulus is refused: `[u64; 2]` and
+-- `[u64; 4]` at `2^130 - 5`, and `u64` at a modulus `p ≥ 2^64`.
+#guard fieldImpls [newtypeJson "Fe130" (u64ArrTyJson 2), fieldImplJson 7 "Fe130" p130Limbs]
+  == []
+#guard fieldImpls [newtypeJson "Fe130" (u64ArrTyJson 4), fieldImplJson 7 "Fe130" p130Limbs]
+  == []
+#guard fieldImpls [newtypeJson "Fe130" u64TyJson, fieldImplJson 7 "Fe130" p130Limbs] == []
+
+/-- The adapter state with the field `impl` of `2^130 - 5` on three limbs. -/
+def wideMap : HaxAdapter.ImplSelfTypeMap := { fieldImpls := [(7, "Fe130", p130, 3)] }
+
+open Lean in
+/-- The `GlobalName` of the item `item` of the trait `Field` resolved to the
+    `impl` with the interning id `id`. -/
+def fieldItemJson (id : Nat) (item : String) : Json :=
+  Json.mkObj [("item", Json.mkObj [("value", Json.mkObj [
+    ("def_id", Json.mkObj [("contents", Json.mkObj [("value",
+      mkDefIdJson "primeir_hax" [defIdSeg "TypeNs" "Field", defIdSeg "ValueNs" item])])]),
+    ("in_trait", Json.mkObj [("impl", Json.mkObj [("Concrete", Json.mkObj [("value",
+      Json.mkObj [("def_id", Json.mkObj [("contents", Json.mkObj [("id", Json.num id)])])])])])])])])]
+
+-- `ZERO` and `ONE` of the wide `impl` are limb-array literals.
+#guard (HaxAdapter.fieldConstLit? (fieldItemJson 7 "ONE") wideMap).map
+    (fun k => (TExpr.mk k .unknown).erase)
+  == some (.app "array_lit" [.lit (.int 1), .lit (.int 0), .lit (.int 0)])
+#guard (HaxAdapter.fieldConstLit? (fieldItemJson 7 "ZERO") wideMap).map
+    (fun k => (TExpr.mk k .unknown).erase)
+  == some (.app "array_lit" [.lit (.int 0), .lit (.int 0), .lit (.int 0)])
+
+-- A call of `mul` resolved to the wide `impl` takes the modulus-tagged head.
+#guard (match HaxAdapter.parseHaxTExpr (haxNode (Lean.Json.mkObj [("Call", Lean.Json.mkObj [
+      ("fun", haxNode (Lean.Json.mkObj [("GlobalName", fieldItemJson 7 "mul")])),
+      ("args", Lean.Json.arr #[haxVarRef "a", haxVarRef "b"])])])) wideMap with
+    | .ok e => e.erase
+    | .error _ => .unitVal)
+  == .app "mul#p1361129467683753853853498429727072845819" [.var "a", .var "b"]
+
+-- The wide newtype erases to `[u64; 3]`: in a type, and at a construction from
+-- a limb array.
+#guard HaxAdapter.eraseFieldNewtypeTy [("Fe130", .array (.uint .w64) 3)]
+    (.tuple [.adt "k::Fe130" [], .bool])
+  == .tuple [.array (.uint .w64) 3, .bool]
+#guard (HaxAdapter.tEraseFieldNewtypes [("Fe130", .array (.uint .w64) 3)]
+    (.mk (.app "Fe130" [.mk (.var "x") (.array (.uint .w64) 3)]) (.adt "Fe130" []))).erase
+  == .var "x"
+
+end FieldTagged
+
 end Hax.EmitterRegressions

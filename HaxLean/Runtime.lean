@@ -538,12 +538,66 @@ instance : Neg (Array Int) where neg a := a.map (- ·)
 @[inline] def div {α : Type} [Div α] (a b : α) : α := a / b
 @[inline] def rem {α : Type} [Mod α] (a b : α) : α := a % b
 @[inline] def neg {α : Type} [Neg α] (a : α) : α := -a
-/-- The square `a * a`, the head of a call of `primeir_hax::Field::square`
-    (`square#p<modulus>`). -/
+/-- The square `a * a`. -/
 @[inline] def square {α : Type} [Mul α] (a : α) : α := a * a
-/-- The double `a + a`, the head of a call of `primeir_hax::Field::double`
-    (`double#p<modulus>`). -/
+/-- The double `a + a`. -/
 @[inline] def double {α : Type} [Add α] (a : α) : α := a + a
+
+/-! ### Prime-field operations
+
+A call of a method of `primeir_hax::Field` at the modulus `p` has the head `<method>#p<p>`. It
+prints as `Hax.field_<method> p` at a modulus below `2^64`, where an element is the integer of
+its canonical representative, and as `Hax.field_<method>_wide p` at a modulus `p ≥ 2^64`, where
+an element is the array of the little-endian `64`-bit limbs of its canonical representative. -/
+
+/-- The field sum `(a + b) mod p` of canonical representatives. -/
+@[inline] def field_add (p : Nat) (a b : Int) : Int := ((a.toNat + b.toNat) % p : Nat)
+/-- The field difference `(a + p - b) mod p` of canonical representatives. -/
+@[inline] def field_sub (p : Nat) (a b : Int) : Int := ((a.toNat + p - b.toNat) % p : Nat)
+/-- The field product `a b mod p` of canonical representatives. -/
+@[inline] def field_mul (p : Nat) (a b : Int) : Int := ((a.toNat * b.toNat) % p : Nat)
+/-- The field negation `(p - a) mod p` of a canonical representative. -/
+@[inline] def field_neg (p : Nat) (a : Int) : Int := ((p - a.toNat) % p : Nat)
+/-- The field square `a a mod p` of a canonical representative. -/
+@[inline] def field_square (p : Nat) (a : Int) : Int := ((a.toNat * a.toNat) % p : Nat)
+/-- The field double `2 a mod p` of a canonical representative. -/
+@[inline] def field_double (p : Nat) (a : Int) : Int := ((2 * a.toNat) % p : Nat)
+
+/-- The number of the little-endian `64`-bit limbs `ls`. -/
+def fieldLimbsNat : List Int → Nat
+  | [] => 0
+  | l :: ls => l.toNat + 2 ^ 64 * fieldLimbsNat ls
+
+/-- The little-endian `64`-bit limbs of `a` in `n` words: the word `i` holds
+    `a / 2^(64 i) mod 2^64`. -/
+def fieldNatLimbs : Nat → Nat → List Int
+  | 0, _ => []
+  | n + 1, a => ((a % 2 ^ 64 : Nat) : Int) :: fieldNatLimbs n (a / 2 ^ 64)
+
+/-- A binary field operation `f p` on limb arrays: the limbs, in as many words as `a` has, of
+    `f p` at the numbers of `a` and `b`. -/
+def fieldWide2 (f : Nat → Int → Int → Int) (p : Nat) (a b : Array Int) : Array Int :=
+  (fieldNatLimbs a.size (f p (fieldLimbsNat a.toList) (fieldLimbsNat b.toList)).toNat).toArray
+
+/-- A unary field operation `f p` on limb arrays: the limbs, in as many words as `a` has, of
+    `f p` at the number of `a`. -/
+def fieldWide1 (f : Nat → Int → Int) (p : Nat) (a : Array Int) : Array Int :=
+  (fieldNatLimbs a.size (f p (fieldLimbsNat a.toList)).toNat).toArray
+
+/-- The field sum on limb arrays. -/
+@[inline] def field_add_wide (p : Nat) (a b : Array Int) : Array Int := fieldWide2 field_add p a b
+/-- The field difference on limb arrays. -/
+@[inline] def field_sub_wide (p : Nat) (a b : Array Int) : Array Int := fieldWide2 field_sub p a b
+/-- The field product on limb arrays. -/
+@[inline] def field_mul_wide (p : Nat) (a b : Array Int) : Array Int := fieldWide2 field_mul p a b
+/-- The field negation on limb arrays. -/
+@[inline] def field_neg_wide (p : Nat) (a : Array Int) : Array Int := fieldWide1 field_neg p a
+/-- The field square on limb arrays. -/
+@[inline] def field_square_wide (p : Nat) (a : Array Int) : Array Int :=
+  fieldWide1 field_square p a
+/-- The field double on limb arrays. -/
+@[inline] def field_double_wide (p : Nat) (a : Array Int) : Array Int :=
+  fieldWide1 field_double p a
 
 -- Comparison (polymorphic: works for Int, Array Int, Array (Array Int), etc.)
 @[inline] def beq {α : Type} [BEq α] (a b : α) : Bool := a == b

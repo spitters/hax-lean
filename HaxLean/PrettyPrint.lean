@@ -80,6 +80,20 @@ def sanitizeName (n : String) : String :=
     | "Empty" | "Decidable" | "Inhabited" | "Nonempty" => s!"«{n}»"
     | _ => n
 
+/-- The runtime function of a call of the prime-field method `op` under the tag
+    `p<modulus>` (the head `<op>#p<modulus>`, `HaxAdapter.fieldTagHead`):
+    `Hax.field_<op> <modulus>` on integers at a modulus below `2^64`, and
+    `Hax.field_<op>_wide <modulus>` on limb arrays at a modulus `p ≥ 2^64`.
+    `none` when `op` is not a method of `HaxAdapter.fieldTaggedMethods` or the
+    tag is not `p` followed by decimal digits. -/
+def fieldRuntimeHead? (op tag : String) : Option String := do
+  guard (HaxAdapter.fieldTaggedMethods.any (·.1 == op))
+  guard (tag.startsWith "p")
+  let ds := (tag.drop 1).toString
+  guard (!ds.isEmpty && ds.all Char.isDigit)
+  let p ← ds.toNat?
+  pure (if p < 2 ^ 64 then s!"Hax.field_{op} {p}" else s!"Hax.field_{op}_wide {p}")
+
 /-- Handle width-annotated operation names (e.g. "wrapping_add#32").
     The HaxAdapter annotates width-sensitive Rust ops with `#<tag>` when it can
     infer the operand type: `<w>` for an unsigned operand, `i<w>` for a signed
@@ -89,7 +103,9 @@ def sanitizeName (n : String) : String :=
     truncation with no sign extension; everything else keeps the unsigned
     `_w` family. The tag `dep` marks an operator-named call whose operand is
     not an integer (`PrettyPrintT.markDepOperators`); it renders as the bare
-    sanitized name, a field of the generated `Deps` class. -/
+    sanitized name, a field of the generated `Deps` class. A modulus tag
+    `p<modulus>` on a prime-field method renders as the runtime field
+    operation `fieldRuntimeHead?`. -/
 def widthAwareRuntime (f : String) : String :=
   if f.any (· == '#') then
     let parts := f.splitOn "#"
@@ -100,7 +116,8 @@ def widthAwareRuntime (f : String) : String :=
       -- word size; the runtime names it `Hax.usizeBits`.
       let widthTok : String → String := fun t => if t == "size" then "Hax.usizeBits" else t
       let w := widthTok w₀
-      if w₀.length > 0 && String.Pos.Raw.get w₀ 0 == 'i' then
+      if let some h := fieldRuntimeHead? op w₀ then h
+      else if w₀.length > 0 && String.Pos.Raw.get w₀ 0 == 'i' then
         let iw := widthTok (w₀.drop 1).toString
         match op with
         | "wrapping_add" => s!"Hax.wrapping_add_iw {iw}"
