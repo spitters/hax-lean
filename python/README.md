@@ -105,12 +105,22 @@ or a shift amount; its comparisons give a secret bit, which only `select` consum
 least `2^64`, call chains deeper than four, and
 functions named after a call head or an array operation.
 
+Every index of a function reached from an entry has an upper bound within the length of its
+array, in the facts the compiler's index check `idxInvCheckB` reads: constants, loop
+variables of a `range` with a known bound, sums and differences with constants, products
+with constants, masks with constants, and the equality guards `x == c` and `x != c`. A name
+rebound in a loop takes its bound at the loop head by widening to the constants of the
+function. A function that is not an entry is checked at each call, under the bounds of the
+arguments. An index without such a bound, for example a word parameter, is refused
+([`IdxBound.idxCheck`](../HaxLean/Py/IdxBound.lean)).
+
 ## What is proved
 
 | Statement | Lean |
 |---|---|
 | Reading the JSON written for a module gives back the module. | [`PyModule.fromJson_toJson`](../HaxLean/Py/Json.lean) |
 | Every module the checker accepts satisfies the declarative typing rules of the fragment. | [`pyCheck_wellTyped`](../HaxLean/Py/CheckSound.lean); rules [`HasTy`](../HaxLean/Py/Types.lean), [`StmtsOk`](../HaxLean/Py/Types.lean) |
+| The bound the index check computes for an expression contains its value whenever every name lies in its bound; joins and widening keep the values of their arguments. | [`exprBnd_sound`](../HaxLean/Py/IdxBound.lean), [`Bnd.mem_join_left`](../HaxLean/Py/IdxBound.lean), [`Bnd.mem_widen`](../HaxLean/Py/IdxBound.lean), [`holds_refine`](../HaxLean/Py/IdxBound.lean) |
 | Every translated function is built from literals, names, `let`, assignment, sequence, calls, counted loops and conditionals only: no match, closure, reference, early exit, `while` loop or fold. | [`pyToTExpr_pyImage`](../HaxLean/Py/ToTExpr.lean); predicate [`PyImage`](../HaxLean/Py/ToTExpr.lean) |
 | Every translated function satisfies the hypotheses on the term of the pipeline's semantic preservation theorem [`pipeline_full_correct`](../HaxLean/PipelineCF.lean): its loops scope their breaks, it has no `?` and no control-flow constructor. | [`pyToTExpr_loopScoped`](../HaxLean/Py/ToTExprProps.lean), [`pyToTExpr_noQuestionMark`](../HaxLean/Py/ToTExprProps.lean), [`pyToTExpr_noCFConstructors`](../HaxLean/Py/ToTExprProps.lean) |
 | The secrecy record of a function marks a parameter or the result secret exactly when its checked type holds a secret. | [`pyFnSecrecy_param`](../HaxLean/Py/Secrecy.lean) |

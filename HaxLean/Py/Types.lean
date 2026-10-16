@@ -356,6 +356,11 @@ inductive RefusalKind where
   /-- An entry function with six parameters whose result is an array of a
   length no array parameter has. -/
   | entryResult
+  /-- An array index `a[i]` or `x.set(i, v)` of a function reached from an entry
+  whose upper bound computed by the index analysis (`HaxLean.Py.IdxBound`) is
+  absent or exceeds the length of the array; the names are the array and its
+  length. -/
+  | unboundedIndex
   deriving Repr, DecidableEq, Inhabited
 
 /-! ## Environments and contexts -/

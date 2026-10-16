@@ -7,6 +7,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.Py.Types
+public import HaxLean.Py.IdxBound
 
 /-!
 # The checker of the Python subset
@@ -28,7 +29,9 @@ concerned.
 * `checkTop`, `pyCheck` — the module: a docstring, imports from `typing` and
   `catcrypt_py`, constants, field classes and function definitions, each
   checked in the environment of the statements before it. A function calls
-  only functions defined before it, so the call graph is acyclic.
+  only functions defined before it, so the call graph is acyclic. Every index
+  of a function reached from an entry has an upper bound within its array
+  (`IdxBound.idxCheck`).
 
 The body of a `linked` function is a Python reference and is not checked;
 its signature is.
@@ -351,7 +354,8 @@ def reservedNames (body : List PyStmt) : List String :=
   "range" :: "reversed" :: moduleNames body
 
 /-- The checker of the Python subset: a module docstring, then module-level
-statements each checked in the environment of those before it. -/
+statements each checked in the environment of those before it, then the index
+analysis `IdxBound.idxCheck` of the checked functions. -/
 def pyCheck (m : PyModule) : Except PyRefusal CheckedModule :=
   match m.body with
   | .expr _ v :: rest =>
@@ -359,7 +363,9 @@ def pyCheck (m : PyModule) : Except PyRefusal CheckedModule :=
       let env₀ : ModEnv :=
         { imports := [], consts := [], fields := [], fns := [], reserved := reservedNames rest }
       let st ← checkTop (env₀, []) rest
-      pure { env := st.1, fns := st.2 }
+      match IdxBound.idxCheck st.2 with
+      | .ok () => pure { env := st.1, fns := st.2 }
+      | .error (p, ns) => .error ⟨.unboundedIndex, some p, ns⟩
     else .error ⟨.noDocstring, some v.pos, []⟩
   | s :: _ => .error ⟨.noDocstring, some s.pos, []⟩
   | [] => .error ⟨.noDocstring, none, []⟩

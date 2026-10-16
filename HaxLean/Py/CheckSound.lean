@@ -302,9 +302,13 @@ theorem pyCheck_wellTyped {m : PyModule} {cm : CheckedModule} (h : pyCheck m = .
   unfold pyCheck at h
   split at h
   · split at h
-    · simp only [bind_eq_ok, pure, Except.pure, Except.ok.injEq] at h
-      obtain ⟨st, hst, rfl⟩ := h
-      exact checkTop_wellTyped _ _ (by simp) hst
+    · simp only [bind_eq_ok] at h
+      obtain ⟨st, hst, h⟩ := h
+      split at h
+      · simp only [pure, Except.pure, Except.ok.injEq] at h
+        subst h
+        exact checkTop_wellTyped _ _ (by simp) hst
+      · simp at h
     · simp at h
   · simp at h
   · simp at h
