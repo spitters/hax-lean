@@ -34,8 +34,12 @@ the coercion of an `int` literal) to the type of the node or to the
   binding is allowed (the top level of a function body or of a loop body).
 * `FnOk` — a function body: statements followed by one `return e` whose
   type is the annotated result.
+* `fnSigOk` — the conditions on a function definition: its name, the entry
+  layout, the placement of an entry's array result, the call depth of an
+  entry, and the array element types of a function that is not an entry.
+* `stmtsDepth` — the length of the longest chain of calls from a body.
 * `CheckedModule.WellTyped` — every function of a checked module whose body
-  is checked satisfies `FnOk`, and every entry function the ABI condition.
+  is checked satisfies `FnOk`, and every function `fnSigOk`.
 -/
 
 @[expose] public section
@@ -159,6 +163,15 @@ def abiResult : PyTy → Bool
   | .array t _ => t.abiScalar
   | _ => false
 
+/-- A parameter or result type of a module function that is not an entry: a
+non-array type, or an array of 64-bit elements (`U64`, `Secret[U64]` or field
+elements), the element types the callee typing `modFnElem` of the compiler's
+module chain (`NFChain.lean`) accepts. -/
+def calleeOk : PyTy → Bool
+  | .array (.word .w64) _ | .array (.secret (.word .w64)) _ | .array (.field _) _ => true
+  | .array _ _ => false
+  | _ => true
+
 end PyTy
 
 /-- The word type of width `w`, secret when `s`. -/
@@ -208,7 +221,7 @@ inductive RefusalKind where
   | missingAnnotation
   /-- An annotation outside the type forms of the subset. -/
   | annotation
-  /-- A `tuple[...]` annotation outside the result of a non-entry function. -/
+  /-- A `tuple[...]` annotation. -/
   | tupleAnnotation
   /-- An array length that is neither a literal nor a constant name. -/
   | arrayLength
@@ -229,13 +242,11 @@ inductive RefusalKind where
   | importInFunction
   /-- An expression statement other than a docstring. -/
   | exprStmt
-  /-- An assignment target other than a name or a tuple of names unpacking a
-  call's tuple result. -/
+  /-- An assignment target other than a name or a tuple. -/
   | assignTarget
   /-- A chained assignment `a = b = e`. -/
   | chainedAssign
-  /-- A tuple target whose value is not a call with a tuple result of the
-  same length, or whose names repeat. -/
+  /-- A tuple target `x, y = e`. -/
   | tupleTarget
   /-- An annotated assignment without value. -/
   | annAssignForm
@@ -320,24 +331,103 @@ inductive RefusalKind where
   | cast
   /-- A tuple whose elements are not storable. -/
   | tupleElem
+  /-- An `int` literal or module constant outside `[0, 2^64)` in an index, a
+  shift or rotation amount, `int` arithmetic or an `int` comparison, or as the
+  value of a module constant. -/
+  | intLiteral
+  /-- A parameter or result of a function that is neither an entry nor linked
+  whose type is an array of elements narrower than 64 bits. -/
+  | calleeArray
+  /-- An entry function whose longest chain of calls of functions that are not
+  linked is longer than `maxCallDepth`. -/
+  | callDepth
+  /-- A function named after a call head of the front (`frontHeadNames`). -/
+  | fnName
+  /-- A local or parameter whose name starts with `__anorm`. -/
+  | anormName
+  /-- An entry function with six parameters whose result is an array of a
+  length no array parameter has. -/
+  | entryResult
   deriving Repr, DecidableEq, Inhabited
 
 /-! ## Environments and contexts -/
 
 /-- The signature of a module function: named, typed parameters, the result,
-whether it is an entry, and whether it is linked (with the optional name
-given by `linked(name="...")`). -/
+whether it is an entry, whether it is linked (with the optional name given by
+`linked(name="...")`), and the length of the longest chain of calls of
+functions that are not linked from its body (`stmtsDepth`). -/
 structure FnSig where
   params : List (String × PyTy)
   result : PyTy
   entry : Bool
   linked : Option (Option String)
+  depth : Nat := 0
   deriving Repr, Inhabited
 
 /-- The entry layout condition: at most six parameters of ABI parameter types
 and an ABI result. -/
 def FnSig.entryAbiOk (s : FnSig) : Bool :=
   decide (s.params.length ≤ 6) && s.params.all (·.2.abiParam) && s.result.abiResult
+
+/-- The placement of an entry's array result: the layout `mkResult` of the
+census (`CensusCore.lean`) reads an array result of length `n` from an array
+parameter of length `n`, or else from a further output parameter in the next
+of the six argument registers; an array result of an entry with six
+parameters needs an array parameter of its length. -/
+def FnSig.entryResultOk (s : FnSig) : Bool :=
+  match s.result with
+  | .array _ n =>
+    decide (s.params.length < 6) || s.params.any fun p =>
+      match p.2 with
+      | .array _ m => decide (m = n)
+      | _ => false
+  | _ => true
+
+/-- The parameter and result types of a function that is not an entry satisfy
+`PyTy.calleeOk`. -/
+def FnSig.calleeOk (s : FnSig) : Bool :=
+  s.params.all (·.2.calleeOk) && s.result.calleeOk
+
+/-- The bound on the longest chain of calls from an entry: the rounds of
+inlining `inlineRounds` of the census module (`CensusCore.lean`). -/
+def maxCallDepth : Nat := 4
+
+/-- The names a module function may not have: the array operations `index`,
+`len`, `array_update`, `repeat` and `array_lit`, `range_incl_end`, and the
+identifiers among the call heads of the front's tables `hax64BinTable`,
+`hax64UnTable`, `hax64CmpTable`, `hax64BitTable` and `hax64TerTable`
+(`ImpToNF.lean` of the compiler) with their width tags removed. The typing
+`crateSigOf` of a module looks a call head up among the module's functions
+before the tables, so a function of one of these names would capture the
+operation. -/
+def frontHeadNames : List String :=
+  ["index", "len", "array_update", "repeat", "array_lit", "range_incl_end",
+    "wrapping_add", "wrapping_sub", "wrapping_mul", "BitAnd", "BitOr", "BitXor", "Shl", "Shr",
+    "rotate_right", "rotate_left", "shl", "shr", "mulhi", "Add", "Sub", "Mul",
+    "Not", "wrapping_neg", "cast",
+    "Eq", "eq", "Ne", "ne", "Lt", "lt", "Le", "le", "Gt", "gt", "Ge", "ge",
+    "select"]
+
+/-- The conditions on a function definition with name `name` and signature
+`s`: the name is not in `frontHeadNames`; an entry satisfies the layout
+condition and `entryResultOk` and has call depth at most `maxCallDepth`; a
+function that is neither an entry nor linked satisfies `calleeOk`. -/
+def fnSigOk (name : String) (s : FnSig) : Except RefusalKind Unit :=
+  if name ∈ frontHeadNames then .error .fnName
+  else if s.entry then
+    if !s.entryAbiOk then .error .entryAbi
+    else if !s.entryResultOk then .error .entryResult
+    else if maxCallDepth < s.depth then .error .callDepth
+    else .ok ()
+  else if s.linked.isNone && !s.calleeOk then .error .calleeArray
+  else .ok ()
+
+/-- An entry accepted by `fnSigOk` satisfies the layout condition. -/
+theorem fnSigOk_entryAbi {name : String} {s : FnSig} (h : fnSigOk name s = .ok ())
+    (he : s.entry = true) : s.entryAbiOk = true := by
+  unfold fnSigOk at h
+  repeat' split at h
+  all_goals simp_all
 
 /-- The module environment. -/
 structure ModEnv where
@@ -438,20 +528,28 @@ def fieldOperands (τl : PyTy) (ll : Option Int) (τr : PyTy) (lr : Option Int) 
   | none, some p => coerceFieldLit p τl ll
   | none, none => .error .operandType
 
-/-- A shift or rotation amount: an `int` literal or a public word. -/
+/-- The literal value of an `int` operand: none, or in `[0, 2^64)`, the range
+of the integer literals the front types (`litInt` of `ImpToNF.lean`). -/
+def intLitOk : Option Int → Except RefusalKind Unit
+  | some n => if decide (0 ≤ n) && decide (n < 2 ^ 64) then .ok () else .error .intLiteral
+  | none => .ok ()
+
+/-- A shift or rotation amount: an `int` literal below `2^64` or a public word. -/
 def amountOk (τ : PyTy) (l : Option Int) : Except RefusalKind Unit :=
   match τ, l with
-  | .int, some n => if decide (0 ≤ n) then .ok () else .error .literalRange
+  | .int, some n => if decide (0 ≤ n) then intLitOk (some n) else .error .literalRange
   | .int, none => .error .intContext
   | .word _, _ => .ok ()
   | .secret _, _ => .error .secretAmount
   | _, _ => .error .indexType
 
-/-- An array index: an `int` expression or a public word. -/
-def indexOk : PyTy → Except RefusalKind Unit
-  | .int | .word _ => .ok ()
-  | .secret _ => .error .secretIndex
-  | _ => .error .indexType
+/-- An array index: an `int` expression, whose literal value is below `2^64`,
+or a public word. -/
+def indexOk : PyTy → Option Int → Except RefusalKind Unit
+  | .int, l => intLitOk l
+  | .word _, _ => .ok ()
+  | .secret _, _ => .error .secretIndex
+  | _, _ => .error .indexType
 
 /-- The type of a binary operation from the types and literal values of its
 operands. -/
@@ -460,7 +558,7 @@ def binOpTy (op : PyBinOp) (τl : PyTy) (ll : Option Int) (τr : PyTy) (lr : Opt
   match op with
   | .add | .sub | .mult =>
     match τl, τr with
-    | .int, .int => .ok .int
+    | .int, .int => (intLitOk ll).bind fun _ => (intLitOk lr).map fun _ => .int
     | _, _ =>
       if τl.fieldOf.isSome || τr.fieldOf.isSome then
         (fieldOperands τl ll τr lr).map .field
@@ -495,7 +593,7 @@ def cmpTy (op : PyCmpOp) (τl : PyTy) (ll : Option Int) (τr : PyTy) (lr : Optio
   | .is | .isNot | .in_ | .notIn => .error .operator
   | _ =>
     match τl, τr with
-    | .int, .int => .ok .bool
+    | .int, .int => (intLitOk ll).bind fun _ => (intLitOk lr).map fun _ => .bool
     | _, _ =>
       if τl.fieldOf.isSome || τr.fieldOf.isSome then
         match op with
@@ -521,10 +619,11 @@ def ifExpTy (τc τt τe : PyTy) : Except RefusalKind PyTy := do
   condOk τc
   if τt = τe ∧ τt ≠ .int ∧ τt ≠ .secretBool then .ok τt else .error .branchType
 
-/-- The type of `a[i]`. -/
-def indexTy (τa τi : PyTy) : Except RefusalKind PyTy :=
+/-- The type of `a[i]` from the types of `a` and `i` and the literal value of
+`i`. -/
+def indexTy (τa τi : PyTy) (li : Option Int) : Except RefusalKind PyTy :=
   match τa with
-  | .array t _ => (indexOk τi).map fun _ => t
+  | .array t _ => (indexOk τi li).map fun _ => t
   | _ => .error .operandType
 
 /-- The type of a tuple expression of storable elements. -/
@@ -573,12 +672,12 @@ def methodTy (m : String) (τr : PyTy) (τs : List PyTy) (ls : List (Option Int)
     | [_], [_], none => .error .method
     | _, _, _ => .error .methodArgs
   | "set" =>
-    match τr, τs with
-    | .array t n, [τi, τv] => do
-      indexOk τi
+    match τr, τs, ls with
+    | .array t n, [τi, τv], [li, _] => do
+      indexOk τi li
       if τv = t then .ok (.array t n) else .error .methodArgs
-    | .array _ _, _ => .error .methodArgs
-    | _, _ => .error .method
+    | .array _ _, _, _ => .error .methodArgs
+    | _, _, _ => .error .method
   | "square" | "double" =>
     match τr, τs with
     | .field p, [] => .ok (.field p)
@@ -662,7 +761,7 @@ inductive HasTy (env : ModEnv) (Γ : Ctx) : PyExpr → PyTy → Prop where
       HasTys env Γ args τs → nameCallTy env f τs (args.map (litVal env)) = .ok τ →
       HasTy env Γ (.call p (.name q f) args []) τ
   | subscript {p : Pos} {a i : PyExpr} {τa τi τ : PyTy} :
-      HasTy env Γ a τa → HasTy env Γ i τi → indexTy τa τi = .ok τ →
+      HasTy env Γ a τa → HasTy env Γ i τi → indexTy τa τi (litVal env i) = .ok τ →
       HasTy env Γ (.subscript p a i) τ
   | tuple {p : Pos} {es : List PyExpr} {τs : List PyTy} {τ : PyTy} :
       HasTys env Γ es τs → tupleTy τs = .ok τ → HasTy env Γ (.tuple p es) τ
@@ -677,10 +776,14 @@ end
 
 /-! ## Statement tables -/
 
+/-- Whether `x` has the prefix `__anorm` of the fresh names of the A-normal
+form of the compiler, which no local or parameter may have. -/
+def anormName (x : String) : Bool := x.startsWith "__anorm"
+
 /-- The binding of `x` to a value of type `τ`: a rebinding keeps the type of
 `x`; a first binding is allowed only where `top` holds, of a storable type,
-and of a name that is not reserved at module level. A loop variable is not
-rebound. -/
+and of a name that is neither reserved at module level nor an `anormName`. A
+loop variable is not rebound. -/
 def bindName (env : ModEnv) (top : Bool) (Γ : Ctx) (x : String) (τ : PyTy) :
     Except RefusalKind Ctx :=
   if x ∈ Γ.loopVars then .error .loopVarRebound
@@ -690,13 +793,9 @@ def bindName (env : ModEnv) (top : Bool) (Γ : Ctx) (x : String) (τ : PyTy) :
     | none =>
       if !top then .error .bindInBranch
       else if x ∈ env.reserved then .error .shadowsName
+      else if anormName x then .error .anormName
       else if !τ.storable then .error .notStorable
       else .ok (Γ.bind x τ)
-
-/-- The bindings of names to types, from left to right. -/
-def bindNames (env : ModEnv) (top : Bool) : Ctx → List (String × PyTy) → Except RefusalKind Ctx
-  | Γ, [] => .ok Γ
-  | Γ, (x, τ) :: xs => (bindName env top Γ x τ).bind fun Γ' => bindNames env top Γ' xs
 
 /-- The names of a list of name expressions. -/
 def namesOf : List PyExpr → Option (List String)
@@ -704,18 +803,12 @@ def namesOf : List PyExpr → Option (List String)
   | .name _ x :: es => (namesOf es).map (x :: ·)
   | _ => none
 
-/-- The context after `targets = v` with `v : τ`: one name, or a tuple of
-distinct names unpacking a call's tuple result. -/
-def assignTy (env : ModEnv) (top : Bool) (Γ : Ctx) (targets : List PyExpr) (v : PyExpr)
+/-- The context after `targets = v` with `v : τ`: the target is one name. -/
+def assignTy (env : ModEnv) (top : Bool) (Γ : Ctx) (targets : List PyExpr) (_v : PyExpr)
     (τ : PyTy) : Except RefusalKind Ctx :=
   match targets with
   | [.name _ x] => bindName env top Γ x τ
-  | [.tuple _ elts] =>
-    match v, τ, namesOf elts with
-    | .call .., .tuple ts, some xs =>
-      if xs.length = ts.length ∧ xs.Nodup then bindNames env top Γ (xs.zip ts)
-      else .error .tupleTarget
-    | _, _, _ => .error .tupleTarget
+  | [.tuple _ _] => .error .tupleTarget
   | [_] => .error .assignTarget
   | _ => .error .chainedAssign
 
@@ -754,20 +847,9 @@ def parseBase (env : ModEnv) : PyExpr → Except RefusalKind PyTy
     else .error .notImported
   | e => parseScalar env e
 
-/-- The elements of a subscript slice: the elements of a tuple, or the slice. -/
-def sliceElems : PyExpr → List PyExpr
-  | .tuple _ es => es
-  | e => [e]
-
-/-- An annotation; `tuple[...]` of non-tuple annotations only when
-`allowTuple`. -/
-def parseAnn (env : ModEnv) (allowTuple : Bool) : PyExpr → Except RefusalKind PyTy
-  | .subscript _ (.name _ "tuple") s =>
-    if allowTuple then
-      match sliceElems s with
-      | [] => .error .tupleAnnotation
-      | es => (es.mapM (parseBase env)).map .tuple
-    else .error .tupleAnnotation
+/-- An annotation: a scalar or `Array[T, N]`; `tuple[...]` is refused. -/
+def parseAnn (env : ModEnv) : PyExpr → Except RefusalKind PyTy
+  | .subscript _ (.name _ "tuple") _ => .error .tupleAnnotation
   | e => parseBase env e
 
 /-- The context after `target: ann = v` with `v : τ`: a first binding of a
@@ -776,7 +858,7 @@ def annAssignTy (env : ModEnv) (top : Bool) (Γ : Ctx) (target ann : PyExpr) (τ
     Except RefusalKind Ctx :=
   match target with
   | .name _ x =>
-    (parseAnn env false ann).bind fun τa =>
+    (parseAnn env ann).bind fun τa =>
       if τa ≠ τ then .error .annMismatch
       else if (Γ.lookup x).isSome then .error .annotatedRebind
       else bindName env top Γ x τ
@@ -808,8 +890,8 @@ def loopIterOk (env : ModEnv) (Γ : Ctx) : PyExpr → Except RefusalKind Unit
   | .call _ (.name _ "reversed") [r] [] => rangeOk env Γ r
   | e => rangeOk env Γ e
 
-/-- The context of a loop body: the loop variable, unbound before and not
-reserved, bound to `int`; no `else` clause. -/
+/-- The context of a loop body: the loop variable, unbound before, not
+reserved and not an `anormName`, bound to `int`; no `else` clause. -/
 def loopEntry (env : ModEnv) (Γ : Ctx) (target iter : PyExpr) (orelse : List PyStmt) :
     Except RefusalKind Ctx :=
   if !orelse.isEmpty then .error .forElse
@@ -819,6 +901,7 @@ def loopEntry (env : ModEnv) (Γ : Ctx) (target iter : PyExpr) (orelse : List Py
       (loopIterOk env Γ iter).bind fun _ =>
         if (Γ.lookup i).isSome then .error .loopVarBound
         else if i ∈ env.reserved then .error .shadowsName
+        else if anormName i then .error .anormName
         else .ok (Γ.bindLoop i)
     | _ => .error .forTarget
 
@@ -870,6 +953,72 @@ def FnOk (env : ModEnv) (Γ₀ : Ctx) (τ : PyTy) (body : List PyStmt) : Prop :=
   ∃ p e Γ', body.getLast? = some (.ret p (some e)) ∧ StmtsOk env true Γ₀ body.dropLast Γ' ∧
     HasTy env Γ' e τ
 
+/-! ## Call depth -/
+
+/-- The depth of a call of the name `f` in a body checked in `env`: one more
+than the depth of a module function that is not linked, `0` for any other
+name. -/
+def callDepthOf (env : ModEnv) (f : String) : Nat :=
+  match List.lookup f env.fns with
+  | some sig => if sig.linked.isNone then sig.depth + 1 else 0
+  | none => 0
+
+mutual
+
+/-- The length of the longest chain of calls of module functions that are not
+linked starting at a call in the expression. -/
+def exprDepth (env : ModEnv) : PyExpr → Nat
+  | .name .. | .const .. => 0
+  | .binOp _ l _ r => max (exprDepth env l) (exprDepth env r)
+  | .unaryOp _ _ e => exprDepth env e
+  | .boolOp _ _ vs => exprsDepth env vs
+  | .compare _ l _ cs => max (exprDepth env l) (exprsDepth env cs)
+  | .ifExp _ c t e => max (exprDepth env c) (max (exprDepth env t) (exprDepth env e))
+  | .call _ func args _ =>
+    let d :=
+      match func with
+      | .name _ f => callDepthOf env f
+      | _ => exprDepth env func
+    max d (exprsDepth env args)
+  | .attribute _ v _ => exprDepth env v
+  | .subscript _ a i => max (exprDepth env a) (exprDepth env i)
+  | .tuple _ es => exprsDepth env es
+
+/-- The largest `exprDepth` of a list of expressions. -/
+def exprsDepth (env : ModEnv) : List PyExpr → Nat
+  | [] => 0
+  | e :: es => max (exprDepth env e) (exprsDepth env es)
+
+end
+
+/-- The depth of an optional expression. -/
+def optDepth (env : ModEnv) : Option PyExpr → Nat
+  | some e => exprDepth env e
+  | none => 0
+
+mutual
+
+/-- The length of the longest chain of calls of module functions that are not
+linked starting at a call in the statement. -/
+def stmtDepth (env : ModEnv) : PyStmt → Nat
+  | .assign _ _ v => exprDepth env v
+  | .annAssign _ _ _ v _ => optDepth env v
+  | .forStmt _ _ iter body orelse =>
+    max (exprDepth env iter) (max (stmtsDepth env body) (stmtsDepth env orelse))
+  | .ifStmt _ c body orelse =>
+    max (exprDepth env c) (max (stmtsDepth env body) (stmtsDepth env orelse))
+  | .ret _ v => optDepth env v
+  | .expr _ v => exprDepth env v
+  | .functionDef .. | .importFrom .. | .pass _ => 0
+
+/-- The largest `stmtDepth` of a list of statements: the call depth of a
+function body. -/
+def stmtsDepth (env : ModEnv) : List PyStmt → Nat
+  | [] => 0
+  | s :: ss => max (stmtDepth env s) (stmtsDepth env ss)
+
+end
+
 /-! ## Checked modules -/
 
 /-- A checked function: its name and position, its signature, the module
@@ -890,11 +1039,17 @@ structure CheckedModule where
   fns : List CheckedFn
   deriving Repr, Inhabited
 
-/-- A checked function is well typed: an entry satisfies the layout
-condition, and a function that is not linked has a body satisfying `FnOk`. -/
+/-- A checked function is well typed: its name and signature satisfy
+`fnSigOk`, its recorded depth is the call depth of its body, and a function
+that is not linked has a body satisfying `FnOk`. -/
 def CheckedFn.WellTyped (f : CheckedFn) : Prop :=
-  (f.sig.entry = true → f.sig.entryAbiOk = true) ∧
+  fnSigOk f.name f.sig = .ok () ∧ f.sig.depth = stmtsDepth f.env f.body ∧
     (f.sig.linked = none → FnOk f.env (Ctx.ofParams f.sig.params) f.sig.result f.body)
+
+/-- A well-typed entry satisfies the layout condition. -/
+theorem CheckedFn.WellTyped.entryAbiOk {f : CheckedFn} (h : f.WellTyped)
+    (he : f.sig.entry = true) : f.sig.entryAbiOk = true :=
+  fnSigOk_entryAbi h.1 he
 
 /-- Every function of a checked module is well typed. -/
 def CheckedModule.WellTyped (cm : CheckedModule) : Prop := ∀ f ∈ cm.fns, f.WellTyped

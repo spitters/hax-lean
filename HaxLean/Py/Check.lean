@@ -20,8 +20,9 @@ concerned.
   the translation can re-run it to type each node.
 * `checkStmt`, `checkStmts` — the context a statement (list) leaves.
 * `checkBody` — a function body: statements, then one `return e`.
-* `checkSig`, `checkFn` — decorators, annotations, the entry layout and the
-  body of a function definition.
+* `checkSig`, `checkFn` — decorators, annotations, the conditions `fnSigOk`
+  on the name, the signature and the call depth, and the body of a function
+  definition.
 * `checkTop`, `pyCheck` — the module: a docstring, imports from `typing` and
   `catcrypt_py`, constants, field classes and function definitions, each
   checked in the environment of the statements before it. A function calls
@@ -101,7 +102,7 @@ def inferExpr (env : ModEnv) (Γ : Ctx) : PyExpr → Except PyRefusal PyTy
   | .subscript p a i => do
       let τa ← inferExpr env Γ a
       let τi ← inferExpr env Γ i
-      liftK p [] (indexTy τa τi)
+      liftK p [] (indexTy τa τi (litVal env i))
   | .tuple p es => do
       let τs ← inferExprs env Γ es
       liftK p [] (tupleTy τs)
@@ -192,17 +193,18 @@ def checkDecorators (env : ModEnv) (pos : Pos) :
   | _ => refuse pos .decorator []
 
 /-- The parameters of a function: annotated, with distinct names that are
-not reserved at module level. -/
+neither reserved at module level nor an `anormName`. -/
 def checkParams (env : ModEnv) : List PyArg → List String →
     Except PyRefusal (List (String × PyTy))
   | [], _ => pure []
   | a :: as, seen => do
       if a.name ∈ seen then refuse a.pos .duplicateParam [a.name] else
       if a.name ∈ env.reserved then refuse a.pos .shadowsName [a.name] else
+      if anormName a.name then refuse a.pos .anormName [a.name] else
       match a.annotation with
       | none => refuse a.pos .missingAnnotation [a.name]
       | some ann => do
-          let τ ← liftK a.pos [a.name] (parseAnn env false ann)
+          let τ ← liftK a.pos [a.name] (parseAnn env ann)
           let rest ← checkParams env as (a.name :: seen)
           pure ((a.name, τ) :: rest)
 
@@ -215,16 +217,17 @@ def checkSig (env : ModEnv) (pos : Pos) (name : String) (params : List PyArg)
   match returns with
   | none => refuse pos .missingAnnotation [name]
   | some r => do
-      let τ ← liftK r.pos [name] (parseAnn env (!isEntry) r)
+      let τ ← liftK r.pos [name] (parseAnn env r)
       pure { params := ps, result := τ, entry := isEntry, linked := linked }
 
-/-- A function definition checked in `env`: its signature, the entry layout
-and, unless it is linked, its body. -/
+/-- A function definition checked in `env`: its signature with the call depth
+of its body, the conditions `fnSigOk` and, unless it is linked, its body. -/
 def checkFn (env : ModEnv) (pos : Pos) (name : String) (params : List PyArg)
     (body : List PyStmt) (decorators : List PyExpr) (returns : Option PyExpr) :
     Except PyRefusal CheckedFn := do
-  let sig ← checkSig env pos name params decorators returns
-  if sig.entry && !sig.entryAbiOk then refuse pos .entryAbi [name] else
+  let sig₀ ← checkSig env pos name params decorators returns
+  let sig := { sig₀ with depth := stmtsDepth env body }
+  liftK pos [name] (fnSigOk name sig)
   if sig.linked.isNone then checkBody env (Ctx.ofParams sig.params) sig.result pos body
   pure { name := name, pos := pos, sig := sig, env := env, body := body }
 
@@ -248,13 +251,14 @@ def checkImport (env : ModEnv) (p : Pos) (m : Option String) (names : List PyAli
   | some x => refuse p .importModule [x]
   | none => refuse p .importModule []
 
-/-- A module constant `N: Final = n`. -/
+/-- A module constant `N: Final = n` with `0 ≤ n < 2^64`. -/
 def checkConst (env : ModEnv) (target ann : PyExpr) (val : Option PyExpr) :
     Except RefusalKind ModEnv :=
   match target, ann, val with
   | .name _ x, .name _ "Final", some (.const _ (.int n)) =>
     if "Final" ∉ env.imports then .error .notImported
     else if n < 0 then .error .constantValue
+    else if 2 ^ 64 ≤ n then .error .intLiteral
     else if x ∈ env.defined then .error .duplicateName
     else .ok { env with consts := env.consts ++ [(x, n.toNat)] }
   | _, _, _ => .error .moduleStmt

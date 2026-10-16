@@ -13,7 +13,8 @@ public import HaxLean.Py.Check
 
 A module accepted by `pyCheck` is well typed: every function whose body is
 checked satisfies `FnOk` in the environment it is checked in, and every
-entry function the layout condition.
+function the conditions `fnSigOk` on its name, its signature and its call
+depth.
 
 * `inferExpr_sound` — `inferExpr env Γ e = .ok τ` gives `HasTy env Γ e τ`.
 * `checkStmts_sound` — `checkStmts env top Γ ss = .ok Γ'` gives
@@ -199,20 +200,17 @@ theorem checkFn_wellTyped {env : ModEnv} {pos : Pos} {name : String} {params : L
     {body : List PyStmt} {decorators : List PyExpr} {returns : Option PyExpr} {f : CheckedFn}
     (h : checkFn env pos name params body decorators returns = .ok f) : f.WellTyped := by
   unfold checkFn at h
-  simp only [bind_eq_ok] at h
-  obtain ⟨sig, -, h⟩ := h
+  simp only [bind_eq_ok, liftK_eq_ok] at h
+  obtain ⟨sig, -, u, hok, h⟩ := h
   split at h
-  · exact absurd h refuse_ne_ok
-  · rename_i habi
-    split at h
-    · rename_i hl
-      simp only [bind_eq_ok, pure, Except.pure, Except.ok.injEq] at h
-      obtain ⟨u, hb, rfl⟩ := h
-      exact ⟨fun he => by simp_all, fun _ => checkBody_sound hb⟩
-    · rename_i hl
-      simp only [pure, Except.pure, Except.ok.injEq] at h
-      subst h
-      exact ⟨fun he => by simp_all, fun hn => absurd (Option.isNone_iff_eq_none.2 hn) hl⟩
+  · rename_i hl
+    simp only [bind_eq_ok, pure, Except.pure, Except.ok.injEq] at h
+    obtain ⟨u, hb, rfl⟩ := h
+    exact ⟨hok, rfl, fun _ => checkBody_sound hb⟩
+  · rename_i hl
+    simp only [pure, Except.pure, Except.ok.injEq] at h
+    subst h
+    exact ⟨hok, rfl, fun hn => absurd (Option.isNone_iff_eq_none.2 hn) hl⟩
 
 /-- A module-level statement keeps every checked function well typed. -/
 theorem checkTopStmt_wellTyped {st st' : ModEnv × List CheckedFn} {s : PyStmt}
@@ -259,7 +257,7 @@ theorem checkTop_wellTyped : (st : ModEnv × List CheckedFn) → (ss : List PySt
 /-- **Soundness of the checker.** A module accepted by `pyCheck` is well
 typed: every function whose body is checked satisfies the typing rules
 `HasTy`/`StmtsOk` (`FnOk`) in the environment of the definitions before it,
-and every entry function satisfies the layout condition. -/
+and every function the conditions `fnSigOk` at the call depth of its body. -/
 theorem pyCheck_wellTyped {m : PyModule} {cm : CheckedModule} (h : pyCheck m = .ok cm) :
     cm.WellTyped := by
   unfold pyCheck at h

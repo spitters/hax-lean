@@ -16,7 +16,7 @@ The secrecy records of the Rust route (`Hax.FnSecrecy`, `Hax.secrecyOfBindings`)
 built from the checked types of a Python function.
 
 * `PyTy.isSecretTy` — a secret type: `secret τ`, `secretBool`, an array of a
-  secret type, or a tuple with a secret component (the last only as a result).
+  secret type, or a tuple with a secret component.
 * `pyTySecrecy` — `secret` for a secret type and `pub` otherwise; the `fields`
   form is not produced, since a `Secret[...]` never appears inside a struct.
 * `pyFnSecrecy` — the `FnSecrecy` of a function: its parameters, in order, and
