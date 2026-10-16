@@ -17,7 +17,9 @@ import all Lean.Data.Json.Basic
 
 `PyModule.fromJson?` reads the JSON dump of a CPython 3.12 `ast.Module`
 (top level `{"python": [3, 12, micro], "file": ..., "module": ...}`) into a
-`PyModule`; `PyModule.toJson` writes a `PyModule` in the same schema. A node
+`PyModule`; `PyModule.toJson` writes a `PyModule` in the same schema. An
+augmented assignment `x op= e` to a name is read as `x = x op e` at the
+position of the node; the writer has no augmented assignment. A node
 is a JSON object with its CPython class name under `"_type"`, its `_fields`
 by name and its span under `lineno`, `col_offset`, `end_lineno`,
 `end_col_offset`; the reader looks fields up by name and does not depend on
@@ -26,8 +28,9 @@ key order.
 The reader refuses, with the node concerned and its position where it has
 one: an interpreter version other than 3.12, a node class outside the
 subset of `HaxLean.Py.AST`, a constant other than `bool`, `int`, `str` and
-`None`, a function with parameters other than positional ones, and a
-function with type parameters.
+`None`, a function with parameters other than positional ones, a function
+with type parameters, and an augmented assignment to a target other than a
+name.
 
 `PyModule.fromJson_toJson` states that reading a written module returns it.
 -/
@@ -637,6 +640,13 @@ def readStmt (j : Json) : ReadM PyStmt := do
     let ts ← readExprs (← list ty "targets" (← field ty j "targets"))
     let v ← readExpr (← field ty j "value")
     return .assign p ts v
+  | "AugAssign" => do
+    let t ← readExpr (← field ty j "target")
+    let op ← readTag "binary operator" PyBinOp.ofName (← field ty j "op")
+    let v ← readExpr (← field ty j "value")
+    match t with
+    | .name q x => return .assign p [.name q x] (.binOp p (.name q x) op v)
+    | _ => throw ⟨ty, some p, "augmented assignment to a target other than a name"⟩
   | "AnnAssign" => do
     let t ← readExpr (← field ty j "target")
     let a ← readExpr (← field ty j "annotation")

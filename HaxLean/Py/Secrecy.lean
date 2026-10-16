@@ -25,6 +25,8 @@ built from the checked types of a Python function.
 * `walkStmt`, `walkStmts` — the statement walk of `checkStmt`, `checkStmts`,
   which also returns the bindings of loop bodies; `walkStmts_fst` states that
   its context is the checker's.
+* `walkBlock` — the walk of a complete body as `checkBlock` reads it,
+  returning the contexts at its `return`s and the bindings of loop bodies.
 * `pyBindings` — the parameters and the bindings of the body with their
   checked types; `pySecretBindings` — the names among them of a secret type,
   without repetition.
@@ -182,13 +184,47 @@ theorem walkStmts_fst (env : ModEnv) (top : Bool) (Γ : Ctx) (ss : List PyStmt) 
 
 end
 
-/-- The bindings of the body of `f` with their checked types: the context the
-statements before the final `return` leave, and the bindings of their loop
-bodies; none for a linked function, whose body is not checked. -/
+/-- The statement walk of `checkBlock`: the contexts at the `return`s of a
+complete body, and the bindings made in its loop bodies. -/
+def walkBlock (env : ModEnv) (Γ : Ctx) :
+    List PyStmt → Except PyRefusal (List (String × PyTy) × List (String × PyTy))
+  | [] => pure ([], [])
+  | s :: rest =>
+    match s, rest with
+    | .ret _ _, [] => pure (Γ.vars, [])
+    | .ifStmt p c body orelse, rest =>
+        if stmtsReturn body || stmtsReturn orelse then
+          if stmtsReturn body then do
+            let a ← walkBlock env Γ body
+            if stmtsReturn orelse then do
+              let b ← walkBlock env Γ orelse
+              pure (a.1 ++ b.1, a.2 ++ b.2)
+            else do
+              let r ← walkStmts env false Γ orelse
+              let b ← walkBlock env r.1 rest
+              pure (a.1 ++ b.1, a.2 ++ r.2 ++ b.2)
+          else do
+            let r ← walkStmts env false Γ body
+            let a ← walkBlock env Γ orelse
+            let b ← walkBlock env r.1 rest
+            pure (a.1 ++ b.1, r.2 ++ a.2 ++ b.2)
+        else do
+          let r ← walkStmt env true Γ (.ifStmt p c body orelse)
+          let b ← walkBlock env r.1 rest
+          pure (b.1, r.2 ++ b.2)
+    | s, rest => do
+        let r ← walkStmt env true Γ s
+        let b ← walkBlock env r.1 rest
+        pure (b.1, r.2 ++ b.2)
+termination_by ss => sizeOf ss
+
+/-- The bindings of the body of `f` with their checked types: the contexts at
+its `return`s, and the bindings of its loop bodies and of the arms of its
+conditionals; none for a linked function, whose body is not checked. -/
 def pyBodyBindings (f : CheckedFn) : List (String × PyTy) :=
   if f.sig.linked.isNone then
-    match walkStmts f.env true (Ctx.ofParams f.sig.params) f.body.dropLast with
-    | .ok r => r.1.vars ++ r.2
+    match walkBlock f.env (Ctx.ofParams f.sig.params) f.body with
+    | .ok r => r.1 ++ r.2
     | .error _ => []
   else []
 

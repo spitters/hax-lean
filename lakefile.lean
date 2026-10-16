@@ -15,8 +15,13 @@ package «hax-lean» where
 lean_lib HaxLean where
   srcDir := "."
 
+-- `needs` builds the modules an extraction module of `haxpipeT` imports
+-- (`PrettyPrintT.lean`, the header of the module), so that the output of
+-- `lake build haxpipeT` elaborates.
 lean_exe haxpipeT where
   root := `HaxLean.MainT
+  needs := #[`+HaxLean.Runtime, `+HaxLean.AST, `+HaxLean.TExpr, `+HaxLean.Semantics,
+    `+HaxLean.Secrecy]
 
 -- API documentation (opt-in, dev only). Generate with:
 --   lake -R -Kenv=doc update && lake -R -Kenv=doc build HaxLean:docs

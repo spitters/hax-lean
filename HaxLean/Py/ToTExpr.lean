@@ -25,6 +25,9 @@ and calls `app head args` with the heads of the front's tables.
   literal takes the type of its position.
 * `trStmt`, `trStmts` — statements as a list of `Step`s, assembled right-nested
   by `assemble`.
+* `trBlock` — a complete body; an `if` with an arm ending in `return` is the
+  last node, `ifThenElse c t e` whose arms are complete bodies, the arm that
+  falls through followed by the statements after the `if`.
 * `trFn`, `pyToTExpr` — function bodies with their prelude; the extraction
   `PyExtraction` with the constants, the function terms and the signatures.
 * `PyImage` — the constructors the translation produces: no `match_`, `lam`,
@@ -422,17 +425,56 @@ end
 def prelude (ps : List (String × PyTy)) (body : TExpr) : TExpr :=
   ps.foldr (fun p acc => .mk (.letBind p.1 (.mk (.var p.1) p.2.toImp) acc) acc.ty) body
 
-/-- The term of a function body: the prelude, the statements before the final
-`return e`, then `e`. -/
-def trFn (f : CheckedFn) : Except String TExpr :=
-  let Γ₀ := Ctx.ofParams f.sig.params
-  match f.body.getLast? with
-  | some (.ret _ (some e)) => do
-      let ss ← trStmts f.env true Γ₀ f.body.dropLast
-      let Γ' ← liftR (checkStmts f.env true Γ₀ f.body.dropLast)
-      let r ← trExpr f.env Γ' none e
-      pure (prelude f.sig.params (assemble ss r))
-  | _ => errAt f.pos "no return"
+/-- The term of a complete body from `Γ` (`BodyOk`), as `checkBlock` reads it:
+`return e` is `e`; an `if` with an arm ending in a value is `ifThenElse`
+whose arms are the term of that arm and the term of the other arm followed
+by the statements after the `if` (`if c: A else: (B ++ rest)`), so no
+statement after it and no early exit remains; any other statement is its
+steps around the term of the rest. -/
+def trBlock (env : ModEnv) (pos : Pos) (Γ : Ctx) : List PyStmt → Except String TExpr
+  | [] => errAt pos "no return"
+  | s :: rest =>
+    match s, rest with
+    | .ret _ (some e), [] => trExpr env Γ none e
+    | .ifStmt p c body orelse, rest =>
+        if stmtsReturn body || stmtsReturn orelse then do
+          let c' ← trExpr env Γ none c
+          if stmtsReturn body then do
+            let t ← trBlock env pos Γ body
+            if stmtsReturn orelse then
+              match rest with
+              | [] => do
+                  let e ← trBlock env pos Γ orelse
+                  pure (.mk (.ifThenElse c' t e) t.ty)
+              | _ :: _ => errAt p "statement after a conditional whose arms return"
+            else do
+              let es ← trStmts env false Γ orelse
+              let Γ₁ ← liftR (checkStmts env false Γ orelse)
+              let r ← trBlock env pos Γ₁ rest
+              pure (.mk (.ifThenElse c' t (assemble es r)) t.ty)
+          else do
+            let ts ← trStmts env false Γ body
+            let Γ₁ ← liftR (checkStmts env false Γ body)
+            let e ← trBlock env pos Γ orelse
+            let r ← trBlock env pos Γ₁ rest
+            pure (.mk (.ifThenElse c' (assemble ts r) e) e.ty)
+        else do
+          let a ← trStmt env Γ (.ifStmt p c body orelse)
+          let Γ₁ ← liftR (checkStmt env true Γ (.ifStmt p c body orelse))
+          let r ← trBlock env pos Γ₁ rest
+          pure (assemble a r)
+    | s, rest => do
+        let a ← trStmt env Γ s
+        let Γ₁ ← liftR (checkStmt env true Γ s)
+        let r ← trBlock env pos Γ₁ rest
+        pure (assemble a r)
+termination_by ss => sizeOf ss
+
+/-- The term of a function body: the prelude around the term of the body
+(`trBlock`). -/
+def trFn (f : CheckedFn) : Except String TExpr := do
+  let b ← trBlock f.env f.pos (Ctx.ofParams f.sig.params) f.body
+  pure (prelude f.sig.params b)
 
 /-- The terms of the functions that are not linked, in module order. -/
 def trFns : List CheckedFn → Except String (List (String × TExpr))
@@ -815,14 +857,60 @@ theorem prelude_pyImage (ps : List (String × PyTy)) (body : TExpr)
     simp only [TExpr.erase]
     exact .letBind .var ih
 
+/-- Every term `trBlock` returns is in `PyImage` after erasure. -/
+theorem trBlock_pyImage (env : ModEnv) (pos : Pos) :
+    (Γ : Ctx) → (ss : List PyStmt) → (t : TExpr) → trBlock env pos Γ ss = .ok t →
+      PyImage t.erase
+  | Γ, [], t, h => by
+      rw [trBlock.eq_def] at h
+      exact absurd h errAt_ne_ok
+  | Γ, s :: rest, t, h => by
+      rw [trBlock.eq_def] at h
+      simp only at h
+      split at h
+      · exact trExpr_pyImage env Γ _ _ _ h
+      · rename_i p c body orelse
+        split at h
+        · simp only [bind_eq_ok] at h
+          obtain ⟨c', hc, h⟩ := h
+          have hc' := trExpr_pyImage env Γ c _ _ hc
+          split at h
+          · simp only [bind_eq_ok] at h
+            obtain ⟨tb, htb, h⟩ := h
+            have htb' := trBlock_pyImage env pos Γ body tb htb
+            split at h
+            · split at h
+              · simp only [bind_eq_ok, pure_ok] at h
+                obtain ⟨te, hte, rfl⟩ := h
+                simp only [TExpr.erase]
+                exact .ifThenElse hc' htb' (trBlock_pyImage env pos Γ orelse te hte)
+              · exact absurd h errAt_ne_ok
+            · simp only [bind_eq_ok, pure_ok] at h
+              obtain ⟨es, hes, Γ₁, _, r, hr, rfl⟩ := h
+              simp only [TExpr.erase]
+              exact .ifThenElse hc' htb' (assemble_pyImage es r
+                (trStmts_pyImage env false Γ orelse es hes) (trBlock_pyImage env pos Γ₁ rest r hr))
+          · simp only [bind_eq_ok, pure_ok] at h
+            obtain ⟨ts, hts, Γ₁, _, te, hte, r, hr, rfl⟩ := h
+            simp only [TExpr.erase]
+            exact .ifThenElse hc' (assemble_pyImage ts r
+              (trStmts_pyImage env false Γ body ts hts) (trBlock_pyImage env pos Γ₁ rest r hr))
+              (trBlock_pyImage env pos Γ orelse te hte)
+        · simp only [bind_eq_ok, pure_ok] at h
+          obtain ⟨a, ha, Γ₁, _, r, hr, rfl⟩ := h
+          exact assemble_pyImage a r (trStmt_pyImage env Γ _ a ha)
+            (trBlock_pyImage env pos Γ₁ rest r hr)
+      · simp only [bind_eq_ok, pure_ok] at h
+        obtain ⟨a, ha, Γ₁, _, r, hr, rfl⟩ := h
+        exact assemble_pyImage a r (trStmt_pyImage env Γ _ a ha)
+          (trBlock_pyImage env pos Γ₁ _ r hr)
+termination_by _ ss => sizeOf ss
+
 theorem trFn_pyImage {f : CheckedFn} {t : TExpr} (h : trFn f = .ok t) : PyImage t.erase := by
   unfold trFn at h
-  split at h
-  · simp only [bind_eq_ok, pure_ok] at h
-    obtain ⟨ss, hss, _, _, r, hr, rfl⟩ := h
-    exact prelude_pyImage _ _ (assemble_pyImage ss r (trStmts_pyImage _ _ _ _ ss hss)
-      (trExpr_pyImage _ _ _ _ r hr))
-  · exact absurd h errAt_ne_ok
+  simp only [bind_eq_ok, pure_ok] at h
+  obtain ⟨b, hb, rfl⟩ := h
+  exact prelude_pyImage _ _ (trBlock_pyImage _ _ _ _ b hb)
 
 theorem trFns_pyImage :
     (fs : List CheckedFn) → (ts : List (String × TExpr)) → trFns fs = .ok ts →

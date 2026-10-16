@@ -19,7 +19,9 @@ concerned.
 * `inferExpr` — the syntax-directed type of an expression; deterministic, so
   the translation can re-run it to type each node.
 * `checkStmt`, `checkStmts` — the context a statement (list) leaves.
-* `checkBody` — a function body: statements, then one `return e`.
+* `checkBlock`, `checkBody` — a function body: statements ending in
+  `return e`, or in an `if` whose arms end so; an `if` with one such arm is
+  followed by the statements its other arm falls through to.
 * `checkSig`, `checkFn` — decorators, annotations, the conditions `fnSigOk`
   on the name, the signature and the call depth, and the body of a function
   definition.
@@ -163,17 +165,50 @@ def checkStmts (env : ModEnv) (top : Bool) (Γ : Ctx) : List PyStmt → Except P
 
 end
 
-/-- A function body with parameters `Γ₀` and result `τ`: the last statement
-is `return e`, the statements before it check from `Γ₀`, and `e` has type
-`τ` in the context they leave. -/
+/-- A complete body from `Γ` whose value has type `τ` (`BodyOk`): `return e`
+as the last statement; an `if` one of whose arms ends in a value
+(`stmtsReturn`) checked as that arm, a complete body, and the other arm,
+either a complete body as well (then the `if` is the last statement) or an
+arm that falls through to the statements after the `if`; any other statement
+checked by `checkStmt` and followed by a complete body. -/
+def checkBlock (env : ModEnv) (τ : PyTy) (pos : Pos) (Γ : Ctx) :
+    List PyStmt → Except PyRefusal Unit
+  | [] => refuse pos .noReturn []
+  | s :: rest =>
+    match s, rest with
+    | .ret p (some e), [] => do
+        let τe ← inferExpr env Γ e
+        if τe = τ then pure () else refuse p .returnType []
+    | .ifStmt p c body orelse, rest =>
+        if stmtsReturn body || stmtsReturn orelse then do
+          let τc ← inferExpr env Γ c
+          liftK p [] (condOk τc)
+          if stmtsReturn body then do
+            checkBlock env τ pos Γ body
+            if stmtsReturn orelse then
+              match rest with
+              | [] => checkBlock env τ pos Γ orelse
+              | s' :: _ => refuse s'.pos .unreachable []
+            else do
+              let Γ₁ ← checkStmts env false Γ orelse
+              checkBlock env τ pos Γ₁ rest
+          else do
+            let Γ₁ ← checkStmts env false Γ body
+            checkBlock env τ pos Γ orelse
+            checkBlock env τ pos Γ₁ rest
+        else do
+          let Γ₁ ← checkStmt env true Γ (.ifStmt p c body orelse)
+          checkBlock env τ pos Γ₁ rest
+    | s, rest => do
+        let Γ₁ ← checkStmt env true Γ s
+        checkBlock env τ pos Γ₁ rest
+termination_by ss => sizeOf ss
+
+/-- A function body with parameters `Γ₀` and result `τ`: a body that ends in
+a value (`stmtsReturn`), checked by `checkBlock`. -/
 def checkBody (env : ModEnv) (Γ₀ : Ctx) (τ : PyTy) (pos : Pos) (body : List PyStmt) :
     Except PyRefusal Unit :=
-  match body.getLast? with
-  | some (.ret p (some e)) => do
-      let Γ' ← checkStmts env true Γ₀ body.dropLast
-      let τe ← inferExpr env Γ' e
-      if τe = τ then pure () else refuse p .returnType []
-  | _ => refuse pos .noReturn []
+  if stmtsReturn body then checkBlock env τ pos Γ₀ body else refuse pos .noReturn []
 
 /-! ## Function definitions -/
 

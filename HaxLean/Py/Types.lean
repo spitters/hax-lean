@@ -32,8 +32,10 @@ the coercion of an `int` literal) to the type of the node or to the
 * `HasTy`, `HasTys` — typing of expressions and expression lists.
 * `StmtOk`, `StmtsOk` — typing of statements; `top` says whether a first
   binding is allowed (the top level of a function body or of a loop body).
-* `FnOk` — a function body: statements followed by one `return e` whose
-  type is the annotated result.
+* `BodyOk`, `FnOk` — a function body: statements ending in `return e` whose
+  type is the annotated result, or in an `if` whose arms are such bodies; an
+  `if` with one such arm is followed by a body the other arm falls through
+  to. `stmtsReturn` says whether a statement list ends in a value.
 * `fnSigOk` — the conditions on a function definition: its name, the entry
   layout, the placement of an entry's array result, the call depth of an
   entry, and the array element types of a function that is not an entry.
@@ -50,9 +52,9 @@ namespace Hax.Py
 
 /-! ## Types -/
 
-/-- The types of the subset. `int` is the type of literals, loop variables
-and index arithmetic; `secret` is applied to words; `secretBool` is the
-result of a comparison of secrets. -/
+/-- The types of the subset. `int` is the type of literals, loop variables,
+`int` locals and parameters, and their arithmetic; `secret` is applied to
+words; `secretBool` is the result of a comparison of secrets. -/
 inductive PyTy where
   | bool
   | int
@@ -139,10 +141,10 @@ def fieldOf : PyTy → Option Nat
   | .field p => some p
   | _ => none
 
-/-- The types a local name may hold: `bool`, words, secret words, field
-elements and arrays. -/
+/-- The types a local name may hold: `bool`, `int`, words, secret words,
+field elements and arrays. -/
 def storable : PyTy → Bool
-  | .bool | .word _ | .field _ | .secret (.word _) | .array _ _ => true
+  | .bool | .int | .word _ | .field _ | .secret (.word _) | .array _ _ => true
   | _ => false
 
 /-- The scalar types of an entry function's layout: words, field elements
@@ -164,12 +166,12 @@ def abiResult : PyTy → Bool
   | _ => false
 
 /-- A parameter or result type of a module function that is not an entry: a
-non-array type, or an array of 64-bit elements (`U64`, `Secret[U64]` or field
-elements), the element types the callee typing `modFnElem` of the compiler's
-module chain (`NFChain.lean`) accepts. -/
+non-array type, or an array of words of any width, public or secret, or of
+field elements, the element types the callee typing `modFnElem` of the
+compiler's module chain (`NFChain.lean`) accepts (`.uint w` with
+`w.bits ≤ 64`). -/
 def calleeOk : PyTy → Bool
-  | .array (.word .w64) _ | .array (.secret (.word .w64)) _ | .array (.field _) _ => true
-  | .array _ _ => false
+  | .array t _ => t.wordOf.isSome || t.fieldOf.isSome
   | _ => true
 
 end PyTy
@@ -232,8 +234,11 @@ inductive RefusalKind where
   | entryAbi
   /-- A function body whose last statement is not `return e`. -/
   | noReturn
-  /-- A `return` before the last statement. -/
+  /-- A `return` before the last statement of a body, other than one ending
+  an arm of an `if` outside a loop body. -/
   | returnNotLast
+  /-- A statement after an `if` whose two arms end in `return`. -/
+  | unreachable
   /-- A returned value whose type is not the annotated result. -/
   | returnType
   /-- A nested function definition. -/
@@ -262,7 +267,7 @@ inductive RefusalKind where
   | bindInBranch
   /-- A local name that is a module-level, imported or reserved name. -/
   | shadowsName
-  /-- A binding of a value of type `int`, `secretBool` or a tuple. -/
+  /-- A binding of a value of type `secretBool` or a tuple. -/
   | notStorable
   /-- A `for` target other than a name. -/
   | forTarget
@@ -270,8 +275,8 @@ inductive RefusalKind where
   | forElse
   /-- A loop iterator other than `range(...)` or `reversed(range(...))`. -/
   | loopHead
-  /-- A loop bound other than an `int` literal below `2^64`, a constant, a
-  loop variable or a public word name. -/
+  /-- A loop bound other than an `int` literal below `2^64`, a constant, an
+  `int` name or a public word name. -/
   | loopBound
   /-- A loop variable already bound. -/
   | loopVarBound
@@ -291,8 +296,9 @@ inductive RefusalKind where
   | widthMismatch
   /-- An `int` literal outside the range of the word or field it is coerced to. -/
   | literalRange
-  /-- A non-literal `int` expression outside an index, a loop bound, a word
-  constructor or a comparison with an `int`. -/
+  /-- A non-literal `int` expression as an operand of a word or field
+  operation or as a shift or rotation amount: an `int` meets a word or a
+  field element only as a literal or as the argument of a word constructor. -/
   | intContext
   /-- An array index that is a secret. -/
   | secretIndex
@@ -323,7 +329,8 @@ inductive RefusalKind where
   | keyword
   /-- An attribute read other than a method call. -/
   | attribute
-  /-- A word constructor applied to something other than an `int`. -/
+  /-- A word constructor applied to something other than an `int` or a
+  public word of at most its width. -/
   | wordCtor
   /-- A `select` whose arguments do not have the types of the subset. -/
   | select
@@ -331,12 +338,13 @@ inductive RefusalKind where
   | cast
   /-- A tuple whose elements are not storable. -/
   | tupleElem
-  /-- An `int` literal or module constant outside `[0, 2^64)` in an index, a
-  shift or rotation amount, `int` arithmetic or an `int` comparison, or as the
-  value of a module constant. -/
+  /-- An `int` literal outside `[0, 2^64)`, or a module constant outside
+  `[0, 2^64)` in an index, a shift or rotation amount, `int` arithmetic or an
+  `int` comparison, or as the value of a module constant. -/
   | intLiteral
   /-- A parameter or result of a function that is neither an entry nor linked
-  whose type is an array of elements narrower than 64 bits. -/
+  whose type is an array of elements that are neither words nor field
+  elements. -/
   | calleeArray
   /-- An entry function whose longest chain of calls of functions that are not
   linked is longer than `maxCallDepth`. -/
@@ -481,10 +489,11 @@ def nameTy (env : ModEnv) (Γ : Ctx) (x : String) : Except RefusalKind PyTy :=
     | some _ => .ok .int
     | none => .error .unboundName
 
-/-- The type of a constant. -/
+/-- The type of a constant: an `int` literal lies in `[0, 2^64)`, the range of
+the integer literals the front types (`litInt` of `ImpToNF.lean`). -/
 def constTy : PyConst → Except RefusalKind PyTy
   | .bool _ => .ok .bool
-  | .int _ => .ok .int
+  | .int n => if decide (0 ≤ n) && decide (n < 2 ^ 64) then .ok .int else .error .intLiteral
   | _ => .error .constant
 
 /-- Whether the `int` literal `n` is a value of a word of width `w`. -/
@@ -702,8 +711,9 @@ def selectTy : List PyTy → Except RefusalKind PyTy
     | _, _ => .error .select
   | _ => .error .select
 
-/-- The type of a call of the name `f`: a word constructor, `select`, or a
-module function defined earlier at its signature. -/
+/-- The type of a call of the name `f`: a word constructor (of an `int` or of
+a public word of at most its width), `select`, or a module function defined
+earlier at its signature. -/
 def nameCallTy (env : ModEnv) (f : String) (τs : List PyTy) (ls : List (Option Int)) :
     Except RefusalKind PyTy :=
   match wordName? f with
@@ -712,6 +722,7 @@ def nameCallTy (env : ModEnv) (f : String) (τs : List PyTy) (ls : List (Option 
       match τs, ls with
       | [.int], [some n] => if litFits w n then .ok (.word w) else .error .literalRange
       | [.int], [none] => .ok (.word w)
+      | [.word w'], [_] => if w'.bits ≤ w.bits then .ok (.word w) else .error .wordCtor
       | _, _ => .error .wordCtor
     else .error .notImported
   | none =>
@@ -839,12 +850,16 @@ def arrayLen (env : ModEnv) : PyExpr → Except RefusalKind Nat
     | none => .error .arrayLength
   | _ => .error .arrayLength
 
-/-- A non-tuple annotation: a scalar or `Array[T, N]`. -/
+/-- A non-tuple annotation: `bool`, `int`, an array element type or
+`Array[T, N]`. An entry refuses `bool` and `int` through `abiParam` and
+`abiResult`. -/
 def parseBase (env : ModEnv) : PyExpr → Except RefusalKind PyTy
   | .subscript _ (.name _ "Array") (.tuple _ [t, n]) =>
     if "Array" ∈ env.imports then
       (parseScalar env t).bind fun τ => (arrayLen env n).map fun k => .array τ k
     else .error .notImported
+  | .name _ "bool" => .ok .bool
+  | .name _ "int" => .ok .int
   | e => parseScalar env e
 
 /-- An annotation: a scalar or `Array[T, N]`; `tuple[...]` is refused. -/
@@ -864,8 +879,9 @@ def annAssignTy (env : ModEnv) (top : Bool) (Γ : Ctx) (target ann : PyExpr) (τ
       else bindName env top Γ x τ
   | _ => .error .assignTarget
 
-/-- A loop bound: an `int` literal below `2^64`, a constant below `2^64`, a
-loop variable or a public word name. -/
+/-- A loop bound: an `int` literal below `2^64`, a constant below `2^64`, an
+`int` name (a loop variable, an `int` local or parameter) or a public word
+name. -/
 def boundOk (env : ModEnv) (Γ : Ctx) : PyExpr → Except RefusalKind Unit
   | .const _ (.int n) => if decide (0 ≤ n) && decide (n < 2 ^ 64) then .ok () else .error .loopBound
   | .name _ x =>
@@ -946,12 +962,51 @@ inductive StmtsOk (env : ModEnv) : Bool → Ctx → List PyStmt → Ctx → Prop
 
 end
 
-/-- A function body checked against parameters `Γ₀` and the result `τ`: its
-last statement is `return e`, the statements before it are well typed from
-`Γ₀`, and `e` has type `τ` in the context they leave. -/
+mutual
+
+/-- Whether a statement ends a body with a value: `return e`, or an `if`
+whose two arms end in a value. -/
+def stmtReturns : PyStmt → Bool
+  | .ret _ (some _) => true
+  | .ifStmt _ _ body orelse => stmtsReturn body && stmtsReturn orelse
+  | _ => false
+
+/-- Whether a statement list ends in a value: its last statement satisfies
+`stmtReturns`. -/
+def stmtsReturn : List PyStmt → Bool
+  | [] => false
+  | s :: ss => if ss.isEmpty then stmtReturns s else stmtsReturn ss
+
+end
+
+/-- `BodyOk env Γ τ ss`: the statements `ss` form a complete body from `Γ`
+whose value has type `τ`. A complete body is `return e`; a well-typed
+statement followed by a complete body; an `if` whose two arms are complete
+bodies, as the last statement; or an `if` with one arm a complete body,
+followed by a complete body, where the other arm falls through to it (it
+binds no name first, as an arm of `StmtOk.ifStmt`). The last form is
+`if c: A else: (B ++ rest)` when `A` is the complete arm. -/
+inductive BodyOk (env : ModEnv) : Ctx → PyTy → List PyStmt → Prop where
+  | ret {Γ : Ctx} {τ : PyTy} {p : Pos} {e : PyExpr} :
+      HasTy env Γ e τ → BodyOk env Γ τ [.ret p (some e)]
+  | cons {Γ Γ₁ : Ctx} {τ : PyTy} {s : PyStmt} {ss : List PyStmt} :
+      StmtOk env true Γ s Γ₁ → BodyOk env Γ₁ τ ss → BodyOk env Γ τ (s :: ss)
+  | ifBoth {Γ : Ctx} {τ τc : PyTy} {p : Pos} {c : PyExpr} {body orelse : List PyStmt} :
+      HasTy env Γ c τc → condOk τc = .ok () → BodyOk env Γ τ body → BodyOk env Γ τ orelse →
+      BodyOk env Γ τ [.ifStmt p c body orelse]
+  | ifThen {Γ Γ₁ : Ctx} {τ τc : PyTy} {p : Pos} {c : PyExpr} {body orelse rest : List PyStmt} :
+      HasTy env Γ c τc → condOk τc = .ok () → BodyOk env Γ τ body →
+      StmtsOk env false Γ orelse Γ₁ → BodyOk env Γ₁ τ rest →
+      BodyOk env Γ τ (.ifStmt p c body orelse :: rest)
+  | ifElse {Γ Γ₁ : Ctx} {τ τc : PyTy} {p : Pos} {c : PyExpr} {body orelse rest : List PyStmt} :
+      HasTy env Γ c τc → condOk τc = .ok () → StmtsOk env false Γ body Γ₁ →
+      BodyOk env Γ τ orelse → BodyOk env Γ₁ τ rest →
+      BodyOk env Γ τ (.ifStmt p c body orelse :: rest)
+
+/-- A function body checked against parameters `Γ₀` and the result `τ`: a
+complete body from `Γ₀` whose value has type `τ` (`BodyOk`). -/
 def FnOk (env : ModEnv) (Γ₀ : Ctx) (τ : PyTy) (body : List PyStmt) : Prop :=
-  ∃ p e Γ', body.getLast? = some (.ret p (some e)) ∧ StmtsOk env true Γ₀ body.dropLast Γ' ∧
-    HasTy env Γ' e τ
+  BodyOk env Γ₀ τ body
 
 /-! ## Call depth -/
 

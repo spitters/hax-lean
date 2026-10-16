@@ -21,8 +21,13 @@ The stages:
 
 ```
 python3 -I python/py2json.py prog.py -o prog.json
-lake exe haxpipeT --python prog.json --name Prog -o Prog.lean
+lake --log-level=error exe haxpipeT --python prog.json --name Prog -o Prog.lean
+lake env lean Prog.lean
 ```
+
+`lake build haxpipeT` also builds the modules the extraction module imports. The option
+`--log-level=error` keeps the warnings Lake replays from the build of `haxpipeT` out of the
+output.
 
 ## Syntax
 
@@ -48,7 +53,8 @@ Rust `x[i] = v`.
 
 ## The fragment
 
-Types: `bool`; `int` for literals, loop indices and index arithmetic; the words `U8`, `U16`,
+Types: `bool`; `int` for literals, loop indices, index arithmetic, locals, and parameters and
+results of functions that are not entries; the words `U8`, `U16`,
 `U32`, `U64`; `Array[T, N]` with `N` a constant or a literal; a prime field `F = field(p)`
 with `1 < p < 2^64`; `Secret[W]` over a word.
 
@@ -59,13 +65,18 @@ compiler takes as an entry: at most six parameters, each a word, a field element
 word or an array of these; the result a word, a field element or an array, and an entry with
 six parameters returns an array only if one of its array parameters has the same length (the
 layout writes an array result into an array parameter of its length or, with fewer than six
-parameters, into an extra output parameter). `@linked` marks a
+parameters, into an extra output parameter). A function that is not an entry may also take
+and return `bool` and `int`, and arrays of words of every width. `@linked` marks a
 kernel called as linked code, whose Python body is a reference only.
 
 Statements: a first binding `x = e` or `x: T = e` at the top level of a function body or of a
 loop body; a rebinding at the same type; `x = x.set(i, v)`; `for i in range(lo, hi)` and
 `for i in reversed(range(lo, hi))`; `if c:`/`else:` with `c` a `bool`, whose arms rebind
-names bound before; `pass`; one `return e` as the last statement.
+names bound before; `x op= e` on a name, read as `x = x op e`; `pass`; `return e` as the last
+statement of a function body or of an arm of an `if` outside a loop body. The statements
+after `if c: A` (or `if c: A else: B`) with `A` ending in `return` form the `else` arm, so
+the translation has no early exit; a first binding may occur in an arm that returns, and a
+statement after an `if` both of whose arms return is refused.
 
 Expressions and the call heads they become:
 
@@ -76,21 +87,22 @@ Expressions and the call heads they become:
 | `a & b`, `a \| b`, `a ^ b`, `~a` | `BitAnd#w`, `BitOr#w`, `BitXor#w`, `Not#w` |
 | `a << k`, `a >> k` (an amount of at least `w` raises) | `Shl#w`, `Shr#w` |
 | `a.rotate_left(k)`, `a.rotate_right(k)`, `a.cast(U32)` | `rotate_left#w`, `rotate_right#w`, `cast#32` |
+| `Uw(v)` for a public word `v` of at most `w` bits | `cast#w` |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | `Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge` |
 | `not c`; `c and d`, `c or d` | `Not`; `&&`, `\|\|`, or a conditional when `d` can fail |
 | `a if c else b`, `select(c, a, b)` | `ifThenElse` |
 | `a[i]`, `x.set(i, v)` | `index`, `array_update` |
 | field `+`, `-`, `*`, unary `-`, `.square()`, `.double()` | `add#p<p>`, `sub#p<p>`, `mul#p<p>`, `neg#p<p>`, `square#p<p>`, `double#p<p>` |
-| `i + 1`, `2 * i` on `int` (index arithmetic) | `Add#size`, `Mul#size` |
+| `i + 1`, `i - 1`, `2 * i` on `int` | `Add#size`, `Sub#size`, `Mul#size` |
 | `g(args)` for a function defined earlier, or a linked function | a call of `g` |
 
-An `int` expression other than a literal occurs only as an index, a loop bound, the argument
-of a word constructor or an operand of a comparison. The call table computes its arithmetic
-as checked 64-bit arithmetic (`Add#size`, `Mul#size`), which agrees with CPython's exact
-arithmetic on values in `[0, 2^64)`. A secret is never a condition, an index, a loop bound
+An `int` meets a word or a field element only as a literal or as the argument of a word
+constructor. The call table computes `int` arithmetic as checked 64-bit arithmetic
+(`Add#size`, `Sub#size`, `Mul#size`), which agrees with CPython's exact arithmetic on values
+in `[0, 2^64)`; outside that range the extraction fails where CPython continues. A secret is never a condition, an index, a loop bound
 or a shift amount; its comparisons give a secret bit, which only `select` consumes, and
 `declassify()` is its only escape. The checker also refuses tuples, `int` literals of at
-least `2^64`, callee arrays of words narrower than 64 bits, call chains deeper than four, and
+least `2^64`, call chains deeper than four, and
 functions named after a call head or an array operation.
 
 ## What is proved

@@ -87,13 +87,20 @@ class Word:
     BITS: ClassVar[int] = 0
     _v: int
 
-    def __new__(cls, n: int) -> Self:
-        """The word of value ``n``: an ``int`` (not a ``bool``) with ``0 <= n < 2**BITS``.
+    def __new__(cls, n: int | Word) -> Self:
+        """The word of value ``n``: an ``int`` (not a ``bool``) with ``0 <= n < 2**BITS``, a
+        literal of type ``Uw`` with no call head; or a word of at most ``BITS`` bits, whose
+        value it keeps, head ``cast#w``.
 
-        ``ValueError`` for any other argument. No call head: a literal of type ``Uw``.
+        ``ValueError`` for any other argument, a wider word included.
         """
         if cls.BITS == 0:
             raise TypeError("Word is abstract; use U8, U16, U32 or U64")
+        if isinstance(n, Word):
+            if not 0 < n.BITS <= cls.BITS:
+                raise ValueError(f"{cls.__name__} takes a word of at most {cls.BITS} bits, "
+                                 f"not {type(n).__name__}")
+            return cls._of(n._v)
         if isinstance(n, bool) or not isinstance(n, int):
             raise ValueError(f"{cls.__name__} takes an int, not {type(n).__name__}")
         if not 0 <= n < (1 << cls.BITS):

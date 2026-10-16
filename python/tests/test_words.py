@@ -25,10 +25,22 @@ class ConstructorTest(unittest.TestCase):
             for bad in (True, False, 1.0, "1", None):
                 with self.assertRaises(ValueError):
                     W(bad)  # type: ignore[arg-type]
-            with self.assertRaises(ValueError):
-                W(W(1))  # type: ignore[arg-type]
         with self.assertRaises(TypeError):
             Word(1)
+
+    def test_widening_from_word(self) -> None:
+        for W in WIDTHS:
+            for V in WIDTHS:
+                top = (1 << V.BITS) - 1
+                if V.BITS <= W.BITS:
+                    for v in (0, 1, top):
+                        x = W(V(v))
+                        self.assertIs(type(x), W)
+                        self.assertEqual(int(x), v)
+                        self.assertEqual(x, V(v).cast(W))
+                else:
+                    with self.assertRaises(ValueError):
+                        W(V(1))
 
     def test_immutable(self) -> None:
         x = U64(5)

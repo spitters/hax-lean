@@ -180,19 +180,58 @@ theorem checkStmts_sound (env : ModEnv) (top : Bool) (Γ : Ctx) :
 
 end
 
+/-- Soundness of `checkBlock`: a checked block is a complete body. -/
+theorem checkBlock_sound (env : ModEnv) (τ : PyTy) (pos : Pos) :
+    (Γ : Ctx) → (ss : List PyStmt) → (u : Unit) → checkBlock env τ pos Γ ss = .ok u →
+      BodyOk env Γ τ ss
+  | Γ, [], u, h => by
+      rw [checkBlock] at h
+      exact absurd h refuse_ne_ok
+  | Γ, s :: rest, u, h => by
+      rw [checkBlock.eq_def] at h
+      simp only at h
+      split at h
+      · simp only [bind_eq_ok] at h
+        obtain ⟨τe, he, h⟩ := h
+        split at h
+        · subst_vars
+          exact .ret (inferExpr_sound env Γ _ _ he)
+        · exact absurd h refuse_ne_ok
+      · rename_i p c body orelse
+        split at h
+        · simp only [bind_eq_ok, liftK_eq_ok] at h
+          obtain ⟨τc, hc, uc, hcond, h⟩ := h
+          have hc' := inferExpr_sound env Γ c τc hc
+          split at h
+          · simp only [bind_eq_ok] at h
+            obtain ⟨ub, hb, h⟩ := h
+            have hb' := checkBlock_sound env τ pos Γ body ub hb
+            split at h
+            · split at h
+              · exact .ifBoth hc' hcond hb' (checkBlock_sound env τ pos Γ orelse u h)
+              · exact absurd h refuse_ne_ok
+            · simp only [bind_eq_ok] at h
+              obtain ⟨Γ₁, h₁, h₂⟩ := h
+              exact .ifThen hc' hcond hb' (checkStmts_sound env false Γ orelse Γ₁ h₁)
+                (checkBlock_sound env τ pos Γ₁ rest u h₂)
+          · simp only [bind_eq_ok] at h
+            obtain ⟨Γ₁, h₁, uo, ho, h₂⟩ := h
+            exact .ifElse hc' hcond (checkStmts_sound env false Γ body Γ₁ h₁)
+              (checkBlock_sound env τ pos Γ orelse uo ho) (checkBlock_sound env τ pos Γ₁ rest u h₂)
+        · simp only [bind_eq_ok] at h
+          obtain ⟨Γ₁, h₁, h₂⟩ := h
+          exact .cons (checkStmt_sound env true Γ _ Γ₁ h₁) (checkBlock_sound env τ pos Γ₁ rest u h₂)
+      · simp only [bind_eq_ok] at h
+        obtain ⟨Γ₁, h₁, h₂⟩ := h
+        exact .cons (checkStmt_sound env true Γ _ Γ₁ h₁) (checkBlock_sound env τ pos Γ₁ _ u h₂)
+termination_by _ ss => sizeOf ss
+
 /-- Soundness of `checkBody`: a checked body satisfies `FnOk`. -/
 theorem checkBody_sound {env : ModEnv} {Γ₀ : Ctx} {τ : PyTy} {pos : Pos} {body : List PyStmt}
     {u : Unit} (h : checkBody env Γ₀ τ pos body = .ok u) : FnOk env Γ₀ τ body := by
   unfold checkBody at h
   split at h
-  · rename_i p e hl
-    simp only [bind_eq_ok] at h
-    obtain ⟨Γ', hs, τe, he, h⟩ := h
-    split at h
-    · rename_i hτ
-      subst hτ
-      exact ⟨p, e, Γ', hl, checkStmts_sound env true Γ₀ _ Γ' hs, inferExpr_sound env Γ' e τe he⟩
-    · exact absurd h refuse_ne_ok
+  · exact checkBlock_sound env τ pos Γ₀ body u h
   · exact absurd h refuse_ne_ok
 
 /-- A checked function definition is well typed. -/
