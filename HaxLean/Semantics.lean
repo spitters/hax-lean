@@ -1339,6 +1339,12 @@ theorem widthArrayOps_of_fieldTag? {f : String} {m : FieldMethod} {p : Nat}
 
 end FieldTag
 
+/-- The value of the call `select` on a Boolean and two values: the first value at `true`,
+    the second at `false`; undefined on every other list of arguments. -/
+def selectOp : List Value → Option Value
+  | [.bool k, x, y] => some (if k then x else y)
+  | _ => none
+
 /-- The Rust `u64` operations on `int` values in `[0, 2^64)`:
     * `wrapping_add#64`, `wrapping_sub#64`, `wrapping_mul#64` modulo `2^64`;
     * `mulhi#64`, the high 64 bits of the 128-bit product;
@@ -1362,6 +1368,7 @@ end FieldTag
     * `none` on the array constructors `array_lit` and `repeat`, which `hax64Builtins`
       reads from `widthArrayOps`;
     * `len` of an array, its length as an `int` value, the encoding of a `u64` word;
+    * `select` as `selectOp`;
     * every other call as `hax64NarrowOps`.
 
     A head `FieldTag.fieldTag?` reads as a method of the prime-field interface at a modulus
@@ -1374,6 +1381,7 @@ def hax64WordOps (f : String) (args : List Value) : Option Value :=
   match f, args with
   | "array_lit", _ => none
   | "repeat", _ => none
+  | "select", _ => selectOp args
   | "len", [.array vs] => some (.int vs.length)
   | "wrapping_add#64", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 64)
   | "wrapping_sub#64", [.int a, .int b] => u64BinOp a b fun x y =>
@@ -1468,6 +1476,23 @@ theorem hax64Builtins_of_none {f : String} {args : List Value}
     (h : hax64WordOps f args = none) : hax64Builtins f args = widthArrayOps f args := by
   unfold hax64Builtins
   rw [h]
+  rfl
+
+/-- At the name `select`, `hax64WordOps` is `selectOp`. -/
+theorem hax64WordOps_select (args : List Value) : hax64WordOps "select" args = selectOp args :=
+  rfl
+
+/-- At the name `select`, `hax64Builtins` is `selectOp`. -/
+theorem hax64Builtins_select (args : List Value) : hax64Builtins "select" args = selectOp args := by
+  unfold hax64Builtins
+  rw [hax64WordOps_select]
+  cases selectOp args <;> rfl
+
+/-- At the name `select`, on a Boolean and two values, `hax64Builtins` is the first value at
+    `true` and the second at `false`. -/
+theorem hax64Builtins_select_bool (k : Bool) (x y : Value) :
+    hax64Builtins "select" [.bool k, x, y] = some (if k then x else y) := by
+  rw [hax64Builtins_select]
   rfl
 
 /-- At a tagged head, `hax64WordOps` is the value `FieldTag.fieldCall` of the head. -/
