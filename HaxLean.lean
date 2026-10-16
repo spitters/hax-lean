@@ -40,6 +40,7 @@ public import HaxLean.TPhase.ElideNewtype
 public import HaxLean.TPipeline
 public import HaxLean.Py.Json
 public import HaxLean.Py.CheckSound
+public import HaxLean.Py.Secrecy
 
 
 @[expose] public section
