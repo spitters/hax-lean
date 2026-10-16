@@ -108,9 +108,12 @@ functions named after a call head or an array operation.
 Every index of a function reached from an entry has an upper bound within the length of its
 array, in the facts the compiler's index check `idxInvCheckB` reads: constants, loop
 variables of a `range` with a known bound, sums and differences with constants, products
-with constants, masks with constants, and the equality guards `x == c` and `x != c`. A name
-rebound in a loop takes its bound at the loop head by widening to the constants of the
-function. A function that is not an entry is checked at each call, under the bounds of the
+with constants, masks with constants, and the equality guards `x == c` and `x != c`. A
+conditional whose arms read no index, update no array, call no linked function and contain no
+loop and no `return` becomes a select in the compiled code, which carries no bound: its value
+and the names such an `if` rebinds have none. A name rebound in a loop takes its bound at the
+loop head by widening to the inclusive bounds the constants and array lengths of the function
+give. A function that is not an entry is checked at each call, under the bounds of the
 arguments. An index without such a bound, for example a word parameter, is refused
 ([`IdxBound.idxCheck`](../HaxLean/Py/IdxBound.lean)).
 

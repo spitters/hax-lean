@@ -28,16 +28,22 @@ guard `x == c` or `x != c` with `c` a literal or a module constant gives `x` the
 one arm and excludes `c` on the other (`cmpFacts`), and an excluded value at a bound moves
 the bound by one (`hiNe`, `lbNe`).
 
+A conditional whose arms read no index, update no array, call no linked function and contain
+no loop and no `return` (`keepsE`, `keepsS`) is compiled to a select (`lowerSelects`), and the
+index check reads no bound off a select: its value, and every name such an `if` rebinds, has
+no upper bound. The bounds after any other `if` are the join of the arms that fall through,
+each under the facts of its guard.
+
 A loop `for i in range(lo, hi)` bounds `i` by `hi` when `hi` has a known value. A name
 rebound in a loop body has at the loop head the least bound `Bnd.widen` stable under the body:
-upper bounds among the constants of the function and their successors, lower bounds `0`
-or `1`, no excluded values, the candidates of the compiler's annotation `idxAnnot`. The
-bounds after an `if` are the join of the arms that fall through. A call of a module function
-analyses the callee's body under the bounds of the arguments.
+upper bounds among the successors of the constants of the function, lower bounds `0` or `1`,
+no excluded values, the candidates of the compiler's annotation `idxAnnot`. A call of a
+module function analyses the callee's body under the bounds of the arguments.
 
 ## Main definitions
 
 * `Bnd`, `Bnd.Mem`, `Bnd.join`, `Bnd.widen`, `Bnd.exclude`: abstract values.
+* `keepsE`, `keepsS`: the conditionals the compiler keeps as branches.
 * `exprBnd`: the abstract value of an expression.
 * `walkE`, `walkS`, `walkSs`: the index obligations of expressions and statements.
 * `analyze`, `idxCheck`: the analysis of the functions reached from the entries.
@@ -224,6 +230,59 @@ def refine (env : ModEnv) (σ : Bnds) (c : PyExpr) (b : Bool) : Bnds :=
     if b = pol then setB x (exact k) σ else setB x ((nameBnd env σ x).exclude k) σ
   | none => σ
 
+mutual
+
+/-- The expression keeps a branch in the compiled code: it reads an index, updates an array
+or calls a linked function. A conditional whose arms keep no branch has arms of register
+arithmetic and register constants only, which the compiler lowers to a select
+(`NFProg.Lowerable`); the index check reads no bound off a select. -/
+def keepsE (env : ModEnv) : PyExpr → Bool
+  | .name .. | .const .. => false
+  | .binOp _ l _ r => keepsE env l || keepsE env r
+  | .unaryOp _ _ e => keepsE env e
+  | .boolOp _ _ vs => keepsEs env vs
+  | .compare _ l _ cs => keepsE env l || keepsEs env cs
+  | .ifExp _ c t e => keepsE env c || keepsE env t || keepsE env e
+  | .call _ (.attribute _ _ "set") _ _ => true
+  | .call _ (.name _ f) args _ =>
+    (match env.fns.lookup f with
+     | some sig => sig.linked.isSome
+     | none => false) || keepsEs env args
+  | .call _ f args _ => keepsE env f || keepsEs env args
+  | .attribute _ e _ => keepsE env e
+  | .subscript .. => true
+  | .tuple _ es => keepsEs env es
+
+/-- A list of expressions keeps a branch. -/
+def keepsEs (env : ModEnv) : List PyExpr → Bool
+  | [] => false
+  | e :: es => keepsE env e || keepsEs env es
+
+end
+
+mutual
+
+/-- The statement keeps a branch in the compiled code: an expression of it does
+(`keepsE`), or it is a loop or a `return`. -/
+def keepsS (env : ModEnv) : PyStmt → Bool
+  | .assign _ _ v => keepsE env v
+  | .annAssign _ _ _ v _ =>
+    match v with
+    | some v => keepsE env v
+    | none => false
+  | .forStmt .. => true
+  | .ifStmt _ c body orelse => keepsE env c || keepsSs env body || keepsSs env orelse
+  | .ret .. => true
+  | .expr _ v => keepsE env v
+  | _ => false
+
+/-- A statement list keeps a branch. -/
+def keepsSs (env : ModEnv) : List PyStmt → Bool
+  | [] => false
+  | s :: ss => keepsS env s || keepsSs env ss
+
+end
+
 /-- The abstract value of a binary operation. -/
 def binBnd (op : PyBinOp) (l r : Bnd) : Bnd :=
   match op with
@@ -265,7 +324,9 @@ def exprBnd (env : ModEnv) (σ : Bnds) : PyExpr → Bnd
     | some w => (exprBnd env σ recv).fit w.bits
     | none => top
   | .ifExp _ c t e =>
-    (exprBnd env (refine env σ c true) t).join (exprBnd env (refine env σ c false) e)
+    if keepsE env t || keepsE env e then
+      (exprBnd env (refine env σ c true) t).join (exprBnd env (refine env σ c false) e)
+    else top
   | _ => top
 
 /-! ## Natural-number meaning and soundness -/
@@ -618,10 +679,16 @@ theorem exprBnd_sound {env : ModEnv} {ρ : String → Option Nat} {e : PyExpr} {
     exact mem_fit _ (ih h)
   | ifT hc _ ih =>
     intro σ h
-    exact mem_join_left _ (ih (holds_refine h hc))
+    simp only [exprBnd]
+    split
+    · exact mem_join_left _ (ih (holds_refine h hc))
+    · exact mem_top _
   | ifF hc _ ih =>
     intro σ h
-    exact mem_join_right _ (ih (holds_refine h hc))
+    simp only [exprBnd]
+    split
+    · exact mem_join_right _ (ih (holds_refine h hc))
+    · exact mem_top _
 
 /-! ## Index obligations -/
 
@@ -809,8 +876,12 @@ def walkS (cx : Cx) (chk : Bool) (st : St) : PyStmt → IdxM (Option St)
     if chk then walkE cx st c
     let a ← walkSs cx chk { st with bs := refine cx.env st.bs c true } body
     let b ← walkSs cx chk { st with bs := refine cx.env st.bs c false } orelse
+    let xs := (assignedSs body ++ assignedSs orelse).filter fun x => (st.bs.lookup x).isSome
     pure <| match a, b with
-      | some a, some b => some { st with bs := joinBs cx.env st.bs a.bs b.bs }
+      | some a, some b =>
+        if keepsSs cx.env body || keepsSs cx.env orelse then
+          some { st with bs := joinBs cx.env st.bs a.bs b.bs }
+        else some { st with bs := setMany xs (fun _ => top) st.bs }
       | some a, none => some a
       | none, some b => some b
       | none, none => none
@@ -881,14 +952,15 @@ def constsSs (env : ModEnv) : List PyStmt → List Nat
 
 end
 
-/-- The widening thresholds of a function: the constants of its body and the lengths of its
-array parameters, and their successors. -/
+/-- The widening thresholds of a function: the successors of the constants of its body and of
+the lengths of its array parameters. An exclusive bound `c + 1` is the inclusive bound `c` of
+a candidate of `idxAnnot`, whose bounds are constants and array lengths. -/
 def thrOf (f : CheckedFn) : List Nat :=
   let cs := constsSs f.env f.body ++ f.sig.params.filterMap fun p =>
     match p.2 with
     | .array _ n => some n
     | _ => none
-  (cs ++ cs.map (· + 1)).eraseDups
+  (cs.map (· + 1)).eraseDups
 
 /-- The state at the entry of a function: its parameters bound to the bounds of the
 arguments, and its array parameters with their lengths. -/
