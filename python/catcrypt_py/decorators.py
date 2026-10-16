@@ -1,7 +1,8 @@
 # Copyright (c) 2026 CatCrypt Contributors. MIT license.
 """The decorators ``entry`` and ``linked``.
 
-``@entry`` marks the function the front compiles as the entry of a module. ``@linked`` marks a
+``@entry`` marks a function the front compiles as an entry; a module may have several, each
+compiled with the module's other functions as callees. ``@linked`` marks a
 kernel that the compiled code calls as linked code (a ``LinkedFn``); its Python body is a
 reference only, run by CPython and not translated.
 """

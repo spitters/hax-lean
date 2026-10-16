@@ -38,6 +38,7 @@ public import HaxLean.TPhase.FixProjectionPaths
 public import HaxLean.TPhase.IrrefutableTupleMatch
 public import HaxLean.TPhase.ElideNewtype
 public import HaxLean.TPipeline
+public import HaxLean.Py.Json
 
 
 @[expose] public section
