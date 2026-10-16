@@ -41,6 +41,7 @@ public import HaxLean.TPipeline
 public import HaxLean.Py.Json
 public import HaxLean.Py.CheckSound
 public import HaxLean.Py.Secrecy
+public import HaxLean.Py.ToTExpr
 
 
 @[expose] public section
