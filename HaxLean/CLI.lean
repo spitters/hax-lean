@@ -176,6 +176,9 @@ OPTIONS:
                     one of these crates carries the head
                     CRATE::Trait::method in the ImpExpr and TExpr literals;
                     the surface definitions and the Deps class are unchanged
+  --python DUMP     Read the py2json dump of a module of the Python subset and
+                    print its extraction module (with --name NAME, -o FILE);
+                    a refusal is printed with its position and the run fails
   --help          Show this help message
 
 INPUT:

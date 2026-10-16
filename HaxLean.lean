@@ -42,6 +42,7 @@ public import HaxLean.Py.Json
 public import HaxLean.Py.CheckSound
 public import HaxLean.Py.Secrecy
 public import HaxLean.Py.ToTExpr
+public import HaxLean.Py.Emit
 
 
 @[expose] public section

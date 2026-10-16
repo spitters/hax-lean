@@ -12,6 +12,7 @@ public import HaxLean.TPipeline
 public import HaxLean.InlineClosures
 public import HaxLean.ThreadMutations
 public import HaxLean.CertifiedTExprs
+public import HaxLean.Py.Emit
 
 /-!
 # haxpipeT CLI — Typed Extraction Pipeline
@@ -32,6 +33,12 @@ hax JSON → parseHaxFileWithTExpr → List (name × TExpr)
                               ↓
               toLeanCertifiedFileTyped → Lean source
 ```
+
+`--python DUMP [--name NAME] [-o FILE]` reads the `py2json` dump of a Python
+module of the subset (`Hax.Py.PyModule.fromJson?`) and prints its extraction
+module (`Hax.Py.pyExtractionModule`) to `FILE` or to stdout; a refusal of the
+reader, the checker or the translation is printed with its position and the
+run fails.
 
 For `--emit-certified`, the typed path uses TExpr types for:
 - Parameter type annotations (from TExpr.ty on param bindings)
@@ -69,7 +76,46 @@ def phaseTick (label : String) (start : Nat) : IO Nat := do
   IO.eprintln s!"TIMING {label}: {now - start} ms"
   return now
 
+/-- The options of `--python`: the dump, the module name and the output file. -/
+structure PyOptions where
+  dump : Option String := none
+  name : String := "result"
+  out : Option String := none
+
+/-- The options of `--python` in `args`; other arguments are ignored. -/
+def parsePyArgs : List String → PyOptions → PyOptions
+  | "--python" :: f :: rest, o => parsePyArgs rest { o with dump := some f }
+  | "--name" :: n :: rest, o => parsePyArgs rest { o with name := n }
+  | "-o" :: f :: rest, o => parsePyArgs rest { o with out := some f }
+  | _ :: rest, o => parsePyArgs rest o
+  | [], o => o
+
+/-- The `--python` mode: the extraction module of the Python module in the
+`py2json` dump, written to the output file or to stdout. -/
+def runPython (o : PyOptions) : IO UInt32 := do
+  let some dump := o.dump
+    | IO.eprintln "haxpipeT: --python needs the path of a py2json dump"; return 1
+  let input ← readInput (some dump)
+  let json ← match Json.parse input with
+    | .ok j => pure j
+    | .error e => IO.eprintln s!"ERROR {dump}: not JSON: {e}"; return 1
+  let m ← match Py.PyModule.fromJson? json with
+    | .ok m => pure m
+    | .error e => IO.eprintln s!"ERROR {dump}: {e.render}"; return 1
+  match Py.pyExtractionModule o.name m with
+  | .error e =>
+    IO.eprintln s!"ERROR {dump}: {e}"
+    IO.eprintln "haxpipeT: no output; the module is outside the Python subset"
+    return 1
+  | .ok text =>
+    match o.out with
+    | some f => IO.FS.writeFile f text
+    | none => IO.println text
+    return 0
+
 def main (args : List String) : IO UInt32 := do
+  if args.contains "--python" then
+    return ← runPython (parsePyArgs args {})
   let opts := parseArgs args
 
   if opts.help then
@@ -215,9 +261,7 @@ def main (args : List String) : IO UInt32 := do
     -- (`FnTypeInfo.paramTypes`) and the field types of the crate's structs.
     let fieldTypes : FieldTypes :=
       structMeta.map fun (sname, fields) => (sname, fields.map fun (f, _, ty) => (f, ty))
-    let fnSec := crateSecrecy fieldTypes fnTypes
-    let secrecyLit := "[" ++ ",\n    ".intercalate (fnSec.map FnSecrecy.toLean) ++ "]"
-    let secrecyDef := s!"\n/-- The per-function secrecy of the crate: each function with a parameter or a\nresult holding a secret value, with the secrecy of each parameter and of the result.\nA function not listed has no secret parameter and a public result. -/\ndef {opts.name}_fnSecrecy : List Hax.FnSecrecy :=\n  {secrecyLit}\n"
+    let secrecyDef := fnSecrecyDef opts.name (crateSecrecy fieldTypes fnTypes)
     -- The crate the export was taken from: the directory holding
     -- `hax_frontend_export.json`, which is the crate root `cargo hax json` ran
     -- in. Empty when the export arrives on stdin, and then the module docstring
