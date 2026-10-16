@@ -39,6 +39,7 @@ public import HaxLean.TPhase.IrrefutableTupleMatch
 public import HaxLean.TPhase.ElideNewtype
 public import HaxLean.TPipeline
 public import HaxLean.Py.Json
+public import HaxLean.Py.CheckSound
 
 
 @[expose] public section
