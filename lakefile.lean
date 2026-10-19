@@ -23,6 +23,12 @@ lean_exe haxpipeT where
   needs := #[`+HaxLean.Runtime, `+HaxLean.AST, `+HaxLean.TExpr, `+HaxLean.Semantics,
     `+HaxLean.Secrecy]
 
+-- For each function of the hax frontend exports given as arguments, whether each pass of
+-- the typed extraction that is not a refinement changes the term
+-- (`HaxLean/CertifiedChecksMain.lean`).
+lean_exe «certified-checks» where
+  root := `HaxLean.CertifiedChecksMain
+
 -- API documentation (opt-in, dev only). Generate with:
 --   lake -R -Kenv=doc update && lake -R -Kenv=doc build HaxLean:docs
 -- Output: .lake/build/doc/ (open index.html). Fast — no mathlib dependency.
