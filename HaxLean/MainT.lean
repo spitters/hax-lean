@@ -301,7 +301,7 @@ def main (args : List String) : IO UInt32 := do
         (crateName := crateName) (emitLowCT := opts.emitLowCT)
         (classHooks := classHooks) (contracts := contractPlan)
         (nominalKrates := opts.nominalKrates) (structTuples := opts.structTuples)
-        (traitHeads := opts.traitHeads) ++ secrecyDef
+        (traitHeads := opts.traitHeads) (keepDeclassify := opts.keepDeclassify) ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered

@@ -1872,6 +1872,46 @@ def pairFileFlags (structTuples traitHeads : Bool) : String :=
 #guard ((pairFileFlags false true).splitOn
   "def Test_depsHeads : List String :=\n  [\"hash\"]\n").length == 2
 #guard ((pairFileFlags false true).splitOn "_texprS").length == 1
+
+/-! ### Declassification heads
+
+`fn open(acc: U8, r: &U8) -> bool { acc.declassify() == r.declassify_ref() }`, with
+`U8` a local secret newtype, calls the inherent methods `U8_declassify` and
+`U8_declassify_ref`; `digest` calls `hash`, which is not a declassification. -/
+
+/-- `fn open(acc: U8, r: &U8) -> bool { acc.declassify() == r.declassify_ref() }`. -/
+def declassifyOpenFn : TExpr :=
+  let u8 : ImpType := .adt "U8" []
+  let acc : TExpr := .mk (.var "acc") u8
+  let r : TExpr := .mk (.var "r") u8
+  .mk (.letBind "acc" acc (.mk (.letBind "r" r
+    (.mk (.app "Eq" [.mk (.app "U8_declassify" [acc]) (.uint .w8),
+      .mk (.app "U8_declassify_ref" [r]) (.uint .w8)]) .bool)) .bool)) .bool
+
+/-- The functions `open` and `digest`. -/
+def declassifyDefs : List (String × TExpr) :=
+  [("open", declassifyOpenFn), ("digest", digestFn)]
+
+/-- The emitted file of `declassifyDefs` with and without `--keep-declassify`. -/
+def declassifyFile (keep : Bool) : String :=
+  toLeanCertifiedFileTyped declassifyDefs "Test" [] [] (keepDeclassify := keep)
+
+-- Without the flag the file is the file printed without it, and the literals keep the
+-- method heads and contain no head `declassify`.
+#guard declassifyFile false == toLeanCertifiedFileTyped declassifyDefs "Test" [] []
+#guard ((declassifyFile false).splitOn ".app \"declassify\" [").length == 1
+#guard ((declassifyFile false).splitOn ".app \"U8_declassify\" [").length == 3
+#guard ((declassifyFile false).splitOn ".app \"U8_declassify_ref\" [").length == 3
+-- `--keep-declassify`: the two declassifications of `open` carry the head `declassify` with
+-- their one argument, in the `ImpExpr` literal and in the `TExpr` literal; the call of `hash`
+-- is unchanged, and so is every part of the file before the literals.
+#guard ((declassifyFile true).splitOn
+  "(.app \"Eq\" [(.app \"declassify\" [(.var \"acc\")]), (.app \"declassify\" [(.var \"r\")])])").length == 2
+#guard ((declassifyFile true).splitOn ".app \"declassify\" [").length == 5
+#guard ((declassifyFile true).splitOn ".app \"U8_declassify").length == 1
+#guard ((declassifyFile true).splitOn "(.app \"hash\" [(.var \"x\")])").length == 2
+#guard ((declassifyFile true).splitOn "def open_impExpr").head? ==
+  ((declassifyFile false).splitOn "def open_impExpr").head?
 end UnitStructs
 
 namespace QuestionMark

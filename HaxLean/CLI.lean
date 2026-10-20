@@ -125,6 +125,11 @@ structure Options where
       `Deps` heads as the `ImpExpr` and `TExpr` literals print them
       (`Hax.literalDepsHeads`). -/
   traitHeads : Bool := false
+  /-- With `--emit-certified --hax`: in the `ImpExpr` and `TExpr` literals, each call
+      of a declassification (`.declassify()`, `.declassify_ref()`, the inherent method of
+      a secret newtype) carries the head `declassify` with the value as its one
+      argument (`Hax.tDeclassifyHeads`). -/
+  keepDeclassify : Bool := false
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -155,6 +160,7 @@ where
       go rest { opts with nominalKrates := ks.splitOn "," |>.filter (!·.isEmpty) }
     | "--struct-tuples" :: rest, opts => go rest { opts with structTuples := true }
     | "--trait-heads" :: rest, opts => go rest { opts with traitHeads := true }
+    | "--keep-declassify" :: rest, opts => go rest { opts with keepDeclassify := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -199,6 +205,10 @@ OPTIONS:
                     values of its two refinement premises
   --trait-heads     With --emit-certified --hax: print the literal
                     NAME_depsHeads, the Deps heads as the literals print them
+  --keep-declassify With --emit-certified --hax: in the ImpExpr and TExpr
+                    literals, each declassification call (.declassify(),
+                    .declassify_ref(), the method of a secret newtype)
+                    carries the head declassify with one argument
   --python DUMP     Read the py2json dump of a module of the Python subset and
                     print its extraction module (with --name NAME, -o FILE);
                     a refusal is printed with its position and the run fails

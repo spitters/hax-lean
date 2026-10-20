@@ -21,6 +21,7 @@ public import HaxLean.TPhase.SinkMutTuple
 public import HaxLean.TPhase.ElideNewtype
 public import HaxLean.ClassEmit
 public import HaxLean.ContractEmit
+public import HaxLean.Secrecy
 public import HaxLean.StructTuple
 
 /-!
@@ -1922,6 +1923,31 @@ def literalDepsHeads (nominalKrates depNames : List String)
     let s := HaxAdapter.surfaceTraitHead nominalKrates h
     depNames.contains s || depNames.contains s!"{s}#{depOpTag}"
 
+/-- The method names of the declassification of a secret value: `declassify` and its
+    by-reference form `declassify_ref`. -/
+def declassifyMethods : List String := ["declassify", "declassify_ref"]
+
+/-- A call head is a declassification: a method of `declassifyMethods` called by its bare
+    name (a trait method of a crate outside `nominalKrates`, such as libcrux-secrets'
+    `Declassify::declassify`), by a qualified head `k::T::m`, or as the inherent method
+    `S_m` of a secret newtype `S` of `Secrecy` (`secretNewtypeNames`,
+    `secretValueNewtypeNames`, `secretWrapperNames`), the head
+    `HaxAdapter.disambiguateMethodCallWithImplMap` gives the call `x.m()` of a method of
+    a local `impl S`. -/
+def isDeclassifyHead (h : String) : Bool :=
+  declassifyMethods.any fun m =>
+    h == m || h.endsWith s!"::{m}" ||
+      (secretNewtypeNames ++ secretValueNewtypeNames ++ secretWrapperNames).any
+        fun s => h == s!"{s}_{m}"
+
+/-- Every call with one argument whose head is a declassification (`isDeclassifyHead`)
+    carries the head `declassify`; every other node is unchanged. -/
+partial def tDeclassifyHeads (e : TExpr) : TExpr :=
+  match e with
+  | .mk (.app f [a]) ty =>
+    .mk (.app (if isDeclassifyHead f then "declassify" else f) [tDeclassifyHeads a]) ty
+  | e => tMapChildren tDeclassifyHeads e
+
 /-- The literal `<moduleName>_depsHeads : List String` of the `Deps` heads `heads`, printed
     under `--trait-heads`. -/
 def depsHeadsDef (moduleName : String) (heads : List String) : String :=
@@ -1957,7 +1983,11 @@ def depsHeadsDef (moduleName : String) (heads : List String) : String :=
     `structTuples` adds, after the erasure identities, the struct-as-tuple
     companions of the `TExpr` literals (`structTupleBlock`); `traitHeads` adds the
     literal of the `Deps` heads of the `ImpExpr` literals (`literalDepsHeads`,
-    `depsHeadsDef`). With both off, neither adds text. -/
+    `depsHeadsDef`). With both off, neither adds text.
+    `keepDeclassify` gives each declassification call of the `ImpExpr` and `TExpr`
+    literals the head `declassify` (`tDeclassifyHeads` on the literal sources); every
+    other part of the file is printed without it, and with it off the literals are
+    unchanged. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1973,9 +2003,14 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (contracts : ContractEmit.Plan := {})
     (nominalKrates : List String := [])
     (structTuples : Bool := false)
-    (traitHeads : Bool := false) : String :=
+    (traitHeads : Bool := false)
+    (keepDeclassify : Bool := false) : String :=
   let prep := certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes
     classHooks nominalKrates
+  let prep := if !keepDeclassify then prep
+    else { prep with
+      literalRaw := prep.literalRaw.map fun (n, te) => (n, tDeclassifyHeads te),
+      literalProc := prep.literalProc.map fun (n, te) => (n, tDeclassifyHeads te) }
   -- The `ImpExpr` and `TExpr` literals.
   let (literalDefs, texprs) := certifiedLiterals prep structMeta fnTypes newtypes
   let rawTdefs := prep.rawTdefs
