@@ -8,6 +8,8 @@ module
 public import HaxLean.TExpr
 public import HaxLean.Semantics
 public import HaxLean.Phase.FlattenLetFoldReturn
+public import HaxLean.Phase.InlineLocalClosures
+public import HaxLean.DenoteTotal
 
 /-!
 # Structs as tuples of their fields
@@ -34,6 +36,11 @@ tuple types of the field types.
 * `denote_tStructToTuple` — the rewrite refines `denote`: when the struct term's outcome is
   not an error, the rewritten term has the same outcome, from and to environments that agree
   except at the reserved name bound by the update's `let`.
+* `denote'_tStructToTuple`, `denoteApp'_tStructToTuple` — the same refinement for the
+  control-flow semantics `denote'` and its call dispatch `denoteApp'`.
+* `denoteSpine_tStructToTuple` — the same refinement for the spine reading `denoteSpine`,
+  under `spineStructOk`: every closure the source spine inlines is inlined after the rewrite
+  and binds a name without a struct role.
 -/
 
 @[expose] public section
@@ -83,7 +90,8 @@ def structHead? (sf : StructFieldTys) (f : String) : Option StructHead :=
 
 /-- The struct heads over the builtin table `bi`, a struct read as the tuple of its fields:
     a construction of `n` fields builds the tuple of its `n` arguments; a field read projects
-    a tuple of `n` values; an update replaces the `i`-th value of a tuple of `n` values. Every
+    a tuple of `n` values; an update replaces the `i`-th value of a tuple of `n` values none of
+    which is a control-flow value. Every
     head without a struct role is answered by `bi`. -/
 def structBi (sf : StructFieldTys) (bi : Builtins) : Builtins := fun f args =>
   match structHead? sf f with
@@ -94,7 +102,10 @@ def structBi (sf : StructFieldTys) (bi : Builtins) : Builtins := fun f args =>
     | _ => none
   | some (.update i n) =>
     match args with
-    | [.tuple vs, v] => if vs.length = n then some (.tuple (vs.set i v)) else none
+    | [.tuple vs, v] =>
+      if vs.length = n ∧ (vs.all fun x => !x.isControlFlow) = true then
+        some (.tuple (vs.set i v))
+      else none
     | _ => none
   | none => bi f args
 
@@ -676,12 +687,13 @@ theorem denote_structApp (sf : StructFieldTys) (bi : Builtins) (t f : String)
           rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp at hlen
           cases x with
           | tuple vs =>
-            by_cases hl : vs.length = n
-            · simp only [structBi, hh, hl, ↓reduceIte, stateM_pure_apply, stateM_bind_apply,
-                stateM_modify_apply] at hb ⊢
-              rw [denoteArgs_updFields bi fuel t i n _ _ vs y _ (by simp) hl]
+            by_cases hl : vs.length = n ∧ (vs.all fun x => !x.isControlFlow) = true
+            · simp only [structBi, hh, hl, and_self, ↓reduceIte, stateM_pure_apply,
+                stateM_bind_apply, stateM_modify_apply] at hb ⊢
+              rw [denoteArgs_updFields bi fuel t i n _ _ vs y _ (by simp) hl.1]
               exact ⟨rfl, (hst.symm.extend_left _).symm⟩
-            · simp [structBi, hh, hl, stateM_pure_apply, isErr] at hb
+            · simp only [structBi, hh, hl, ↓reduceIte, stateM_pure_apply, isErr] at hb
+              exact absurd hb (by simp)
           | _ => simp [structBi, hh, stateM_pure_apply, isErr] at hb
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) (a :: b :: c :: rest)) = none
           by simp [structApp, hh]]
@@ -868,5 +880,1147 @@ theorem denote_tStructToTuple_of_structOk (sf : StructFieldTys) (bi : Builtins) 
     Refines isErr t (denote (structBi sf bi) fuel e.erase)
       (denote bi fuel (tStructToTuple sf t e).erase) :=
   denote_tStructToTuple sf bi t e h.1 fuel
+
+/-! ## Refinement of `denote'` -/
+
+/-- Case split of an outcome down to the constructor of its value, the Boolean of a `bool`,
+    `result` or control-flow value included. -/
+local macro "cf_cases " x:ident : tactic =>
+  `(tactic| rcases $x:ident with
+    (⟨_ | _⟩ | _ | _ | _ | _ | _ | _ | _ | ⟨_ | _, _⟩ | ⟨_ | _, _⟩) | _ | _ | _ | _)
+
+/-- `cf_cases` that also splits the payload of a control-flow value. -/
+local macro "cf_cases2 " x:ident : tactic =>
+  `(tactic| rcases $x:ident with
+    (⟨_ | _⟩ | _ | _ | _ | _ | _ | _ | _ | ⟨_ | _, _⟩ |
+      ⟨_ | _, (⟨_ | _⟩ | _ | _ | _ | _ | _ | _ | _ | ⟨_ | _, _⟩ | ⟨_ | _, _⟩)⟩) | _ | _ | _ | _)
+
+namespace StructTuple
+
+/-- The builtin table `S` answers every call as the struct heads over `T` do: whenever `S`
+    answers `f` at `vals`, `structBi sf T` gives the same answer. -/
+def StructTab (sf : StructFieldTys) (S T : Builtins) : Prop :=
+  ∀ f vals v, S f vals = some v → structBi sf T f vals = some v
+
+theorem StructTab.of_structBi (sf : StructFieldTys) (bi : Builtins) :
+    StructTab sf (structBi sf bi) bi :=
+  fun _ _ _ h => h
+
+/-- A run of `denoteArgs'` on a nonempty list to a list of values reads the head to a value
+    that is no control-flow value and the tail to the rest. -/
+theorem denoteArgs'_cons_inv (bi : Builtins) (fuel : Nat) (x : ImpExpr) (xs : List ImpExpr)
+    (s s' : Env) (vals : List Value) (h : denoteArgs' bi fuel (x :: xs) s = (some vals, s')) :
+    ∃ v rest s₁, vals = v :: rest ∧ v.isControlFlow = false ∧
+      denote' bi fuel x s = (.val v, s₁) ∧ denoteArgs' bi fuel xs s₁ = (some rest, s') := by
+  simp only [denoteArgs', stateM_bind_apply] at h
+  rcases hr : denote' bi fuel x s with ⟨o, s₁⟩
+  rw [hr] at h
+  dsimp only at h
+  split at h
+  · exact absurd (Prod.mk.inj h).1 (by simp)
+  · rename_i v hv
+    rcases hrest : denoteArgs' bi fuel xs s₁ with ⟨r, s₂⟩
+    rw [stateM_bind_apply, hrest] at h
+    cases r with
+    | none => exact absurd (Prod.mk.inj h).1 (by simp)
+    | some rest =>
+      obtain ⟨h1, rfl⟩ := Prod.mk.inj h
+      simp only [Option.map_some, Option.some.injEq] at h1
+      exact ⟨v, rest, s₁, h1.symm, by cases v <;> simp_all, rfl, hrest⟩
+  · exact absurd (Prod.mk.inj h).1 (by simp)
+
+theorem denoteArgs'_length_of_eq (bi : Builtins) (fuel : Nat) :
+    ∀ (es : List ImpExpr) (s s' : Env) (vals : List Value),
+      denoteArgs' bi fuel es s = (some vals, s') → vals.length = es.length
+  | [], s, s', vals, h => by
+    rw [Total.denoteArgs'_nil_run] at h
+    obtain ⟨h1, -⟩ := Prod.mk.inj h
+    cases h1; rfl
+  | x :: xs, s, s', vals, h => by
+    obtain ⟨v, rest, s₁, rfl, -, -, hr⟩ := denoteArgs'_cons_inv bi fuel x xs s s' vals h
+    simp [denoteArgs'_length_of_eq bi fuel xs s₁ s' rest hr]
+
+/-- A call read by `denote'` without error reads its arguments to values that the builtin
+    table answers. -/
+theorem denote'_app_inv (bi : Builtins) (fuel : Nat) (f : String) (xs : List ImpExpr)
+    (s s' : Env) (o : Outcome) (h : denote' bi fuel (.app f xs) s = (o, s'))
+    (ho : isErr o = false) :
+    ∃ vals v, o = .val v ∧ bi f vals = some v ∧ denoteArgs' bi fuel xs s = (some vals, s') := by
+  simp only [denote', denoteApp', stateM_bind_apply] at h
+  rcases hA : denoteArgs' bi fuel xs s with ⟨r, s₁⟩
+  rw [hA] at h
+  cases r with
+  | none =>
+    obtain ⟨rfl, -⟩ := Prod.mk.inj h
+    simp [isErr] at ho
+  | some vals =>
+    cases hb : bi f vals with
+    | none =>
+      simp only [hb, stateM_pure_apply] at h
+      obtain ⟨rfl, -⟩ := Prod.mk.inj h
+      simp [isErr] at ho
+    | some v =>
+      simp only [hb, stateM_pure_apply] at h
+      obtain ⟨rfl, rfl⟩ := Prod.mk.inj h
+      exact ⟨vals, v, rfl, hb, rfl⟩
+
+theorem denote'_var_refines (S T : Builtins) (fuel : Nat) {t m : String} (h : m ≠ t) :
+    Refines isErr t (denote' S fuel (.var m)) (denote' T fuel (.var m)) := by
+  intro s₁ s₂ hs _
+  simp only [denote', stateM_bind_apply, stateM_get_apply]
+  rw [hs m h]
+  cases s₂ m <;> exact ⟨rfl, hs⟩
+
+theorem denoteArgs'_refines (S T : Builtins) (t : String) (fuel : Nat) {β : Type}
+    (F G : β → ImpExpr) :
+    ∀ (xs : List β),
+      (∀ x ∈ xs, Refines isErr t (denote' S fuel (F x)) (denote' T fuel (G x))) →
+      Refines Option.isNone t (denoteArgs' S fuel (xs.map F))
+        (denoteArgs' T fuel (xs.map G)) := by
+  intro xs
+  induction xs with
+  | nil => intro _; simp only [List.map_nil, denoteArgs']; exact Refines.pure _
+  | cons x xs ih =>
+    intro hall
+    simp only [List.map_cons, denoteArgs']
+    refine Refines.bind (hall x (List.mem_cons_self ..)) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ih fun y hy => hall y (List.mem_cons_of_mem _ hy)) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [stateM_pure_apply]
+           · intro r hr; exact Refines.pure _)
+
+theorem denoteMatchArms'_refines (S T : Builtins) (t : String) (fuel : Nat) (v : Value)
+    {β : Type} (F G : β → ImpExpr) :
+    ∀ (arms : List (ImpPat × β)),
+      (∀ pa ∈ arms, Refines isErr t (denote' S fuel (F pa.2)) (denote' T fuel (G pa.2))) →
+      Refines isErr t (denoteMatchArms' S fuel v (arms.map fun pa => (pa.1, F pa.2)))
+        (denoteMatchArms' T fuel v (arms.map fun pa => (pa.1, G pa.2))) := by
+  intro arms
+  induction arms with
+  | nil => intro _; simp only [List.map_nil, denoteMatchArms']; exact Refines.pure _
+  | cons pa rest ih =>
+    obtain ⟨pat, b⟩ := pa
+    intro hall s₁ s₂ hs hb
+    simp only [List.map_cons, denoteMatchArms', stateM_bind_apply, stateM_get_apply] at hb ⊢
+    have hmp := matchPat_agree t pat v s₁ s₂ hs
+    cases hp1 : matchPat pat v s₁ <;> cases hp2 : matchPat pat v s₂ <;>
+      simp only [hp1, hp2, OptAgree] at hmp hb ⊢
+    · exact ih (fun pa' h' => hall pa' (List.mem_cons_of_mem _ h')) s₁ s₂ hs hb
+    · simp only [stateM_bind_apply, stateM_set_apply] at hb ⊢
+      exact hall (pat, b) (List.mem_cons_self ..) _ _ hmp hb
+
+theorem denoteForLoopOrig'_refines (S T : Builtins) (t var : String) (body body' : ImpExpr)
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel lo hi, Refines isErr t (denoteForLoopOrig' S fuel var lo hi body)
+      (denoteForLoopOrig' T fuel var lo hi body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi
+    unfold denoteForLoopOrig'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi
+    unfold denoteForLoopOrig'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · refine Refines.bind (Refines.modify_extend var (.int lo)) (by simp) (fun _ _ => ?_)
+        refine Refines.bind (hb (k + 1)) ?_ ?_
+        · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+        · intro rb _
+          cases rb <;> first | exact ih _ _ | exact Refines.pure _
+
+theorem denoteForLoopRevOrig'_refines (S T : Builtins) (t var : String) (body body' : ImpExpr)
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel lo hi, Refines isErr t (denoteForLoopRevOrig' S fuel var lo hi body)
+      (denoteForLoopRevOrig' T fuel var lo hi body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi
+    unfold denoteForLoopRevOrig'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi
+    unfold denoteForLoopRevOrig'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · refine Refines.bind (Refines.modify_extend var (.int (hi - 1))) (by simp)
+          (fun _ _ => ?_)
+        refine Refines.bind (hb (k + 1)) ?_ ?_
+        · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+        · intro rb _
+          cases rb <;> first | exact ih _ _ | exact Refines.pure _
+
+theorem denoteForLoop'_refines (S T : Builtins) (t var : String) (body body' : ImpExpr)
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel lo hi, Refines isErr t (denoteForLoop' S fuel var lo hi body)
+      (denoteForLoop' T fuel var lo hi body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi
+    unfold denoteForLoop'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi
+    unfold denoteForLoop'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · refine Refines.bind (Refines.modify_extend var (.int lo)) (by simp) (fun _ _ => ?_)
+        refine Refines.bind (hb (k + 1)) ?_ ?_
+        · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+        · intro rb _
+          cf_cases rb <;> first | exact Refines.pure _ | exact ih _ _
+
+theorem denoteForLoopRev'_refines (S T : Builtins) (t var : String) (body body' : ImpExpr)
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel lo hi, Refines isErr t (denoteForLoopRev' S fuel var lo hi body)
+      (denoteForLoopRev' T fuel var lo hi body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi
+    unfold denoteForLoopRev'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi
+    unfold denoteForLoopRev'
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · refine Refines.bind (Refines.modify_extend var (.int (hi - 1))) (by simp)
+          (fun _ _ => ?_)
+        refine Refines.bind (hb (k + 1)) ?_ ?_
+        · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+        · intro rb _
+          cf_cases rb <;> first | exact Refines.pure _ | exact ih _ _
+
+theorem denoteForLoop'Return_refines (S T : Builtins) (t var : String) (body body' : ImpExpr)
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel lo hi, Refines isErr t (denoteForLoop'Return S fuel var lo hi body)
+      (denoteForLoop'Return T fuel var lo hi body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi
+    unfold denoteForLoop'Return
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi
+    unfold denoteForLoop'Return
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · refine Refines.bind (Refines.modify_extend var (.int lo)) (by simp) (fun _ _ => ?_)
+        refine Refines.bind (hb (k + 1)) ?_ ?_
+        · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+        · intro rb _
+          cf_cases2 rb <;> first | exact Refines.pure _ | exact ih _ _
+
+theorem denoteForLoopRev'Return_refines (S T : Builtins) (t var : String)
+    (body body' : ImpExpr)
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel lo hi, Refines isErr t (denoteForLoopRev'Return S fuel var lo hi body)
+      (denoteForLoopRev'Return T fuel var lo hi body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro lo hi
+    unfold denoteForLoopRev'Return
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · exact absurd rfl ‹_›
+  | succ k ih =>
+    intro lo hi
+    unfold denoteForLoopRev'Return
+    split
+    · exact Refines.pure _
+    · split
+      · exact Refines.pure _
+      · refine Refines.bind (Refines.modify_extend var (.int (hi - 1))) (by simp)
+          (fun _ _ => ?_)
+        refine Refines.bind (hb (k + 1)) ?_ ?_
+        · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+        · intro rb _
+          cf_cases2 rb <;> first | exact Refines.pure _ | exact ih _ _
+
+theorem denoteWhileOrig'_refines (S T : Builtins) (t : String) (cond cond' body body' : ImpExpr)
+    (hc : ∀ fuel, Refines isErr t (denote' S fuel cond) (denote' T fuel cond'))
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel, Refines isErr t (denoteWhileOrig' S fuel cond body)
+      (denoteWhileOrig' T fuel cond' body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    unfold denoteWhileOrig'
+    split
+    · exact Refines.pure _
+    · exact absurd rfl ‹_›
+  | succ k ih =>
+    unfold denoteWhileOrig'
+    split
+    · exact Refines.pure _
+    · refine Refines.bind (hc (k + 1)) ?_ ?_
+      · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+      · intro rc _
+        cf_cases rc <;> first
+          | exact Refines.pure _
+          | (refine Refines.bind (hb (k + 1)) ?_ ?_
+             · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+             · intro rb _
+               cases rb <;> first | exact ih | exact Refines.pure _)
+
+theorem denoteWhile'_refines (S T : Builtins) (t : String) (cond cond' body body' : ImpExpr)
+    (hc : ∀ fuel, Refines isErr t (denote' S fuel cond) (denote' T fuel cond'))
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel, Refines isErr t (denoteWhile' S fuel cond body)
+      (denoteWhile' T fuel cond' body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    unfold denoteWhile'
+    split
+    · exact Refines.pure _
+    · exact absurd rfl ‹_›
+  | succ k ih =>
+    unfold denoteWhile'
+    split
+    · exact Refines.pure _
+    · refine Refines.bind (hc (k + 1)) ?_ ?_
+      · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+      · intro rc _
+        cf_cases rc <;> first
+          | exact Refines.pure _
+          | (refine Refines.bind (hb (k + 1)) ?_ ?_
+             · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+             · intro rb _
+               cf_cases rb <;> first | exact Refines.pure _ | exact ih)
+
+theorem denoteWhile'Return_refines (S T : Builtins) (t : String)
+    (cond cond' body body' : ImpExpr)
+    (hc : ∀ fuel, Refines isErr t (denote' S fuel cond) (denote' T fuel cond'))
+    (hb : ∀ fuel, Refines isErr t (denote' S fuel body) (denote' T fuel body')) :
+    ∀ fuel, Refines isErr t (denoteWhile'Return S fuel cond body)
+      (denoteWhile'Return T fuel cond' body') := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    unfold denoteWhile'Return
+    split
+    · exact Refines.pure _
+    · exact absurd rfl ‹_›
+  | succ k ih =>
+    unfold denoteWhile'Return
+    split
+    · exact Refines.pure _
+    · refine Refines.bind (hc (k + 1)) ?_ ?_
+      · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+      · intro rc _
+        cf_cases rc <;> first
+          | exact Refines.pure _
+          | (refine Refines.bind (hb (k + 1)) ?_ ?_
+             · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+             · intro rb _
+               cf_cases2 rb <;> first | exact Refines.pure _ | exact ih)
+
+/-- A list of expressions each read by `denote'` to a value that is no control-flow value,
+    without changing the environment, reads to the list of those values. -/
+theorem denoteArgs'_map_val (bi : Builtins) (fuel : Nat) (s : Env) {β : Type}
+    (g : β → ImpExpr) (hv : β → Value) :
+    ∀ (l : List β), (∀ j ∈ l, denote' bi fuel (g j) s = (.val (hv j), s) ∧
+        (hv j).isControlFlow = false) →
+      denoteArgs' bi fuel (l.map g) s = (some (l.map hv), s) := by
+  intro l
+  induction l with
+  | nil => intro _; exact Total.denoteArgs'_nil_run bi fuel s
+  | cons j l ih =>
+    intro h
+    exact Total.denoteArgs'_cons_of_val (h j (List.mem_cons_self ..)).1
+      (h j (List.mem_cons_self ..)).2 (ih fun j' hj' => h j' (List.mem_cons_of_mem _ hj'))
+
+/-- The fields of an update read by `denote'`, without changing the environment, to the
+    fields of the struct with the `i`-th replaced, when no field and not the new value is a
+    control-flow value. -/
+theorem denoteArgs'_updFields (bi : Builtins) (fuel : Nat) (t : String) (i n : Nat)
+    (sty vty : ImpType) (vs : List Value) (w : Value) (s : Env)
+    (hs : s t = some (.tuple [.tuple vs, w])) (hn : vs.length = n)
+    (hw : w.isControlFlow = false) (hc : (vs.all fun x => !x.isControlFlow) = true) :
+    denoteArgs' bi fuel ((updFields t i n sty vty).map TExpr.erase) s =
+      (some (vs.set i w), s) := by
+  unfold updFields
+  rw [List.map_map,
+    denoteArgs'_map_val bi fuel s _ (fun j => if j = i then w else vs.getD j .unit)]
+  · refine Prod.ext (congrArg some ?_) rfl
+    apply List.ext_getElem
+    · simp [hn]
+    · intro k h1 h2
+      simp only [List.getElem_map, List.getElem_range, List.getElem_set]
+      grind only [= List.length_set, = List.getD_eq_getElem?_getD, = getElem?_pos,
+        = Option.getD_some]
+  · intro j hj
+    rw [List.mem_range] at hj
+    show denote' bi fuel (TExpr.erase (if j = i then _ else _)) s = _ ∧ _
+    have hjv : j < vs.length := hn ▸ hj
+    by_cases hji : j = i
+    · simp only [hji, ↓reduceIte, TExpr.erase, denote', stateM_bind_apply, stateM_get_apply, hs,
+        Value.projIdx, stateM_pure_apply]
+      exact ⟨rfl, hw⟩
+    · have hcj : vs[j].isControlFlow = false := by
+        have := List.all_eq_true.1 hc vs[j] (List.getElem_mem hjv)
+        simpa using this
+      simp only [hji, ↓reduceIte, TExpr.erase, denote', stateM_bind_apply, stateM_get_apply, hs,
+        Value.projIdx, stateM_pure_apply]
+      simp [List.getElem?_eq_getElem hjv, stateM_pure_apply, List.getD_eq_getElem?_getD, hcj]
+
+/-- A call left in place refines itself when `T` answers its head as `S` does on every
+    argument list of its arity on which `S` answers. -/
+theorem denote'_app_fallback (sf : StructFieldTys) (S T : Builtins) (t f : String)
+    (args : List TExpr)
+    (ih : ∀ a ∈ args, ∀ fuel, Refines isErr t (denote' S fuel a.erase)
+      (denote' T fuel (tStructToTuple sf t a).erase))
+    (hfb : ∀ vals : List Value, vals.length = args.length → ∀ v,
+      S f vals = some v → T f vals = some v) (fuel : Nat) :
+    Refines isErr t (denote' S fuel (.app f (args.map TExpr.erase)))
+      (denote' T fuel (.app f ((args.map (tStructToTuple sf t)).map TExpr.erase))) := by
+  intro s₁ s₂ hs hb
+  rcases h₁ : denote' S fuel (.app f (args.map TExpr.erase)) s₁ with ⟨o, s₁'⟩
+  rw [h₁] at hb
+  obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
+  have hA' := denoteArgs'_refines S T t fuel TExpr.erase (TExpr.erase ∘ tStructToTuple sf t)
+    args (fun x hx => ih x hx fuel) s₁ s₂ hs (by simp [hA])
+  rw [hA] at hA'
+  rcases hB : denoteArgs' T fuel (List.map (TExpr.erase ∘ tStructToTuple sf t) args) s₂ with
+    ⟨o₂, s₂'⟩
+  rw [hB] at hA'
+  obtain ⟨ho, hst⟩ := hA'
+  simp only at ho hst
+  subst ho
+  have hlen := denoteArgs'_length_of_eq S fuel _ s₁ s₁' vals hA
+  rw [List.length_map] at hlen
+  rw [List.map_map, Total.denote'_app_of_args hB (hfb vals hlen v hS)]
+  exact ⟨rfl, hst⟩
+
+/-- A call node refines its rewrite under `denote'`, given that its arguments do. -/
+theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTab sf S T)
+    (t f : String) (args : List TExpr) (ty : ImpType)
+    (ih : ∀ a ∈ args, ∀ fuel, Refines isErr t (denote' S fuel a.erase)
+      (denote' T fuel (tStructToTuple sf t a).erase)) (fuel : Nat) :
+    Refines isErr t (denote' S fuel (.app f (args.map TExpr.erase)))
+      (denote' T fuel (TExpr.mk ((structApp sf t f (args.map (tStructToTuple sf t))).getD
+        (.app f (args.map (tStructToTuple sf t)))) ty).erase) := by
+  have hT : ∀ vals v, S f vals = some v → structBi sf T f vals = some v := hST f
+  have ih' : ∀ x ∈ args, Refines isErr t (denote' S fuel x.erase)
+      (denote' T fuel ((TExpr.erase ∘ tStructToTuple sf t) x)) := fun x hx => ih x hx fuel
+  cases hh : structHead? sf f with
+  | none =>
+    have hs : structApp sf t f (args.map (tStructToTuple sf t)) = none := by
+      simp [structApp, hh]
+    rw [hs]
+    simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
+    exact denote'_app_fallback sf S T t f args ih
+      (fun vals _ v h => by simpa [structBi, hh] using hT vals v h) fuel
+  | some hd =>
+    cases hd with
+    | ctor n =>
+      have hs : structApp sf t f (args.map (tStructToTuple sf t)) =
+          some (.tuple (args.map (tStructToTuple sf t))) := by
+        simp [structApp, hh]
+      rw [hs]
+      simp only [Option.getD_some, TExpr.erase, TExpr.eraseList_eq, List.map_map]
+      intro s₁ s₂ hs₁ hb
+      rcases h₁ : denote' S fuel (.app f (args.map TExpr.erase)) s₁ with ⟨o, s₁'⟩
+      rw [h₁] at hb
+      obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
+      have hv := hT vals v hS
+      simp only [structBi, hh] at hv
+      split at hv
+      · cases hv
+        have hA' := denoteArgs'_refines S T t fuel TExpr.erase
+          (TExpr.erase ∘ tStructToTuple sf t) args ih' s₁ s₂ hs₁ (by simp [hA])
+        rw [hA] at hA'
+        rcases hB : denoteArgs' T fuel (List.map (TExpr.erase ∘ tStructToTuple sf t) args) s₂
+          with ⟨o₂, s₂'⟩
+        rw [hB] at hA'
+        obtain ⟨ho, hst⟩ := hA'
+        simp only at ho hst
+        subst ho
+        simp only [denote', stateM_bind_apply, hB, stateM_pure_apply]
+        exact ⟨by trivial, hst⟩
+      · cases hv
+    | field i n =>
+      rcases args with _ | ⟨a, _ | ⟨b, rest⟩⟩
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) []) = none by
+          simp [structApp, hh]]
+        simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
+        exact denote'_app_fallback sf S T t f [] ih (fun vals hl v h => by
+          have := hT vals v h
+          rcases vals with _ | ⟨x, _ | ⟨y, _⟩⟩ <;> simp_all [structBi]) fuel
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) [a]) =
+            some (.proj (tStructToTuple sf t a) i) by simp [structApp, hh]]
+        simp only [Option.getD_some, TExpr.erase, List.map_cons, List.map_nil]
+        intro s₁ s₂ hs₁ hb
+        rcases h₁ : denote' S fuel (.app f [a.erase]) s₁ with ⟨o, s₁'⟩
+        rw [h₁] at hb
+        obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
+        obtain ⟨w, rest, s₃, rfl, hw, hd, hrest⟩ :=
+          denoteArgs'_cons_inv S fuel _ _ s₁ s₁' vals hA
+        rw [Total.denoteArgs'_nil_run] at hrest
+        obtain ⟨hr1, rfl⟩ := Prod.mk.inj hrest
+        cases hr1
+        have hv := hT [w] v hS
+        obtain ⟨ho, hst⟩ := ih a (List.mem_singleton_self a) fuel s₁ s₂ hs₁ (by simp [hd, isErr])
+        rw [hd] at ho hst
+        rcases h₂ : denote' T fuel (tStructToTuple sf t a).erase s₂ with ⟨o₂, s₂'⟩
+        rw [h₂] at ho hst
+        simp only at ho hst
+        subst ho
+        cases w with
+        | tuple vs =>
+          simp only [structBi, hh] at hv
+          split at hv
+          · simp only [denote', stateM_bind_apply, h₂, Value.projIdx, hv, stateM_pure_apply]
+            exact ⟨by trivial, hst⟩
+          · cases hv
+        | _ => simp [structBi, hh] at hv
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) (a :: b :: rest)) = none by
+          simp [structApp, hh]]
+        simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
+        exact denote'_app_fallback sf S T t f _ ih (fun vals hl v h => by
+          have := hT vals v h
+          rcases vals with _ | ⟨x, _ | ⟨y, _⟩⟩ <;> simp_all [structBi]) fuel
+    | update i n =>
+      rcases args with _ | ⟨a, _ | ⟨b, _ | ⟨c, rest⟩⟩⟩
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) []) = none by
+          simp [structApp, hh]]
+        simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
+        exact denote'_app_fallback sf S T t f [] ih (fun vals hl v h => by
+          have := hT vals v h
+          rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp_all [structBi]) fuel
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) [a]) = none by
+          simp [structApp, hh]]
+        simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
+        exact denote'_app_fallback sf S T t f [a] ih (fun vals hl v h => by
+          have := hT vals v h
+          rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp_all [structBi]) fuel
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) [a, b]) =
+            some (.letBind t
+              (.mk (.tuple [tStructToTuple sf t a, tStructToTuple sf t b])
+                (.tuple [(tStructToTuple sf t a).ty, (tStructToTuple sf t b).ty]))
+              (.mk (.tuple (updFields t i n (tStructToTuple sf t a).ty
+                (tStructToTuple sf t b).ty)) (tStructToTuple sf t a).ty)) by
+          simp [structApp, hh]]
+        simp only [Option.getD_some, TExpr.erase, TExpr.eraseList_eq, List.map_cons,
+          List.map_nil]
+        intro s₁ s₂ hs₁ hb
+        rcases h₁ : denote' S fuel (.app f [a.erase, b.erase]) s₁ with ⟨o, s₁'⟩
+        rw [h₁] at hb
+        obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
+        have hA' := denoteArgs'_refines S T t fuel TExpr.erase
+          (TExpr.erase ∘ tStructToTuple sf t) [a, b] ih' s₁ s₂ hs₁ (by simp [hA])
+        simp only [List.map_cons, List.map_nil, Function.comp_apply] at hA'
+        rw [hA] at hA'
+        rcases hB : denoteArgs' T fuel
+          [(tStructToTuple sf t a).erase, (tStructToTuple sf t b).erase] s₂ with ⟨o₂, s₂'⟩
+        rw [hB] at hA'
+        obtain ⟨ho, hst⟩ := hA'
+        simp only at ho hst
+        subst ho
+        obtain ⟨x, rest, s₃, rfl, -, -, hrest⟩ := denoteArgs'_cons_inv S fuel _ _ s₁ s₁' vals hA
+        obtain ⟨y, rest', s₄, rfl, hy, -, hnil⟩ :=
+          denoteArgs'_cons_inv S fuel _ _ s₃ s₁' rest hrest
+        rw [Total.denoteArgs'_nil_run] at hnil
+        obtain ⟨hr1, rfl⟩ := Prod.mk.inj hnil
+        cases hr1
+        have hv := hT [x, y] v hS
+        cases x with
+        | tuple vs =>
+          simp only [structBi, hh] at hv
+          split at hv
+          · rename_i hl
+            cases hv
+            simp only [denote', stateM_bind_apply, hB, stateM_pure_apply, stateM_modify_apply]
+            rw [denoteArgs'_updFields T fuel t i n _ _ vs y _ (by simp) hl.1 hy hl.2]
+            exact ⟨rfl, (hst.symm.extend_left _).symm⟩
+          · cases hv
+        | _ => simp [structBi, hh] at hv
+      · rw [show structApp sf t f (List.map (tStructToTuple sf t) (a :: b :: c :: rest)) = none
+          by simp [structApp, hh]]
+        simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
+        exact denote'_app_fallback sf S T t f _ ih (fun vals hl v h => by
+          have := hT vals v h
+          rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp_all [structBi]) fuel
+
+end StructTuple
+
+/-- The rewrite refines `denote'` over builtin tables `S` and `T` with `StructTab sf S T`:
+    when the struct term `e`, whose erasure never reads the reserved name `t`, has an outcome
+    that is not an error under `S`, the rewritten term has the same outcome under `T`, from
+    and to environments that agree except at `t`. -/
+theorem denote'_tStructToTuple_of_structTab (sf : StructFieldTys) (S T : Builtins)
+    (hST : StructTab sf S T) (t : String) (e : TExpr) (h : noVarRef t e.erase = true)
+    (fuel : Nat) :
+    Refines isErr t (denote' S fuel e.erase) (denote' T fuel (tStructToTuple sf t e).erase) := by
+  induction e using TExpr.ind generalizing fuel with
+  | letBind ty n v b ihv ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihv h.1 fuel) ?_ ?_
+    · intro a s ha; cases a <;> simp_all [isErr, stateM_pure_apply]
+    · intro a ha
+      cf_cases a <;> first
+        | exact Refines.pure _
+        | exact Refines.bind (Refines.modify_extend n _) (by simp) (fun _ _ => ihb h.2 fuel)
+  | var ty m =>
+    simp only [TExpr.erase, noVarRef, bne_iff_ne, ne_eq] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase]
+    exact denote'_var_refines _ _ fuel h
+  | app ty f args ih =>
+    simp only [TExpr.erase, TExpr.eraseList_eq, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, tStructToTuple_goList, TExpr.erase,
+      TExpr.eraseList_eq]
+    exact denote'_structApp sf S T hST t f args _
+      (fun a ha => ih a ha (noVarRef_allExpr_mem h _ (List.mem_map_of_mem ha))) fuel
+  | tuple ty es ih =>
+    simp only [TExpr.erase, TExpr.eraseList_eq, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, tStructToTuple_goList, TExpr.erase,
+      TExpr.eraseList_eq, List.map_map, denote']
+    refine Refines.bind (denoteArgs'_refines _ _ t fuel TExpr.erase
+      (TExpr.erase ∘ tStructToTuple sf t) es
+      (fun a ha => ih a ha (noVarRef_allExpr_mem h _ (List.mem_map_of_mem ha)) fuel)) ?_ ?_
+    · intro a s ha; cases a <;> simp_all [isErr, stateM_pure_apply]
+    · intro a ha; cases a <;> exact Refines.pure _
+  | proj ty e i ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro a s ha; cases a <;> simp_all [isErr, stateM_pure_apply]
+    · intro a ha
+      cf_cases a <;> first
+        | exact Refines.pure _
+        | (dsimp only
+           generalize Value.projIdx _ i = o
+           cases o <;> exact Refines.pure _)
+  | ifThenElse ty c a b ihc iha ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihc h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | exact iha h.1.2 fuel
+        | exact ihb h.2 fuel
+  | match_ ty s arms ihs iharms =>
+    simp only [TExpr.erase, TExpr.eraseArms_eq, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, tStructToTuple_goArms, TExpr.erase,
+      TExpr.eraseArms_eq, List.map_map, denote']
+    refine Refines.bind (ihs h.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | exact denoteMatchArms'_refines _ _ t fuel _ TExpr.erase
+            (fun x => (tStructToTuple sf t x).erase) arms
+            (fun pa hpa => iharms pa hpa (noVarRef_allArms_mem h.2 _
+              (List.mem_map_of_mem hpa)) fuel)
+  | seq ty a b iha ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (iha h.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first | exact Refines.pure _ | exact ihb h.2 fuel
+  | borrow ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    exact ih h fuel
+  | deref ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    exact ih h fuel
+  | ann ty e ih =>
+    simp only [TExpr.erase] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase]
+    exact ih h fuel
+  | assign ty n e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | exact Refines.bind (Refines.modify_extend n _) (by simp) (fun _ _ => Refines.pure _)
+  | forLoop ty v lo hi b ihlo ihhi ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihlo h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ihhi h.1.2 fuel) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+           · intro r' _
+             cf_cases r' <;> first
+               | exact Refines.pure _
+               | exact denoteForLoopOrig'_refines _ _ t v _ _ (ihb h.2) _ _ _)
+  | forLoopRev ty v lo hi b ihlo ihhi ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihlo h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ihhi h.1.2 fuel) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+           · intro r' _
+             cf_cases r' <;> first
+               | exact Refines.pure _
+               | exact denoteForLoopRevOrig'_refines _ _ t v _ _ (ihb h.2) _ _ _)
+  | whileLoop ty c b ihc ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    exact denoteWhileOrig'_refines _ _ t _ _ _ _ (ihc h.1) (ihb h.2) fuel
+  | forFold ty v lo hi b ihlo ihhi ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihlo h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ihhi h.1.2 fuel) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+           · intro r' _
+             cf_cases r' <;> first
+               | exact Refines.pure _
+               | exact denoteForLoop'_refines _ _ t v _ _ (ihb h.2) _ _ _)
+  | forFoldRev ty v lo hi b ihlo ihhi ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihlo h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ihhi h.1.2 fuel) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+           · intro r' _
+             cf_cases r' <;> first
+               | exact Refines.pure _
+               | exact denoteForLoopRev'_refines _ _ t v _ _ (ihb h.2) _ _ _)
+  | whileFold ty c b ihc ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    exact denoteWhile'_refines _ _ t _ _ _ _ (ihc h.1) (ihb h.2) fuel
+  | forFoldReturn ty v lo hi b ihlo ihhi ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihlo h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ihhi h.1.2 fuel) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+           · intro r' _
+             cf_cases r' <;> first
+               | exact Refines.pure _
+               | exact denoteForLoop'Return_refines _ _ t v _ _ (ihb h.2) _ _ _)
+  | forFoldRevReturn ty v lo hi b ihlo ihhi ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ihlo h.1.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first
+        | exact Refines.pure _
+        | (refine Refines.bind (ihhi h.1.2 fuel) ?_ ?_
+           · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+           · intro r' _
+             cf_cases r' <;> first
+               | exact Refines.pure _
+               | exact denoteForLoopRev'Return_refines _ _ t v _ _ (ihb h.2) _ _ _)
+  | whileFoldReturn ty c b ihc ihb =>
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    exact denoteWhile'Return_refines _ _ t _ _ _ _ (ihc h.1) (ihb h.2) fuel
+  | break_some ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr; cf_cases r <;> exact Refines.pure _
+  | earlyReturn ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr; cf_cases r <;> exact Refines.pure _
+  | questionMark ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr; cf_cases r <;> exact Refines.pure _
+  | cfBreak ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr; cf_cases r <;> exact Refines.pure _
+  | cfContinue ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr; cf_cases r <;> exact Refines.pure _
+  | cfBreakContinue ty e ih =>
+    simp only [TExpr.erase, noVarRef] at h
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    refine Refines.bind (ih h fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr; cf_cases r <;> exact Refines.pure _
+  | namedProj ty n e ih =>
+    simp only [TExpr.erase, noVarRef, noVarRef.allExpr, Bool.and_true] at h
+    simp only [tStructToTuple, tStructToTuple.goKind]
+    have hk : ∀ (k : Option TExprKind) (e' : TExpr) (ty' : ImpType),
+        (TExpr.mk (k.getD (.namedProj n e')) ty').erase =
+          (TExpr.mk (k.getD (.app ".0" [e'])) ty').erase := by
+      intro k e' ty'; cases k <;> rfl
+    rw [hk]
+    have := denote'_structApp sf S T hST t ".0" [e] (tyStructToTuple sf sf.length ty)
+      (fun a ha => by rw [List.mem_singleton] at ha; subst ha; exact ih h) fuel
+    simpa only [List.map_cons, List.map_nil, TExpr.erase] using this
+  | _ =>
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denote']
+    exact Refines.pure _
+
+/-- The rewrite refines `denote'`: when the struct term `e`, whose erasure never reads the
+    reserved name `t`, has an outcome that is not an error under `structBi sf bi`, the
+    rewritten term has the same outcome under `bi`, from and to environments that agree
+    except at `t`. -/
+theorem denote'_tStructToTuple (sf : StructFieldTys) (bi : Builtins) (t : String) (e : TExpr)
+    (h : noVarRef t e.erase = true) (fuel : Nat) :
+    Refines isErr t (denote' (structBi sf bi) fuel e.erase)
+      (denote' bi fuel (tStructToTuple sf t e).erase) :=
+  denote'_tStructToTuple_of_structTab sf _ bi (StructTab.of_structBi sf bi) t e h fuel
+
+/-- A call of a head without a struct role refines its rewrite under `denoteApp'`, given that
+    its arguments do. -/
+theorem denoteApp'_tStructToTuple (sf : StructFieldTys) (bi : Builtins) (t f : String)
+    (args : List TExpr) (hf : structHead? sf f = none)
+    (h : ∀ a ∈ args, noVarRef t a.erase = true) (fuel : Nat) :
+    Refines isErr t (denoteApp' (structBi sf bi) fuel f (args.map TExpr.erase))
+      (denoteApp' bi fuel f ((args.map (tStructToTuple sf t)).map TExpr.erase)) := by
+  have := denote'_app_fallback sf (structBi sf bi) bi t f args
+    (fun a ha fuel => denote'_tStructToTuple sf bi t a (h a ha) fuel)
+    (fun vals _ v hv => by simpa [structBi, hf] using hv) fuel
+  simpa only [denote'] using this
+
+/-! ## Refinement of the spine reading `denoteSpine` -/
+
+open InlineLocalClosures (denoteSpine inlineSpine closureOk blockOk closureTable bindAll)
+
+/-- The side condition of `denoteSpine` on the rewrite: every closure binding on the statement
+    spine of `e` that `denoteSpine` reads as a closure (`closureOk` or `blockOk` of the binding
+    with its continuation inlined) is read as a closure after the rewrite too, and binds a name
+    without a struct role. -/
+def spineStructOk (sf : StructFieldTys) (t : String) : TExpr → Bool
+  | .mk (.letBind f v cont) _ =>
+    (match v.erase, (tStructToTuple sf t v).erase with
+      | .lam ps body, .lam ps' body' =>
+        !(closureOk f ps body (inlineSpine cont.erase) ||
+            blockOk f ps body (inlineSpine cont.erase)) ||
+          ((closureOk f ps' body' (inlineSpine (tStructToTuple sf t cont).erase) ||
+              blockOk f ps' body' (inlineSpine (tStructToTuple sf t cont).erase)) &&
+            (structHead? sf f).isNone)
+      | _, _ => true) && spineStructOk sf t cont
+  | .mk (.seq _ b) _ => spineStructOk sf t b
+  | .mk (.ann e) _ => spineStructOk sf t e
+  | _ => true
+
+namespace StructTuple
+
+theorem bindAll_agreeExcept {t : String} {ρ₁ ρ₂ : Env} (h : Env.AgreeExcept t ρ₁ ρ₂) :
+    ∀ (ps : List String) (vals : List Value),
+      Env.AgreeExcept t (bindAll ρ₁ ps vals) (bindAll ρ₂ ps vals)
+  | [], _ => h
+  | _ :: _, [] => h
+  | p :: ps, v :: vs => by
+    simp only [bindAll]
+    exact (bindAll_agreeExcept h ps vs).extend p v
+
+/-- The builtin table of a closure whose name has no struct role keeps `StructTab`, when the
+    body refines its rewrite and the environments of the binding agree except at `t`. -/
+theorem structTab_closureTable {sf : StructFieldTys} {S T : Builtins} (hST : StructTab sf S T)
+    {t f : String} (hf : structHead? sf f = none) (fuel : Nat) (ps : List String)
+    {body body' : ImpExpr} (hb : Refines isErr t (denote' S fuel body) (denote' T fuel body'))
+    {ρ₁ ρ₂ : Env} (hρ : Env.AgreeExcept t ρ₁ ρ₂) :
+    StructTab sf (closureTable S fuel f ps body ρ₁) (closureTable T fuel f ps body' ρ₂) := by
+  intro g vals v h
+  by_cases hg : g = f
+  · subst hg
+    simp only [structBi, hf]
+    simp only [InlineLocalClosures.closureTable, if_true] at h ⊢
+    by_cases hl : vals.length = ps.length
+    · simp only [hl, if_true] at h ⊢
+      rcases hd : (denote' S fuel body).run (bindAll ρ₁ ps vals) with ⟨o, s⟩
+      rw [hd] at h
+      cases o with
+      | val w =>
+        obtain ⟨ho, -⟩ := hb _ _ (bindAll_agreeExcept hρ ps vals)
+          (by simp only [StateT.run] at hd; simp [hd, isErr])
+        simp only [StateT.run] at hd ho ⊢
+        rw [ho, hd]
+        exact h
+      | _ => simp at h
+    · simp [hl] at h
+  · have h' := hST g vals v (by simpa [InlineLocalClosures.closureTable, hg] using h)
+    simp only [structBi] at h' ⊢
+    cases hh : structHead? sf g with
+    | none =>
+      simp only [hh] at h' ⊢
+      simpa [InlineLocalClosures.closureTable, hg] using h'
+    | some r => simp only [hh] at h' ⊢; cases r <;> exact h'
+
+/-- The spine reading of a binding whose value is no closure. -/
+theorem denoteSpine_letBind_of_not_lam (bi : Builtins) (fuel : Nat) (x : String)
+    (v cont : ImpExpr) (hv : ∀ ps b, v ≠ .lam ps b) :
+    denoteSpine bi fuel (.letBind x v cont) = (do
+      let rv ← denote' bi fuel v
+      match rv with
+      | .val (.controlFlow isBreak w) => pure (.val (.controlFlow isBreak w))
+      | .val w => do modify (Env.extend · x w); denoteSpine bi fuel cont
+      | other => pure other) := by
+  cases v <;> first | exact absurd rfl (hv _ _) | rfl
+
+/-- The spine reading of an expression that is neither a binding nor a sequence is
+    `denote'`. -/
+theorem denoteSpine_of_not_spine (bi : Builtins) (fuel : Nat) (e : ImpExpr)
+    (h1 : ∀ x v c, e ≠ .letBind x v c) (h2 : ∀ a b, e ≠ .seq a b) :
+    denoteSpine bi fuel e = denote' bi fuel e := by
+  cases e <;> first | exact absurd rfl (h1 _ _ _) | exact absurd rfl (h2 _ _) | rfl
+
+/-- The spine reading of a binding of a tuple followed by a tuple is `denote'`. -/
+theorem denoteSpine_letBind_tuple (bi : Builtins) (fuel : Nat) (x : String)
+    (xs ys : List ImpExpr) :
+    denoteSpine bi fuel (.letBind x (.tuple xs) (.tuple ys)) =
+      denote' bi fuel (.letBind x (.tuple xs) (.tuple ys)) := by
+  rw [denoteSpine_letBind_of_not_lam bi fuel x _ _ (fun _ _ h => by cases h),
+    denoteSpine_of_not_spine bi fuel _ (fun _ _ _ h => by cases h) (fun _ _ h => by cases h)]
+  simp only [denote']; rfl
+
+/-- The erasure of a term is a closure exactly when the erasure of its rewrite is, with the
+    rewritten body. -/
+theorem erase_tStructToTuple_lam (sf : StructFieldTys) (t : String) :
+    ∀ (v : TExpr) (ps : List String) (body : ImpExpr), v.erase = .lam ps body →
+      ∃ b : TExpr, body = b.erase ∧
+        (tStructToTuple sf t v).erase = .lam ps (tStructToTuple sf t b).erase := by
+  intro v
+  induction v using TExpr.ind with
+  | lam ty ps' b ih =>
+    intro ps body h
+    simp only [TExpr.erase, ImpExpr.lam.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    exact ⟨b, rfl, by simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase]⟩
+  | ann ty e ih =>
+    intro ps body h
+    simp only [TExpr.erase] at h
+    obtain ⟨b, hb, he⟩ := ih ps body h
+    exact ⟨b, hb, by simpa only [tStructToTuple, tStructToTuple.goKind, TExpr.erase] using he⟩
+  | _ => intro ps body h; simp [TExpr.erase] at h
+
+theorem erase_tStructToTuple_not_lam (sf : StructFieldTys) (t : String) :
+    ∀ (v : TExpr), (∀ ps b, v.erase ≠ .lam ps b) →
+      ∀ ps b, (tStructToTuple sf t v).erase ≠ .lam ps b := by
+  intro v
+  induction v using TExpr.ind with
+  | lam ty ps' b ih => intro h; exact absurd rfl (h ps' b.erase)
+  | ann ty e ih =>
+    intro h
+    simpa only [tStructToTuple, tStructToTuple.goKind, TExpr.erase] using
+      ih (by simpa only [TExpr.erase] using h)
+  | app ty f args ih =>
+    intro _ ps b
+    simp only [tStructToTuple, tStructToTuple.goKind, structApp]
+    split <;> simp [TExpr.erase]
+  | namedProj ty n e ih =>
+    intro _ ps b
+    simp only [tStructToTuple, tStructToTuple.goKind, structApp]
+    split <;> simp [TExpr.erase]
+  | _ => intro _ ps b; simp [tStructToTuple, tStructToTuple.goKind, TExpr.erase]
+
+/-- On a term that is neither a binding, a sequence nor an annotation, the spine readings of
+    the term and of its rewrite are `denote'`. -/
+theorem denoteSpine_tStructToTuple_nonspine (sf : StructFieldTys) (t : String) (S T : Builtins)
+    (fuel : Nat) (k : TExprKind) (ty : ImpType)
+    (h1 : ∀ n v b, k ≠ .letBind n v b) (h2 : ∀ a b, k ≠ .seq a b) (h3 : ∀ e, k ≠ .ann e) :
+    denoteSpine S fuel (TExpr.mk k ty).erase = denote' S fuel (TExpr.mk k ty).erase ∧
+      denoteSpine T fuel (tStructToTuple sf t (.mk k ty)).erase =
+        denote' T fuel (tStructToTuple sf t (.mk k ty)).erase := by
+  cases k
+  case letBind n v b => exact absurd rfl (h1 n v b)
+  case seq a b => exact absurd rfl (h2 a b)
+  case ann e => exact absurd rfl (h3 e)
+  case app f args =>
+    refine ⟨denoteSpine_of_not_spine _ _ _ (by simp [TExpr.erase]) (by simp [TExpr.erase]), ?_⟩
+    simp only [tStructToTuple, tStructToTuple.goKind, structApp]
+    split <;> simp only [Option.getD_some, Option.getD_none, TExpr.erase, TExpr.eraseList_eq] <;>
+      first
+        | exact denoteSpine_letBind_tuple _ _ _ _ _
+        | exact denoteSpine_of_not_spine _ _ _ (by simp) (by simp)
+  case namedProj n e =>
+    refine ⟨denoteSpine_of_not_spine _ _ _ (by simp [TExpr.erase]) (by simp [TExpr.erase]), ?_⟩
+    simp only [tStructToTuple, tStructToTuple.goKind, structApp]
+    split <;> simp only [Option.getD_some, Option.getD_none, TExpr.erase, TExpr.eraseList_eq] <;>
+      first
+        | exact denoteSpine_letBind_tuple _ _ _ _ _
+        | exact denoteSpine_of_not_spine _ _ _ (by simp) (by simp)
+  case break_ o =>
+    cases o <;>
+    exact ⟨denoteSpine_of_not_spine _ _ _ (by simp [TExpr.erase]) (by simp [TExpr.erase]),
+      denoteSpine_of_not_spine _ _ _ (by simp [tStructToTuple, tStructToTuple.goKind, TExpr.erase])
+        (by simp [tStructToTuple, tStructToTuple.goKind, TExpr.erase])⟩
+  all_goals
+    exact ⟨denoteSpine_of_not_spine _ _ _ (by simp [TExpr.erase]) (by simp [TExpr.erase]),
+      denoteSpine_of_not_spine _ _ _ (by simp [tStructToTuple, tStructToTuple.goKind, TExpr.erase])
+        (by simp [tStructToTuple, tStructToTuple.goKind, TExpr.erase])⟩
+
+/-- On a term that is neither a binding, a sequence nor an annotation, refinement of the spine
+    readings follows from refinement under `denote'`. -/
+theorem refines_denoteSpine_of_nonspine (sf : StructFieldTys) (t : String) (S T : Builtins)
+    (fuel : Nat) (k : TExprKind) (ty : ImpType)
+    (h1 : ∀ n v b, k ≠ .letBind n v b) (h2 : ∀ a b, k ≠ .seq a b) (h3 : ∀ e, k ≠ .ann e)
+    (hr : Refines isErr t (denote' S fuel (TExpr.mk k ty).erase)
+      (denote' T fuel (tStructToTuple sf t (.mk k ty)).erase)) :
+    Refines isErr t (denoteSpine S fuel (TExpr.mk k ty).erase)
+      (denoteSpine T fuel (tStructToTuple sf t (.mk k ty)).erase) := by
+  obtain ⟨hS, hT⟩ := denoteSpine_tStructToTuple_nonspine sf t S T fuel k ty h1 h2 h3
+  rw [hS, hT]
+  exact hr
+
+end StructTuple
+
+/-- The rewrite refines the spine reading `denoteSpine` over builtin tables `S` and `T` with
+    `StructTab sf S T`: when the struct term `e`, whose erasure never reads the reserved name
+    `t` and whose spine satisfies `spineStructOk`, has an outcome that is not an error under
+    `S`, the rewritten term has the same outcome under `T`, from and to environments that agree
+    except at `t`. -/
+theorem denoteSpine_tStructToTuple_of_structTab (sf : StructFieldTys) (t : String)
+    (fuel : Nat) (e : TExpr) :
+    ∀ (S T : Builtins), StructTab sf S T → noVarRef t e.erase = true →
+      spineStructOk sf t e = true →
+      Refines isErr t (denoteSpine S fuel e.erase)
+        (denoteSpine T fuel (tStructToTuple sf t e).erase) := by
+  induction e using TExpr.ind with
+  | letBind ty n v b ihv ihb =>
+    intro S T hST h hok
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    by_cases hl : ∃ ps body, v.erase = .lam ps body
+    · obtain ⟨ps, body, hv⟩ := hl
+      obtain ⟨bT, rfl, hv'⟩ := erase_tStructToTuple_lam sf t v ps body hv
+      have hnb : noVarRef t bT.erase = true := by simpa [hv, noVarRef] using h.1
+      simp only [spineStructOk, hv, hv', Bool.and_eq_true] at hok
+      obtain ⟨hg, hokb⟩ := hok
+      simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, hv, hv', denoteSpine]
+      cases hg₁ : (closureOk n ps bT.erase (inlineSpine b.erase) ||
+          blockOk n ps bT.erase (inlineSpine b.erase))
+      · simp only [Bool.false_eq_true, if_false]
+        refine Refines.of_bad (fun s => ?_)
+        obtain ⟨m, hm⟩ := InlineLocalClosures.denote'_letBind_lam_err S fuel n ps bT.erase
+          b.erase s
+        simp only [StateT.run] at hm
+        rw [hm]; rfl
+      · simp only [hg₁, Bool.not_true, Bool.false_or, Bool.and_eq_true,
+          Option.isNone_iff_eq_none] at hg
+        obtain ⟨hg₂, hn⟩ := hg
+        simp only [hg₂, if_true]
+        intro s₁ s₂ hs hb
+        simp only [stateM_bind_apply, stateM_get_apply] at hb ⊢
+        exact ihb _ _ (structTab_closureTable hST hn fuel ps
+          (denote'_tStructToTuple_of_structTab sf S T hST t bT hnb fuel) hs) h.2 hokb s₁ s₂ hs hb
+    · have hnl : ∀ ps body, v.erase ≠ .lam ps body := fun ps body he => hl ⟨ps, body, he⟩
+      have hnl' := erase_tStructToTuple_not_lam sf t v hnl
+      have hokb : spineStructOk sf t b = true := by
+        simp only [spineStructOk, Bool.and_eq_true] at hok
+        exact hok.2
+      simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase]
+      rw [denoteSpine_letBind_of_not_lam _ _ _ _ _ hnl,
+        denoteSpine_letBind_of_not_lam _ _ _ _ _ hnl']
+      refine Refines.bind (denote'_tStructToTuple_of_structTab sf S T hST t v h.1 fuel) ?_ ?_
+      · intro a s ha; cases a <;> simp_all [isErr, stateM_pure_apply]
+      · intro a ha
+        cf_cases a <;> first
+          | exact Refines.pure _
+          | exact Refines.bind (Refines.modify_extend n _) (by simp)
+              (fun _ _ => ihb S T hST h.2 hokb)
+  | seq ty a b iha ihb =>
+    intro S T hST h hok
+    simp only [TExpr.erase, noVarRef, Bool.and_eq_true] at h
+    simp only [spineStructOk] at hok
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, denoteSpine]
+    refine Refines.bind (denote'_tStructToTuple_of_structTab sf S T hST t a h.1 fuel) ?_ ?_
+    · intro r s hr; cases r <;> simp_all [isErr, stateM_pure_apply]
+    · intro r hr
+      cf_cases r <;> first | exact Refines.pure _ | exact ihb S T hST h.2 hok
+  | ann ty e ih =>
+    intro S T hST h hok
+    simp only [TExpr.erase] at h
+    simp only [spineStructOk] at hok
+    simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase]
+    exact ih S T hST h hok
+  | _ =>
+    intro S T hST h _
+    refine refines_denoteSpine_of_nonspine sf t S T fuel _ _ ?_ ?_ ?_
+      (denote'_tStructToTuple_of_structTab sf S T hST t _ h fuel) <;> simp
+
+/-- The rewrite refines the spine reading `denoteSpine`, the reading of a function body by
+    `compileA`'s run semantics: when the struct term `e`, whose erasure never reads the reserved
+    name `t` and whose spine satisfies `spineStructOk`, has an outcome that is not an error
+    under `structBi sf bi`, the rewritten term has the same outcome under `bi`, from and to
+    environments that agree except at `t`. -/
+theorem denoteSpine_tStructToTuple (sf : StructFieldTys) (bi : Builtins) (t : String)
+    (e : TExpr) (h : noVarRef t e.erase = true) (hok : spineStructOk sf t e = true)
+    (fuel : Nat) :
+    Refines isErr t (denoteSpine (structBi sf bi) fuel e.erase)
+      (denoteSpine bi fuel (tStructToTuple sf t e).erase) :=
+  denoteSpine_tStructToTuple_of_structTab sf t fuel e _ bi (StructTab.of_structBi sf bi) h hok
 
 end Hax
