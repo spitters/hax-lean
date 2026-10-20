@@ -4398,6 +4398,40 @@ def extractNodeType (j : Json) : ImpType :=
   | .ok tyJ => parseHaxType tyJ
   | _ => .unknown
 
+/-- The `def_id` of the `item` of a hax `GlobalName` node `gn`, read from
+    `item.value.def_id` or `item.def_id`. -/
+def globalNameDefId? (gn : Json) : Option Json := do
+  let item ← (gn.getObjVal? "item").toOption
+  match item.getObjVal? "value" with
+  | .ok v => match v.getObjVal? "def_id" with
+    | .ok d => some d
+    | _ => (item.getObjVal? "def_id").toOption
+  | _ => (item.getObjVal? "def_id").toOption
+
+/-- The parameter types and the result type of the hax function type `ty`: the
+    `inputs` and `output` of its signature, under `Arrow` or under the `fn_sig` of
+    `FnDef`. `none` for any other type. -/
+def fnTypeSig? (ty : Json) : Option (Array Json × Option Json) := do
+  let kind := match ty.getObjVal? "value" with
+    | .ok v => v
+    | _ => (ty.getObjVal? "kind").toOption.getD ty
+  let sig ← (kind.getObjVal? "Arrow").toOption <|>
+    ((kind.getObjVal? "FnDef").toOption >>= fun d => (d.getObjVal? "fn_sig").toOption)
+  let fs := (sig.getObjVal? "value").toOption.getD sig
+  let inputs ← (fs.getObjValAs? (Array Json) "inputs").toOption
+  pure (inputs, (fs.getObjVal? "output").toOption)
+
+/-- The value of the constructor head `head` of a variant used as a function, at
+    the hax function type `ty`: the eta-expansion `fun _ctor0 … => head _ctor0 …`
+    over the parameters of `ty` (`fnTypeSig?`). `none` when `ty` is no function
+    type. -/
+def variantCtorValue? (head : String) (ty : Json) : Option TExprKind := do
+  let (inputs, output) ← fnTypeSig? ty
+  let params := (List.range inputs.size).map (s!"_ctor{·}")
+  let args := (params.zip inputs.toList).map fun (p, t) => TExpr.mk (.var p) (parseHaxType t)
+  let retTy := (output.map parseHaxType).getD .unknown
+  pure (.lam params (TExpr.mk (.app head args) retTy))
+
 /-- Bug-1 (let-bound local closures): if `exprJ` is a `Closure` with an inline
     `body` and ≥1 cleanly-named param, return its ordered param names and the body
     JSON, for sentinel marking. The IR has no lambda, so a let-bound closure is
@@ -4507,6 +4541,14 @@ where
       let name := match data.getObjVal? "item" with
         | .ok item => extractItemDefIdName item "global" [] implMap.localCrate
         | _ => "global"
+      -- A variant of an enum of the crate used as a function value is the
+      -- eta-expansion of its head `E::V` (`variantCtorValue?`), the head of its
+      -- construction (`crateVariantHead?`); without a function type it is refused.
+      if let some head := (globalNameDefId? data).bind
+          (fun vd => crateVariantHead? vd (extractDefIdName vd)) then
+        match (_parentJ.getObjVal? "ty").toOption.bind (variantCtorValue? head) with
+        | some k => return k
+        | none => throw s!"unsupported construct: the enum variant `{head}` used as a function value without a function type; write the closure `|x| {head}(x)`"
       -- An integer limit of `core` is its value (`coreIntLimit?`).
       match coreIntLimit? data (extractNodeType _parentJ) with
       | some n => return .lit (.int n)

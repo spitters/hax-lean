@@ -3223,4 +3223,38 @@ def thenWriteLoop : ImpExpr :=
 
 end BranchArrayState
 
+namespace VariantFnValue
+
+/-! ## A variant used as a function value
+
+A variant of an enum of the crate used as a function value (`.map(E::V)`, a
+`GlobalName` node of function type) is the eta-expansion `fun _ctor0 … => E::V
+_ctor0 …` of its head (`HaxAdapter.variantCtorValue?`); at a node with no function
+type it is refused. A variant of a `core` enum keeps its bare name. -/
+
+open Lean Hax.HaxAdapter QuestionMarkExport FrontAdapterFixes
+
+/-- The `GlobalName` node naming the item `vd`, of type `ty`. -/
+def globalNameJ (vd ty : Json) : Json :=
+  nodeJ ty (Json.mkObj [("GlobalName", Json.mkObj [
+    ("item", Json.mkObj [("value", Json.mkObj [("def_id", vd)])])])])
+
+/-- The function type `u32 -> u32`. -/
+def u32ArrowJ : Json :=
+  tyJ (Json.mkObj [("Arrow", Json.mkObj [("value", Json.mkObj [
+    ("inputs", Json.arr #[u32J]), ("output", u32J)])])])
+
+-- `E::V` as a function value is `fun _ctor0 => E::V _ctor0`.
+#guard match tParse (globalNameJ (variantDefIdJ "sigma_proofs" "E" "V") u32ArrowJ) with
+  | some (.lam ps body) => ps == ["_ctor0"] && body == .app "E::V" [.var "_ctor0"]
+  | _ => false
+-- Without a function type it is refused.
+#guard tRefused (globalNameJ (variantDefIdJ "sigma_proofs" "E" "V") u32J)
+  "unsupported construct: the enum variant `E::V` used as a function value"
+-- `Some` as a function value keeps its bare name.
+#guard tParse (globalNameJ (variantDefIdJ "core" "Option" "Some") u32ArrowJ) ==
+  some (.var "Some")
+
+end VariantFnValue
+
 end Hax.EmitterRegressions
