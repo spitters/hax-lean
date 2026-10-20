@@ -5,7 +5,7 @@ Authors: CatCrypt Contributors
 -/
 module
 
-public import HaxLean.Semantics
+public import HaxLean.FieldTag
 
 /-!
 # Montgomery-form field calls
