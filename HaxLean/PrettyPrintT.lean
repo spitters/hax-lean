@@ -21,6 +21,7 @@ public import HaxLean.TPhase.SinkMutTuple
 public import HaxLean.TPhase.ElideNewtype
 public import HaxLean.ClassEmit
 public import HaxLean.ContractEmit
+public import HaxLean.StructTuple
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -1876,6 +1877,56 @@ def typeDeclRuns (ds : List (String × Nat × String × List String)) :
     | some (k', ts) => if k == k' then acc.dropLast ++ [(k, ts ++ [t])] else acc ++ [(k, [t])]
     | none => [(k, [t])]) []
 
+/-- The struct layout of struct metadata: each struct with its fields and their types. -/
+def structFieldTysOf (structMeta : StructMeta) : StructFieldTys :=
+  structMeta.map fun (s, fs) => (s, fs.map fun (f, _, ty) => (f, ty))
+
+/-- The reserved name of `tStructToTuple` for the bodies `es`: the first of `struct#t`,
+    `struct#t1`, …, `struct#t63` that no body reads (`noVarRef`), and `struct#t63` when every
+    candidate is read. A Rust identifier contains no `#`. -/
+def structTupleName (es : List ImpExpr) : String :=
+  let cands := (List.range 64).map fun i => if i = 0 then "struct#t" else s!"struct#t{i}"
+  (cands.find? fun t => es.all (noVarRef t)).getD "struct#t63"
+
+/-- The struct-as-tuple companions of the `TExpr` literals `texprs`, printed under
+    `--struct-tuples`. `t` is `structTupleName` of the erased literals. For each literal
+    `f_texpr` whose rewrite `tStructToTuple sf t` prints a different term: a comment with the
+    values of the premises `noVarRef t` and `spineStructOk sf t` of
+    `StructTuple.denote'_tStructToTuple` and `StructTuple.denoteSpine_tStructToTuple`, the
+    literal `f_texprS` of the rewrite, the literal `f_impExprS` of its erasure and, unless
+    `partialDefs`, the erasure identity `f_texprS.erase = f_impExprS`. Under `partialDefs`
+    the literals are `partial def`s. -/
+def structTupleBlock (tyName : String → Option String) (sf : StructFieldTys)
+    (texprs : List (String × TExpr)) (partialDefs : Bool) : String :=
+  let t := structTupleName (texprs.map (·.2.erase))
+  let pd (d : String) : String := if partialDefs then d.replace "def " "partial def " else d
+  let ds := texprs.filterMap fun (n, e) =>
+    let eS := tStructToTuple sf t e
+    if toLeanTExpr (fun _ => none) eS == toLeanTExpr (fun _ => none) e then none
+    else
+      let texprS := sanitizeName (n ++ "_texprS")
+      let impExprS := sanitizeName (n ++ "_impExprS")
+      let ex := if partialDefs then ""
+        else s!"example : {texprS}.erase = {impExprS} := rfl\n"
+      some (s!"-- tStructToTuple, reserved name {(repr t).pretty}: noVarRef = {noVarRef t e.erase}, spineStructOk = {spineStructOk sf t e}\n"
+        ++ pd s!"def {texprS} : TExpr :=\n  {toLeanTExpr tyName eS}\n"
+        ++ pd s!"def {impExprS} : ImpExpr :=\n  {toLeanImpExpr eS.erase}\n" ++ ex)
+  if ds.isEmpty then "" else "\n".intercalate ds ++ "\n"
+
+/-- The `Deps` heads of the `ImpExpr` literals `literalDefs` as the literals print them: each
+    application head whose surface head (`HaxAdapter.surfaceTraitHead nominalKrates`), or that
+    head tagged `#dep`, is among `depNames`, in order of first occurrence. -/
+def literalDepsHeads (nominalKrates depNames : List String)
+    (literalDefs : List (String × ImpExpr)) : List String :=
+  (literalDefs.flatMap fun (_, e) => (collectAppCalls e).map (·.1)).eraseDups.filter fun h =>
+    let s := HaxAdapter.surfaceTraitHead nominalKrates h
+    depNames.contains s || depNames.contains s!"{s}#{depOpTag}"
+
+/-- The literal `<moduleName>_depsHeads : List String` of the `Deps` heads `heads`, printed
+    under `--trait-heads`. -/
+def depsHeadsDef (moduleName : String) (heads : List String) : String :=
+  s!"/-- The `Deps` heads of the `ImpExpr` and `TExpr` literals, as they print them. -/\ndef {sanitizeName (moduleName ++ "_depsHeads")} : List String :=\n  [{", ".intercalate (heads.map fun h => (repr h).pretty)}]\n\n"
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
@@ -1902,7 +1953,11 @@ def typeDeclRuns (ds : List (String × Nat × String × List String)) :
     (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`), eliding the newtype
     constructions and projections (`literalIdentityHeads`); the projection
     markers, the nested projection paths and the newtype-constructor renaming
-    apply to the surface definitions alone. -/
+    apply to the surface definitions alone.
+    `structTuples` adds, after the erasure identities, the struct-as-tuple
+    companions of the `TExpr` literals (`structTupleBlock`); `traitHeads` adds the
+    literal of the `Deps` heads of the `ImpExpr` literals (`literalDepsHeads`,
+    `depsHeadsDef`). With both off, neither adds text. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -1916,7 +1971,9 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (emitLowCT : Bool := false)
     (classHooks : ClassEmit.ClassHooks := {})
     (contracts : ContractEmit.Plan := {})
-    (nominalKrates : List String := []) : String :=
+    (nominalKrates : List String := [])
+    (structTuples : Bool := false)
+    (traitHeads : Bool := false) : String :=
   let prep := certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes
     classHooks nominalKrates
   -- The `ImpExpr` and `TExpr` literals.
@@ -2222,8 +2279,12 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- The contracts of `--emit-contracts` name the surface definitions and the
   -- instances, so they follow both.
   let contractBlock := ContractEmit.renderPlan structLookup classHooks contracts
+  let structTupleText := if !structTuples then ""
+    else structTupleBlock tyName (structFieldTysOf structMeta) texprs needsPartial
+  let depsHeadsText := if !traitHeads then ""
+    else depsHeadsDef moduleName (literalDepsHeads nominalKrates depNames literalDefs)
   let footer :=
-    s!"\n{mutualClose}{contractBlock}{impExprs}\n{lowCTBlock}{texprBlock}{exampleBlock}end  -- noncomputable section\n\nend {moduleName}\n"
+    s!"\n{mutualClose}{contractBlock}{impExprs}\n{lowCTBlock}{texprBlock}{exampleBlock}{structTupleText}{depsHeadsText}end  -- noncomputable section\n\nend {moduleName}\n"
   fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax

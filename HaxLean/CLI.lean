@@ -116,6 +116,15 @@ structure Options where
       qualified head whatever the list, and is the `Deps` field `Trait_method`
       (`HaxAdapter.qualifiesTraitCall`, `HaxAdapter.surfaceTraitHead`). -/
   nominalKrates : List String := []
+  /-- With `--emit-certified --hax`: print, beside each `f_texpr` literal that the
+      struct-to-tuple rewrite `tStructToTuple` changes, the literals `f_texprS` and
+      `f_impExprS` of the rewrite, with the values of the premises of its refinement
+      theorems (`Hax.structTupleBlock`). -/
+  structTuples : Bool := false
+  /-- With `--emit-certified --hax`: print the literal `<name>_depsHeads` of the
+      `Deps` heads as the `ImpExpr` and `TExpr` literals print them
+      (`Hax.literalDepsHeads`). -/
+  traitHeads : Bool := false
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -144,6 +153,8 @@ where
     | "--emit-contracts" :: rest, opts => go rest { opts with emitContracts := true }
     | "--nominal-crates" :: ks :: rest, opts =>
       go rest { opts with nominalKrates := ks.splitOn "," |>.filter (!·.isEmpty) }
+    | "--struct-tuples" :: rest, opts => go rest { opts with structTuples := true }
+    | "--trait-heads" :: rest, opts => go rest { opts with traitHeads := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -182,6 +193,12 @@ OPTIONS:
                     A trait method of another crate named like a runtime
                     builtin (mul, eq, len, ...) carries the qualified head
                     without this option and is the Deps field Trait_method
+  --struct-tuples   With --emit-certified --hax: beside each TExpr literal
+                    that the struct-to-tuple rewrite changes, print the
+                    literals f_texprS and f_impExprS of the rewrite and the
+                    values of its two refinement premises
+  --trait-heads     With --emit-certified --hax: print the literal
+                    NAME_depsHeads, the Deps heads as the literals print them
   --python DUMP     Read the py2json dump of a module of the Python subset and
                     print its extraction module (with --name NAME, -o FILE);
                     a refusal is printed with its position and the run fails

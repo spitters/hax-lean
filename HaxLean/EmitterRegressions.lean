@@ -1832,6 +1832,46 @@ def pairFile : String :=
 -- Both positional projections are emitted, at the first and second component.
 #guard ((pairFile.splitOn "0» (x : Pair_T) := x.1\n").length) == 2
 #guard ((pairFile.splitOn "1» (x : Pair_T) := x.2\n").length) == 2
+
+/-- `fn zero() -> i64 { 0 }`, a function without a struct. -/
+def zeroFn : TExpr := .mk (.lit (.int 0)) .int
+
+/-- `fn digest(x: u32) -> u32 { hash(x) }`, a call of the unresolved method `hash`. -/
+def digestFn : TExpr :=
+  let x : TExpr := .mk (.var "x") (.uint .w32)
+  .mk (.letBind "x" x (.mk (.app "hash" [x]) (.uint .w32))) (.uint .w32)
+
+/-- The functions `swap`, `zero` and `digest` over `Pair`. -/
+def pairZeroDigestDefs : List (String × TExpr) :=
+  [("swap", pairSwapFn), ("zero", zeroFn), ("digest", digestFn)]
+
+/-- The emitted file of `pairZeroDigestDefs` under the two printer flags. -/
+def pairFileFlags (structTuples traitHeads : Bool) : String :=
+  toLeanCertifiedFileTyped pairZeroDigestDefs "Test" pairMeta []
+    (structTuples := structTuples) (traitHeads := traitHeads)
+
+-- With both flags off, the file has neither the struct-as-tuple literals nor the
+-- `Deps` heads, and it is the file printed without the flags.
+#guard pairFileFlags false false == toLeanCertifiedFileTyped pairZeroDigestDefs "Test" pairMeta []
+#guard ((pairFileFlags false false).splitOn "_texprS").length == 1
+#guard ((pairFileFlags false false).splitOn "_impExprS").length == 1
+#guard ((pairFileFlags false false).splitOn "_depsHeads").length == 1
+#guard ((pairFile.splitOn "_texprS").length) == 1
+-- `--struct-tuples`: the struct function `swap` has its rewritten literals, with
+-- both refinement premises true; `zero` and `digest`, without a struct, have none.
+#guard ((pairFileFlags true false).splitOn "def swap_texprS : TExpr :=").length == 2
+#guard ((pairFileFlags true false).splitOn
+  "def swap_impExprS : ImpExpr :=\n  (.letBind \"p\" (.var \"p\") (.tuple [(.proj (.var \"p\") 1), (.proj (.var \"p\") 0)]))").length == 2
+#guard ((pairFileFlags true false).splitOn "example : swap_texprS.erase = swap_impExprS := rfl").length == 2
+#guard ((pairFileFlags true false).splitOn
+  "reserved name \"struct#t\": noVarRef = true, spineStructOk = true").length == 2
+#guard ((pairFileFlags true false).splitOn "zero_texprS").length == 1
+#guard ((pairFileFlags true false).splitOn "digest_texprS").length == 1
+#guard ((pairFileFlags true false).splitOn "_depsHeads").length == 1
+-- `--trait-heads`: one literal listing the `Deps` head `hash`.
+#guard ((pairFileFlags false true).splitOn
+  "def Test_depsHeads : List String :=\n  [\"hash\"]\n").length == 2
+#guard ((pairFileFlags false true).splitOn "_texprS").length == 1
 end UnitStructs
 
 namespace QuestionMark
