@@ -359,6 +359,17 @@ This is the principled version of the earlier name-allowlist heuristic
 than guessing from method names.
 -/
 
+/-- The representation of the elements of a field `impl` of `primeir_hax::Field`,
+    read from its `MONT_BITS` constant: canonical (`canon`, the stored integer is
+    the value) or Montgomery with radix `2 ^ k` (`mont k`, the stored integer is
+    the value times `2 ^ k` modulo `p`). -/
+inductive FieldImplRepr where
+  /-- The stored integer is the value. -/
+  | canon
+  /-- The stored integer is the value times `2 ^ k` modulo the modulus. -/
+  | mont (k : Nat)
+  deriving DecidableEq, Repr, Inhabited
+
 /-- Parse-time context threaded through the typed parse. `impls` maps an
     Impl-block DefId-interning-id to the short name of the self-type the impl is
     for (method-call disambiguation). `collisions` is the set of function short
@@ -406,9 +417,14 @@ structure ImplSelfTypeMap where
       `(impl interning id, T, modulus, number of limbs)`, the number of limbs
       `1` for `u64` (`buildFieldImplMap`). A call of a method of
       `fieldTaggedMethods` resolved to one of them takes the head
-      `fieldTagHead` of its modulus, and a read of its `ZERO` or `ONE` is the
-      literal of `0` or `1` (`fieldConstLit?`). -/
+      `fieldTagHeadRepr` of its modulus and representation, and a read of its
+      `ZERO` or `ONE` is the literal of the representation of `0` or `1`
+      (`fieldConstLit?`). -/
   fieldImpls : List (Nat × String × Nat × Nat) := []
+  /-- The representation of each `impl` of `fieldImpls` whose representation is
+      not canonical, keyed by its interning id (`buildFieldReprMap`); an `impl`
+      without an entry is canonical (`fieldReprOf`). -/
+  fieldReprs : List (Nat × FieldImplRepr) := []
   deriving Inhabited
 
 /-- Map from newtype struct name (e.g. `"VectorCommitment"`) to its
@@ -919,17 +935,176 @@ def fieldTaggedMethods : List (String × Nat) :=
 def fieldTagHead (method : String) (p : Nat) : String :=
   method ++ "#p" ++ toString p
 
-/-- The modulus-tagged head (`fieldTagHead`) of a call with `nArgs` arguments
-    of a method of `fieldTaggedMethods` that resolves to an `impl` of
-    `m.fieldImpls`, when `nArgs` is the method's arity. `none` for any other
-    call. -/
+/-- The head `<method>#p<modulus>#r<k>` of a field operation in the prime field
+    of modulus `p` whose elements are stored in the Montgomery representation
+    with radix `2 ^ k`, both numbers in decimal: the canonical head
+    (`fieldTagHead`) followed by `#r` and `k`. -/
+def fieldTagHeadMont (method : String) (p k : Nat) : String :=
+  fieldTagHead method p ++ "#r" ++ toString k
+
+/-- The head of a field operation at the modulus `p` in the representation `r`:
+    `fieldTagHead` for `canon`, `fieldTagHeadMont` for `mont k`. -/
+def fieldTagHeadRepr (method : String) (p : Nat) : FieldImplRepr → String
+  | .canon => fieldTagHead method p
+  | .mont k => fieldTagHeadMont method p k
+
+/-- In the canonical representation the head is `fieldTagHead`. -/
+theorem fieldTagHeadRepr_canon (method : String) (p : Nat) :
+    fieldTagHeadRepr method p .canon = fieldTagHead method p := by
+  simp only [fieldTagHeadRepr]
+
+/-- The characters before the first `#`, and the characters after it when
+    there is one. -/
+def splitAtHash : List Char → List Char × Option (List Char)
+  | [] => ([], none)
+  | '#' :: cs => ([], some cs)
+  | c :: cs => (c :: (splitAtHash cs).1, (splitAtHash cs).2)
+
+/-- A nonempty list of decimal digits. -/
+def decDigitsOk (cs : List Char) : Bool := !cs.isEmpty && cs.all Char.isDigit
+
+/-- The method, the modulus and the representation of the characters of a field
+    head: the characters before the first `#`, then `p` and a nonempty list of
+    decimal digits, then either nothing (`canon`) or `#r` and a nonempty list of
+    decimal digits (`mont k`). `none` for characters of any other form. -/
+def fieldTagReprChars? (cs : List Char) : Option (String × Nat × FieldImplRepr) :=
+  match splitAtHash cs with
+  | (pre, some ('p' :: r1)) =>
+    match splitAtHash r1 with
+    | (pd, none) =>
+      if decDigitsOk pd then some (String.ofList pre, Nat.ofDigitChars 10 pd 0, .canon)
+      else none
+    | (pd, some ('r' :: kd)) =>
+      if decDigitsOk pd && decDigitsOk kd then
+        some (String.ofList pre, Nat.ofDigitChars 10 pd 0, .mont (Nat.ofDigitChars 10 kd 0))
+      else none
+    | _ => none
+  | _ => none
+
+/-- The method, the modulus and the representation of a field head
+    (`fieldTagReprChars?`). -/
+def fieldTagRepr? (f : String) : Option (String × Nat × FieldImplRepr) :=
+  fieldTagReprChars? f.toList
+
+theorem splitAtHash_append {xs : List Char} (h : '#' ∉ xs) (ys : List Char) :
+    splitAtHash (xs ++ '#' :: ys) = (xs, some ys) := by
+  induction xs with
+  | nil => rfl
+  | cons c cs ih =>
+    have hc : c ≠ '#' := fun e => h (e ▸ List.mem_cons_self)
+    have h' : '#' ∉ cs := fun m => h (List.mem_cons_of_mem _ m)
+    rw [List.cons_append, splitAtHash.eq_3 c _ (by simpa using hc), ih h']
+
+theorem splitAtHash_of_not_mem {xs : List Char} (h : '#' ∉ xs) :
+    splitAtHash xs = (xs, none) := by
+  induction xs with
+  | nil => rfl
+  | cons c cs ih =>
+    have hc : c ≠ '#' := fun e => h (e ▸ List.mem_cons_self)
+    have h' : '#' ∉ cs := fun m => h (List.mem_cons_of_mem _ m)
+    rw [splitAtHash.eq_3 c _ (by simpa using hc), ih h']
+
+theorem not_hash_mem_toDigits (n : Nat) : '#' ∉ Nat.toDigits 10 n := fun h => by
+  have := Nat.isDigit_of_mem_toDigits (by decide) (by decide) h
+  revert this
+  decide
+
+theorem decDigitsOk_toDigits (n : Nat) : decDigitsOk (Nat.toDigits 10 n) = true := by
+  have hl := @Nat.length_toDigits_pos 10 n
+  simp only [decDigitsOk, Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
+    List.all_eq_true]
+  exact ⟨List.ne_nil_of_length_pos hl,
+    fun c hc => Nat.isDigit_of_mem_toDigits (by decide) (by decide) hc⟩
+
+/-- **The field heads round-trip**: `fieldTagRepr?` reads the method, the
+    modulus and the representation back off the head `fieldTagHeadRepr` writes,
+    for a method name without `#`. -/
+theorem fieldTagRepr?_fieldTagHeadRepr {method : String} (hm : '#' ∉ method.toList)
+    (p : Nat) (r : FieldImplRepr) :
+    fieldTagRepr? (fieldTagHeadRepr method p r) = some (method, p, r) := by
+  have hs : ∀ n : Nat, (toString n).toList = Nat.toDigits 10 n := fun _ => Nat.toList_repr
+  cases r with
+  | canon =>
+    simp only [fieldTagRepr?, fieldTagHeadRepr, fieldTagHead, String.toList_append, hs]
+    rw [List.append_assoc, show "#p".toList ++ Nat.toDigits 10 p
+        = '#' :: ('p' :: Nat.toDigits 10 p) from rfl, fieldTagReprChars?,
+      splitAtHash_append hm]
+    simp only
+    rw [splitAtHash_of_not_mem (not_hash_mem_toDigits p)]
+    simp only [decDigitsOk_toDigits, if_true, String.ofList_toList, Nat.ofDigitChars_ten_toDigits]
+  | mont k =>
+    simp only [fieldTagRepr?, fieldTagHeadRepr, fieldTagHeadMont, fieldTagHead,
+      String.toList_append, hs]
+    rw [List.append_assoc, List.append_assoc, List.append_assoc,
+      show "#p".toList ++ (Nat.toDigits 10 p ++ ("#r".toList ++ Nat.toDigits 10 k))
+        = '#' :: ('p' :: (Nat.toDigits 10 p ++ '#' :: 'r' :: Nat.toDigits 10 k)) from rfl,
+      fieldTagReprChars?, splitAtHash_append hm]
+    simp only
+    rw [splitAtHash_append (not_hash_mem_toDigits p)]
+    simp only [decDigitsOk_toDigits, Bool.and_self, if_true, String.ofList_toList,
+      Nat.ofDigitChars_ten_toDigits]
+
+/-- No method of `fieldTaggedMethods` has `#` in its name. -/
+theorem not_hash_of_lookup_fieldTaggedMethods {method : String} {arity : Nat}
+    (h : fieldTaggedMethods.lookup method = some arity) : '#' ∉ method.toList := by
+  have hmem : method ∈ fieldTaggedMethods.map (·.1) := by
+    simp only [fieldTaggedMethods, List.lookup] at h
+    simp only [fieldTaggedMethods, List.map_cons, List.map_nil, List.mem_cons,
+      List.not_mem_nil, or_false]
+    repeat' split at h
+    all_goals simp_all
+  simp only [fieldTaggedMethods, List.map_cons, List.map_nil, List.mem_cons,
+    List.not_mem_nil, or_false] at hmem
+  rcases hmem with rfl | rfl | rfl | rfl | rfl | rfl <;> decide
+
+/-- The representation of the `impl` with the interning id `implId`: its entry
+    in `m.fieldReprs`, and `canon` when it has none. -/
+def fieldReprOf (m : ImplSelfTypeMap) (implId : Nat) : FieldImplRepr :=
+  (m.fieldReprs.lookup implId).getD .canon
+
+/-- An `impl` of a map without representation entries is canonical. -/
+theorem fieldReprOf_of_fieldReprs_nil {m : ImplSelfTypeMap} (h : m.fieldReprs = [])
+    (implId : Nat) : fieldReprOf m implId = .canon := by
+  simp [fieldReprOf, h]
+
+/-- The modulus-tagged head (`fieldTagHeadRepr`, at the modulus and the
+    representation of the `impl`) of a call with `nArgs` arguments of a method
+    of `fieldTaggedMethods` that resolves to an `impl` of `m.fieldImpls`, when
+    `nArgs` is the method's arity. `none` for any other call. -/
 def fieldTaggedHead? (funJ : Json) (nArgs : Nat) (m : ImplSelfTypeMap) : Option String := do
   guard (!m.fieldImpls.isEmpty)
   let (implId, method) ← traitCallImplMethod funJ
   let arity ← fieldTaggedMethods.lookup method
   guard (arity == nArgs)
   let entry ← m.fieldImpls.find? (·.1 == implId)
-  pure (fieldTagHead method entry.2.2.1)
+  pure (fieldTagHeadRepr method entry.2.2.1 (fieldReprOf m implId))
+
+/-- **The heads `fieldTaggedHead?` writes round-trip**: `fieldTagRepr?` reads
+    from each the method, the modulus of its `impl` and the representation of
+    that `impl`. -/
+theorem fieldTagRepr?_of_fieldTaggedHead? {funJ : Json} {nArgs : Nat}
+    {m : ImplSelfTypeMap} {h : String} (hh : fieldTaggedHead? funJ nArgs m = some h) :
+    ∃ implId method entry, traitCallImplMethod funJ = some (implId, method) ∧
+      m.fieldImpls.find? (·.1 == implId) = some entry ∧
+      fieldTagRepr? h = some (method, entry.2.2.1, fieldReprOf m implId) := by
+  unfold fieldTaggedHead? at hh
+  cases hc : traitCallImplMethod funJ with
+  | none => simp [hc] at hh
+  | some x =>
+    obtain ⟨implId, method⟩ := x
+    cases ha : fieldTaggedMethods.lookup method with
+    | none => simp [hc, ha] at hh
+    | some arity =>
+      cases he : m.fieldImpls.find? (·.1 == implId) with
+      | none => simp [hc, ha, he] at hh
+      | some entry =>
+        simp only [hc, ha, he, Option.bind_eq_bind, Option.bind_some] at hh
+        refine ⟨implId, method, entry, rfl, he, ?_⟩
+        have hh' : fieldTagHeadRepr method entry.2.2.1 (fieldReprOf m implId) = h := by
+          revert hh
+          cases (!m.fieldImpls.isEmpty) <;> cases (arity == nArgs) <;> simp [guard, failure]
+        rw [← hh']
+        exact fieldTagRepr?_fieldTagHeadRepr (not_hash_of_lookup_fieldTaggedMethods ha) _ _
 
 /-- The literal of a field element `v < 2^64` in `n` limbs: the integer
     literal `v` for one limb, and the array literal of the `n` little-endian
@@ -939,19 +1114,156 @@ def fieldLimbsLit (v : Int) (n : Nat) : TExprKind :=
   else .app "array_lit"
     ((List.range n).map fun i => .mk (.lit (.int (if i = 0 then v else 0))) (.uint .w64))
 
+/-- The `n` little-endian base-`2^64` limbs of `v`. -/
+def natLimbs : Nat → Nat → List Nat
+  | 0, _ => []
+  | n + 1, v => v % 2 ^ 64 :: natLimbs n (v / 2 ^ 64)
+
+/-- The number little-endian base-`2^64` limbs denote. -/
+def limbsValue (ls : List Nat) : Nat := ls.foldr (fun l acc => l + 2 ^ 64 * acc) 0
+
+/-- The limbs of `v` denote `v` modulo `2^(64 n)`. -/
+theorem limbsValue_natLimbs (n v : Nat) : limbsValue (natLimbs n v) = v % 2 ^ (64 * n) := by
+  induction n generalizing v with
+  | zero => simp [natLimbs, limbsValue, Nat.mod_one]
+  | succ n ih =>
+    have := ih (v / 2 ^ 64)
+    simp only [limbsValue, natLimbs, List.foldr_cons] at this ⊢
+    rw [this, Nat.mul_succ, Nat.add_comm (64 * n) 64, Nat.pow_add, Nat.mod_mul]
+
+/-- Every limb is below `2^64`. -/
+theorem natLimbs_lt (n v : Nat) : ∀ l ∈ natLimbs n v, l < 2 ^ 64 := by
+  induction n generalizing v with
+  | zero => simp [natLimbs]
+  | succ n ih =>
+    intro l hl
+    simp only [natLimbs, List.mem_cons] at hl
+    rcases hl with rfl | hl
+    · exact Nat.mod_lt _ (by decide)
+    · exact ih _ l hl
+
+/-- The limbs of a number below `2^64`: the number, then `0`s. -/
+theorem natLimbs_of_lt {v : Nat} (hv : v < 2 ^ 64) (n : Nat) :
+    natLimbs (n + 1) v = (List.range (n + 1)).map (fun i => if i = 0 then v else 0) := by
+  have hz : ∀ k, natLimbs k 0 = List.replicate k 0 := by
+    intro k
+    induction k with
+    | zero => rfl
+    | succ k ih => simp [natLimbs, ih, List.replicate_succ]
+  rw [natLimbs, Nat.mod_eq_of_lt hv, Nat.div_eq_of_lt hv, hz, List.range_succ_eq_map]
+  simp only [List.map_cons, if_true, List.map_map]
+  congr 1
+  apply List.ext_getElem <;> simp
+
+/-- The literal of a stored integer `v` in `n` limbs: the integer literal `v`
+    for one limb, and the array literal of the `n` little-endian `u64` limbs of
+    `v` (`natLimbs`) otherwise. -/
+def fieldLimbsLitNat (v n : Nat) : TExprKind :=
+  if n ≤ 1 then .lit (.int v)
+  else .app "array_lit" ((natLimbs n v).map fun (l : Nat) => .mk (.lit (.int (l : Int))) (.uint .w64))
+
+/-- Below `2^64` the two literals agree. -/
+theorem fieldLimbsLit_eq_fieldLimbsLitNat {v : Nat} (hv : v < 2 ^ 64) (n : Nat) :
+    fieldLimbsLit v n = fieldLimbsLitNat v n := by
+  unfold fieldLimbsLit fieldLimbsLitNat
+  split
+  · rfl
+  · obtain ⟨n', rfl⟩ : ∃ n', n = n' + 1 := ⟨n - 1, by omega⟩
+    rw [natLimbs_of_lt hv, List.map_map]
+    congr 1
+    apply List.map_congr_left
+    intro i _
+    simp only [Function.comp_apply]
+    split <;> rfl
+
+/-- The integer the representation `r` stores for the value `v` at the modulus
+    `p`: `v` for `canon`, `v * 2 ^ k mod p` for `mont k`. -/
+def fieldReprVal (r : FieldImplRepr) (p v : Nat) : Nat :=
+  match r with
+  | .canon => v
+  | .mont k => v * 2 ^ k % p
+
+/-- The literal of the value `v` in the representation `r`, at the modulus `p`
+    and in `n` limbs: `fieldLimbsLit v n` for `canon`, and the literal of the
+    stored integer (`fieldReprVal`, `fieldLimbsLitNat`) for `mont k`. -/
+def fieldConstLitRepr (r : FieldImplRepr) (p n v : Nat) : TExprKind :=
+  match r with
+  | .canon => fieldLimbsLit v n
+  | .mont k => fieldLimbsLitNat (fieldReprVal (.mont k) p v) n
+
+/-- In the canonical representation the literal of `v` is `fieldLimbsLit v n`. -/
+theorem fieldConstLitRepr_canon (p n v : Nat) :
+    fieldConstLitRepr .canon p n v = fieldLimbsLit v n := by
+  simp only [fieldConstLitRepr]
+
+/-- **The literal is the literal of the stored integer**: for a value below
+    `2^64`, in every representation, `fieldConstLitRepr` is the literal of the
+    limbs of the integer the representation stores. -/
+theorem fieldConstLitRepr_eq (r : FieldImplRepr) (p n : Nat) {v : Nat} (hv : v < 2 ^ 64) :
+    fieldConstLitRepr r p n v = fieldLimbsLitNat (fieldReprVal r p v) n := by
+  cases r with
+  | canon => exact fieldLimbsLit_eq_fieldLimbsLitNat hv n
+  | mont k => rfl
+
 /-- The literal of a read of the associated constant `ZERO` (`0`) or `ONE`
-    (`1`) of an `impl` of `m.fieldImpls`, in the limbs of the `impl`
-    (`fieldLimbsLit`), from the `NamedConst` or `GlobalName` node of the read.
-    `none` for any other read. -/
+    (`1`) of an `impl` of `m.fieldImpls`, in the representation and the limbs
+    of the `impl` (`fieldConstLitRepr`), from the `NamedConst` or `GlobalName`
+    node of the read. `none` for any other read. -/
 def fieldConstLit? (globalName : Json) (m : ImplSelfTypeMap) : Option TExprKind := do
   guard (!m.fieldImpls.isEmpty)
   let (implId, item) ← traitCallImplMethod
     (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])])
   let entry ← m.fieldImpls.find? (·.1 == implId)
   match item with
-  | "ZERO" => some (fieldLimbsLit 0 entry.2.2.2)
-  | "ONE" => some (fieldLimbsLit 1 entry.2.2.2)
+  | "ZERO" => some (fieldConstLitRepr (fieldReprOf m implId) entry.2.2.1 entry.2.2.2 0)
+  | "ONE" => some (fieldConstLitRepr (fieldReprOf m implId) entry.2.2.1 entry.2.2.2 1)
   | _ => none
+
+/-- **The constants `fieldConstLit?` reads**: a read yields a literal exactly
+    when it resolves to an `impl` of `m.fieldImpls` and names `ZERO` or `ONE`,
+    and the literal is then the literal of the limbs of the integer the
+    representation of the `impl` stores for `0` or `1`. -/
+theorem fieldConstLit?_eq_some_iff {globalName : Json} {m : ImplSelfTypeMap}
+    {k : TExprKind} :
+    fieldConstLit? globalName m = some k ↔
+      ∃ implId item entry, traitCallImplMethod
+          (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])]) =
+          some (implId, item) ∧
+        m.fieldImpls.find? (·.1 == implId) = some entry ∧
+        ((item = "ZERO" ∧
+            k = fieldLimbsLitNat (fieldReprVal (fieldReprOf m implId) entry.2.2.1 0)
+              entry.2.2.2) ∨
+          (item = "ONE" ∧
+            k = fieldLimbsLitNat (fieldReprVal (fieldReprOf m implId) entry.2.2.1 1)
+              entry.2.2.2)) := by
+  unfold fieldConstLit?
+  cases hc : traitCallImplMethod
+      (Json.mkObj [("contents", Json.mkObj [("GlobalName", globalName)])]) with
+  | none => simp
+  | some x =>
+    obtain ⟨implId, item⟩ := x
+    cases he : m.fieldImpls.find? (·.1 == implId) with
+    | none => simp [he]
+    | some entry =>
+      have hne : (!m.fieldImpls.isEmpty) = true := by
+        cases hf : m.fieldImpls with
+        | nil => simp [hf] at he
+        | cons _ _ => rfl
+      simp only [he, hne, guard, if_true, Option.bind_eq_bind, Option.bind_some,
+        Option.some.injEq, Prod.mk.injEq, exists_and_left, pure]
+      rw [fieldConstLitRepr_eq _ _ _ (by decide : (0 : Nat) < 2 ^ 64),
+        fieldConstLitRepr_eq _ _ _ (by decide : (1 : Nat) < 2 ^ 64)]
+      constructor
+      · intro hk
+        refine ⟨implId, item, ⟨rfl, rfl⟩, entry, he, ?_⟩
+        split at hk
+        · exact Or.inl ⟨rfl, (Option.some.inj hk).symm⟩
+        · exact Or.inr ⟨rfl, (Option.some.inj hk).symm⟩
+        · cases hk
+      · rintro ⟨_, _, ⟨rfl, rfl⟩, x, hx, h⟩
+        rw [he] at hx
+        cases hx
+        rcases h with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> rfl
 
 /-- The qualifier `krate::Trait` of a call whose callee is a method declared by
     the trait `Trait` of a crate `krate` in `krates`: the callee's `DefId` has
@@ -5508,10 +5820,13 @@ partial def buildNewtypeMap (j : Json) : NewtypeMap :=
 A call of a method of `primeir_hax::Field` that resolves to an `impl` of the
 crate whose self type is a newtype over `u64` (a modulus below `2^64`) or over
 `[u64; n]` (a modulus `p ≥ 2^64`, `n` the least number of words with
-`p ≤ 2^(64 n)`) takes the head `<method>#p<modulus>` (`fieldTagHead`); the
-newtype is erased to its inner type in the whole export
-(`tEraseFieldNewtypes`), so the operands and the result of such a call are
-`u64` values, or arrays of `n` little-endian `u64` limbs. -/
+`p ≤ 2^(64 n)`) takes the head `<method>#p<modulus>` (`fieldTagHead`) when the
+`impl` stores elements canonically, and `<method>#p<modulus>#r<k>`
+(`fieldTagHeadMont`) when its `MONT_BITS` constant is `k > 0`, the Montgomery
+representation with radix `2 ^ k` (`fieldImplRepr?`); the newtype is erased to
+its inner type in the whole export (`tEraseFieldNewtypes`), so the operands and
+the result of such a call are `u64` values, or arrays of `n` little-endian `u64`
+limbs, holding the stored integers. -/
 
 /-- The top-level constants of a hax export (the four-element `Const` form
     `[ident, generics, ty, body]`), as `(name, body)`. -/
@@ -5576,18 +5891,20 @@ def fieldReprLimbs? (inner : ImpType) (p : Nat) : Option Nat :=
 def fieldReprTy (n : Nat) : ImpType :=
   if n ≤ 1 then .uint .w64 else .array (.uint .w64) n
 
-/-- The local `impl primeir_hax::Field for T` blocks of a hax export whose self
-    type `T` is a newtype in `newtypes` over `u64` or over `[u64; n]`, as
-    `(impl interning id, T, modulus, number of limbs)`. The modulus is the value
-    of the `impl`'s `MODULUS_LE` constant read as little-endian base-`2^64`
-    limbs (`constLimbs`); an `impl` whose `MODULUS_LE` does not evaluate to
+/-- The last `::` segment of a name. -/
+def lastPathSegment (n : String) : String := ((n.splitOn "::").getLast?).getD n
+
+/-- The entry `(impl interning id, T, modulus, number of limbs)` of an item of a
+    hax export that is a local `impl primeir_hax::Field for T` whose self type
+    `T` is a newtype in `newtypes` over `u64` or over `[u64; n]`, with the
+    top-level constants `consts` of the export. The modulus is the value of the
+    `impl`'s `MODULUS_LE` constant read as little-endian base-`2^64` limbs
+    (`constLimbs`); `none` for an `impl` whose `MODULUS_LE` does not evaluate to
     limbs below `2^64` denoting a number at least `2`, or whose inner type is
-    not the representation of that modulus (`fieldReprLimbs?`), is not
-    listed. -/
-def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) :
-    List (Nat × String × Nat × Nat) :=
-  let consts := exportConstBodies j
-  (exportItems j).filterMap fun it => do
+    not the representation of that modulus (`fieldReprLimbs?`), and for any
+    other item. -/
+def fieldImplEntry? (consts : List (String × Json)) (newtypes : NewtypeMap) (it : Json) :
+    Option (Nat × String × Nat × Nat) := do
     let kind ← (it.getObjVal? "kind").toOption
     let impl ← (kind.getObjVal? "Impl").toOption
     guard (isPrimeirFieldImpl impl)
@@ -5615,8 +5932,136 @@ def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) :
     let n ← fieldReprLimbs? inner p
     pure (implId, sn, p, n)
 
-/-- The last `::` segment of a name. -/
-def lastPathSegment (n : String) : String := ((n.splitOn "::").getLast?).getD n
+/-- The items of a trait `impl` item of a hax export, and `#[]` for any other
+    item. -/
+def fieldImplItems (it : Json) : Array Json :=
+  ((do
+    let kind ← (it.getObjVal? "kind").toOption
+    let impl ← (kind.getObjVal? "Impl").toOption
+    (impl.getObjValAs? (Array Json) "items").toOption : Option (Array Json))).getD #[]
+
+/-- The item named `name` of the items of an `impl`. -/
+def implItemNamed? (implItems : Array Json) (name : String) : Option Json :=
+  implItems.find? fun ii => (ii.getObjVal? "ident").toOption.map extractFnName == some name
+
+/-- The `u64` limbs of the body of an associated constant item of an `impl`
+    whose self type is the newtype `sn`, with the top-level constants `consts`:
+    a construction `sn(x)` is read as `x` (`constLimbs`). -/
+def implConstLimbs? (consts : List (String × Json)) (sn : String) (item : Json) :
+    Option (List Nat) := do
+  let k ← (item.getObjVal? "kind").toOption
+  let bodyJ ← match k.getObjVal? "Const" with
+    | .ok (.arr #[_, b]) => some (thirBodyExpr b)
+    | _ => none
+  let te ← (parseHaxTExpr bodyJ {}).toOption
+  let te := match te.kind with
+    | .app f [x] => if lastPathSegment f == sn then x else te
+    | _ => te
+  constLimbs consts 8 te
+
+/-- The representation of a field `impl` with the items `implItems` and the self
+    type `sn`, from its `MONT_BITS` constant: `canon` when the `impl` does not
+    define it (the trait default `0`) or defines it as `0`, `mont k` when it
+    defines it as `k > 0`. `none` when the constant does not evaluate to one
+    number. -/
+def fieldImplRepr? (consts : List (String × Json)) (sn : String) (implItems : Array Json) :
+    Option FieldImplRepr :=
+  match implItemNamed? implItems "MONT_BITS" with
+  | none => some .canon
+  | some it =>
+    match implConstLimbs? consts sn it with
+    | some [0] => some .canon
+    | some [k] => some (.mont k)
+    | _ => none
+
+/-- Whether the limbs `one` of the constant `ONE` of a field `impl` of modulus
+    `p` are the representation `r` of `1`: always for `canon`; for `mont k`,
+    the limbs are given, are below `2^64` and denote `2 ^ k mod p`
+    (`fieldReprVal`). -/
+def fieldOneOk (r : FieldImplRepr) (p : Nat) (one : Option (List Nat)) : Bool :=
+  match r with
+  | .canon => true
+  | .mont k =>
+    match one with
+    | some ls => ls.all (· < 2 ^ 64) && limbsValue ls == fieldReprVal (.mont k) p 1
+    | none => false
+
+/-- **The Montgomery check**: in the representation `mont k`, `fieldOneOk`
+    holds exactly when the limbs of `ONE` are below `2^64` and denote the
+    integer the representation stores for `1`. -/
+theorem fieldOneOk_mont_iff (k p : Nat) (ls : List Nat) :
+    fieldOneOk (.mont k) p (some ls) = true ↔
+      (∀ l ∈ ls, l < 2 ^ 64) ∧ limbsValue ls = fieldReprVal (.mont k) p 1 := by
+  simp [fieldOneOk]
+
+/-- The entry of an item of a hax export that is a field `impl`
+    (`fieldImplEntry?`) together with its representation (`fieldImplRepr?`).
+    `none` for an `impl` whose `MONT_BITS` does not evaluate to one number, and
+    for a Montgomery `impl` whose `ONE` is not the representation of `1`
+    (`fieldOneOk`). -/
+def fieldImplReprEntry? (consts : List (String × Json)) (newtypes : NewtypeMap) (it : Json) :
+    Option ((Nat × String × Nat × Nat) × FieldImplRepr) := do
+  let e ← fieldImplEntry? consts newtypes it
+  let items := fieldImplItems it
+  let r ← fieldImplRepr? consts e.2.1 items
+  guard (fieldOneOk r e.2.2.1 ((implItemNamed? items "ONE").bind (implConstLimbs? consts e.2.1)))
+  pure (e, r)
+
+/-- **An `impl` without `MONT_BITS` is read as before**: its entry is the
+    entry `fieldImplEntry?` gives, in the canonical representation. -/
+theorem fieldImplReprEntry?_of_canon {consts : List (String × Json)} {newtypes : NewtypeMap}
+    {it : Json} (h : implItemNamed? (fieldImplItems it) "MONT_BITS" = none) :
+    fieldImplReprEntry? consts newtypes it =
+      (fieldImplEntry? consts newtypes it).map (·, .canon) := by
+  unfold fieldImplReprEntry?
+  cases fieldImplEntry? consts newtypes it with
+  | none => rfl
+  | some e => simp [fieldImplRepr?, h, fieldOneOk, guard]
+
+/-- The local `impl primeir_hax::Field for T` blocks of a hax export whose self
+    type `T` is a newtype in `newtypes` over `u64` or over `[u64; n]`, as
+    `(impl interning id, T, modulus, number of limbs)` (`fieldImplReprEntry?`). -/
+def buildFieldImplMap (j : Json) (newtypes : NewtypeMap) :
+    List (Nat × String × Nat × Nat) :=
+  let consts := exportConstBodies j
+  (exportItems j).filterMap fun it => (fieldImplReprEntry? consts newtypes it).map (·.1)
+
+/-- The representations of the `impl`s of `buildFieldImplMap` that are not
+    canonical, keyed by their interning ids. -/
+def buildFieldReprMap (j : Json) (newtypes : NewtypeMap) : List (Nat × FieldImplRepr) :=
+  let consts := exportConstBodies j
+  (exportItems j).filterMap fun it => do
+    let (e, r) ← fieldImplReprEntry? consts newtypes it
+    match r with
+    | .canon => none
+    | .mont k => some (e.1, .mont k)
+
+/-- **The canonical path is unchanged**: on an export none of whose items
+    defines `MONT_BITS`, `buildFieldImplMap` lists the entries `fieldImplEntry?`
+    gives and `buildFieldReprMap` is empty. -/
+theorem buildFieldImplMap_of_canon {j : Json} {newtypes : NewtypeMap}
+    (h : ∀ it ∈ exportItems j, implItemNamed? (fieldImplItems it) "MONT_BITS" = none) :
+    buildFieldImplMap j newtypes =
+        (exportItems j).filterMap (fieldImplEntry? (exportConstBodies j) newtypes) ∧
+      buildFieldReprMap j newtypes = [] := by
+  have hx : ∀ it ∈ exportItems j, fieldImplReprEntry? (exportConstBodies j) newtypes it =
+      (fieldImplEntry? (exportConstBodies j) newtypes it).map (·, .canon) :=
+    fun it hit => fieldImplReprEntry?_of_canon (h it hit)
+  constructor
+  · unfold buildFieldImplMap
+    clear h
+    generalize exportItems j = l at hx ⊢
+    induction l with
+    | nil => rfl
+    | cons a l ih =>
+      simp only [List.filterMap_cons]
+      rw [hx a List.mem_cons_self, ih fun it hit => hx it (List.mem_cons_of_mem _ hit)]
+      cases fieldImplEntry? (exportConstBodies j) newtypes a <;> rfl
+  · unfold buildFieldReprMap
+    rw [List.filterMap_eq_nil_iff]
+    intro it hit
+    rw [hx it hit]
+    cases fieldImplEntry? (exportConstBodies j) newtypes it <;> rfl
 
 /-- `ty` with every type of `names` (field newtypes, each with its inner type)
     replaced by its inner type. -/
@@ -5709,7 +6154,8 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
       traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else []
       traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else []
       localBoundConstCalls := traitImplConsts, nominalKrates := nominalKrates
-      fieldImpls := buildFieldImplMap j (buildNewtypeMap j) }
+      fieldImpls := buildFieldImplMap j (buildNewtypeMap j)
+      fieldReprs := buildFieldReprMap j (buildNewtypeMap j) }
   let fieldNewtypes := (implMap.fieldImpls.map fun e => (e.2.1, fieldReprTy e.2.2.2)).eraseDups
   let rec parseItemsTExpr (items : List Json) :
       Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
