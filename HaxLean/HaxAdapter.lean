@@ -127,6 +127,33 @@ structure LocalCrate where
     the builtin table reads. -/
 def builtinKrates : List String := ["core", "std", "alloc", "<synthetic>"]
 
+/-- The untagged call heads that the file printer renders as runtime functions
+    rather than `Deps` fields (`builtinTable`, `runtimeName`) or that the
+    semantics' builtin tables interpret (`defaultBuiltins`, `fullBuiltins`,
+    `hax64Builtins`). -/
+def builtinHeads : List String :=
+  [ "index", "array_update", "slice_update", "repeat", "array_lit", "push", "len",
+    "from_elem", "index_mut", "is_empty", "to_vec", "slice_reverse", "vec_remove",
+    "copy_from_slice", "extend_from_slice", "truncate", "with_capacity", "into_vec",
+    "into_iter", "iter", "map", "collect", "flat_map", "zip", "next", "new", "enumerate",
+    "RangeTo", "RangeFrom", "Range", "range_incl_end",
+    "count_ones", "assert_failed", "assert_failed'", "from", "into", "literal",
+    "str_opaque", "deref", "deref_mut", "clone", "cast", "castVal", "castVal_w",
+    "from_val", "panic", "sha256", "rotate_right", "rotate_left", "_assign",
+    "Some", "None", "Ok", "Err",
+    "add", "sub", "mul", "div", "rem", "neg", "wrapping_add", "wrapping_sub",
+    "wrapping_mul", "Add", "Sub", "Mul", "Div", "Rem", "Neg",
+    "wrapping_add_w", "wrapping_sub_w", "wrapping_mul_w",
+    "bitand", "bitor", "bitxor", "bitnot", "bitxor_w", "bitand_w", "bitor_w", "shl_w",
+    "shr_w", "BitAnd", "BitOr", "BitXor", "shl", "shr", "Shl", "Shr",
+    "eq", "Eq", "ne", "Ne", "lt", "le", "gt", "ge", "Lt", "Le", "Gt", "Ge",
+    "not", "Not", "and", "And", "or", "Or", "&&", "||", "min", "max",
+    "expect", "is_err", "is_none", "is_ok", "is_some", "unwrap", "unwrap_or", "select" ]
+
+/-- No builtin head contains `:`, so no head `q::h` is a builtin head. -/
+theorem colon_not_mem_builtinHeads : ∀ s ∈ builtinHeads, ':' ∉ s.toList := by
+  simp [builtinHeads]
+
 /-- Whether a `DefId` in krate `krate` with short name `n` names an item of a
     dependency crate whose short name the export also defines. -/
 def shadowsLocalFn (lc : LocalCrate) (krate n : String) : Bool :=
@@ -409,8 +436,9 @@ structure ImplSelfTypeMap where
   localBoundConstCalls : Bool := false
   /-- The crates whose trait methods are nominal: a call of a method declared
       by a trait of one of these crates, not resolved to a trait `impl` of the
-      extracted crate, takes the head `krate::Trait::h`, where `h` is the head
-      the call takes when the list is empty (`nominalTraitQualifier?`). -/
+      extracted crate, takes the head `krate::Trait::h`. A call of a method of
+      another crate whose head is a builtin head may also take it
+      (`ImplSelfTypeMap.qualifiesTraitCall`). -/
   nominalKrates : List String := []
   /-- The local `impl primeir_hax::Field for T` blocks whose self type `T` is
       a newtype over `u64` or over `[u64; n]`, as
@@ -1265,21 +1293,35 @@ theorem fieldConstLit?_eq_some_iff {globalName : Json} {m : ImplSelfTypeMap}
         cases hx
         rcases h with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> rfl
 
-/-- The qualifier `krate::Trait` of a call whose callee is a method declared by
-    the trait `Trait` of a crate `krate` in `krates`: the callee's `DefId` has
-    kind `AssocFn`, its parent has kind `Trait`, and `Trait` is the
-    second-to-last segment of its path. `none` for any other call. -/
-def nominalTraitQualifier? (funJ : Json) (krates : List String) : Option String := do
-  guard (!krates.isEmpty)
+/-- The value of the callee's `DefId` of a call whose callee node `funJ` is a
+    `GlobalName`; `none` for any other callee. -/
+def calleeDefIdValue? (funJ : Json) : Option Json := do
   let contents ← (funJ.getObjVal? "contents").toOption
   let gn ← (contents.getObjVal? "GlobalName").toOption
   let item ← (gn.getObjVal? "item").toOption
   let v ← (item.getObjVal? "value").toOption
   let defId ← (v.getObjVal? "def_id").toOption
   let dc ← (defId.getObjVal? "contents").toOption
-  let dv ← (dc.getObjVal? "value").toOption
+  (dc.getObjVal? "value").toOption
+
+/-- Whether a call of a method of a trait of the crate `krate`, whose head is `h`
+    without qualification, takes the qualified head: for a crate of
+    `nominalKrates`; and, outside the trait-to-class emission
+    (`localBoundConstCalls`), for a crate other than `primeir_hax` and outside
+    `builtinKrates` when `h` is a builtin head (`builtinHeads`), which the
+    printer and the semantics would read as the runtime function. -/
+def ImplSelfTypeMap.qualifiesTraitCall (m : ImplSelfTypeMap) (krate h : String) : Bool :=
+  m.nominalKrates.contains krate ||
+    (!m.localBoundConstCalls && krate != "primeir_hax" && !builtinKrates.contains krate &&
+      builtinHeads.contains h)
+
+/-- The crate `krate` and the qualifier `krate::Trait` of a call whose callee is a
+    method declared by the trait `Trait` of the crate `krate`: the callee's
+    `DefId` has kind `AssocFn`, its parent has kind `Trait`, and `Trait` is the
+    second-to-last segment of its path. `none` for any other call. -/
+def traitMethodQualifier? (funJ : Json) : Option (String × String) := do
+  let dv ← calleeDefIdValue? funJ
   let krate ← (dv.getObjValAs? String "krate").toOption
-  guard (krates.contains krate)
   guard ((dv.getObjValAs? String "kind").toOption == some "AssocFn")
   let p ← (dv.getObjVal? "parent").toOption
   let pv ← (p.getObjVal? "contents" >>= (·.getObjVal? "value")).toOption
@@ -1288,11 +1330,63 @@ def nominalTraitQualifier? (funJ : Json) (krates : List String) : Option String 
   guard (segs.size ≥ 2)
   let seg ← segs[segs.size - 2]?
   let trait ← (seg.getObjVal? "data" >>= (·.getObjValAs? String "TypeNs")).toOption
-  pure s!"{krate}::{trait}"
+  pure (krate, s!"{krate}::{trait}")
+
+/-- The qualifier `krate::Trait` of a call of a method of the trait `Trait` of a
+    crate `krate` with `qual krate` (`traitMethodQualifier?`); `none` for any
+    other call. -/
+def nominalTraitQualifier? (funJ : Json) (qual : String → Bool) : Option String := do
+  let (krate, q) ← traitMethodQualifier? funJ
+  guard (qual krate)
+  pure q
 
 /-- The head `q::h` of a call with qualifier `q` (`nominalTraitQualifier?`)
     whose head is `h` when no crate is nominal. -/
 def qualifyNominalHead (q h : String) : String := s!"{q}::{h}"
+
+/-- A qualified head `q::h` is not a builtin head. -/
+theorem qualifyNominalHead_not_mem_builtinHeads (q h : String) :
+    qualifyNominalHead q h ∉ builtinHeads := by
+  intro hm
+  apply colon_not_mem_builtinHeads _ hm
+  simp only [qualifyNominalHead, String.toList_append, List.mem_append]
+  exact Or.inl (Or.inr (by simp [toString]))
+
+/-- The head of a call with callee node `funJ` whose unqualified head is `h`:
+    `krate::Trait::h` for a call of a method of a trait of `krate` with
+    `m.qualifiesTraitCall krate h` (`nominalTraitQualifier?`) that is not
+    resolved to a trait `impl` of the extracted crate (`resolved`), and `h`
+    otherwise. -/
+def traitCallHead (m : ImplSelfTypeMap) (funJ : Json) (resolved : Bool) (h : String) :
+    String :=
+  match nominalTraitQualifier? funJ (m.qualifiesTraitCall · h) with
+  | some q => if resolved then h else qualifyNominalHead q h
+  | none => h
+
+/-- A call of a method of a trait of a crate of `builtinKrates` (`core::ops::Mul`,
+    `core::cmp::PartialEq`, …) outside `nominalKrates` keeps its unqualified head,
+    the key of the runtime builtin table. -/
+theorem traitCallHead_builtinKrate (m : ImplSelfTypeMap) (funJ : Json) (resolved : Bool)
+    (h k q : String) (hq : traitMethodQualifier? funJ = some (k, q))
+    (hb : k ∈ builtinKrates) (hn : k ∉ m.nominalKrates) :
+    traitCallHead m funJ resolved h = h := by
+  simp [traitCallHead, nominalTraitQualifier?, hq, ImplSelfTypeMap.qualifiesTraitCall, hn, hb,
+    guard, failure]
+
+/-- Outside the trait-to-class emission, the head of a call of a method of a
+    trait of a crate other than `primeir_hax` and outside `builtinKrates`, not
+    resolved to a trait `impl` of the extracted crate, is not a builtin head:
+    either `h`, when `h` is not a builtin head, or the qualified head. -/
+theorem traitCallHead_not_mem_builtinHeads (m : ImplSelfTypeMap) (funJ : Json)
+    (h k q : String) (hq : traitMethodQualifier? funJ = some (k, q))
+    (hl : m.localBoundConstCalls = false) (hp : k ≠ "primeir_hax")
+    (hb : k ∉ builtinKrates) :
+    traitCallHead m funJ false h ∉ builtinHeads := by
+  unfold traitCallHead nominalTraitQualifier?
+  rw [hq]
+  by_cases hc : m.qualifiesTraitCall k h
+  · simp [hc, guard, qualifyNominalHead_not_mem_builtinHeads]
+  · simp_all [ImplSelfTypeMap.qualifiesTraitCall, guard, failure]
 
 /-- The head a call has when no crate is nominal, from its head under the
     nominal crates `krates`: `h` for `k::T::h` with `k` in `krates`, and the
@@ -1305,14 +1399,22 @@ def unqualifyNominalHead (krates : List String) (f : String) : String :=
     | k :: _ :: rest@(_ :: _) => if krates.contains k then "::".intercalate rest else f
     | _ => f
 
-/-- `unqualifyNominalHead` applied to every app head of a typed expression. -/
+/-- The head of the surface definitions and the `Deps` class for the head `f`
+    under the nominal crates `krates`: `unqualifyNominalHead krates f`, except
+    that a remaining head `k::T::h` with `h` a builtin head (the qualified head
+    of `ImplSelfTypeMap.qualifiesTraitCall`) is the `Deps` name `T_h`. -/
+def surfaceTraitHead (krates : List String) (f : String) : String :=
+  let f' := unqualifyNominalHead krates f
+  match f'.splitOn "::" with
+  | [k, t, h] => if k != "" && builtinHeads.contains h then s!"{t}_{h}" else f'
+  | _ => f'
+
+/-- `surfaceTraitHead` applied to every app head of a typed expression. -/
 partial def tUnqualifyNominalHeads (krates : List String) (e : TExpr) : TExpr :=
-  if krates.isEmpty then e
-  else
-    match e with
-    | .mk (.app f args) ty =>
-      .mk (.app (unqualifyNominalHead krates f) (args.map (tUnqualifyNominalHeads krates))) ty
-    | e => tMapChildren (tUnqualifyNominalHeads krates) e
+  match e with
+  | .mk (.app f args) ty =>
+    .mk (.app (surfaceTraitHead krates f) (args.map (tUnqualifyNominalHeads krates))) ty
+  | e => tMapChildren (tUnqualifyNominalHeads krates) e
 
 /-- The emitted name of a read of an associated constant (`Self::ONE`) that
     resolves to a trait `impl` block of the extracted crate, from the
@@ -4447,7 +4549,8 @@ where
       -- takes that `impl` method's emitted name, so the call reaches the
       -- method's body instead of the generated `Deps` class. A call through a
       -- trait whose `impl` is outside the crate is left alone.
-      let funName' := (resolveTraitImplCall funJ implMap).getD funName'
+      let resolvedImpl := resolveTraitImplCall funJ implMap
+      let funName' := resolvedImpl.getD funName'
       -- A width-tagged inherent integer method (`wrapping_add#32`) carries the
       -- tag of its integer type: the result type where that is an integer
       -- (`wrapping_*`, `rotate_*`, `from_*_bytes`), else the first argument's
@@ -4463,12 +4566,7 @@ where
       -- head (`primeir_hax::Field::mul`), which separates it from the integer
       -- builtin of the same short name. A call resolved to a trait `impl` of
       -- the extracted crate names a definition and keeps that name.
-      let funName'' :=
-        match nominalTraitQualifier? funJ implMap.nominalKrates with
-        | some q =>
-          if (resolveTraitImplCall funJ implMap).isSome then funName''
-          else qualifyNominalHead q funName''
-        | none => funName''
+      let funName'' := traitCallHead implMap funJ resolvedImpl.isSome funName''
       return (tFloatEarlyExitArgs funName'' args (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Let" then
@@ -6126,9 +6224,11 @@ partial def tEraseFieldNewtypes (names : List (String × ImpType)) (e : TExpr) :
     also makes a read of an associated constant through a trait bound of a type
     parameter a nullary call, `.app "ZERO" []` (`constReadKind`).
 
-    `nominalKrates` names the crates whose trait-method calls take the
-    qualified head `krate::Trait::h` (`ImplSelfTypeMap.nominalKrates`); with
-    the empty list every head is the one of the unqualified parse.
+    A call of a method declared by a trait, not resolved to a trait `impl` of
+    the crate, takes the qualified head `krate::Trait::h` (`traitCallHead`)
+    when `krate` is in `nominalKrates`, and, outside `traitImplConsts`, when
+    `krate` is neither `primeir_hax` nor in `builtinKrates` and the unqualified
+    head is a builtin head (`ImplSelfTypeMap.qualifiesTraitCall`).
 
     A call of a method of `primeir_hax::Field` resolved to an `impl` of
     `buildFieldImplMap` takes its modulus-tagged head (`fieldTaggedHead?`),

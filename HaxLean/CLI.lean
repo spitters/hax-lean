@@ -110,8 +110,11 @@ structure Options where
   /-- The crates whose trait methods are nominal. With `--emit-certified
       --hax`, a call of a method declared by a trait of one of these crates
       carries the head `krate::Trait::method` in the `ImpExpr` and `TExpr`
-      literals; the surface definitions and the `Deps` class are those of the
-      empty list. -/
+      literals, and the surface definitions and the `Deps` class read the bare
+      method name. A trait method of any other crate outside `core`, `std`,
+      `alloc` and `primeir_hax` whose name is a runtime builtin carries the
+      qualified head whatever the list, and is the `Deps` field `Trait_method`
+      (`HaxAdapter.qualifiesTraitCall`, `HaxAdapter.surfaceTraitHead`). -/
   nominalKrates : List String := []
 
 /-- Parse command-line arguments. -/
@@ -175,7 +178,10 @@ OPTIONS:
                     With --emit-certified --hax: a call of a trait method of
                     one of these crates carries the head
                     CRATE::Trait::method in the ImpExpr and TExpr literals;
-                    the surface definitions and the Deps class are unchanged
+                    the surface definitions and the Deps class are unchanged.
+                    A trait method of another crate named like a runtime
+                    builtin (mul, eq, len, ...) carries the qualified head
+                    without this option and is the Deps field Trait_method
   --python DUMP     Read the py2json dump of a module of the Python subset and
                     print its extraction module (with --name NAME, -o FILE);
                     a refusal is printed with its position and the run fails

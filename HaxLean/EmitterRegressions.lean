@@ -2389,11 +2389,17 @@ def asSliceCallJson (t : Json) (x : String) : Json :=
 
 /-! ## Qualified heads of nominal trait methods
 
-With `nominalKrates` set, a call of a method declared by a trait of a listed
-crate takes the head `krate::Trait::method`; a trait method of any other crate,
-such as `core::ops::Mul::mul` on an integer, keeps its head. The file printer
-prints the qualified heads in the literals only: the surface definitions and the
-`Deps` class are those of the unqualified input. -/
+A call of a method declared by a trait, not resolved to a trait `impl` of the
+extracted crate, takes the head `krate::Trait::method` when the crate is in
+`nominalKrates`, and when the crate is neither `primeir_hax` nor in
+`HaxAdapter.builtinKrates` and the bare method name is a builtin head
+(`HaxAdapter.builtinHeads`, `HaxAdapter.traitCallHead_not_mem_builtinHeads`). A
+trait method of `core`, `std` or `alloc`, such as `core::ops::Mul::mul` on an
+integer, keeps its head (`HaxAdapter.traitCallHead_builtinKrate`), and so does a
+method whose name is not a builtin head. For the crates of `nominalKrates` the
+file printer prints the qualified heads in the literals only: the surface
+definitions and the `Deps` class are those of the unqualified input. A qualified
+head of any other crate is a `Deps` field. -/
 
 open Lean in
 /-- The callee `krate::Trait::m`, a method declared by the trait `Trait`, called
@@ -2425,10 +2431,58 @@ def nominalCallHead (ks : List String) (j : Lean.Json) : Option String :=
 -- `Field::mul` of `primeir_hax` on a type parameter carries its trait and crate.
 #guard nominalCallHead ["primeir_hax"] (traitMethodCallJson "primeir_hax" "Field" "mul")
   == some "primeir_hax::Field::mul"
--- Without nominal crates the head is the bare method name.
+-- Without nominal crates the `primeir_hax` head is the bare method name.
 #guard nominalCallHead [] (traitMethodCallJson "primeir_hax" "Field" "mul") == some "mul"
--- The integer `mul` (`core::ops::Mul::mul`) keeps its head.
+-- A trait method of another crate named like a builtin carries its trait and
+-- crate; one with any other name keeps its bare name.
+#guard nominalCallHead [] (traitMethodCallJson "simplestot" "OTCrypto" "mul")
+  == some "simplestot::OTCrypto::mul"
+#guard nominalCallHead [] (traitMethodCallJson "simplestot" "OTCrypto" "hash") == some "hash"
+#guard nominalCallHead [] (traitMethodCallJson "simplestot" "OTCrypto" "exp") == some "exp"
+-- The integer `mul` (`core::ops::Mul::mul`) and the comparisons keep their heads.
 #guard nominalCallHead ["primeir_hax"] (traitMethodCallJson "core" "Mul" "mul") == some "mul"
+#guard nominalCallHead [] (traitMethodCallJson "core" "Mul" "mul") == some "mul"
+#guard nominalCallHead [] (traitMethodCallJson "core" "PartialEq" "eq") == some "eq"
+-- `builtinHeads` contains every name the printer keeps out of `Deps`
+-- (`builtinTable`) and every head `runtimeName` maps to a runtime function.
+#guard builtinTable.all fun (_, ns) => ns.all HaxAdapter.builtinHeads.contains
+#guard ["add", "sub", "mul", "div", "rem", "neg", "Add", "Sub", "Mul", "Div", "Rem", "Neg",
+    "eq", "Eq", "ne", "Ne", "not", "Not", "and", "And", "or", "Or", "lt", "le", "gt", "ge",
+    "Lt", "Le", "Gt", "Ge", "shl", "shr", "bitand", "bitor", "bitxor", "bitnot", "Shl", "Shr",
+    "BitAnd", "BitOr", "BitXor", "index", "&&", "||", "Some", "None", "Ok", "Err",
+    "array_lit", "repeat", "push", "len", "rotate_right", "rotate_left", "wrapping_add",
+    "wrapping_sub", "wrapping_mul", "array_update", "slice_update", "slice_reverse",
+    "vec_remove", "range_incl_end", "literal", "str_opaque", "copy_from_slice",
+    "extend_from_slice", "index_mut", "RangeTo", "RangeFrom", "Range", "from", "into_iter",
+    "iter", "map", "collect", "flat_map", "zip", "into_vec", "next", "enumerate",
+    "with_capacity", "from_elem", "truncate", "is_empty", "deref", "deref_mut", "clone",
+    "to_vec", "_assign", "count_ones", "assert_failed", "cast"].all
+  HaxAdapter.builtinHeads.contains
+-- Under the trait-to-class emission only the listed crates are qualified.
+#guard (match HaxAdapter.parseHaxTExpr (traitMethodCallJson "simplestot" "OTCrypto" "mul")
+    { localBoundConstCalls := true, nominalKrates := ["primeir_hax"] } with
+  | .ok (.mk (.app f _) _) => f == "mul" | _ => false)
+
+/-- `fn f<C: OTCrypto>(a: u64, b: u64) -> u64 { C::mul(a, b) }`, with the head the
+    adapter gives the call. -/
+def otCryptoMulFn : TExpr :=
+  let h := (nominalCallHead [] (traitMethodCallJson "simplestot" "OTCrypto" "mul")).getD ""
+  .mk (.letBind "a" (.mk (.var "a") (.uint .w64))
+    (.mk (.letBind "b" (.mk (.var "b") (.uint .w64))
+      (.mk (.app h [.mk (.var "a") (.uint .w64), .mk (.var "b") (.uint .w64)]) (.uint .w64)))
+      (.uint .w64))) (.uint .w64)
+
+-- The printed `C::mul(a, b)` calls the `Deps` field `OTCrypto_mul` of the trait
+-- method (`HaxAdapter.surfaceTraitHead`), the literals keep the qualified head,
+-- and the runtime `Hax.mul` occurs nowhere in the file.
+#guard ((toLeanCertifiedFileTyped [("f", otCryptoMulFn)] "Test" [] [] []).splitOn
+  "class TestDeps where\n  OTCrypto_mul (a : Int) (b : Int) : Int\n").length == 2
+#guard ((toLeanCertifiedFileTyped [("f", otCryptoMulFn)] "Test" [] [] []).splitOn
+  ":=\nOTCrypto_mul a b\n").length == 2
+#guard ((toLeanCertifiedFileTyped [("f", otCryptoMulFn)] "Test" [] [] []).splitOn
+  "(.app \"simplestot::OTCrypto::mul\"").length == 3
+#guard ((toLeanCertifiedFileTyped [("f", otCryptoMulFn)] "Test" [] [] []).splitOn
+  "Hax.mul").length == 1
 -- Unqualifying inverts the qualification and leaves other heads alone.
 #guard HaxAdapter.unqualifyNominalHead ["primeir_hax"] "primeir_hax::Field::mul" == "mul"
 #guard HaxAdapter.unqualifyNominalHead ["primeir_hax"] "RangeInclusive::new"

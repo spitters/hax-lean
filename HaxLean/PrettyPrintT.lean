@@ -1776,9 +1776,12 @@ def certifiedLiteralTExprs (rawTdefs : List (String × TExpr))
     instances.
     `nominalKrates` names the crates whose trait-method calls carry the
     qualified head `krate::Trait::h` in `rawTdefs` and `procTdefs`
-    (`HaxAdapter.parseHaxFileWithTExpr`): the `ImpExpr` and `TExpr` literals
-    keep those heads, and every other part of the file is printed from the
-    terms with the heads unqualified (`HaxAdapter.tUnqualifyNominalHeads`).
+    (`HaxAdapter.parseHaxFileWithTExpr`); a trait-method call of another crate
+    whose bare head is a builtin head carries it too
+    (`HaxAdapter.qualifiesTraitCall`). The `ImpExpr` and `TExpr` literals keep
+    those heads, and every other part of the file is printed from the terms
+    with the heads of `nominalKrates` unqualified and each other qualified head
+    `k::T::h` printed as the `Deps` name `T_h` (`HaxAdapter.tUnqualifyNominalHeads`).
     The `ImpExpr` literals are `emitLiteralBodies` of the input
     (`emitLiteralBodies_proc`, `emitLiteralBodies_raw`), eliding the newtype
     constructions and projections (`literalIdentityHeads`); the projection
