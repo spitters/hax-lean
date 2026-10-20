@@ -2962,4 +2962,217 @@ def fieldItemJson (id : Nat) (item : String) : Json :=
 
 end FieldTagged
 
+namespace FrontAdapterFixes
+
+/-! ## Binders, early exits and constructor heads of the typed parse
+
+A closure parameter with a tuple pattern is a parameter `_clo<k>` destructured
+in front of the body (`HaxAdapter.tClosureBinders`); a closure parameter with
+another pattern is refused. A `?` in an operand of an operator, or in the
+condition of an `if`, is bound in front of it (`HaxAdapter.tFloatEarlyExitOperands`);
+in the right operand of `&&` or `||` it is refused. A raw borrow is refused. A
+leading `let mut p = p;` on a parameter `p` is dropped
+(`HaxAdapter.tDropParamRebinds`), and a local read outside the translation of its
+binder is refused (`HaxAdapter.tUnboundLocals`). A variant of an enum of the crate
+is the head `E::V` (`HaxAdapter.crateVariantHead?`), so that neither a builtin
+head nor a `Deps` field takes it. -/
+
+open Lean Hax.HaxAdapter QuestionMarkExport
+
+/-- The erasure of the typed parse of `j`; `none` when the parse fails. -/
+def tParse (j : Json) : Option ImpExpr := ((parseHaxTExpr j).map (·.erase)).toOption
+
+/-- Whether the typed parse of `j` is refused with a message starting with `pre`. -/
+def tRefused (j : Json) (pre : String) : Bool :=
+  match parseHaxTExpr j with
+  | .ok _ => false
+  | .error e => e.startsWith pre
+
+/-- The pattern `(p₁, …, pₙ)`. -/
+def tuplePatJ (ps : List Json) : Json :=
+  Json.mkObj [("ty", tyJ (Json.mkObj [("Tuple", Json.arr #[])])),
+    ("contents", Json.mkObj [("Tuple", Json.mkObj [("subpatterns", Json.arr ps.toArray)])])]
+
+/-- The closure with parameter patterns `pats` and body `body`. -/
+def closureJ (pats : List Json) (body : Json) : Json :=
+  nodeJ u32J (Json.mkObj [("Closure", Json.mkObj [
+    ("params", Json.arr (pats.map fun p => Json.mkObj [("pat", p)]).toArray), ("body", body)])])
+
+/-- The tuple `(x₁, …, xₙ)`. -/
+def tupleJ (xs : List Json) : Json :=
+  nodeJ u32J (Json.mkObj [("Tuple", Json.mkObj [("fields", Json.arr xs.toArray)])])
+
+/-- `|(r, w)| (w, r)`. -/
+def swapClosure : Json :=
+  closureJ [tuplePatJ [bindPatJ "r", bindPatJ "w"]] (tupleJ [varJ u32J "w", varJ u32J "r"])
+
+-- The tuple parameter is `_clo0`, destructured into `r` and `w` in front of the
+-- body (`ImpExpr.beq` has no `lam` arm, so parameters and body are compared apart).
+#guard match tParse swapClosure with
+  | some (.lam ps body) => ps == ["_clo0"] &&
+    body == .letBind "r" (.proj (.var "_clo0") 0) (.letBind "w" (.proj (.var "_clo0") 1)
+      (.tuple [.var "w", .var "r"]))
+  | _ => false
+-- A closure parameter with a variant pattern is refused.
+#guard tRefused (closureJ [cfPatJ "Break" (bindPatJ "x")] (varJ u32J "x"))
+  "unsupported construct: a closure parameter pattern"
+
+/-- `a op b`, of type `bool`. -/
+def binaryJ (op : String) (a b : Json) : Json :=
+  nodeJ (tyJ (Json.str "Bool")) (Json.mkObj [("Binary", Json.mkObj [
+    ("op", Json.str op), ("lhs", a), ("rhs", b)])])
+
+-- `o? == x`: the `match` of `o?` is bound in front of the comparison.
+#guard tParse (binaryJ "Eq" optTry (varJ u32J "x")) ==
+  some (.letBind "_try_o" optTryForm (.app "Eq" [.var "_try_o", .var "x"]))
+-- `if o? == x { a } else { b }`: bound in front of the `if`.
+#guard tParse (nodeJ u32J (Json.mkObj [("If", Json.mkObj [
+    ("cond", binaryJ "Eq" optTry (varJ u32J "x")),
+    ("then", varJ u32J "a"), ("else_opt", varJ u32J "b")])])) ==
+  some (.letBind "_try_o" optTryForm
+    (.ifThenElse (.app "Eq" [.var "_try_o", .var "x"]) (.var "a") (.var "b")))
+-- `a && o? == x`: the right operand is evaluated only when `a` holds; refused.
+#guard tRefused (nodeJ u32J (Json.mkObj [("LogicalOp", Json.mkObj [("op", Json.str "And"),
+    ("lhs", varJ u32J "a"), ("rhs", binaryJ "Eq" optTry (varJ u32J "x"))])]))
+  "unsupported construct: `?` in the right operand"
+
+-- `&raw const x` is refused.
+#guard tRefused (nodeJ u32J (Json.mkObj [("RawBorrow", Json.mkObj [("arg", varJ u32J "x")])]))
+  "unsupported construct: a raw borrow"
+
+/-- The `DefId` of the variant `v` of the enum `enum` of `krate`. -/
+def variantDefIdJ (krate enum v : String) : Json :=
+  let seg (n : String) := Json.mkObj [("data", Json.mkObj [("TypeNs", Json.str n)])]
+  Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+    ("krate", Json.str krate), ("kind", Json.str "Variant"), ("path", Json.arr #[seg enum, seg v]),
+    ("parent", Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+      ("krate", Json.str krate), ("kind", Json.str "Enum"), ("path", Json.arr #[seg enum])])])])])])]
+
+/-- The construction of the variant `vd` from the fields `xs`. -/
+def variantJ (vd : Json) (xs : List Json) : Json :=
+  nodeJ u32J (Json.mkObj [("Adt", Json.mkObj [("info", Json.mkObj [("variant", vd)]),
+    ("fields", Json.arr (xs.map fun x => Json.mkObj [("value", x)]).toArray)])])
+
+-- `InstanceNode::And(x)` and `ComposedCommitment::Simple(x)` keep their enums:
+-- `And` is no builtin head and `Simple` no `Deps` field.
+#guard tParse (variantJ (variantDefIdJ "sigma_proofs" "InstanceNode" "And") [varJ u32J "x"]) ==
+  some (.app "InstanceNode::And" [.var "x"])
+#guard tParse (variantJ (variantDefIdJ "sigma_proofs" "ComposedCommitment" "Simple")
+    [varJ u32J "x"]) == some (.app "ComposedCommitment::Simple" [.var "x"])
+-- A variant of a `core` enum keeps its bare name, the key of the builtin table.
+#guard tParse (variantJ (variantDefIdJ "core" "Option" "Some") [varJ u32J "x"]) ==
+  some (.app "Some" [.var "x"])
+
+/-- `fn f(p₁: u32, …) -> u32 { body }`. -/
+def fnJ (params : List String) (body : Json) : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Fn", Json.mkObj [("def", Json.mkObj [
+    ("params", Json.arr (params.map fun p =>
+      Json.mkObj [("pat", bindPatJ p), ("ty", u32J)]).toArray),
+    ("ret", u32J), ("body", body)])])])]
+
+/-- The block `{ let n = init; tail }`. -/
+def letBlockJ (n : String) (init tail : Json) : Json :=
+  nodeJ u32J (Json.mkObj [("Block", Json.mkObj [
+    ("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj [("Let", Json.mkObj [
+      ("pattern", bindPatJ n), ("initializer", init)])])]]), ("expr", tail)])])
+
+/-- The erased raw body of the parse of the function item `j`; `none` when the
+    parse fails. -/
+def itemBody (j : Json) : Option ImpExpr :=
+  match parseHaxItemTExpr j with
+  | .ok (some (_, raw, _, _)) => some raw.erase
+  | _ => none
+
+-- `fn f(out: u32) -> u32 { let mut out = out; out }` has the one parameter `out`.
+#guard itemBody (fnJ ["out"] (letBlockJ "out" (varJ u32J "out") (varJ u32J "out"))) ==
+  some (.letBind "out" (.var "out") (.var "out"))
+-- A local `p` read with no binder is refused.
+#guard (match parseHaxItemTExpr (fnJ ["out"] (tupleJ [varJ u32J "out", varJ u32J "p"])) with
+  | .error e => e.startsWith "unsupported construct in `unknown_fn`: the local variables [p]"
+  | .ok _ => false)
+
+end FrontAdapterFixes
+
+namespace FrontPrinterFixes
+
+/-! ## Type parameters, declaration order, `from_elem` and Bool tests of the printer
+
+The synthetic type parameter of an argument-position `impl Trait` is named
+`impl_<Trait>_…` (`ClassEmit.typeParamLeanName`), and a method of a generic
+`impl` block takes the type parameters of the block and of its own generics as
+binders (`ClassEmit.genericImplMethods`), as does the instance of a generic trait
+`impl`. Enums and newtype aliases are declared in dependency order
+(`orderTypeDecls`). `vec![s; n]` with `s` a struct value is `from_elem s n`. A
+Bool-typed variable in a condition is the test `b` or `!b`
+(`markBoolTests`), and `!xs.is_empty()` is `!(Hax.is_empty xs)`. -/
+
+open Lean
+
+/-- `impl<G> Wrap<G> { fn new(message: impl Into<String>) }` in the export form of
+    a hax `Impl` item, rewritten by `keepTypeParams`. -/
+def wrapImplJson : Json :=
+  let defId (name : String) : Json := Json.mkObj [("contents", Json.mkObj [("value",
+    Json.mkObj [("krate", "k"), ("path", Json.arr #[Json.mkObj [("data",
+      Json.mkObj [("TypeNs", .str name)])]])])])]
+  let tparam (n : String) : Json := Json.mkObj [
+    ("kind", Json.mkObj [("Type", Json.mkObj [("synthetic", true)])]),
+    ("name", Json.mkObj [("Plain", Json.mkObj [("name", .str n)])])]
+  ClassEmit.keepTypeParams (Json.arr #[Json.mkObj [("kind", Json.mkObj [("Impl", Json.mkObj [
+    ("generics", Json.mkObj [("params", Json.arr #[tparam "G"]), ("bounds", Json.arr #[])]),
+    ("of_trait", .null),
+    ("self_ty", Json.mkObj [("value", Json.mkObj [("Adt", Json.mkObj [("value",
+      Json.mkObj [("def_id", defId "Wrap")])])])]),
+    ("items", Json.arr #[Json.mkObj [("ident", Json.arr #["new", .null]),
+      ("generics", Json.mkObj [("params", Json.arr #[tparam "impl Into<String>"]),
+        ("bounds", Json.arr #[])]),
+      ("kind", Json.mkObj [("Fn", Json.mkObj [])])]])])])]])
+
+-- An argument-position `impl Trait` is a type parameter with a Lean name.
+#guard ClassEmit.typeParamLeanName "impl IntoIterator<Item = (G::Scalar, G)>"
+  == "impl_IntoIterator_Item_G_Scalar_G"
+#guard ClassEmit.typeParamLeanName "G" == "G"
+#guard match HaxAdapter.parseHaxType (ClassEmit.keepTypeParams (Json.mkObj [("value",
+    Json.mkObj [("Param", Json.mkObj [("index", 0), ("name", "impl Into<String>")])])])) with
+  | .typeVar "impl_Into_String" => true | _ => false
+-- The method of the generic `impl` binds the block's and its own type parameters.
+#guard (ClassEmit.genericImplMethods [] wrapImplJson).map (fun g => (g.name, g.typeParams))
+  == [("Wrap_new", ["G", "impl_Into_String"])]
+#guard ({ genericFns := ClassEmit.genericImplMethods [] wrapImplJson } :
+    ClassEmit.ClassHooks).addBinders "Wrap_new" "def Wrap_new (message : impl_Into_String) :=\nx\n"
+  == "def Wrap_new {G : Type} [Inhabited G] {impl_Into_String : Type} [Inhabited impl_Into_String] (message : impl_Into_String) :=\nx\n"
+-- The instance of a generic trait `impl` binds the block's type parameters.
+#guard ({} : ClassEmit.ClassHooks).renderInstance (fun _ => none)
+    { trait := "Ring", selfTy := .typeVar "G", fields := [("add", "Ring_add")],
+      typeParams := ["G"] }
+  == "instance {G : Type} [Inhabited G] : Ring G where\n  add := Ring_add\n"
+
+-- An enum whose payload is a newtype follows the newtype's alias.
+#guard ((toLeanCertifiedFileTyped [("f", .mk (.lit (.int 0)) .int)] "Test"
+    (newtypes := [("Scalar", .array (.uint .w8) 32)])
+    (enumMeta := [{ name := "E", variants := [{ name := "V", payload := [.adt "Scalar" []] }] }])).splitOn
+  "noncomputable def «Scalar.mk» (x : Array (Int)) : Scalar := x\n\n/-- Rust enum definitions extracted from hax JSON. -/\ninductive E : Type where\n  | V : Scalar → E").length == 2
+
+-- `let xs = vec![s; n]` with `s : Share`, a struct of two fields, keeps `s`.
+#guard ((literalStructSteps [("Share", [("a", "int", .int), ("b", "int", .int)])] []
+  [("f", .mk (.letBind "xs" (.mk (.app "from_elem" [.mk (.var "s") (.adt "Share" []),
+      .mk (.var "n") (.uint .wsize)]) (.adt "Vec" [.adt "Share" [], .unknown]))
+      (.mk (.var "xs") (.adt "Vec" [.adt "Share" [], .unknown]))) .unknown)]).map
+  fun (_, t) => toLean t.erase 0) == ["let xs := Hax.from_elem s n\nxs"]
+
+-- A Bool parameter is tested as `b` and negated as `!b`; `!xs.is_empty()` is a
+-- Bool negation; neither is compared with `0`.
+#guard toLeanDefTyped "g" (.mk (.letBind "b" (.mk (.var "b") .bool)
+    (.mk (.ifThenElse (.mk (.var "b") .bool) (.mk (.lit (.int 1)) .int)
+      (.mk (.lit (.int 2)) .int)) .int)) .int)
+    (.ifThenElse (.var "b") (.ifThenElse (.app "Not" [.var "b"]) (.lit (.int 1)) (.lit (.int 2)))
+      (.lit (.int 3)))
+  == "def g (b : Bool) :=\n  if b then\n    if !b then\n      (1 : Int)\n    else\n      (2 : Int)\n  else\n    (3 : Int)\n"
+#guard toLean (.ifThenElse (.app "Not" [.app "is_empty" [.var "xs"]]) (.lit (.int 1))
+    (.lit (.int 2)))
+  == "  if !(Hax.is_empty xs) then\n    (1 : Int)\n  else\n    (2 : Int)"
+-- A name used at `bool` and at another known type is not marked.
+#guard boolVarNames (.mk (.letBind "b" (.mk (.var "b") .bool) (.mk (.var "b") .int)) .int) == []
+
+end FrontPrinterFixes
+
 end Hax.EmitterRegressions

@@ -880,6 +880,84 @@ partial def injectLetTypeAnnotations (typeMap : List (String × String)) :
   | .cfBreakContinue e => .cfBreakContinue (injectLetTypeAnnotations typeMap e)
   | e => e
 
+/-! ## Bool tests
+
+The renderer reads an untyped body, where a bare variable used as a condition
+is printed as the integer test `Hax.bne x 0`. A variable the typed term gives
+the type `bool` is marked `(x : Bool)` in the conditions of the body, which the
+renderer prints as the Bool test `x`, and its negation as `!x`. -/
+
+/-- The variables of a typed term that are Bool-typed: each name with an
+    occurrence `.var n` at type `bool` (under a reference) and none at another
+    known type. -/
+partial def boolVarNames (t : TExpr) : List String :=
+  let occs := occTypes t
+  let isBool (ty : ImpType) : Bool := match ty with
+    | .bool | .ref .bool _ => true
+    | _ => false
+  ((occs.filter (isBool ·.2)).map (·.1)).eraseDups.filter fun n =>
+    occs.all fun (m, ty) => m != n || isBool ty || ty.isUnknown
+where
+  /-- Every variable occurrence of a typed term, with its type. -/
+  occTypes (t : TExpr) : List (String × ImpType) :=
+    match t with
+    | .mk (.var n) ty => [(n, ty)]
+    | t => (tChildren t).flatMap occTypes
+
+/-- A condition with each variable of `bools` marked `(v : Bool)`, also under
+    negation, conjunction and disjunction. -/
+partial def markBoolTest (bools : List String) : ImpExpr → ImpExpr
+  | .var v => if bools.contains v then .typeAscription (.var v) "Bool" else .var v
+  | .app f args =>
+    if ["Not", "not", "and", "And", "or", "Or", "&&", "||"].contains f then
+      .app f (args.map (markBoolTest bools))
+    else .app f args
+  | e => e
+
+/-- A body with the conditions of its `if`s and the operands of its negations
+    marked by `markBoolTest`. -/
+partial def markBoolTests (bools : List String) : ImpExpr → ImpExpr
+  | .ifThenElse c t e =>
+    .ifThenElse (markBoolTest bools (markBoolTests bools c)) (markBoolTests bools t)
+      (markBoolTests bools e)
+  | .app f args =>
+    let args := args.map (markBoolTests bools)
+    if f == "Not" || f == "not" then .app f (args.map (markBoolTest bools)) else .app f args
+  | .letBind n v b => .letBind n (markBoolTests bools v) (markBoolTests bools b)
+  | .lam ps b => .lam ps (markBoolTests (bools.filter (!ps.contains ·)) b)
+  | .tuple es => .tuple (es.map (markBoolTests bools))
+  | .proj e i => .proj (markBoolTests bools e) i
+  | .match_ s arms => .match_ (markBoolTests bools s)
+      (arms.map fun (p, b) => (p, markBoolTests bools b))
+  | .seq a b => .seq (markBoolTests bools a) (markBoolTests bools b)
+  | .borrow e => .borrow (markBoolTests bools e)
+  | .deref e => .deref (markBoolTests bools e)
+  | .assign n r => .assign n (markBoolTests bools r)
+  | .forLoop v lo hi b =>
+    .forLoop v (markBoolTests bools lo) (markBoolTests bools hi) (markBoolTests bools b)
+  | .forLoopRev v lo hi b =>
+    .forLoopRev v (markBoolTests bools lo) (markBoolTests bools hi) (markBoolTests bools b)
+  | .whileLoop c b => .whileLoop (markBoolTests bools c) (markBoolTests bools b)
+  | .break_ (some e) => .break_ (some (markBoolTests bools e))
+  | .earlyReturn e => .earlyReturn (markBoolTests bools e)
+  | .questionMark e => .questionMark (markBoolTests bools e)
+  | .forFold v lo hi b =>
+    .forFold v (markBoolTests bools lo) (markBoolTests bools hi) (markBoolTests bools b)
+  | .forFoldRev v lo hi b =>
+    .forFoldRev v (markBoolTests bools lo) (markBoolTests bools hi) (markBoolTests bools b)
+  | .whileFold c b => .whileFold (markBoolTests bools c) (markBoolTests bools b)
+  | .forFoldReturn v lo hi b =>
+    .forFoldReturn v (markBoolTests bools lo) (markBoolTests bools hi) (markBoolTests bools b)
+  | .forFoldRevReturn v lo hi b =>
+    .forFoldRevReturn v (markBoolTests bools lo) (markBoolTests bools hi)
+      (markBoolTests bools b)
+  | .whileFoldReturn c b => .whileFoldReturn (markBoolTests bools c) (markBoolTests bools b)
+  | .cfBreak e => .cfBreak (markBoolTests bools e)
+  | .cfContinue e => .cfContinue (markBoolTests bools e)
+  | .cfBreakContinue e => .cfBreakContinue (markBoolTests bools e)
+  | .typeAscription e s => .typeAscription (markBoolTests bools e) s
+  | e => e
+
 /-! ## Typed Definition Generator -/
 
 /-- Generate a Lean 4 definition using types from the raw TExpr for parameter
@@ -981,6 +1059,8 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
           s!"({sn} : {tyStr})"
         else sn)
   let body := Hax.stripFunctionTailCfBreak body
+  let bools := boolVarNames rawTe
+  let body := if bools.isEmpty then body else markBoolTests bools body
   let bodyStr := toLean body 1 boolNames
   s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
 
@@ -1760,6 +1840,42 @@ def certifiedLiteralTExprs (rawTdefs : List (String × TExpr))
       nominalKrates)
     structMeta fnTypes newtypes).2
 
+/-- The identifier tokens of a rendered type: its maximal runs of alphanumeric
+    characters and `_`. -/
+def typeStrTokens (s : String) : List String :=
+  let (toks, cur) := s.toList.foldl (fun (acc : List String × String) c =>
+      if c.isAlphanum || c == '_' then (acc.1, acc.2.push c)
+      else if acc.2.isEmpty then acc else (acc.1 ++ [acc.2], "")) ([], "")
+  if cur.isEmpty then toks else toks ++ [cur]
+
+/-- Type declarations `(name, kind, text, referenced tokens)` ordered so that
+    each follows the declarations it references: each step places the first
+    declaration, in input order, whose references among the other names are all
+    placed. A cycle leaves the remaining declarations in input order. -/
+def orderTypeDecls (ds : List (String × Nat × String × List String)) :
+    List (String × Nat × String × List String) :=
+  let names := ds.map (·.1)
+  let rec go (fuel : Nat) (done : List (String × Nat × String × List String))
+      (rest : List (String × Nat × String × List String)) :
+      List (String × Nat × String × List String) :=
+    match fuel with
+    | 0 => done ++ rest
+    | fuel + 1 =>
+      let ready (d : String × Nat × String × List String) : Bool :=
+        d.2.2.2.all fun r => r == d.1 || !names.contains r || done.any (·.1 == r)
+      match rest.find? ready with
+      | none => done ++ rest
+      | some d => go fuel (done ++ [d]) (rest.filter (·.1 != d.1))
+  go ds.length [] ds
+
+/-- The consecutive runs of declarations of one kind, with their texts. -/
+def typeDeclRuns (ds : List (String × Nat × String × List String)) :
+    List (Nat × List String) :=
+  ds.foldl (fun acc (_, k, t, _) =>
+    match acc.getLast? with
+    | some (k', ts) => if k == k' then acc.dropLast ++ [(k, ts ++ [t])] else acc ++ [(k, [t])]
+    | none => [(k, [t])]) []
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
@@ -1965,10 +2081,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- `inductive T : Type where ...` gives pattern matches
   -- `match x with | .Variant => ...` real constructors to resolve, where
   -- `axiom T : Type` would leave them unresolved.
-  let inductiveBlock : String :=
-    if enumMeta.isEmpty then ""
-    else
-      let lines := enumMeta.map fun ei =>
+  let enumDecls : List (String × Nat × String × List String) :=
+      enumMeta.map fun ei =>
         -- Render `| Name : T1 → T2 → ... → MyEnum` for payload variants.
         -- Payload types go through the clash-augmented `structLookup`, not
         -- `baseStructLookup`: a payload whose type collides with a Deps method
@@ -1990,9 +2104,9 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         let hasOpaquePayload := ei.variants.any fun v =>
           v.payload.any fun ty => allOpaque.contains (renderPayload ty)
         let derivingClause := if hasOpaquePayload then "" else "\n  deriving Inhabited, BEq"
-        s!"inductive {ei.name} : Type where\n{variants}{derivingClause}"
-      "/-- Rust enum definitions extracted from hax JSON. -/\n"
-        ++ "\n\n".intercalate lines ++ "\n\n"
+        let refs := (ei.variants.flatMap fun v =>
+          v.payload.flatMap fun ty => typeStrTokens (renderPayload ty)).eraseDups
+        (ei.name, 0, s!"inductive {ei.name} : Type where\n{variants}{derivingClause}", refs)
   -- Newtype preamble: emit the alias `abbrev <T> := <Inner>`, the
   -- definitional unwrap `def «<T>.0» x := x`, and the definitional
   -- constructor wrap `def «<T>.mk» x := x` (the inverse of `«<T>.0»`) per
@@ -2004,16 +2118,26 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- alias already holds the bare name whenever the clash rename does not
   -- move it to `<T>_T`; `rewriteNewtypeCtors` above rewrites the call sites
   -- to match.
-  let newtypeBlock : String :=
-    if newtypeRenamed.isEmpty then ""
-    else
-      let lines := newtypeRenamed.map fun (aliasName, innerStr) =>
+  let newtypeDecls : List (String × Nat × String × List String) :=
+      newtypeRenamed.map fun (aliasName, innerStr) =>
         -- Original short name (without `_T`): used for the projection name
         -- and the constructor name.
         let bareName := if aliasName.endsWith "_T" then (aliasName.dropEnd 2).copy else aliasName
-        s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def «{bareName}.mk» (x : {innerStr}) : {aliasName} := x"
+        (aliasName, 1,
+          s!"abbrev {aliasName} := {innerStr}\nnoncomputable def «{bareName}.0» (x : {aliasName}) : {innerStr} := x\nnoncomputable def «{bareName}.mk» (x : {innerStr}) : {aliasName} := x",
+          typeStrTokens innerStr)
+  -- The enums and the newtype aliases in dependency order (`orderTypeDecls`):
+  -- an enum payload may name a newtype alias and a newtype may wrap an enum.
+  -- Each run of one kind carries its block's docstring; when no enum names a
+  -- newtype, the enums form one block and the newtypes the next.
+  let typeDeclBlock : String := String.join ((typeDeclRuns
+      (orderTypeDecls (enumDecls ++ newtypeDecls))).map fun (k, texts) =>
+    if k == 0 then
+      "/-- Rust enum definitions extracted from hax JSON. -/\n"
+        ++ "\n\n".intercalate texts ++ "\n\n"
+    else
       "/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps and definitional constructors. Inner\n    types may themselves be axiomatized (see the axiom block above). -/\n"
-        ++ "\n".intercalate lines ++ "\n\n"
+        ++ "\n".intercalate texts ++ "\n\n")
   -- The `Deps` class carries a `variable` binder exactly when it has fields,
   -- so the preamble decides whether the module docstring may call the
   -- definitions parametric in it.
@@ -2067,7 +2191,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         else "\n".intercalate (classHooks.instances.map (classHooks.renderInstance structLookup))
           ++ "\n"
       (surfaceDefs.map (·.2), "mutual\n\n", "end\n\n" ++ insts)
-  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{inductiveBlock}{newtypeBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
+  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{typeDeclBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
   let body := "\n".intercalate bodyParts
   let impExprs := "\n".intercalate (literalDefs.map fun (n, e) =>
     let impExprDef := toLeanImpExprDef n e

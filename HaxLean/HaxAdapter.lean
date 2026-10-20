@@ -303,6 +303,25 @@ def variantEnumName (j : Json) : Option String := do
   guard ((pv.getObjValAs? String "kind").toOption == some "Enum")
   pure (extractDefIdName pv)
 
+/-- The krate of a hax `DefId`, or `""` when the node carries none. -/
+def defIdKrate (defId : Json) : String :=
+  let inner := match defId.getObjVal? "contents" with
+    | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
+    | _ => defId
+  (inner.getObjValAs? String "krate").toOption.getD ""
+
+/-- The constructor head `E::V` of the variant `V` (short name `name`) of an enum
+    `E` of a krate outside `builtinKrates`, for the variant `DefId` `variantDefId`.
+    The printer renders it as the constructor `E.V` of the emitted inductive and
+    keeps it out of the `Deps` class; it contains `::`, so it is no builtin head
+    (`colon_not_mem_builtinHeads`). `none` for a variant of a `builtinKrates` enum
+    (`Some`, `Ok`, …), for a `DefId` without a krate, and for a struct. -/
+def crateVariantHead? (variantDefId : Json) (name : String) : Option String := do
+  let enumName ← variantEnumName variantDefId
+  let krate := defIdKrate variantDefId
+  guard (krate != "" && !builtinKrates.contains krate)
+  pure s!"{enumName}::{name}"
+
 /-- Extract a name from a hax `LocalIdent`.
     LocalIdent JSON: `{"name": "x", "id": ...}` -/
 def extractLocalIdentName (j : Json) : String :=
@@ -2471,6 +2490,23 @@ def tFloatEarlyExitArgs (f : String) (args : List TExpr) (ty : ImpType) : TExpr 
     let (binds, out, _) := peeled.zipIdx.foldl step ([], [], avoid0)
     tWrapTryLets binds (.mk (.app f out) ty)
 
+/-- The term `mk xs` of type `ty` built from the operands `xs`, with the
+    early-exit operands bound in front of it in their order of evaluation, as
+    `tFloatEarlyExitArgs` binds the arguments of an application: the operands of
+    an operator, a constructor, a projection, a borrow or a condition. -/
+def tFloatEarlyExitOperands (xs : List TExpr) (ty : ImpType)
+    (mk : List TExpr → TExprKind) : TExpr :=
+  let (bs, e) := tPeelTryLets (tFloatEarlyExitArgs "" xs ty)
+  match e.kind with
+  | .app _ out => tWrapTryLets bs (.mk (mk out) ty)
+  | _ => .mk (mk xs) ty
+
+/-- Whether a term holds an early exit in evaluation position: it is an early-exit
+    `match` (`tIsEarlyExitMatch`) or has `let`s with the prefix `tryBindPrefix` at
+    its head. -/
+def tHasEarlyExit (e : TExpr) : Bool :=
+  tIsEarlyExitMatch e || !(tPeelTryLets e).1.isEmpty
+
 /-- `readMatch` on `TExpr`, for a `match` of type `ty`: the operand of a `?` is
     read from the type of `branch(c)` and the type of `from_residual(r)`. -/
 def tReadMatch (scrut : TExpr) (arms : List (ImpPat × TExpr)) (ty : ImpType) : TExpr :=
@@ -4376,6 +4412,13 @@ def closureSentinelArg? (exprJ : Json) : Option (List String × Json) :=
   | .ok cdata =>
     match cdata.getObjVal? "body", cdata.getObjValAs? (Array Json) "params" with
     | .ok bodyJ, .ok paramsArr =>
+      -- A tuple-pattern parameter is bound by `tClosureBinders` in the
+      -- `Closure` arm of `parseHaxTExpr`.
+      let tuplePat := paramsArr.toList.any fun p =>
+        match p.getObjVal? "pat" with
+        | .ok patJ => (parseHaxPat patJ matches .tuplePat _)
+        | _ => false
+      if tuplePat then none else
       let names := paramsArr.toList.filterMap (fun p =>
         match p.getObjVal? "pat" with
         | .ok patJ => match parseHaxPat patJ with
@@ -4385,6 +4428,42 @@ def closureSentinelArg? (exprJ : Json) : Option (List String × Json) :=
       if names.isEmpty then none else some (names, bodyJ)
     | _, _ => none
   | _ => none
+
+/-- Whether a closure parameter pattern binds variables only: a variable, a
+    wildcard, or a tuple of such patterns. -/
+def closureParamPatBinds : ImpPat → Bool
+  | .varPat _ | .wildcard => true
+  | .tuplePat ps => ps.attach.all fun ⟨p, _⟩ => closureParamPatBinds p
+  | _ => false
+
+/-- The binders of a hax `Closure` payload for `parseHaxTExpr`: the parameter
+    names in order and the `let`s in front of the body that destructure the tuple
+    parameters. A variable parameter is its name, a wildcard is `_`, a parameter
+    whose `pat` is `null` or missing is the implicit environment slot and names
+    nothing, and a tuple parameter (`closureParamPatBinds`) at position `k` is
+    named `_clo<k>` and destructured by `tTupleDestructBinds`. A parameter with any
+    other pattern is refused. -/
+def tClosureBinders (cdata : Json) : Except String (List String × List (String × TExpr)) := do
+  let params := (cdata.getObjValAs? (Array Json) "params").toOption.getD #[]
+  let mut names : List String := []
+  let mut binds : List (String × TExpr) := []
+  for p in params.toList do
+    match p.getObjVal? "pat" with
+    | .ok .null => pure ()
+    | .ok patJ =>
+      match parseHaxPat patJ with
+      | .varPat nm => names := names ++ [nm]
+      | .wildcard => names := names ++ ["_"]
+      | pat@(.tuplePat ps) =>
+        unless closureParamPatBinds pat do
+          throw "unsupported construct: a closure parameter pattern other than variables and tuples of variables"
+        let n := s!"_clo{names.length}"
+        names := names ++ [n]
+        binds := binds ++ tTupleDestructBinds n (extractNodeType patJ) ps 0
+      | _ =>
+        throw "unsupported construct: a closure parameter pattern other than variables and tuples of variables"
+    | .error _ => pure ()
+  return (names, binds)
 
 /-- Parse a hax `Decorated<ExprKind>` JSON directly into a `TExpr`,
     preserving the type annotation from every JSON node's `ty` field.
@@ -4471,7 +4550,10 @@ where
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
         | .ok elsJ => parseHaxTExpr elsJ implMap
         | _ => pure (TExpr.mk .unitVal .unit)
-      return .ifThenElse cond thn els
+      -- A `?` in the condition is bound in front of the `if`.
+      return (tFloatEarlyExitOperands [cond] (extractNodeType _parentJ) fun
+        | [c] => .ifThenElse c thn els
+        | _ => .ifThenElse cond thn els).kind
 
     else if let .ok data := j.getObjVal? "Call" then
       let funJ ← data.getObjVal? "fun"
@@ -4653,12 +4735,12 @@ where
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
       let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f implMap)
       if fields.isEmpty then return .unitVal
-      return .tuple fields
+      return (tFloatEarlyExitOperands fields (extractNodeType _parentJ) .tuple).kind
 
     else if let .ok data := j.getObjVal? "Array" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
       let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, _h⟩ => parseHaxTExpr f implMap)
-      return .app "array_lit" fields
+      return (tFloatEarlyExitArgs "array_lit" fields (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Assign" then
       let lhsJ ← data.getObjVal? "lhs"
@@ -4755,11 +4837,18 @@ where
 
     else if let .ok data := j.getObjVal? "Borrow" then
       let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
-      return .borrow arg
+      return (tFloatEarlyExitOperands [arg] (extractNodeType _parentJ) fun
+        | [a] => .borrow a
+        | _ => .borrow arg).kind
+
+    else if let .ok _ := j.getObjVal? "RawBorrow" then
+      throw "unsupported construct: a raw borrow (`&raw const`, `&raw mut`, as in `core::ptr::eq`)"
 
     else if let .ok data := j.getObjVal? "Deref" then
       let arg ← parseHaxTExpr (← data.getObjVal? "arg") implMap
-      return .deref arg
+      return (tFloatEarlyExitOperands [arg] (extractNodeType _parentJ) fun
+        | [a] => .deref a
+        | _ => .deref arg).kind
 
     else if let .ok data := j.getObjVal? "Loop" then
       let body ← parseHaxTExpr (← data.getObjVal? "body") implMap
@@ -4790,7 +4879,8 @@ where
       let lhs ← parseHaxTExpr lhsJ implMap
       let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
       let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
-      return .app opAnnotated [lhs, rhs]
+      -- A `?` in an operand is bound in front of the operation.
+      return (tFloatEarlyExitArgs opAnnotated [lhs, rhs] (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "LogicalOp" then
       let op := match data.getObjVal? "op" with
@@ -4799,7 +4889,11 @@ where
         | _ => "logical_op"
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let rhs ← parseHaxTExpr (← data.getObjVal? "rhs") implMap
-      return .app op [lhs, rhs]
+      -- The right operand is evaluated only on the left operand's value, so a `?`
+      -- in it cannot be bound in front; a `?` in the left operand is.
+      if tHasEarlyExit rhs then
+        throw s!"unsupported construct: `?` in the right operand of `{op}`"
+      return (tFloatEarlyExitArgs op [lhs, rhs] (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Unary" then
       let op := match data.getObjVal? "op" with
@@ -4808,26 +4902,28 @@ where
       let argJ ← data.getObjVal? "arg"
       let arg ← parseHaxTExpr argJ implMap
       let opAnnotated := annotateOpWidth op (extractExprWidth argJ)
-      return .app opAnnotated [arg]
+      return (tFloatEarlyExitArgs opAnnotated [arg] (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Field" then
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let fieldName := match data.getObjVal? "field" with
         | .ok fj => extractDefIdName fj
         | _ => "field"
-      return .app ("." ++ fieldName) [lhs]
+      return (tFloatEarlyExitArgs ("." ++ fieldName) [lhs] (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "TupleField" then
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let idx := match data.getObjValAs? Nat "field" with
         | .ok n => n
         | _ => 0
-      return .proj lhs idx
+      return (tFloatEarlyExitOperands [lhs] (extractNodeType _parentJ) fun
+        | [a] => .proj a idx
+        | _ => .proj lhs idx).kind
 
     else if let .ok data := j.getObjVal? "Index" then
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
       let index ← parseHaxTExpr (← data.getObjVal? "index") implMap
-      return .app "index" [lhs, index]
+      return (tFloatEarlyExitArgs "index" [lhs, index] (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Cast" then
       let source ← parseHaxTExpr (← data.getObjVal? "source") implMap
@@ -4890,7 +4986,11 @@ where
       let body ← parseHaxTExpr (← data.getObjVal? "body") implMap
       match closureParams? data with
       | some names => return .lam names body
-      | none => return body.kind
+      | none =>
+        let (names, binds) ← tClosureBinders data
+        if names.isEmpty then return body.kind
+        return .lam names (binds.foldr (fun (n, proj) acc =>
+          TExpr.mk (.letBind n proj acc) body.ty) body)
 
     else if let .ok data := j.getObjVal? "Repeat" then
       let value ← parseHaxTExpr (← data.getObjVal? "value") implMap
@@ -5110,7 +5210,17 @@ where
     -- `enum E { V(V) }`) is written `E::V`, which renders as the constructor
     -- `E.V`; the bare name would resolve to the struct.
     let variantDefId := (j.getObjVal? "info" >>= (·.getObjVal? "variant")).toOption
-    let head := match variantDefId.map variantEnumName with
+    -- A variant of an enum of the crate is `E::V` (`crateVariantHead?`), so that it
+    -- reaches neither a builtin head (`And` ↦ `Hax.band`) nor the `Deps` class.
+    -- A struct of the crate whose name is a builtin head is refused.
+    if let some vd := variantDefId then
+      if (variantEnumName vd).isNone && builtinHeads.contains name
+          && !builtinKrates.contains (defIdKrate vd) && defIdKrate vd != "" then
+        throw s!"unsupported construct: the crate struct `{name}` has the name of a builtin head; rename the struct"
+    let head := match variantDefId.bind (crateVariantHead? · name) with
+      | some h => h
+      | none =>
+      match variantDefId.map variantEnumName with
       | some (some enumName) =>
         let shortOf : ImpType → Option String
           | .adt n _ => (n.splitOn "::").getLast?
@@ -5122,7 +5232,7 @@ where
       | _ => name
     match fruBase with
     | some b => return .letBind "_fru_base" b (TExpr.mk (.app head fields) b.ty)
-    | none => return .app head fields
+    | none => return (tFloatEarlyExitArgs head fields .unknown).kind
 
 /-- `iterMutWriteBack` on a typed body: every write of the element variable `x`
     is followed by `store`, the write-back of `x` to its collection. -/
@@ -5488,6 +5598,64 @@ partial def normalizeAssignOpsTExpr : TExpr → TExpr
   | .mk (.namedProj n e) ty =>
     .mk (.namedProj n (normalizeAssignOpsTExpr e)) ty
 
+/-- The names of the local variables a hax expression reads: the `VarRef` and
+    `UpvarRef` nodes, at any depth. -/
+partial def haxLocalRefNames : Json → List String
+  | .obj kvs => kvs.toList.flatMap fun (k, v) =>
+    let here : List String := match k, v with
+      | "VarRef", d => match d.getObjVal? "id" with
+        | .ok id => [extractLocalIdentName id]
+        | _ => []
+      | "UpvarRef", d => match d.getObjVal? "var_hir_id" with
+        | .ok h => [extractLocalIdentName h]
+        | _ => []
+      | _, _ => []
+    here ++ haxLocalRefNames v
+  | .arr xs => xs.toList.flatMap haxLocalRefNames
+  | _ => []
+
+/-- The variables a pattern binds. -/
+def patLocalBinders : ImpPat → List String
+  | .varPat n => [n]
+  | .tuplePat ps | .ctorPat _ ps => ps.attach.flatMap fun ⟨p, _⟩ => patLocalBinders p
+  | .somePat p | .okPat p | .errPat p => patLocalBinders p
+  | _ => []
+
+/-- The variables among `locals` that a parsed body reads or assigns outside the
+    scope of every binder of them, `bound` being the names in scope: the names
+    bound by `let`, `fun`, a `match` arm's pattern or a loop. -/
+partial def tUnboundLocals (locals bound : List String) : TExpr → List String
+  | .mk k _ =>
+    let go := tUnboundLocals locals
+    let free (n : String) : List String :=
+      if locals.contains n && !bound.contains n then [n] else []
+    match k with
+    | .var n => free n
+    | .assign n rhs => free n ++ go bound rhs
+    | .letBind n v b => go bound v ++ go (n :: bound) b
+    | .lam ps b => go (ps ++ bound) b
+    | .app _ args | .tuple args => args.flatMap (go bound)
+    | .match_ s arms =>
+      go bound s ++ arms.flatMap fun (p, b) => go (patLocalBinders p ++ bound) b
+    | .forLoop v lo hi b | .forLoopRev v lo hi b | .forFold v lo hi b
+    | .forFoldRev v lo hi b | .forFoldReturn v lo hi b | .forFoldRevReturn v lo hi b =>
+      go bound lo ++ go bound hi ++ go (v :: bound) b
+    | .ifThenElse c t e => go bound c ++ go bound t ++ go bound e
+    | .seq a b | .whileLoop a b | .whileFold a b | .whileFoldReturn a b =>
+      go bound a ++ go bound b
+    | .proj e _ | .borrow e | .deref e | .earlyReturn e | .questionMark e | .ann e | .namedProj _ e
+    | .cfBreak e | .cfContinue e | .cfBreakContinue e | .break_ (some e) => go bound e
+    | _ => []
+
+/-- A body without its leading rebindings `let p := p` of a parameter `p` in `ps`,
+    the form of Rust's `let mut p = p;`: such a `let` binds `p` to the value it
+    has. -/
+def tDropParamRebinds (ps : List String) : TExpr → TExpr
+  | .mk (.letBind n (.mk (.var v) vt) b) t =>
+    if n == v && ps.contains n then tDropParamRebinds ps b
+    else .mk (.letBind n (.mk (.var v) vt) b) t
+  | e => e
+
 /-- Parse a single hax Fn item into a typed TExpr with full type information.
     Returns `some (name, rawTExpr, processedTExpr, fnTypeInfo)` for Fn items.
     `rawTExpr` preserves types from hax JSON (for type extraction).
@@ -5527,7 +5695,16 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     let retType := match defLike.getObjVal? "ret" with
       | .ok retJ => parseHaxType retJ
       | _ => .unknown
-    let body ← parseHaxTExpr (thirBodyExpr (← defLike.getObjVal? "body")) implMap
+    let bodyJ := thirBodyExpr (← defLike.getObjVal? "body")
+    let body ← parseHaxTExpr bodyJ implMap
+    -- A local variable read outside every binder of it is a binder the parse has
+    -- not translated; it is refused, so that it never becomes a `Deps` field.
+    let unbound := (tUnboundLocals (haxLocalRefNames bodyJ) paramNames body).eraseDups
+    unless unbound.isEmpty do
+      throw s!"unsupported construct in `{name}`: the local variables {unbound} are read outside the translation of their binders"
+    -- `let mut p = p;` on a parameter `p` rebinds `p` to its value; the leading
+    -- such `let`s are dropped, so that they are not read as further parameters.
+    let body := tDropParamRebinds paramNames body
     -- Save the raw TExpr (with full types from hax JSON) for type extraction
     let rawWrapped := if paramNames.isEmpty then body
       else paramNames.foldr (fun p acc =>
@@ -5603,13 +5780,6 @@ partial def collectFnNameParents (items : List Json) : List (String × String) :
           | _ => acc
         | _ => acc
     | _ => acc
-
-/-- The krate of a hax `DefId`, or `""` when the node carries none. -/
-def defIdKrate (defId : Json) : String :=
-  let inner := match defId.getObjVal? "contents" with
-    | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
-    | _ => defId
-  (inner.getObjValAs? String "krate").toOption.getD ""
 
 /-- `(krate, shortName)` for every item `parseItemsTExpr` turns into a definition
     under its bare name: an `Fn` item and a top-level `Const` item (the

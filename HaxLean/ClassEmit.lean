@@ -57,9 +57,22 @@ namespace Hax.ClassEmit
 
 open Lean (Json)
 open Hax.HaxAdapter (parseHaxType defIdLeafName defIdKrate defIdPathNames
-  builtinKrates extractFnName buildTraitImplMethodMap buildTraitImplConstMap)
+  builtinKrates extractFnName buildTraitImplMethodMap buildTraitImplConstMap
+  extractAdtShortName)
 
 /-! ## Export rewriting -/
+
+/-- The Lean name of a hax type parameter. hax names the synthetic type
+    parameter of an argument-position `impl Trait` by its Rust spelling
+    (`impl Into<String>`), which is not a Lean identifier; such a name is the
+    alphanumeric runs of the spelling joined by `_` (`impl_Into_String`). Every
+    other name is returned unchanged. -/
+def typeParamLeanName (n : String) : String :=
+  if !n.startsWith "impl " then n else
+  let (runs, cur) := n.toList.foldl (fun (acc : List String × String) c =>
+      if c.isAlphanum then (acc.1, acc.2.push c)
+      else if acc.2.isEmpty then acc else (acc.1 ++ [acc.2], "")) ([], "")
+  "_".intercalate (if cur.isEmpty then runs else runs ++ [cur])
 
 /-- The type parameter, trait and associated item of a projection `P::A` on a
     type parameter `P`, by short names, from the `Alias` node of the type: the
@@ -81,7 +94,7 @@ def paramAssocProj (alias : Json) : Option (String × String × String) := do
   let item ← (proj.getObjVal? "assoc_item").toOption
   let defId ← (item.getObjVal? "def_id").toOption
   let itemName ← defIdLeafName defId
-  pure (param, traitName, itemName)
+  pure (typeParamLeanName param, traitName, itemName)
 
 /-- The associated-type name of a projection `Self::Name`, from the `Alias`
     node of the type: a projection whose trait reference has the type parameter
@@ -106,7 +119,8 @@ def paramAssocType (alias : Json) : Option String := do
     enclosing trait to `{"TypeVar": A}`, and every projection `P::A` of a trait
     `T` on another type parameter `P` to `{"TypeVar": "(T.A P)"}`.
     `HaxAdapter.parseHaxType` reads the rewritten node as `ImpType.typeVar n`;
-    it reads a `Param` as `.slice .int`. -/
+    it reads a `Param` as `.slice .int`. A parameter is named by
+    `typeParamLeanName`. -/
 partial def keepTypeParams (j : Json) : Json :=
   match j with
   | .arr xs => .arr (xs.map keepTypeParams)
@@ -114,7 +128,7 @@ partial def keepTypeParams (j : Json) : Json :=
     match t.toList with
     | [("Param", p)] =>
       match p.getObjValAs? String "name" with
-      | .ok n => Json.mkObj [("TypeVar", .str n)]
+      | .ok n => Json.mkObj [("TypeVar", .str (typeParamLeanName n))]
       | _ => Json.mkObj [("Param", keepTypeParams p)]
     | [("Alias", a)] =>
       match selfAssocName a, paramAssocType a with
@@ -293,7 +307,9 @@ structure GenericFn where
   beqParams : List String := []
   deriving Inhabited
 
-/-- The type-parameter names of a hax `generics` node. -/
+/-- The type-parameter names of a hax `generics` node, by
+    `typeParamLeanName`: the synthetic parameter of an argument-position
+    `impl Trait` is among them. -/
 def typeParamNames (generics : Json) : List String :=
   match generics.getObjValAs? (Array Json) "params" with
   | .ok ps => ps.toList.filterMap fun p => do
@@ -301,7 +317,7 @@ def typeParamNames (generics : Json) : List String :=
     let _ ← (k.getObjVal? "Type").toOption
     let n ← (p.getObjVal? "name").toOption
     let plain ← (n.getObjVal? "Plain").toOption
-    (plain.getObjValAs? String "name").toOption
+    (plain.getObjValAs? String "name").toOption.map typeParamLeanName
   | _ => []
 
 /-- The bounds `(trait, type parameter)` of a hax `generics` node whose trait
@@ -339,6 +355,49 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
            beqParams }
   fs.foldl (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
+
+/-- The generic methods of the `impl` blocks of an export rewritten by
+    `keepTypeParams`: each method whose `impl` block or whose own generics have
+    a type parameter, with the type parameters and bounds of both, the block's
+    first. A method of an inherent `impl` is named `<SelfType>_<method>`, and a
+    method of a trait `impl` by `buildTraitImplMethodMap`; these are the names of
+    the definitions the adapter emits (`HaxAdapter.parseHaxFileWithTExpr`). -/
+def genericImplMethods (traits : List String) (j : Json) : List GenericFn :=
+  let traitNames := buildTraitImplMethodMap j
+  (allItems j).flatMap fun it => ((do
+    let k ← (it.getObjVal? "kind").toOption
+    let impl ← (k.getObjVal? "Impl").toOption
+    let ig := (impl.getObjVal? "generics").toOption.getD .null
+    let isTrait := match impl.getObjVal? "of_trait" with
+      | .ok Json.null => false
+      | .ok _ => true
+      | _ => false
+    let implId : Option Nat := do
+      let oid ← (it.getObjVal? "owner_id").toOption
+      let c ← (oid.getObjVal? "contents").toOption
+      (c.getObjValAs? Nat "id").toOption
+    let selfName : Option String := do
+      let st ← (impl.getObjVal? "self_ty").toOption
+      let v ← (st.getObjVal? "value").toOption
+      let adt ← (v.getObjVal? "Adt").toOption
+      extractAdtShortName adt
+    let implItems ← (impl.getObjValAs? (Array Json) "items").toOption
+    pure (implItems.toList.filterMap fun ii => do
+      let ik ← (ii.getObjVal? "kind").toOption
+      let _ ← (ik.getObjVal? "Fn").toOption
+      let m := extractFnName ((ii.getObjVal? "ident").toOption.getD .null)
+      let name ← if isTrait then do
+          let iid ← implId
+          let e ← traitNames.find? fun p => p.1 == iid && p.2.1 == m
+          pure e.2.2
+        else selfName.map (s!"{·}_{m}")
+      let mg := (ii.getObjVal? "generics").toOption.getD .null
+      let ps := (typeParamNames ig ++ typeParamNames mg).eraseDups
+      guard (!ps.isEmpty)
+      let eqB := typeParamBounds ["PartialEq", "Eq"] ig ++ typeParamBounds ["PartialEq", "Eq"] mg
+      some { name, typeParams := ps,
+             bounds := (typeParamBounds traits ig ++ typeParamBounds traits mg).eraseDups,
+             beqParams := (eqB.map (·.2)).eraseDups : GenericFn })) : Option _).getD []
 
 /-- The generic structs of an export, with their type-parameter names. A
     struct item is `Struct: [ident, generics, …]`. -/
@@ -388,11 +447,16 @@ structure ImplInstance where
   /-- The pre- and postcondition fields of the instance under
       `--emit-contracts`, as (field name, rendered value). -/
   contractFields : List (String × String) := []
+  /-- The type parameters of the `impl` block and its bounds `(trait, type
+      parameter)` over the known traits, bound by the instance. -/
+  typeParams : List String := []
+  bounds : List (String × String) := []
   deriving Inhabited
 
 /-- The trait `impl`s of the extracted crate whose trait is among `traits`,
     one per `impl` block. The fields are the entries of
-    `buildTraitImplMethodMap` and `buildTraitImplConstMap` for the block. -/
+    `buildTraitImplMethodMap` and `buildTraitImplConstMap` for the block; the
+    type parameters and bounds are those of the block's generics. -/
 def implInstances (traits : List String) (j : Json) : List ImplInstance :=
   let items := buildTraitImplMethodMap j ++ buildTraitImplConstMap j
   let found := (allItems j).filterMap fun it => do
@@ -413,7 +477,9 @@ def implInstances (traits : List String) (j : Json) : List ImplInstance :=
       | _ => .unknown
     let fields := ((items.filter (·.1 == implId)).map fun (_, item, emitted) =>
       (item, emitted)).eraseDups
-    some (implId, { trait := tn, selfTy, fields, implId : ImplInstance })
+    let ig := (impl.getObjVal? "generics").toOption.getD .null
+    some (implId, { trait := tn, selfTy, fields, implId, typeParams := typeParamNames ig,
+                    bounds := typeParamBounds traits ig : ImplInstance })
   (found.foldl (fun acc p => if acc.any (·.1 == p.1) then acc else acc ++ [p]) []).map (·.2)
 
 /-! ## The plan handed to the renderer -/
@@ -459,7 +525,8 @@ def plan (traitExport crate : Json) : ClassHooks :=
     let items := (used.filter (·.2 == t)).map (·.1)
     if items.isEmpty then none else some (t, items)
   { traits, exports
-    genericFns := genericFns names crate
+    genericFns := (genericFns names crate ++ genericImplMethods names crate).foldl
+      (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
     genericStructs := genericStructs crate
     instances := implInstances names crate }
 
@@ -623,7 +690,10 @@ def ClassHooks.renderInstance (h : ClassHooks) (sl : String → Option String)
   let superFields := supers.map fun s => s!"  to{s} := inferInstance"
   let fields := inst.fields.map fun (item, d) => s!"  {sanitizeName item} := {d}"
   let contractFields := inst.contractFields.map fun (f, v) => s!"  {f} := {v}"
-  s!"instance : {inst.trait} {argTypeStr sl inst.selfTy} where\n"
+  let binders := if inst.typeParams.isEmpty then ""
+    else " " ++ ({ name := "", typeParams := inst.typeParams, bounds := inst.bounds :
+      GenericFn }).binders
+  s!"instance{binders} : {inst.trait} {argTypeStr sl inst.selfTy} where\n"
     ++ "\n".intercalate (superFields ++ fields ++ contractFields) ++ "\n"
 
 /-- The rendered definitions and instances in dependency order, or `none` when

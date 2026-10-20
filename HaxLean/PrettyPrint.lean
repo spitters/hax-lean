@@ -1296,6 +1296,9 @@ def parensIf (s : String) (needParens : Bool) : String :=
 
 /-- Is this expression known to produce a Bool?
     Comparison operators, boolean literals, logical ops, and `Not` all return Bool.
+    So do the runtime's Bool-valued collection tests (`is_empty`) and an
+    expression ascribed `Bool`, the form in which the typed printer marks a
+    Bool-typed variable (`PrettyPrintT.markBoolTests`).
     Unknown expressions (bare variables, arbitrary function calls) return false. -/
 def isKnownBool : ImpExpr → Bool
   | .lit (.bool _) => true
@@ -1304,7 +1307,9 @@ def isKnownBool : ImpExpr → Bool
     | "gt" | "Gt" | "ge" | "Ge" | "beq" | "bne" => true
     | "and" | "And" | "or" | "Or" | "&&" | "||" => true
     | "not" | "Not" => true
+    | "is_empty" => true
     | _ => false
+  | .typeAscription _ "Bool" => true
   | _ => false
 
 /-- Check if an expression is a "leaf" — renders without `{indent lvl}` prefix.
@@ -1800,12 +1805,17 @@ where
       - Function applications known to return Bool (via `boolNames` from TExpr types) pass through.
       - `Not x` on a variable → `Hax.beq x (0 : Int)` (correct negation for Int).
       - `Not x` on a Bool expr → `!x`.
-      - Bare variables → `Hax.bne x (0 : Int)` (forces Int, C-style truth). -/
+      - Bare variables → `Hax.bne x (0 : Int)` (forces Int, C-style truth).
+      - A variable ascribed `Bool` (`PrettyPrintT.markBoolTests`) → `x`, and its
+        negation → `!x`. -/
   condToLean (c : ImpExpr) : String :=
     -- Type-directed Bool detection: check boolNames from TExpr types
     let isTypedBool (e : ImpExpr) : Bool := match e with
       | .app f _ => boolNames.contains f | _ => false
     match c with
+    | .typeAscription (.var v) "Bool" => sanitizeName v
+    | .app "Not" [.typeAscription (.var v) "Bool"] | .app "not" [.typeAscription (.var v) "Bool"] =>
+      s!"!{sanitizeName v}"
     | .app "Not" [x] | .app "not" [x] =>
       if isKnownBool x || isTypedBool x then
         s!"!{parensIf (toLean x 0) (!isAtom x)}"

@@ -106,12 +106,23 @@ def desiredArity (structMeta : StructMetaT) : ImpType → Option Nat
     | _ => none
   | _ => none
 
+/-- Whether a type is a struct or a tuple, under references: the type of an
+    initial value that is already a whole element of a container of structs or
+    tuples (`vec![s; n]` with `s` a struct value). -/
+def isCompositeTy (ty : ImpType) : Bool :=
+  match unwrapRefs ty with
+  | .adt _ _ | .tuple _ => true
+  | _ => false
+
 /-- Build the tuple-expanded `from_elem` call.
-    Returns the original call when no expansion is needed. -/
+    Returns the original call when no expansion is needed, and when the
+    initial value is a struct or a tuple (`isCompositeTy`), which is then the
+    element itself. -/
 def expandFromElem (structMeta : StructMetaT)
     (initVal sz : TExpr) (callTy : ImpType) : TExpr :=
   match desiredArity structMeta callTy with
   | some n =>
+    if isCompositeTy initVal.ty then .mk (.app "from_elem" [initVal, sz]) callTy else
     let copies := List.replicate n initVal
     let tupleTy : ImpType := .tuple (copies.map TExpr.ty)
     let tupleInit : TExpr := .mk (.tuple copies) tupleTy
