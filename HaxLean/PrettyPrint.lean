@@ -732,15 +732,16 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
       else
         extractAccumulatorsAux (n :: locals) (readBefore ++ freeVars val) rest
     else extractAccumulatorsAux locals (readBefore ++ freeVars val) rest
-  -- Look inside conditional mutations for hidden accumulators
+  -- Look inside conditional mutations for hidden accumulators: a variable
+  -- rebound in either branch is loop-carried, since the other branch keeps it.
   | .seq (.ifThenElse c thn els) rest =>
-    let thnAccs := extractCondMutationsAux locals (readBefore ++ freeVars c) thn |>.map (·.1)
-      |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
+    let rb := readBefore ++ freeVars c
+    let armAccs :=
+      (extractCondMutationsAux locals rb thn ++ extractCondMutationsAux locals rb els)
+        |>.map (·.1) |>.filter (fun n => !n.startsWith "_assign" && !locals.contains n)
     let restAccs :=
-      extractAccumulatorsAux locals
-        (readBefore ++ freeVars c ++ freeVars thn ++ freeVars els) rest
-    let all := thnAccs ++ restAccs
-    all.eraseDups
+      extractAccumulatorsAux locals (rb ++ freeVars thn ++ freeVars els) rest
+    (armAccs ++ restAccs).eraseDups
   -- Recurse into nested loops in seq position to find transitive accumulators
   | .seq (.forFold _ _ _ body) rest =>
     (extractAccumulatorsAux locals readBefore body
@@ -810,6 +811,36 @@ partial def extractAccumulatorsAux (locals readBefore : List String) : ImpExpr �
 /-- Top-level wrapper. -/
 partial def extractAccumulators (e : ImpExpr) : List String :=
   extractAccumulatorsAux [] [] e
+
+/-- The loop-state variables a `for` fold drops: for each `forFold`,
+    `forFoldRev`, `forFoldReturn` or `forFoldRevReturn` in `e`, the names its
+    body rebinds (`extractCondMutationsAux`) that are live after the fold and
+    absent from the body's accumulators (`extractAccumulators`). A name is live
+    after a fold when the continuation reads it (`liveAfter`); inside a fold
+    body, every name the body reads is live, since the next iteration reads it.
+    Each entry is the fold's index variable and the dropped name. -/
+partial def droppedLoopState (liveAfter : List String := []) : ImpExpr → List (String × String)
+  | .seq a b => droppedLoopState (liveAfter ++ freeVars b) a ++ droppedLoopState liveAfter b
+  | .letBind n v b =>
+    droppedLoopState (liveAfter ++ (freeVars b).filter (· != n)) v
+      ++ droppedLoopState liveAfter b
+  | .ifThenElse c t e =>
+    droppedLoopState liveAfter c ++ droppedLoopState liveAfter t ++ droppedLoopState liveAfter e
+  | .match_ s arms =>
+    droppedLoopState liveAfter s ++ arms.flatMap (fun (_, b) => droppedLoopState liveAfter b)
+  | .app _ args | .tuple args => args.flatMap (droppedLoopState liveAfter)
+  | .lam _ b | .proj b _ | .typeAscription b _ | .cfBreak b | .cfContinue b
+  | .cfBreakContinue b | .earlyReturn b => droppedLoopState liveAfter b
+  | .forFold v _ _ body | .forFoldRev v _ _ body | .forFoldReturn v _ _ body
+  | .forFoldRevReturn v _ _ body =>
+    let accs := extractAccumulators body
+    let mutated := (extractCondMutationsAux [] [] body).map (·.1)
+      |>.filter (fun n => !n.startsWith "_assign" && n != v)
+    let dropped := mutated.eraseDups.filter fun n => liveAfter.contains n && !accs.contains n
+    dropped.map (v, ·) ++ droppedLoopState (liveAfter ++ freeVars body) body
+  | .whileFold c body | .whileFoldReturn c body =>
+    droppedLoopState liveAfter c ++ droppedLoopState (liveAfter ++ freeVars body) body
+  | _ => []
 
 /-- Build a destructure-and-return wrapper for an inner fold whose
     accumulator shape doesn't match the outer fold's. Emits

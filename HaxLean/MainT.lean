@@ -243,6 +243,12 @@ def main (args : List String) : IO UInt32 := do
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
+    -- A variable a `for` fold body rebinds that is live after the fold but
+    -- not in the fold's state: the rebinding does not reach the continuation.
+    let droppedState := erased.flatMap fun (n, e) => (droppedLoopState [] e).map (n, ·)
+    for (n, (i, x)) in droppedState do
+      IO.eprintln s!"ERROR dropped-loop-state: in `{n}`, the fold over `{i}` rebinds `{x}`, which is read after the fold, but `{x}` is not in the fold's state; the rebinding does not reach the continuation."
+    IO.eprintln s!"INFO dropped-loop-state={droppedState.length}"
     let allWarnings := erased.foldl (fun acc (_, e) =>
       acc ++ HaxAdapter.validateExtraction e) ([] : List String)
     IO.eprintln s!"INFO warnings={allWarnings.length}"

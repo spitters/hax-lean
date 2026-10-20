@@ -3175,4 +3175,52 @@ def wrapImplJson : Json :=
 
 end FrontPrinterFixes
 
+namespace BranchArrayState
+
+/-- The body of Rust's
+    `for k in 0..m { if c { failed = 4; } else { v[k] = true; } n += 1; }`
+    on a `let mut` vector `v`, after local mutation: `v` is rebound only in the
+    else branch of an `if` that is followed by further statements. -/
+def elseWriteBody : ImpExpr :=
+  .seq (.ifThenElse (.var "c")
+      (.seq (.letBind "failed" (.lit (.int 4)) (.var "failed")) .unitVal)
+      (.seq (.letBind "v" (.app "array_update" [.var "v", .var "k", .lit (.bool true)])
+        (.var "v")) .unitVal))
+    (.seq (.letBind "n" (.app "add" [.var "n", .lit (.int 1)]) (.var "n")) .unitVal)
+
+#guard extractAccumulators elseWriteBody == ["failed", "v", "n"]
+
+/-- The loop over `elseWriteBody`, followed by a read of its state. -/
+def elseWriteLoop : ImpExpr :=
+  .seq (.forFold "k" (.lit (.int 0)) (.var "m") elseWriteBody)
+    (.tuple [.var "failed", .var "v", .var "n"])
+
+-- The fold state contains `v`, and no rebinding is dropped.
+#guard ((toLean elseWriteLoop 1 []).splitOn
+  "Hax.foldRange (0 : Int) m (failed, v, n) fun k (failed, v, n) =>").length == 2
+#guard droppedLoopState [] elseWriteLoop == []
+
+/-- The then-branch twin:
+    `for k in 0..m { if c { v[k] = true; n += 1; } else { failed = 4; } t += 1; }`. -/
+def thenWriteBody : ImpExpr :=
+  .seq (.ifThenElse (.var "c")
+      (.seq (.letBind "v" (.app "array_update" [.var "v", .var "k", .lit (.bool true)])
+          (.var "v"))
+        (.seq (.letBind "n" (.app "add" [.var "n", .lit (.int 1)]) (.var "n")) .unitVal))
+      (.seq (.letBind "failed" (.lit (.int 4)) (.var "failed")) .unitVal))
+    (.seq (.letBind "t" (.app "add" [.var "t", .lit (.int 1)]) (.var "t")) .unitVal)
+
+#guard extractAccumulators thenWriteBody == ["v", "n", "failed", "t"]
+
+/-- The loop over `thenWriteBody`, followed by a read of its state. -/
+def thenWriteLoop : ImpExpr :=
+  .seq (.forFold "k" (.lit (.int 0)) (.var "m") thenWriteBody)
+    (.tuple [.var "v", .var "n", .var "failed", .var "t"])
+
+#guard ((toLean thenWriteLoop 1 []).splitOn
+  "Hax.foldRange (0 : Int) m (v, n, failed, t) fun k (v, n, failed, t) =>").length == 2
+#guard droppedLoopState [] thenWriteLoop == []
+
+end BranchArrayState
+
 end Hax.EmitterRegressions
