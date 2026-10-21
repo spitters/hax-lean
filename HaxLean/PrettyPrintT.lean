@@ -7,7 +7,7 @@ module
 
 public import HaxLean.TExpr
 public import HaxLean.AnfLowCT
-public import HaxLean.PrettyPrint
+public import HaxLean.PrettyPrint -- deprecated_module: ignore
 public import HaxLean.Pipeline
 public import HaxLean.TPipeline
 public import HaxLean.HaxAdapter

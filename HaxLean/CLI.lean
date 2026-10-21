@@ -4,7 +4,7 @@ public import HaxLean.Json
 public import HaxLean.Json.Adapter
 public import HaxLean.Json.IdTable
 public import HaxLean.HaxAdapter
-public import HaxLean.PrettyPrint
+public import HaxLean.PrettyPrint -- deprecated_module: ignore
 public import HaxLean.Pipeline
 
 

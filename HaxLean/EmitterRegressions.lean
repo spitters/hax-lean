@@ -5,8 +5,8 @@ Authors: CatCrypt Contributors
 -/
 module
 
-public meta import HaxLean.PrettyPrint
-public import HaxLean.PrettyPrint
+public meta import HaxLean.PrettyPrint -- deprecated_module: ignore
+public import HaxLean.PrettyPrint -- deprecated_module: ignore
 public meta import HaxLean.PrettyPrintT
 public import HaxLean.PrettyPrintT
 public meta import HaxLean.ThreadMutations

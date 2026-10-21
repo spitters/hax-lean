@@ -45,6 +45,9 @@ Removal target: once `tests/run_tests.sh` and `scripts/run_haxpipe.sh`
 (SSProve-lean) are migrated or removed.
 -/
 
+deprecated_module "untyped emit path; use HaxLean.PrettyPrintT \
+  (Hax.PrettyPrintT.toLeanCertifiedFileTyped)" (since := "2026-05-14")
+
 @[expose] public section
 
 namespace Hax

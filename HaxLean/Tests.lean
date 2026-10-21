@@ -25,8 +25,8 @@ public meta import HaxLean.Pipeline
 public import HaxLean.Pipeline
 public meta import HaxLean.ThreadMutations
 public import HaxLean.ThreadMutations
-public meta import HaxLean.PrettyPrint
-public import HaxLean.PrettyPrint
+public meta import HaxLean.PrettyPrint -- deprecated_module: ignore
+public import HaxLean.PrettyPrint -- deprecated_module: ignore
 public meta import HaxLean.Json.AdapterProbes
 public import HaxLean.Json.AdapterProbes
 public meta import HaxLean.PrettyPrintT
