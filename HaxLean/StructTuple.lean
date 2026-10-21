@@ -897,14 +897,17 @@ local macro "cf_cases2 " x:ident : tactic =>
 
 namespace StructTuple
 
-/-- The builtin table `S` answers every call as the struct heads over `T` do: whenever `S`
-    answers `f` at `vals`, `structBi sf T` gives the same answer. -/
+/-- The builtin table `S` answers every call a run can make as the struct heads over `T` do:
+    whenever `S` answers `f` at argument values `vals` none of which is a control-flow value,
+    `structBi sf T` gives the same answer. `denoteArgs'` reads no control-flow value as an
+    argument (`denoteArgs'_all_not_isControlFlow`). -/
 def StructTab (sf : StructFieldTys) (S T : Builtins) : Prop :=
-  ∀ f vals v, S f vals = some v → structBi sf T f vals = some v
+  ∀ f vals v, (vals.all fun x => !x.isControlFlow) = true → S f vals = some v →
+    structBi sf T f vals = some v
 
 theorem StructTab.of_structBi (sf : StructFieldTys) (bi : Builtins) :
     StructTab sf (structBi sf bi) bi :=
-  fun _ _ _ h => h
+  fun _ _ _ _ h => h
 
 /-- A run of `denoteArgs'` on a nonempty list to a list of values reads the head to a value
     that is no control-flow value and the tail to the rest. -/
@@ -939,6 +942,19 @@ theorem denoteArgs'_length_of_eq (bi : Builtins) (fuel : Nat) :
   | x :: xs, s, s', vals, h => by
     obtain ⟨v, rest, s₁, rfl, -, -, hr⟩ := denoteArgs'_cons_inv bi fuel x xs s s' vals h
     simp [denoteArgs'_length_of_eq bi fuel xs s₁ s' rest hr]
+
+/-- A run of `denoteArgs'` to a list of values reads no control-flow value. -/
+theorem denoteArgs'_all_not_isControlFlow (bi : Builtins) (fuel : Nat) :
+    ∀ (es : List ImpExpr) (s s' : Env) (vals : List Value),
+      denoteArgs' bi fuel es s = (some vals, s') → (vals.all fun x => !x.isControlFlow) = true
+  | [], s, s', vals, h => by
+    rw [Total.denoteArgs'_nil_run] at h
+    obtain ⟨h1, -⟩ := Prod.mk.inj h
+    cases h1; rfl
+  | x :: xs, s, s', vals, h => by
+    obtain ⟨v, rest, s₁, rfl, hv, -, hr⟩ := denoteArgs'_cons_inv bi fuel x xs s s' vals h
+    simp only [List.all_cons, hv, Bool.not_false, Bool.true_and]
+    exact denoteArgs'_all_not_isControlFlow bi fuel xs s₁ s' rest hr
 
 /-- A call read by `denote'` without error reads its arguments to values that the builtin
     table answers. -/
@@ -1312,7 +1328,8 @@ theorem denote'_app_fallback (sf : StructFieldTys) (S T : Builtins) (t f : Strin
     (args : List TExpr)
     (ih : ∀ a ∈ args, ∀ fuel, Refines isErr t (denote' S fuel a.erase)
       (denote' T fuel (tStructToTuple sf t a).erase))
-    (hfb : ∀ vals : List Value, vals.length = args.length → ∀ v,
+    (hfb : ∀ vals : List Value, vals.length = args.length →
+      (vals.all fun x => !x.isControlFlow) = true → ∀ v,
       S f vals = some v → T f vals = some v) (fuel : Nat) :
     Refines isErr t (denote' S fuel (.app f (args.map TExpr.erase)))
       (denote' T fuel (.app f ((args.map (tStructToTuple sf t)).map TExpr.erase))) := by
@@ -1331,7 +1348,8 @@ theorem denote'_app_fallback (sf : StructFieldTys) (S T : Builtins) (t f : Strin
   subst ho
   have hlen := denoteArgs'_length_of_eq S fuel _ s₁ s₁' vals hA
   rw [List.length_map] at hlen
-  rw [List.map_map, Total.denote'_app_of_args hB (hfb vals hlen v hS)]
+  rw [List.map_map, Total.denote'_app_of_args hB
+    (hfb vals hlen (denoteArgs'_all_not_isControlFlow S fuel _ s₁ s₁' vals hA) v hS)]
   exact ⟨rfl, hst⟩
 
 /-- A call node refines its rewrite under `denote'`, given that its arguments do. -/
@@ -1342,7 +1360,8 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
     Refines isErr t (denote' S fuel (.app f (args.map TExpr.erase)))
       (denote' T fuel (TExpr.mk ((structApp sf t f (args.map (tStructToTuple sf t))).getD
         (.app f (args.map (tStructToTuple sf t)))) ty).erase) := by
-  have hT : ∀ vals v, S f vals = some v → structBi sf T f vals = some v := hST f
+  have hT : ∀ vals v, (vals.all fun x => !x.isControlFlow) = true → S f vals = some v →
+      structBi sf T f vals = some v := hST f
   have ih' : ∀ x ∈ args, Refines isErr t (denote' S fuel x.erase)
       (denote' T fuel ((TExpr.erase ∘ tStructToTuple sf t) x)) := fun x hx => ih x hx fuel
   cases hh : structHead? sf f with
@@ -1352,7 +1371,7 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
     rw [hs]
     simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
     exact denote'_app_fallback sf S T t f args ih
-      (fun vals _ v h => by simpa [structBi, hh] using hT vals v h) fuel
+      (fun vals _ hc v h => by simpa [structBi, hh] using hT vals v hc h) fuel
   | some hd =>
     cases hd with
     | ctor n =>
@@ -1365,7 +1384,7 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
       rcases h₁ : denote' S fuel (.app f (args.map TExpr.erase)) s₁ with ⟨o, s₁'⟩
       rw [h₁] at hb
       obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
-      have hv := hT vals v hS
+      have hv := hT vals v (denoteArgs'_all_not_isControlFlow S fuel _ s₁ s₁' vals hA) hS
       simp only [structBi, hh] at hv
       split at hv
       · cases hv
@@ -1386,8 +1405,8 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) []) = none by
           simp [structApp, hh]]
         simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
-        exact denote'_app_fallback sf S T t f [] ih (fun vals hl v h => by
-          have := hT vals v h
+        exact denote'_app_fallback sf S T t f [] ih (fun vals hl hc v h => by
+          have := hT vals v hc h
           rcases vals with _ | ⟨x, _ | ⟨y, _⟩⟩ <;> simp_all [structBi]) fuel
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) [a]) =
             some (.proj (tStructToTuple sf t a) i) by simp [structApp, hh]]
@@ -1396,12 +1415,13 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
         rcases h₁ : denote' S fuel (.app f [a.erase]) s₁ with ⟨o, s₁'⟩
         rw [h₁] at hb
         obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
+        have hc := denoteArgs'_all_not_isControlFlow S fuel _ s₁ s₁' vals hA
         obtain ⟨w, rest, s₃, rfl, hw, hd, hrest⟩ :=
           denoteArgs'_cons_inv S fuel _ _ s₁ s₁' vals hA
         rw [Total.denoteArgs'_nil_run] at hrest
         obtain ⟨hr1, rfl⟩ := Prod.mk.inj hrest
         cases hr1
-        have hv := hT [w] v hS
+        have hv := hT [w] v hc hS
         obtain ⟨ho, hst⟩ := ih a (List.mem_singleton_self a) fuel s₁ s₂ hs₁ (by simp [hd, isErr])
         rw [hd] at ho hst
         rcases h₂ : denote' T fuel (tStructToTuple sf t a).erase s₂ with ⟨o₂, s₂'⟩
@@ -1419,22 +1439,22 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) (a :: b :: rest)) = none by
           simp [structApp, hh]]
         simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
-        exact denote'_app_fallback sf S T t f _ ih (fun vals hl v h => by
-          have := hT vals v h
+        exact denote'_app_fallback sf S T t f _ ih (fun vals hl hc v h => by
+          have := hT vals v hc h
           rcases vals with _ | ⟨x, _ | ⟨y, _⟩⟩ <;> simp_all [structBi]) fuel
     | update i n =>
       rcases args with _ | ⟨a, _ | ⟨b, _ | ⟨c, rest⟩⟩⟩
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) []) = none by
           simp [structApp, hh]]
         simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
-        exact denote'_app_fallback sf S T t f [] ih (fun vals hl v h => by
-          have := hT vals v h
+        exact denote'_app_fallback sf S T t f [] ih (fun vals hl hc v h => by
+          have := hT vals v hc h
           rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp_all [structBi]) fuel
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) [a]) = none by
           simp [structApp, hh]]
         simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
-        exact denote'_app_fallback sf S T t f [a] ih (fun vals hl v h => by
-          have := hT vals v h
+        exact denote'_app_fallback sf S T t f [a] ih (fun vals hl hc v h => by
+          have := hT vals v hc h
           rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp_all [structBi]) fuel
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) [a, b]) =
             some (.letBind t
@@ -1449,6 +1469,7 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
         rcases h₁ : denote' S fuel (.app f [a.erase, b.erase]) s₁ with ⟨o, s₁'⟩
         rw [h₁] at hb
         obtain ⟨vals, v, rfl, hS, hA⟩ := denote'_app_inv S fuel f _ s₁ s₁' o h₁ hb
+        have hc := denoteArgs'_all_not_isControlFlow S fuel _ s₁ s₁' vals hA
         have hA' := denoteArgs'_refines S T t fuel TExpr.erase
           (TExpr.erase ∘ tStructToTuple sf t) [a, b] ih' s₁ s₂ hs₁ (by simp [hA])
         simp only [List.map_cons, List.map_nil, Function.comp_apply] at hA'
@@ -1465,7 +1486,7 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
         rw [Total.denoteArgs'_nil_run] at hnil
         obtain ⟨hr1, rfl⟩ := Prod.mk.inj hnil
         cases hr1
-        have hv := hT [x, y] v hS
+        have hv := hT [x, y] v hc hS
         cases x with
         | tuple vs =>
           simp only [structBi, hh] at hv
@@ -1480,8 +1501,8 @@ theorem denote'_structApp (sf : StructFieldTys) (S T : Builtins) (hST : StructTa
       · rw [show structApp sf t f (List.map (tStructToTuple sf t) (a :: b :: c :: rest)) = none
           by simp [structApp, hh]]
         simp only [Option.getD_none, TExpr.erase, TExpr.eraseList_eq]
-        exact denote'_app_fallback sf S T t f _ ih (fun vals hl v h => by
-          have := hT vals v h
+        exact denote'_app_fallback sf S T t f _ ih (fun vals hl hc v h => by
+          have := hT vals v hc h
           rcases vals with _ | ⟨x, _ | ⟨y, _ | ⟨z, _⟩⟩⟩ <;> simp_all [structBi]) fuel
 
 end StructTuple
@@ -1751,7 +1772,7 @@ theorem denoteApp'_tStructToTuple (sf : StructFieldTys) (bi : Builtins) (t f : S
       (denoteApp' bi fuel f ((args.map (tStructToTuple sf t)).map TExpr.erase)) := by
   have := denote'_app_fallback sf (structBi sf bi) bi t f args
     (fun a ha fuel => denote'_tStructToTuple sf bi t a (h a ha) fuel)
-    (fun vals _ v hv => by simpa [structBi, hf] using hv) fuel
+    (fun vals _ _ v hv => by simpa [structBi, hf] using hv) fuel
   simpa only [denote'] using this
 
 /-! ## Refinement of the spine reading `denoteSpine` -/
@@ -1794,7 +1815,7 @@ theorem structTab_closureTable {sf : StructFieldTys} {S T : Builtins} (hST : Str
     {body body' : ImpExpr} (hb : Refines isErr t (denote' S fuel body) (denote' T fuel body'))
     {ρ₁ ρ₂ : Env} (hρ : Env.AgreeExcept t ρ₁ ρ₂) :
     StructTab sf (closureTable S fuel f ps body ρ₁) (closureTable T fuel f ps body' ρ₂) := by
-  intro g vals v h
+  intro g vals v hc h
   by_cases hg : g = f
   · subst hg
     simp only [structBi, hf]
@@ -1812,7 +1833,7 @@ theorem structTab_closureTable {sf : StructFieldTys} {S T : Builtins} (hST : Str
         exact h
       | _ => simp at h
     · simp [hl] at h
-  · have h' := hST g vals v (by simpa [InlineLocalClosures.closureTable, hg] using h)
+  · have h' := hST g vals v hc (by simpa [InlineLocalClosures.closureTable, hg] using h)
     simp only [structBi] at h' ⊢
     cases hh : structHead? sf g with
     | none =>
