@@ -1118,6 +1118,7 @@ def hax64WordOps (f : String) (args : List Value) : Option Value :=
       if y < 32 then some (((x % 2 ^ 32) <<< y) % 2 ^ 32) else none
   | "Shr#32", [.int a, .int b] => u64BinOp a b fun x y =>
       if y < 32 then some ((x % 2 ^ 32) >>> y) else none
+  | "declassify", [v] => some v
   | f, args => hax64NarrowOps f args
 
 /-- The builtin table of `u64` code: `hax64WordOps`, then the array operations
@@ -1157,6 +1158,16 @@ theorem hax64Builtins_select (args : List Value) : hax64Builtins "select" args =
   unfold hax64Builtins
   rw [hax64WordOps_select]
   cases selectOp args <;> rfl
+
+/-- At the name `declassify` on one argument, `hax64WordOps` is the identity. -/
+theorem hax64WordOps_declassify (v : Value) : hax64WordOps "declassify" [v] = some v :=
+  rfl
+
+/-- At the name `declassify` on one argument, `hax64Builtins` is the identity. -/
+theorem hax64Builtins_declassify (v : Value) : hax64Builtins "declassify" [v] = some v := by
+  unfold hax64Builtins
+  rw [hax64WordOps_declassify]
+  rfl
 
 /-- At the name `select`, on a Boolean and two values, `hax64Builtins` is the first value at
     `true` and the second at `false`. -/
