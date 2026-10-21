@@ -26,7 +26,8 @@ tuple types of the field types.
 ## Main definitions
 
 * `StructFieldTys` — struct name to its fields with their types, in declaration order
-* `structHead?` — the classification of an application head as a struct head
+* `structHead?` — the classification of an application head as a struct head, by equality
+  with the names the layout generates, so that a non-canonical spelling is not a struct head
 * `structBi` — the struct heads over a builtin table, structs read as tuples
 * `tStructToTuple` — the rewrite of struct heads and struct types into tuples
 * `StructOk` — the side condition: the reserved name is not read, struct heads have their arity
@@ -69,24 +70,35 @@ inductive StructHead where
   | update (i n : Nat)
   deriving Inhabited, DecidableEq, Repr
 
-/-- The struct role of the application head `f`: a struct name of `sf` constructs that
-    struct; `struct_update#S#i#n` updates field `i` when `S` has `n` fields and `i < n`;
-    `.g` reads field `g` of the unique struct declaring it, and `S.g` reads field `g` of `S`
-    (`resolveStructField`). Every other head has no struct role. -/
+/-- The update role of `f`: field `i` of a struct `S` of `sf` with `n` fields when `f` is the
+    generated head `structUpdateHead S i n` with `i < n`. -/
+def structUpdateRole? (sf : StructFieldTys) (f : String) : Option StructHead :=
+  sf.findSome? fun p =>
+    ((List.range p.2.length).find? fun i => structUpdateHead p.1 i p.2.length == f).map
+      fun i => .update i p.2.length
+
+/-- The field-read role of `f`: field `g` of the unique struct of `sf` declaring `g` when `f`
+    is `"." ++ g`, and otherwise field `g` of a struct `S` of `sf` when `f` is
+    `S ++ "." ++ g`. -/
+def structFieldRole? (sf : StructFieldTys) (f : String) : Option StructHead :=
+  match sf.filter (fun p => p.2.any fun q => "." ++ q.1 == f) with
+  | [(_, fs)] => (fs.findIdx? fun q => "." ++ q.1 == f).map fun i => .field i fs.length
+  | _ =>
+    sf.findSome? fun p =>
+      (p.2.findIdx? fun q => p.1 ++ "." ++ q.1 == f).map fun i => .field i p.2.length
+
+/-- The struct role of the application head `f`, by equality with the names the layout `sf`
+    generates: a struct name `S` of `sf` constructs that struct; `structUpdateHead S i n`
+    updates field `i` when `S` has `n` fields and `i < n`; `"." ++ g` reads field `g` of the
+    unique struct declaring it, and `S ++ "." ++ g` reads field `g` of `S`. Every other head,
+    a non-canonical spelling of one of these names among them, has no struct role. -/
 def structHead? (sf : StructFieldTys) (f : String) : Option StructHead :=
   match sf.lookup f with
   | some fs => some (.ctor fs.length)
   | none =>
-    match parseStructUpdateHead f with
-    | some (s, i, n) =>
-      match sf.lookup s with
-      | some fs => if fs.length = n ∧ i < n then some (.update i n) else none
-      | none => none
-    | none =>
-      match f.splitOn "." with
-      | ["", g] => (resolveStructField sf.names g).map fun r => .field r.2.1 r.2.2
-      | [_, _] => (resolveStructField sf.names f).map fun r => .field r.2.1 r.2.2
-      | _ => none
+    match structUpdateRole? sf f with
+    | some h => some h
+    | none => structFieldRole? sf f
 
 /-- The struct heads over the builtin table `bi`, a struct read as the tuple of its fields:
     a construction of `n` fields builds the tuple of its `n` arguments; a field read projects
