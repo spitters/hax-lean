@@ -26,6 +26,8 @@ The lemmas of the canonical tagged heads `<method>#p<modulus>` in `HaxLean.Field
   encoding of `fieldCall`.
 * `FieldTag.fieldArmMont_lt`, `FieldTag.fieldArmWideMont_lt`: the values of the arms.
 * `FieldTag.mem_hash_of_fieldTagM?`: a Montgomery head contains `#`.
+* `FieldTag.toList_of_fieldTagM?`: a Montgomery head is the method name, `#p` and further
+  characters.
 * `FieldTag.widthArrayOps_of_fieldTagM?`: no array operation has a Montgomery head.
 * `hax64WordOps_of_fieldTagM?`, `hax64Builtins_of_fieldTagM?`: the `u64` table at a Montgomery
   head is `fieldCallMont`.
@@ -137,6 +139,31 @@ theorem mem_hash_of_fieldTagM? {f : String} {m : FieldMethod} {p k : Nat}
       cases hd
     rw [splitMontTag_eq _ hne]
     simp
+  · cases h
+
+/-- A Montgomery head of the method `m` is the name of `m`, `#p` and further characters. -/
+theorem toList_of_fieldTagM? {f : String} {m : FieldMethod} {p k : Nat}
+    (h : fieldTagM? f = some (m, p, k)) :
+    ∃ ds, f.toList = m.nameChars ++ '#' :: 'p' :: ds := by
+  unfold fieldTagM? fieldTagMChars? at h
+  split at h
+  · rename_i hd
+    obtain ⟨mp, hmp, he⟩ := Option.map_eq_some_iff.mp h
+    simp only [Prod.mk.injEq] at he
+    obtain ⟨hm, hp, -⟩ := he
+    have hne : (splitMontTag f.toList).2 ≠ [] := by
+      intro h0
+      rw [h0] at hd
+      cases hd
+    have ht : fieldTag? (String.ofList (splitMontTag f.toList).1) = some (m, p) := by
+      rw [← hm, ← hp]
+      simpa [fieldTag?, String.toList_ofList] using hmp
+    obtain ⟨ds, hds, -⟩ := toList_of_fieldTag? ht
+    rw [String.toList_ofList] at hds
+    refine ⟨ds ++ '#' :: 'r' :: (splitMontTag f.toList).2, ?_⟩
+    calc f.toList = (splitMontTag f.toList).1 ++ '#' :: 'r' :: (splitMontTag f.toList).2 :=
+          splitMontTag_eq _ hne
+      _ = _ := by rw [hds]; simp
   · cases h
 
 /-- No array operation of `widthArrayOps` has a Montgomery head. -/
