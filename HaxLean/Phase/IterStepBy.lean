@@ -619,12 +619,12 @@ theorem app2_err {f : String} {t1 t2 : ImpExpr} (h1 : boundOk t1 = true)
   rcases hb2 : boundVal env t2 with _ | w2
   · exact ⟨_, rfl⟩
   by_cases hc : (w1.isControlFlow || w2.isControlFlow) = true
-  · simp only [if_pos hc]
+  · simp only [ite_eq_left hc]
     exact ⟨_, rfl⟩
   · have hnn : numOf w1 = none ∨ numOf w2 = none := by
       rw [hb1, hb2] at hn
       cases h1' : numOf w1 <;> cases h2' : numOf w2 <;> simp_all
-    simp only [if_neg hc, hf w1 w2 hnn]
+    simp only [ite_eq_right hc, hf w1 w2 hnn]
     exact ⟨_, rfl⟩
 
 theorem forFold_hi_err {v : String} {hiE body : ImpExpr} {env : Env} {m : String}

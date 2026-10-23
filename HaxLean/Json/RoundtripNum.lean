@@ -47,7 +47,7 @@ theorem isDigit_bridge (c : Char) (h : c.isDigit = true) : isDigit c = true := b
 theorem dropDigits_all (l : List Char) (h : ∀ c ∈ l, isDigit c = true) : dropDigits l = [] := by
   induction l with
   | nil => rfl
-  | cons d rest ih => simp only [dropDigits, if_pos (h d (by simp))]; exact ih (fun c hc => h c (by simp [hc]))
+  | cons d rest ih => simp only [dropDigits, ite_eq_left (h d (by simp))]; exact ih (fun c hc => h c (by simp [hc]))
 
 theorem toDigits_all_digit (k : Nat) : ∀ c ∈ Nat.toDigits 10 k, isDigit c = true := fun c hc =>
   isDigit_bridge c (Nat.isDigit_of_mem_toDigits (by decide) (by decide) hc)
@@ -92,7 +92,7 @@ theorem validNumberLitL_digits (ds : List Char) (hne : ds ≠ [])
       have hdneg : d ≠ '-' := by rintro rfl; simp [isDigit] at hdd
       rw [validNumberLitL_cons_ne_minus d rest hdneg]
       have hvip : validIntPart (d :: rest) = some (dropDigits rest) := by
-        unfold validIntPart; simp only [if_pos hdd]
+        unfold validIntPart; simp only [ite_eq_left hdd]
       rw [hvip, hrest]; rfl
 
 theorem validNumberLitL_toDigits (k : Nat) : validNumberLitL (Nat.toDigits 10 k) = true := by
@@ -105,10 +105,10 @@ theorem validNumberLit_repr (m : Int) : validNumberLit (Int.repr m) = true := by
   unfold validNumberLit
   rw [Int.repr_eq_if]
   by_cases hm : 0 ≤ m
-  · rw [if_pos hm]
+  · rw [ite_eq_left hm]
     show validNumberLitL (Nat.repr m.toNat).toList = true
     rw [Nat.toList_repr]; exact validNumberLitL_toDigits _
-  · rw [if_neg hm]
+  · rw [ite_eq_right hm]
     show validNumberLitL ("-" ++ Nat.repr (-m).toNat).toList = true
     rw [String.toList_append]
     have : ("-" : String).toList = ['-'] := rfl
@@ -179,7 +179,7 @@ theorem takeNumber_all (cs : List Char) (hall : ∀ c ∈ cs, isNumChar c = true
     have hc : isNumChar c = true := hall c (by simp)
     have hrest : ∀ x ∈ rest, isNumChar x = true := fun x hx => hall x (by simp [hx])
     have hlen : rest.length < n := by simp only [List.length_cons] at hf; omega
-    simp only [takeNumber, if_pos hc]
+    simp only [takeNumber, ite_eq_left hc]
     rw [ih hrest n (c :: acc) hlen]
     simp [List.reverse_cons]
 
@@ -198,8 +198,8 @@ theorem tokenizeAux_num_head (n : Nat) (c : Char) (rest : List Char)
     · exact isNumChar_of_isDigit h
     · simp [isNumChar]
   have hkw : takeKeyword (c :: rest) = none := takeKeyword_eq_none_of_head c rest h8 h9 h10
-  rw [tokenizeAux, if_neg (by simp [hws]), if_neg h1, if_neg h2, if_neg h3, if_neg h4,
-    if_neg h5, if_neg h6, if_neg h7, hkw]
+  rw [tokenizeAux, ite_eq_right (by simp [hws]), ite_eq_right h1, ite_eq_right h2, ite_eq_right h3, ite_eq_right h4,
+    ite_eq_right h5, ite_eq_right h6, ite_eq_right h7, hkw]
   simp only [hnum, if_true]
 
 /-- A number literal `c :: cs` (all `isNumChar`, valid, digit/`-` head) lexes to a
@@ -227,11 +227,11 @@ theorem tokenizeAux_numberLit (c : Char) (cs : List Char)
 theorem repr_toList_numChars (i : Int) : ∀ x ∈ (Int.repr i).toList, isNumChar x = true := by
   rw [Int.repr_eq_if]
   by_cases hm : 0 ≤ i
-  · rw [if_pos hm]
+  · rw [ite_eq_left hm]
     show ∀ x ∈ (Nat.repr i.toNat).toList, isNumChar x = true
     rw [Nat.toList_repr]
     exact fun x hx => isNumChar_of_isDigit (toDigits_all_digit _ x hx)
-  · rw [if_neg hm]
+  · rw [ite_eq_right hm]
     show ∀ x ∈ ("-" ++ Nat.repr (-i).toNat).toList, isNumChar x = true
     rw [String.toList_append]
     intro x hx
@@ -248,14 +248,14 @@ theorem repr_toList_cons (i : Int) :
     ∃ c cs, (Int.repr i).toList = c :: cs ∧ (isDigit c = true ∨ c = '-') := by
   rw [Int.repr_eq_if]
   by_cases hm : 0 ≤ i
-  · rw [if_pos hm]
+  · rw [ite_eq_left hm]
     show ∃ c cs, (Nat.repr i.toNat).toList = c :: cs ∧ _
     rw [Nat.toList_repr]
     cases hcd : Nat.toDigits 10 i.toNat with
     | nil => exact absurd hcd Nat.toDigits_ne_nil
     | cons d rest =>
       exact ⟨d, rest, rfl, Or.inl (toDigits_all_digit _ d (by rw [hcd]; simp))⟩
-  · rw [if_neg hm]
+  · rw [ite_eq_right hm]
     show ∃ c cs, ("-" ++ Nat.repr (-i).toNat).toList = c :: cs ∧ _
     rw [String.toList_append]
     have h : ("-" : String).toList = ['-'] := rfl

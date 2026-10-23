@@ -477,7 +477,7 @@ theorem denote'_letChain (bi : Builtins) (fuel : Nat) (es : List ImpExpr) (ps : 
     have hpl := flatBinders_length ps xs hx
     have hm : matchPat (.tuplePat ps) (.tuple vals) s = some (applyExts s (binds xs vals)) := by
       simp only [matchPat]
-      rw [if_neg (by simp [← hpl, hl, hvl])]
+      rw [ite_eq_right (by simp [← hpl, hl, hvl])]
       exact matchPatList_flat ps xs vals s hx (by rw [hl, hvl])
     rw [hm] at hr
     refine ⟨s₂, ?_, rfl⟩

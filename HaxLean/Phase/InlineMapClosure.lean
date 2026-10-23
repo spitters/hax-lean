@@ -200,8 +200,8 @@ theorem take_append_drop_set {α : Type} (ws vs : List α) (j : Nat) (hl : ws.le
     simp only [List.getElem_set, List.getElem_append, List.getElem_take, List.getElem_drop,
       List.length_take] at *
     by_cases hk : j = k
-    · subst hk; simp only [if_true]; rw [dif_pos (by omega)]
-    · rw [if_neg hk]
+    · subst hk; simp only [if_true]; rw [dite_eq_left (by omega)]
+    · rw [ite_eq_right hk]
       split <;> split <;> first | rfl | omega | (congr 1; omega)
 
 /-- The loop from trip `j` binds `y` to `ws`, and changes no variable other than `y`, the

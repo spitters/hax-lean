@@ -232,7 +232,7 @@ theorem limbsDec_limbsOf : ∀ (n a : Nat), limbsDec (limbsOf n a) = some (a % 2
       have hl : ((a % 2 ^ 64 : Nat) : Int) < 2 ^ 64 := by
         exact_mod_cast Nat.mod_lt _ (by decide)
       simp only [limbsOf, limbsDec, limbsDec_limbsOf n, Option.map_some, Int.toNat_natCast,
-        if_pos (And.intro (Int.natCast_nonneg _) hl)]
+        ite_eq_left (And.intro (Int.natCast_nonneg _) hl)]
       rw [Nat.mul_succ, Nat.add_comm (64 * n) 64, Nat.pow_add, Nat.mod_mul]
 
 /-- **The arm of the head of `m` at a modulus `p ≥ 2^64`** on the numbers `a` and `b`: defined

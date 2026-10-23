@@ -879,7 +879,7 @@ theorem denoteWhile'_succ_run (bi : Builtins) (n : Nat) (cond body : ImpExpr) (e
       | (other, env') => (other, env') := by
   have hfuel : ¬(n + 1 = 0) := by omega
   conv => lhs; unfold denoteWhile'
-  rw [if_neg hfuel]
+  rw [ite_eq_right hfuel]
   dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
   simp only [show n + 1 - 1 = n from rfl]
   generalize denote' bi (n + 1) cond env = p

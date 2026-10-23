@@ -244,14 +244,14 @@ theorem hax64Builtins_shl_nat {a b : Nat} (ha : a < 2 ^ 64) (hb : b < 64) :
     hax64Builtins "Shl#64" [.int a, .int b] = some (.int ((a <<< b) % 2 ^ 64 : Nat)) := by
   unfold hax64Builtins
   rw [hax64WordOps_shl, u64BinOp_natCast ha (Nat.lt_trans hb (by decide)), Nat.mod_eq_of_lt ha,
-    if_pos hb]
+    ite_eq_left hb]
   rfl
 
 theorem hax64Builtins_shr_nat {a b : Nat} (ha : a < 2 ^ 64) (hb : b < 64) :
     hax64Builtins "Shr#64" [.int a, .int b] = some (.int (a >>> b : Nat)) := by
   unfold hax64Builtins
   rw [hax64WordOps_shr, u64BinOp_natCast ha (Nat.lt_trans hb (by decide)), Nat.mod_eq_of_lt ha,
-    if_pos hb]
+    ite_eq_left hb]
   rfl
 
 /-! ## Evaluation of the pieces -/
@@ -337,7 +337,7 @@ theorem denote'_packE {p : String} {bs : List Nat} (hp : env p = some (wordsVal 
     refine denote'_app_three (ih (by omega)) rfl (denote'_litE j) rfl
       (denote'_wordE hbi hp hb (by omega) (by omega)) rfl ?_
     rw [hbi "array_update" (by simp [wrapperHeads]), wordsVal, wordsVal,
-      hax64Builtins_arrayUpdate_nat, List.length_map, fill_length _ (by omega), if_pos (by omega : j < 4),
+      hax64Builtins_arrayUpdate_nat, List.length_map, fill_length _ (by omega), ite_eq_left (by omega : j < 4),
       ← List.map_set, fill_set (fun i => packedWord bs (8 * i) 8) hj]
 
 theorem denote'_byteOfWordE {r : String} {ws : List Nat} (hr : env r = some (wordsVal ws))
@@ -371,7 +371,7 @@ theorem denote'_unpackE {r : String} {ws : List Nat} (hr : env r = some (wordsVa
     refine denote'_app_three (ih (by omega)) rfl (denote'_litE k) rfl
       (denote'_byteOfWordE hbi hr hw hl (by omega)) rfl ?_
     rw [hbi "array_update" (by simp [wrapperHeads]), wordsVal, wordsVal,
-      hax64Builtins_arrayUpdate_nat, List.length_map, fill_length _ (by omega), if_pos (by omega : k < 32),
+      hax64Builtins_arrayUpdate_nat, List.length_map, fill_length _ (by omega), ite_eq_left (by omega : k < 32),
       ← List.map_set, fill_set (wordByteLE ws) hk]
 
 theorem denote'_argE {q : String × ArgConv} {v : Value} (hq : env q.1 = some v)

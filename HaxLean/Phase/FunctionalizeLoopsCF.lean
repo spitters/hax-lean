@@ -524,12 +524,12 @@ theorem denoteForLoop_combined (bi : Builtins) (hbi : Builtins.DeepNoControlFlow
     intro var_name lo_val hi_val env henv
     unfold denoteForLoop denoteForLoop'
     by_cases hge : lo_val ≥ hi_val
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
       exact ⟨henv, fun v h => by
         simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
         fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       have hint : (Value.int lo_val).deepNoControlFlow = true := rfl
@@ -590,7 +590,7 @@ theorem denoteWhile_combined_gen (nested : Bool)
     intro env henv
     unfold denoteWhile denoteWhile'
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel]
+    simp only [ite_eq_right hfuel]
     simp only [bind, StateT.bind]
     obtain ⟨henvc, hncc, hbrkc, hsimc⟩ := hcond (n + 1) env henv
     generalize hpc : denote bi (n + 1) cond env = pc at henvc hncc hbrkc hsimc ⊢
@@ -674,8 +674,8 @@ theorem denoteForLoop_never_broke (bi : Builtins) (fuel : Nat)
   | succ n ih =>
     unfold denoteForLoop
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize denote bi (n + 1) body (Env.extend env var (.int lo)) = pb
@@ -698,8 +698,8 @@ theorem denoteForLoop_never_continued (bi : Builtins) (fuel : Nat)
   | succ n ih =>
     unfold denoteForLoop
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize denote bi (n + 1) body (Env.extend env var (.int lo)) = pb
@@ -768,12 +768,12 @@ theorem denoteForLoop_combined_return (bi : Builtins) (hbi : Builtins.DeepNoCont
     intro var_name lo_val hi_val env henv
     unfold denoteForLoop denoteForLoop'Return
     by_cases hge : lo_val ≥ hi_val
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
       exact ⟨henv, fun v h => by
         simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
         fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       have hint : (Value.int lo_val).deepNoControlFlow = true := rfl
@@ -845,12 +845,12 @@ theorem denoteForLoopRev_combined (bi : Builtins) (hbi : Builtins.DeepNoControlF
     intro var_name lo_val hi_val env henv
     unfold denoteForLoopRev denoteForLoopRev'
     by_cases hge : lo_val ≥ hi_val
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
       exact ⟨henv, fun v h => by
         simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
         fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       have hint : (Value.int (hi_val - 1)).deepNoControlFlow = true := rfl
@@ -898,8 +898,8 @@ theorem denoteForLoopRev_never_broke (bi : Builtins) (fuel : Nat)
   | succ n ih =>
     unfold denoteForLoopRev
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize denote bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
@@ -922,8 +922,8 @@ theorem denoteForLoopRev_never_continued (bi : Builtins) (fuel : Nat)
   | succ n ih =>
     unfold denoteForLoopRev
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize denote bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
@@ -991,12 +991,12 @@ theorem denoteForLoopRev_combined_return (bi : Builtins)
     intro var_name lo_val hi_val env henv
     unfold denoteForLoopRev denoteForLoopRev'Return
     by_cases hge : lo_val ≥ hi_val
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
       exact ⟨henv, fun v h => by
         simp only [pure, Pure.pure, StateT.pure, Outcome.val.injEq] at h; subst h; rfl,
         fun v h => by simp [pure, Pure.pure, StateT.pure] at h, rfl⟩
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       have hint : (Value.int (hi_val - 1)).deepNoControlFlow = true := rfl
@@ -1060,7 +1060,7 @@ theorem denoteWhile_combined_return (nested : Bool)
     intro env henv
     unfold denoteWhile denoteWhile'Return
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel]
+    simp only [ite_eq_right hfuel]
     simp only [bind, StateT.bind]
     obtain ⟨henvc, hncc, hbrkc, hsimc⟩ := hcond (n + 1) env henv
     generalize hpc : denote bi (n + 1) cond env = pc at henvc hncc hbrkc hsimc ⊢

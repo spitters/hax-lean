@@ -34,4 +34,4 @@ lean_exe «certified-checks» where
 -- Output: .lake/build/doc/ (open index.html). Fast — no mathlib dependency.
 meta if get_config? env = some "doc" then
 require «doc-gen4» from git
-  "https://github.com/leanprover/doc-gen4" @ "v4.32.0"
+  "https://github.com/leanprover/doc-gen4" @ "v4.35.0"

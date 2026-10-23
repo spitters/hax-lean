@@ -1134,13 +1134,13 @@ theorem u64BinOp_natCast {n m : Nat} (hn : n < 2 ^ 64) (hm : m < 2 ^ 64)
     u64BinOp n m g = (g n m).map fun r => Value.int r := by
   have hn' : (n : Int) < 2 ^ 64 := by exact_mod_cast hn
   have hm' : (m : Int) < 2 ^ 64 := by exact_mod_cast hm
-  rw [u64BinOp, if_pos ⟨by omega, hn', by omega, hm'⟩, Int.toNat_natCast, Int.toNat_natCast]
+  rw [u64BinOp, ite_eq_left ⟨by omega, hn', by omega, hm'⟩, Int.toNat_natCast, Int.toNat_natCast]
 
 /-- On a word below `2^64`, `u64UnOp` is the operation on its natural number. -/
 theorem u64UnOp_natCast {n : Nat} (hn : n < 2 ^ 64) (g : Nat → Nat) :
     u64UnOp n g = some (.int (g n : Nat)) := by
   have hn' : (n : Int) < 2 ^ 64 := by exact_mod_cast hn
-  rw [u64UnOp, if_pos ⟨by omega, hn'⟩, Int.toNat_natCast]
+  rw [u64UnOp, ite_eq_left ⟨by omega, hn'⟩, Int.toNat_natCast]
 
 /-- Where `hax64WordOps` is undefined, `hax64Builtins` is `widthArrayOps`. -/
 theorem hax64Builtins_of_none {f : String} {args : List Value}
@@ -1206,7 +1206,7 @@ theorem hax64Builtins_fieldArgsWide {f : String} {m : FieldTag.FieldMethod} {p :
   unfold hax64Builtins
   rw [hax64WordOps_of_fieldTag? h, FieldTag.fieldCall_fieldArgsWide hp ha hb]
   unfold FieldTag.fieldArmWide
-  rw [if_pos ⟨ha, fun _ => hb⟩]
+  rw [ite_eq_left ⟨ha, fun _ => hb⟩]
   rfl
 
 /-- A value of the `u64` table at a tagged head is the value `FieldTag.fieldCall` of the
@@ -1736,8 +1736,8 @@ theorem uintAddOp_natCast (w n m : Nat) :
     uintAddOp w n m = if n + m < 2 ^ w then some (.int ((n + m : Nat))) else none := by
   unfold uintAddOp
   by_cases h : n + m < 2 ^ w
-  · rw [if_pos h, if_pos ⟨by omega, by omega, by exact_mod_cast h⟩, Int.natCast_add]
-  · rw [if_neg h, if_neg fun hc => h (by exact_mod_cast hc.2.2)]
+  · rw [ite_eq_left h, ite_eq_left ⟨by omega, by omega, by exact_mod_cast h⟩, Int.natCast_add]
+  · rw [ite_eq_right h, ite_eq_right fun hc => h (by exact_mod_cast hc.2.2)]
 
 /-- `uintSubOp` on two natural numbers: their difference when the subtrahend does not
     exceed the minuend and the minuend is below `2^w`. -/
@@ -1745,8 +1745,8 @@ theorem uintSubOp_natCast (w n m : Nat) :
     uintSubOp w n m = if m ≤ n ∧ n < 2 ^ w then some (.int ((n - m : Nat))) else none := by
   unfold uintSubOp
   by_cases h : m ≤ n ∧ n < 2 ^ w
-  · rw [if_pos h, if_pos ⟨by omega, by omega, by exact_mod_cast h.2⟩, Int.natCast_sub h.1]
-  · rw [if_neg h, if_neg fun hc => h ⟨by omega, by exact_mod_cast hc.2.2⟩]
+  · rw [ite_eq_left h, ite_eq_left ⟨by omega, by omega, by exact_mod_cast h.2⟩, Int.natCast_sub h.1]
+  · rw [ite_eq_right h, ite_eq_right fun hc => h ⟨by omega, by exact_mod_cast hc.2.2⟩]
 
 /-- `uintMulOp` on two natural numbers below `2^w`: their product when it is below
     `2^w`. -/
@@ -1755,9 +1755,9 @@ theorem uintMulOp_natCast (w n m : Nat) :
       if n < 2 ^ w ∧ m < 2 ^ w ∧ n * m < 2 ^ w then some (.int ((n * m : Nat))) else none := by
   unfold uintMulOp
   by_cases h : n < 2 ^ w ∧ m < 2 ^ w ∧ n * m < 2 ^ w
-  · rw [if_pos h, if_pos ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.1,
+  · rw [ite_eq_left h, ite_eq_left ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.1,
       by exact_mod_cast h.2.2⟩, Int.natCast_mul]
-  · rw [if_neg h, if_neg fun hc => h ⟨by exact_mod_cast hc.2.1, by exact_mod_cast hc.2.2.2.1,
+  · rw [ite_eq_right h, ite_eq_right fun hc => h ⟨by exact_mod_cast hc.2.1, by exact_mod_cast hc.2.2.2.1,
       by exact_mod_cast hc.2.2.2.2⟩]
 
 /-- `uintDivOp` on two natural numbers below `2^w`: their quotient when the divisor is
@@ -1767,9 +1767,9 @@ theorem uintDivOp_natCast (w n m : Nat) :
       if n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w then some (.int ((n / m : Nat))) else none := by
   unfold uintDivOp
   by_cases h : n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w
-  · rw [if_pos h, if_pos ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.2⟩,
+  · rw [ite_eq_left h, ite_eq_left ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.2⟩,
       Int.natCast_ediv]
-  · rw [if_neg h, if_neg fun hc => h ⟨by exact_mod_cast hc.2.1, by omega,
+  · rw [ite_eq_right h, ite_eq_right fun hc => h ⟨by exact_mod_cast hc.2.1, by omega,
       by exact_mod_cast hc.2.2.2⟩]
 
 /-- `uintRemOp` on two natural numbers below `2^w`: the remainder when the divisor is
@@ -1779,9 +1779,9 @@ theorem uintRemOp_natCast (w n m : Nat) :
       if n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w then some (.int ((n % m : Nat))) else none := by
   unfold uintRemOp
   by_cases h : n < 2 ^ w ∧ 0 < m ∧ m < 2 ^ w
-  · rw [if_pos h, if_pos ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.2⟩,
+  · rw [ite_eq_left h, ite_eq_left ⟨by omega, by exact_mod_cast h.1, by omega, by exact_mod_cast h.2.2⟩,
       Int.natCast_emod]
-  · rw [if_neg h, if_neg fun hc => h ⟨by exact_mod_cast hc.2.1, by omega,
+  · rw [ite_eq_right h, ite_eq_right fun hc => h ⟨by exact_mod_cast hc.2.1, by omega,
       by exact_mod_cast hc.2.2.2⟩]
 
 /-- A value of `uintAddOp` is the sum of two natural numbers and is below `2^w`. -/
@@ -1791,14 +1791,14 @@ theorem uintAddOp_some {w : Nat} {a b : Int} {v : Value} (h : uintAddOp w a b = 
     unfold uintAddOp at h
     by_cases hc : 0 ≤ a ∧ 0 ≤ b ∧ a + b < 2 ^ w
     · exact ⟨hc.1, hc.2.1⟩
-    · rw [if_neg hc] at h; cases h
+    · rw [ite_eq_right hc] at h; cases h
   obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
   obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
   rw [uintAddOp_natCast] at h
   by_cases hs : x + y < 2 ^ w
-  · rw [if_pos hs] at h
+  · rw [ite_eq_left hs] at h
     exact ⟨x, y, rfl, rfl, hs, (Option.some.inj h).symm⟩
-  · rw [if_neg hs] at h; cases h
+  · rw [ite_eq_right hs] at h; cases h
 
 /-- A value of `uintSubOp` is the difference of two natural numbers, the subtrahend at
     most the minuend and the minuend below `2^w`. -/
@@ -1808,14 +1808,14 @@ theorem uintSubOp_some {w : Nat} {a b : Int} {v : Value} (h : uintSubOp w a b = 
     unfold uintSubOp at h
     by_cases hc : 0 ≤ b ∧ b ≤ a ∧ a < 2 ^ w
     · exact ⟨by omega, hc.1⟩
-    · rw [if_neg hc] at h; cases h
+    · rw [ite_eq_right hc] at h; cases h
   obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
   obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
   rw [uintSubOp_natCast] at h
   by_cases hs : y ≤ x ∧ x < 2 ^ w
-  · rw [if_pos hs] at h
+  · rw [ite_eq_left hs] at h
     exact ⟨x, y, rfl, rfl, hs.1, hs.2, (Option.some.inj h).symm⟩
-  · rw [if_neg hs] at h; cases h
+  · rw [ite_eq_right hs] at h; cases h
 
 /-- A value of `uintMulOp` is the product of two natural numbers below `2^w` and is
     below `2^w`. -/
@@ -1826,14 +1826,14 @@ theorem uintMulOp_some {w : Nat} {a b : Int} {v : Value} (h : uintMulOp w a b = 
     unfold uintMulOp at h
     by_cases hc : 0 ≤ a ∧ a < 2 ^ w ∧ 0 ≤ b ∧ b < 2 ^ w ∧ a * b < 2 ^ w
     · exact ⟨hc.1, hc.2.2.1⟩
-    · rw [if_neg hc] at h; cases h
+    · rw [ite_eq_right hc] at h; cases h
   obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
   obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
   rw [uintMulOp_natCast] at h
   by_cases hs : x < 2 ^ w ∧ y < 2 ^ w ∧ x * y < 2 ^ w
-  · rw [if_pos hs] at h
+  · rw [ite_eq_left hs] at h
     exact ⟨x, y, rfl, rfl, hs.1, hs.2.1, hs.2.2, (Option.some.inj h).symm⟩
-  · rw [if_neg hs] at h; cases h
+  · rw [ite_eq_right hs] at h; cases h
 
 /-- A value of `uintDivOp` is the quotient of two natural numbers below `2^w`, the
     divisor positive. -/
@@ -1844,14 +1844,14 @@ theorem uintDivOp_some {w : Nat} {a b : Int} {v : Value} (h : uintDivOp w a b = 
     unfold uintDivOp at h
     by_cases hc : 0 ≤ a ∧ a < 2 ^ w ∧ 0 < b ∧ b < 2 ^ w
     · exact ⟨hc.1, by omega⟩
-    · rw [if_neg hc] at h; cases h
+    · rw [ite_eq_right hc] at h; cases h
   obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
   obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
   rw [uintDivOp_natCast] at h
   by_cases hs : x < 2 ^ w ∧ 0 < y ∧ y < 2 ^ w
-  · rw [if_pos hs] at h
+  · rw [ite_eq_left hs] at h
     exact ⟨x, y, rfl, rfl, hs.1, hs.2.1, hs.2.2, (Option.some.inj h).symm⟩
-  · rw [if_neg hs] at h; cases h
+  · rw [ite_eq_right hs] at h; cases h
 
 /-- A value of `uintRemOp` is the remainder of two natural numbers below `2^w`, the
     divisor positive. -/
@@ -1862,14 +1862,14 @@ theorem uintRemOp_some {w : Nat} {a b : Int} {v : Value} (h : uintRemOp w a b = 
     unfold uintRemOp at h
     by_cases hc : 0 ≤ a ∧ a < 2 ^ w ∧ 0 < b ∧ b < 2 ^ w
     · exact ⟨hc.1, by omega⟩
-    · rw [if_neg hc] at h; cases h
+    · rw [ite_eq_right hc] at h; cases h
   obtain ⟨x, rfl⟩ := Int.eq_ofNat_of_zero_le hc.1
   obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le hc.2
   rw [uintRemOp_natCast] at h
   by_cases hs : x < 2 ^ w ∧ 0 < y ∧ y < 2 ^ w
-  · rw [if_pos hs] at h
+  · rw [ite_eq_left hs] at h
     exact ⟨x, y, rfl, rfl, hs.1, hs.2.1, hs.2.2, (Option.some.inj h).symm⟩
-  · rw [if_neg hs] at h; cases h
+  · rw [ite_eq_right hs] at h; cases h
 
 /-- A value of `uintAddOp` is a natural number below `2^w`. -/
 theorem uintAddOp_lt {w : Nat} {a b : Int} {v : Value} (h : uintAddOp w a b = some v) :
@@ -1909,9 +1909,9 @@ theorem uintAddOp_64 :
     obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le h.2.2.1
     rw [uintAddOp_natCast, u64BinOp_natCast (by omega) (by omega)]
     by_cases hs : x + y < 2 ^ 64
-    · rw [if_pos hs, if_pos hs]; rfl
-    · rw [if_neg hs, if_neg hs]; rfl
-  · rw [uintAddOp, u64BinOp, if_neg h, if_neg (by omega)]
+    · rw [ite_eq_left hs, ite_eq_left hs]; rfl
+    · rw [ite_eq_right hs, ite_eq_right hs]; rfl
+  · rw [uintAddOp, u64BinOp, ite_eq_right h, ite_eq_right (by omega)]
 
 /-- The checked subtraction at `64` bits is the `u64BinOp` of the arm `Sub`. -/
 theorem uintSubOp_64 :
@@ -1921,9 +1921,9 @@ theorem uintSubOp_64 :
     obtain ⟨y, rfl⟩ := Int.eq_ofNat_of_zero_le h.2.2.1
     rw [uintSubOp_natCast, u64BinOp_natCast (by omega) (by omega)]
     by_cases hs : y ≤ x
-    · rw [if_pos hs, if_pos ⟨hs, by omega⟩]; rfl
-    · rw [if_neg hs, if_neg fun hc => hs hc.1]; rfl
-  · rw [uintSubOp, u64BinOp, if_neg h, if_neg (by omega)]
+    · rw [ite_eq_left hs, ite_eq_left ⟨hs, by omega⟩]; rfl
+    · rw [ite_eq_right hs, ite_eq_right fun hc => hs hc.1]; rfl
+  · rw [uintSubOp, u64BinOp, ite_eq_right h, ite_eq_right (by omega)]
 
 /-- `Add#64` answers as `Add`. -/
 theorem hax64WordOps_add64_eq_Add :

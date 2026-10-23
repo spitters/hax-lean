@@ -718,8 +718,8 @@ theorem IScalar.neg_step {ty} (x: IScalar ty) :
   have := IScalar.hBounds x
   simp only [neg, tryMk, tryMkOpt, IScalar.min, check_bounds, decide_eq_true_eq]
   by_cases h : -2 ^ (ty.numBits - 1) ≤ -x.val ∧ -x.val < 2 ^ (ty.numBits - 1)
-  · rw [dif_pos h]; simp [partialSpec]
-  · rw [dif_neg h]; simp only [partialSpec, RustM.ofOption]; omega
+  · rw [dite_eq_left h]; simp [partialSpec]
+  · rw [dite_eq_right h]; simp only [partialSpec, RustM.ofOption]; omega
 
 /-- Heterogeneous negation: `-. a`. -/
 class HNeg (α : Type u) (β : outParam (Type v)) where

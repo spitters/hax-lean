@@ -127,7 +127,7 @@ theorem extend_other (env : Env) (name : String) (v : Value)
     (x : String) (h : x ≠ name) :
     (env.extend name v) x = env x := by
   simp only [extend, beq_iff_eq]
-  exact if_neg h
+  exact ite_eq_right h
 
 /-- Extending an environment at a name with the value it already holds is the
     identity. -/

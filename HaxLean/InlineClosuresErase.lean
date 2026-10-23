@@ -193,7 +193,7 @@ theorem tLowerClosureCalls_erase (lamNames : List String) (e : TExpr) :
   · -- case5
     rename_i L recv argsTup rest ty name _hvar hcond ih
     have hneg : ¬(rest = [] ∧ name ∈ L) := fun h => hcond h.1 h.2
-    rw [if_neg hneg, if_neg hneg]
+    rw [ite_eq_right hneg, ite_eq_right hneg]
     obtain ⟨ihr, iha, ihm⟩ := ih
     simp [TExpr.erase, TExpr.eraseList_eq, ihr, iha, ihm]
   · -- case11

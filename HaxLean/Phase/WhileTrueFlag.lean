@@ -343,7 +343,7 @@ theorem forFold_wtIH {i : String} {lo hi body : ImpExpr} (hig : i ≠ g)
 
 theorem denoteWhile'_zero (c body : ImpExpr) (env : Env) :
     (denoteWhile' bi 0 c body).run env = (.err "out of fuel", env) := by
-  rw [denoteWhile', if_pos rfl]; rfl
+  rw [denoteWhile', ite_eq_left rfl]; rfl
 
 /-- **A `whileFold` over the rewritten body.** For guards `c1` and `c2` that end in
     the same outcome and leave the environment unchanged on environments agreeing
@@ -437,7 +437,7 @@ theorem denote'_whileFoldReturn_eq (fuel : Nat) (c body : ImpExpr) :
 
 theorem denoteWhile'Return_zero (c body : ImpExpr) (env : Env) :
     (denoteWhile'Return bi 0 c body).run env = (.err "out of fuel", env) := by
-  rw [denoteWhile'Return, if_pos rfl]; rfl
+  rw [denoteWhile'Return, ite_eq_left rfl]; rfl
 
 /-- One trip of `denoteWhile'Return` at positive fuel. -/
 theorem denoteWhile'Return_succ (n : Nat) (cond body : ImpExpr) (env : Env) :
@@ -456,7 +456,7 @@ theorem denoteWhile'Return_succ (n : Nat) (cond body : ImpExpr) (env : Env) :
       | (other, env') => (other, env') := by
   have hfuel : ¬(n + 1 = 0) := by omega
   conv => lhs; unfold denoteWhile'Return
-  rw [if_neg hfuel]
+  rw [ite_eq_right hfuel]
   dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
   simp only [show n + 1 - 1 = n from rfl]
   generalize denote' bi (n + 1) cond env = p

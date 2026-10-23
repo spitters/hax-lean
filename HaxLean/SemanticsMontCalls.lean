@@ -246,7 +246,7 @@ theorem hax64Builtins_fieldArgsWideMont {f : String} {m : FieldTag.FieldMethod} 
   unfold hax64Builtins
   rw [hax64WordOps_of_fieldTagM? h, FieldTag.fieldCallMont_fieldArgsWide hodd hp k ha hb]
   unfold FieldTag.fieldArmWideMont
-  rw [if_pos ⟨ha, fun _ => hb⟩]
+  rw [ite_eq_left ⟨ha, fun _ => hb⟩]
   rfl
 
 /-- A value of the `u64` table at a Montgomery head is the value `FieldTag.fieldCallMont` of the

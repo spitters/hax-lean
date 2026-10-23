@@ -274,7 +274,7 @@ theorem while_var_false {g : String} {body : ImpExpr} {env : Env} (n : Nat)
   have hc : (denote' bi (n + 1) (.var g)).run env = (.val (.bool false), env) := by
     rw [var_run, h]
   unfold denoteWhile'
-  rw [if_neg (Nat.add_one_ne_zero n)]
+  rw [ite_eq_right (Nat.add_one_ne_zero n)]
   simp only [StateT.run, bind, StateT.bind] at hc ⊢
   rw [hc]; rfl
 
@@ -285,7 +285,7 @@ theorem while_var_true {g : String} {body : ImpExpr} {env e1 : Env} (n : Nat) {w
   have hc : (denote' bi (n + 1) (.var g)).run env = (.val (.bool true), env) := by
     rw [var_run, h]
   conv => lhs; unfold denoteWhile'
-  rw [if_neg (Nat.add_one_ne_zero n)]
+  rw [ite_eq_right (Nat.add_one_ne_zero n)]
   simp only [StateT.run, bind, StateT.bind] at hc hb ⊢
   rw [hc]
   dsimp only
@@ -575,7 +575,7 @@ theorem seq_rel {a b : ImpExpr} (iha : BodyIH N bi f1 f2 a) (ihb : BodyIH N bi f
       · have := r.noBrk h; simp [isBrk] at this
       · rfl
     have hgo2 : e2 N.go = some (.bool false) := r.goBrk rfl
-    rw [seq_run_brk hA1, seq_run_val hA2 rfl, if_pos hab, ite_run_var hgo2]
+    rw [seq_run_brk hA1, seq_run_val hA2 rfl, ite_eq_left hab, ite_run_var hgo2]
     simp only [Bool.false_eq_true, ↓reduceIte, unitVal_run]
     exact r.mono (fun h => by simp [hasBrk, hab] at h)
   · simp only at hm; subst hm

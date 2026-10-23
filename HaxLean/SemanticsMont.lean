@@ -185,8 +185,8 @@ def evalMontHead? (f : String) (args : List Value) : Option Value :=
 theorem fieldCallMont_mul {p k a b : Nat} (hp : p % 2 = 1) (hp64 : p < 2 ^ 64) (ha : a < p)
     (hb : b < p) :
     fieldCallMont .mul p k [.int a, .int b] = some (.int (a * b * montRInv p k % p : Nat)) := by
-  rw [fieldCallMont, if_pos ⟨hp, hp64, rfl, by omega, by omega⟩, Int.toNat_natCast,
-    Int.toNat_natCast, fieldArmMont, if_pos ⟨ha, fun _ => hb⟩]
+  rw [fieldCallMont, ite_eq_left ⟨hp, hp64, rfl, by omega, by omega⟩, Int.toNat_natCast,
+    Int.toNat_natCast, fieldArmMont, ite_eq_left ⟨ha, fun _ => hb⟩]
   rfl
 
 /-- Test: at the modulus `13` and the radix `2^4`, the Montgomery product of `5` and `6` is

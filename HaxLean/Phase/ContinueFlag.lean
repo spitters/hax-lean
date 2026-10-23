@@ -146,7 +146,7 @@ theorem AgreeOff.extend_right {c : String} {e1 e2 : Env} (h : AgreeOff c e1 e2) 
     AgreeOff c e1 (e2.extend c v) := by
   intro x hx
   simp only [Env.extend]
-  rw [if_neg (by simpa using hx)]
+  rw [ite_eq_right (by simpa using hx)]
   exact h x hx
 
 theorem EnvPlain.extend {env : Env} (h : EnvPlain env) {n : String} {v : Value}
@@ -160,7 +160,7 @@ theorem EnvPlain.extend {env : Env} (h : EnvPlain env) {n : String} {v : Value}
 theorem extend_ne {env : Env} {n x : String} (v : Value) (h : x ≠ n) :
     (env.extend n v) x = env x := by
   simp only [Env.extend]
-  rw [if_neg (by simpa using h)]
+  rw [ite_eq_right (by simpa using h)]
 
 /-! ## One step of `denote'` -/
 
@@ -543,7 +543,7 @@ theorem seq_rel {a b : ImpExpr} (iha : BodyIH bi fuel c a) (ihb : BodyIH bi fuel
           · exact absurd (r6 h) (by simp [isCont])
           · rfl
         simp only [contNorm]
-        rw [← hRdef, if_pos hca]
+        rw [← hRdef, ite_eq_left hca]
         simp only [guardRest]
         rw [ifThenElse_run, var_run, r4]
         simp only [isCont]
@@ -594,11 +594,11 @@ variable (bi : Builtins)
 
 theorem forLoop_ge_run (fuel : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (env : Env)
     (h : hi ≤ lo) : (denoteForLoop' bi fuel i lo hi body).run env = (.val .unit, env) := by
-  rw [denoteForLoop', if_pos h]; rfl
+  rw [denoteForLoop', ite_eq_left h]; rfl
 
 theorem forLoop_zero_run (i : String) (lo hi : Int) (body : ImpExpr) (env : Env)
     (h : lo < hi) : (denoteForLoop' bi 0 i lo hi body).run env = (.err "out of fuel", env) := by
-  rw [denoteForLoop', if_neg (Int.not_le.mpr h), if_pos rfl]; rfl
+  rw [denoteForLoop', ite_eq_right (Int.not_le.mpr h), ite_eq_left rfl]; rfl
 
 theorem forLoop_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (env : Env)
     (h : lo < hi) :
@@ -608,7 +608,7 @@ theorem forLoop_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (
       | (.val (.controlFlow false _), e2) => (denoteForLoop' bi n i (lo + 1) hi body).run e2
       | (.val _, e2) => (denoteForLoop' bi n i (lo + 1) hi body).run e2
       | (o, e2) => (o, e2) := by
-  rw [denoteForLoop', if_neg (Int.not_le.mpr h)]
+  rw [denoteForLoop', ite_eq_right (Int.not_le.mpr h)]
   simp only [Nat.add_one_ne_zero, if_false, StateT.run, bind, StateT.bind, pure, modify,
     modifyGet, MonadStateOf.modifyGet, StateT.modifyGet, Nat.add_sub_cancel]
   rcases (denote' bi (n + 1) body) (env.extend i (.int lo)) with ⟨o2, e2⟩
@@ -619,12 +619,12 @@ theorem forLoop_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (
 
 theorem forLoopRet_ge_run (fuel : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (env : Env)
     (h : hi ≤ lo) : (denoteForLoop'Return bi fuel i lo hi body).run env = (.val .unit, env) := by
-  rw [denoteForLoop'Return, if_pos h]; rfl
+  rw [denoteForLoop'Return, ite_eq_left h]; rfl
 
 theorem forLoopRet_zero_run (i : String) (lo hi : Int) (body : ImpExpr) (env : Env)
     (h : lo < hi) :
     (denoteForLoop'Return bi 0 i lo hi body).run env = (.err "out of fuel", env) := by
-  rw [denoteForLoop'Return, if_neg (Int.not_le.mpr h), if_pos rfl]; rfl
+  rw [denoteForLoop'Return, ite_eq_right (Int.not_le.mpr h), ite_eq_left rfl]; rfl
 
 theorem forLoopRet_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (env : Env)
     (h : lo < hi) :
@@ -636,7 +636,7 @@ theorem forLoopRet_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr
           (denoteForLoop'Return bi n i (lo + 1) hi body).run e2
       | (.val _, e2) => (denoteForLoop'Return bi n i (lo + 1) hi body).run e2
       | (o, e2) => (o, e2) := by
-  rw [denoteForLoop'Return, if_neg (Int.not_le.mpr h)]
+  rw [denoteForLoop'Return, ite_eq_right (Int.not_le.mpr h)]
   simp only [Nat.add_one_ne_zero, if_false, StateT.run, bind, StateT.bind, pure, modify,
     modifyGet, MonadStateOf.modifyGet, StateT.modifyGet, Nat.add_sub_cancel]
   rcases (denote' bi (n + 1) body) (env.extend i (.int lo)) with ⟨o2, e2⟩

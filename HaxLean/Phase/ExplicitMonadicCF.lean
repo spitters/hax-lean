@@ -287,9 +287,9 @@ theorem forLoop_body_neutral (bi : Builtins) (fuel : Nat)
     intro lo' env hn
     unfold denoteForLoop'
     by_cases hge : lo' ≥ hi
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [wrapReturns_denote'_wrapContinue bi (n + 1) body
@@ -332,7 +332,7 @@ theorem whileLoop_body_neutral (bi : Builtins) (fuel : Nat)
     intro env hn
     unfold denoteWhile'
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel]
+    simp only [ite_eq_right hfuel]
     dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
       MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
     generalize denote' bi (n + 1) cond env = pc
@@ -390,9 +390,9 @@ theorem forLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
     intro lo' env hn
     unfold denoteForLoop'Return
     by_cases hge : lo' ≥ hi
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [wrapReturns_denote'_wrapContinue bi (n + 1) body
@@ -443,9 +443,9 @@ theorem forLoopRev_body_neutral (bi : Builtins) (fuel : Nat)
     intro hi' env hn
     unfold denoteForLoopRev'
     by_cases hge : lo ≥ hi'
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [wrapReturns_denote'_wrapContinue bi (n + 1) body
@@ -490,9 +490,9 @@ theorem forLoopRevReturn_body_neutral (bi : Builtins) (fuel : Nat)
     intro hi' env hn
     unfold denoteForLoopRev'Return
     by_cases hge : lo ≥ hi'
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [wrapReturns_denote'_wrapContinue bi (n + 1) body
@@ -538,7 +538,7 @@ theorem whileLoopReturn_body_neutral (bi : Builtins) (fuel : Nat)
     intro env hn
     unfold denoteWhile'Return
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel]
+    simp only [ite_eq_right hfuel]
     dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
       MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
     generalize denote' bi (n + 1) cond env = pc
@@ -601,9 +601,9 @@ theorem denoteForLoop'_body_congr (bi : Builtins)
     intro lo hi env
     unfold denoteForLoop'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [h (n + 1) (Env.extend env var (.int lo))]
@@ -637,7 +637,7 @@ theorem denoteWhile'_congr (bi : Builtins)
     intro env
     unfold denoteWhile'
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel]
+    simp only [ite_eq_right hfuel]
     dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
       MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
     rw [hc (n + 1) env]
@@ -686,9 +686,9 @@ theorem denoteForLoop'Return_body_congr (bi : Builtins)
     intro lo hi env
     unfold denoteForLoop'Return
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [h (n + 1) (Env.extend env var (.int lo))]
@@ -726,9 +726,9 @@ theorem denoteForLoopRev'_body_congr (bi : Builtins)
     intro lo hi env
     unfold denoteForLoopRev'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [h (n + 1) (Env.extend env var (.int (hi - 1)))]
@@ -763,9 +763,9 @@ theorem denoteForLoopRev'Return_body_congr (bi : Builtins)
     intro lo hi env
     unfold denoteForLoopRev'Return
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge]
+    · simp only [ite_eq_left hge]
     · have hfuel : ¬(n + 1 = 0) := by omega
-      simp only [if_neg hge, if_neg hfuel]
+      simp only [ite_eq_right hge, ite_eq_right hfuel]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [h (n + 1) (Env.extend env var (.int (hi - 1)))]
@@ -802,7 +802,7 @@ theorem denoteWhile'Return_congr (bi : Builtins)
     intro env
     unfold denoteWhile'Return
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel]
+    simp only [ite_eq_right hfuel]
     dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
       MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
     rw [hc (n + 1) env]

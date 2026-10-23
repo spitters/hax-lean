@@ -139,20 +139,20 @@ theorem denoteForLoop'_total {Q : Env → Prop} {bi : Builtins} {x : String}
   | zero =>
     intro lo hi fuel env ht _ _ _ hQ
     refine ⟨env, ?_, hQ⟩
-    rw [denoteForLoop', if_pos (by omega)]
+    rw [denoteForLoop', ite_eq_left (by omega)]
     rfl
   | succ t ih =>
     intro lo hi fuel env ht hf hlo hhi hQ
     by_cases hlh : lo ≥ hi
     · refine ⟨env, ?_, hQ⟩
-      rw [denoteForLoop', if_pos hlh]
+      rw [denoteForLoop', ite_eq_left hlh]
       rfl
     · obtain ⟨v, env1, hv, hcf, hQ1⟩ :=
         hb fuel (by omega) lo env hlo (by omega) hQ
       obtain ⟨env2, hrun, hQ2⟩ :=
         ih (lo + 1) hi (fuel - 1) env1 (by omega) (by omega) (by omega) hhi hQ1
       refine ⟨env2, ?_, hQ2⟩
-      rw [denoteForLoop', if_neg hlh, if_neg (by omega)]
+      rw [denoteForLoop', ite_eq_right hlh, ite_eq_right (by omega)]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet, MonadStateOf.modifyGet,
         StateT.modifyGet, pure, Pure.pure, StateT.pure, Id.run]
       rw [hv]

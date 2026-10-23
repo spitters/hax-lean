@@ -316,7 +316,7 @@ theorem fieldN_eq_fieldArm {m : FieldMethod} {p a b : Nat} (ha : a < p)
     fieldArm m p a b = some (.int (fieldN m p a b)) := by
   rw [fieldN_natCast]
   unfold fieldArm
-  rw [if_pos ⟨ha, hb⟩]
+  rw [ite_eq_left ⟨ha, hb⟩]
 
 /-- At a modulus below `2^64`, a tagged head on numbers below `p` is the integer runtime
     function of its method. -/
@@ -363,7 +363,7 @@ theorem fieldW_eq_fieldArmWide {m : FieldMethod} {p a b : Nat} (ha : a < p) (hb 
       some (.array ((fieldW m p (limbArr p a) (limbArr p b)).toList.map .int)) := by
   have hpow := le_pow_fieldLimbs p
   unfold fieldArmWide
-  rw [if_pos ⟨ha, fun _ => hb⟩, fieldW_eq]
+  rw [ite_eq_left ⟨ha, fun _ => hb⟩, fieldW_eq]
   simp only [limbArr, List.size_toArray, List.toList_toArray, length_fieldNatLimbs,
     fieldLimbsNat_fieldNatLimbs, Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le ha hpow),
     Nat.mod_eq_of_lt (Nat.lt_of_lt_of_le hb hpow), fieldN_natCast, Int.toNat_natCast,

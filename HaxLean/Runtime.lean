@@ -294,11 +294,11 @@ theorem whileFoldFuel_mono {α β : Type} {cond : α → Bool} {f : α → Contr
     obtain ⟨m, rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
     simp only [whileFoldFuel] at h ⊢
     split at h
-    · rw [if_pos ‹_›]
+    · rw [ite_eq_left ‹_›]
       split at h
       · exact h
       · exact ih h (by omega)
-    · rw [if_neg ‹_›]; exact h
+    · rw [ite_eq_right ‹_›]; exact h
 
 /-- Two bounded runs of the same while-fold that both stop agree. -/
 theorem whileFoldFuel_agree {α β : Type} {cond : α → Bool} {f : α → ControlFlow β α}
@@ -345,7 +345,7 @@ theorem whileFold_eq_of_fuel {α β : Type} {init : α} {cond : α → Bool}
     (h : whileFoldFuel cond f n init = some r) : whileFold init cond f = r := by
   have hs : WhileFoldStops init cond f := ⟨n, by simp [h]⟩
   unfold whileFold
-  rw [dif_pos hs]
+  rw [dite_eq_left hs]
   exact whileFoldFuel_agree (Option.eq_some_of_isSome (Classical.choose_spec hs)) h
 
 /-- `whileFold` on a loop that does not stop is `Continue init`. -/
@@ -353,7 +353,7 @@ theorem whileFold_of_not_stops {α β : Type} {init : α} {cond : α → Bool}
     {f : α → ControlFlow β α} (h : ¬ WhileFoldStops init cond f) :
     whileFold init cond f = .Continue init := by
   unfold whileFold
-  rw [dif_neg h]
+  rw [dite_eq_right h]
 
 /-- One-trip unfolding of a stopping `whileFold`. -/
 theorem whileFold_eq {α β : Type} {init : α} {cond : α → Bool}
@@ -372,11 +372,11 @@ theorem whileFold_eq {α β : Type} {init : α} {cond : α → Bool}
   | succ n =>
     simp only [whileFoldFuel] at hr
     split at hr
-    · rw [if_pos ‹_›]
+    · rw [ite_eq_left ‹_›]
       split at hr
       · exact (Option.some.inj hr).symm
       · exact (whileFold_eq_of_fuel hr).symm
-    · rw [if_neg ‹_›]; exact (Option.some.inj hr).symm
+    · rw [ite_eq_right ‹_›]; exact (Option.some.inj hr).symm
 
 /-- The run of a while-fold with early return from `acc`, bounded by `n`
     condition tests: `some r` when the loop stops within them with result `r`,
@@ -405,12 +405,12 @@ theorem whileFoldReturnFuel_mono {α β γ : Type} {cond : α → Bool}
     obtain ⟨m, rfl⟩ : ∃ m', m = m' + 1 := ⟨m - 1, by omega⟩
     simp only [whileFoldReturnFuel] at h ⊢
     split at h
-    · rw [if_pos ‹_›]
+    · rw [ite_eq_left ‹_›]
       split at h
       · exact h
       · exact h
       · exact ih h (by omega)
-    · rw [if_neg ‹_›]; exact h
+    · rw [ite_eq_right ‹_›]; exact h
 
 /-- Two bounded runs of the same while-fold with early return that both stop
     agree. -/
@@ -465,7 +465,7 @@ theorem whileFoldReturn_eq_of_fuel {α β γ : Type} {init : α} {cond : α → 
     whileFoldReturn init cond f = r := by
   have hs : WhileFoldReturnStops init cond f := ⟨n, by simp [h]⟩
   unfold whileFoldReturn
-  rw [dif_pos hs]
+  rw [dite_eq_left hs]
   exact whileFoldReturnFuel_agree (Option.eq_some_of_isSome (Classical.choose_spec hs)) h
 
 /-- `whileFoldReturn` on a loop that does not stop is `Continue (Continue init)`. -/
@@ -473,7 +473,7 @@ theorem whileFoldReturn_of_not_stops {α β γ : Type} {init : α} {cond : α �
     {f : α → ControlFlow (ControlFlow β γ) α} (h : ¬ WhileFoldReturnStops init cond f) :
     whileFoldReturn init cond f = .Continue (.Continue init) := by
   unfold whileFoldReturn
-  rw [dif_neg h]
+  rw [dite_eq_right h]
 
 /-- One-trip unfolding of a stopping `whileFoldReturn`. -/
 theorem whileFoldReturn_eq {α β γ : Type} {init : α} {cond : α → Bool}
@@ -493,12 +493,12 @@ theorem whileFoldReturn_eq {α β γ : Type} {init : α} {cond : α → Bool}
   | succ n =>
     simp only [whileFoldReturnFuel] at hr
     split at hr
-    · rw [if_pos ‹_›]
+    · rw [ite_eq_left ‹_›]
       split at hr
       · exact (Option.some.inj hr).symm
       · exact (Option.some.inj hr).symm
       · exact (whileFoldReturn_eq_of_fuel hr).symm
-    · rw [if_neg ‹_›]; exact (Option.some.inj hr).symm
+    · rw [ite_eq_right ‹_›]; exact (Option.some.inj hr).symm
 
 /-- Helper for code generation: wraps `ControlFlow.Break` with explicit type params. -/
 @[inline] def cfBreak {B C : Type} (v : B) : ControlFlow B C := ControlFlow.Break v
@@ -1171,7 +1171,7 @@ grind_pattern mod2w_lt_two_pow => mod2w w n
 
 /-- On a non-negative argument, `mod2w w` is reduction modulo `2 ^ w`. -/
 theorem mod2w_eq_emod {w : Nat} {n : Int} (h0 : 0 ≤ n) : mod2w w n = n % 2 ^ w := by
-  rw [mod2w_eq_ite, if_pos h0]
+  rw [mod2w_eq_ite, ite_eq_left h0]
 
 /-- `mod2w w` is the identity on `[0, 2 ^ w)`. -/
 theorem mod2w_of_lt {w : Nat} {n : Int} (h0 : 0 ≤ n) (h : n < 2 ^ w) :
@@ -1313,29 +1313,29 @@ theorem wrapping_sub_w_eq_emod {w : Nat} {a b : Int} (h : b ≤ a + 2 ^ w) :
 /-- `Hax.array_update` at an index `i` with `a.size ≤ i.toNat` returns the array. -/
 @[grind =] theorem array_update_of_size_le {α : Type} {a : Array α} {i : Int} (v : α)
     (h : a.size ≤ i.toNat) : array_update a i v = a := by
-  unfold array_update; rw [dif_neg (by omega)]
+  unfold array_update; rw [dite_eq_right (by omega)]
 
 /-- `Hax.index` at an in-bounds index is the entry at `i.toNat`. -/
 @[grind =] theorem index_eq_getElem {α : Type} [Inhabited α] {a : Array α} {i : Int}
     (h : i.toNat < a.size) : index a i = a[i.toNat] := by
-  unfold index; rw [dif_pos h]
+  unfold index; rw [dite_eq_left h]
 
 /-- `Hax.index` at an out-of-bounds index of a non-empty array is the first entry. -/
 @[grind =] theorem index_of_size_le {α : Type} [Inhabited α] {a : Array α} {i : Int}
     (h : a.size ≤ i.toNat) (h0 : 0 < a.size) : index a i = a[0] := by
-  unfold index; rw [dif_neg (by omega), dif_pos h0]
+  unfold index; rw [dite_eq_right (by omega), dite_eq_left h0]
 
 /-- `Hax.index` into an empty array is `default`. -/
 @[grind =] theorem index_of_size_eq_zero {α : Type} [Inhabited α] {a : Array α} (i : Int)
     (h : a.size = 0) : index a i = default := by
-  unfold index; rw [dif_neg (by omega), dif_neg (by omega)]
+  unfold index; rw [dite_eq_right (by omega), dite_eq_right (by omega)]
 
 /-- Reading back an in-bounds `Hax.array_update` at the same index gives the value
     written. -/
 @[grind =] theorem index_array_update_same {α : Type} [Inhabited α] {a : Array α}
     {i : Int} (v : α) (h : i.toNat < a.size) : index (array_update a i v) i = v := by
   unfold array_update
-  rw [dif_pos h, index_eq_getElem (by simpa using h)]
+  rw [dite_eq_left h, index_eq_getElem (by simpa using h)]
   simp
 
 /-- Reading an in-bounds index `j` of `Hax.array_update a i v` with

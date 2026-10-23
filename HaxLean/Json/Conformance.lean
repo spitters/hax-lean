@@ -136,11 +136,11 @@ theorem dropDigits_nil_all_digit (l : List Char) (h : dropDigits l = []) :
   | cons d rest ih =>
     simp only [dropDigits] at h
     by_cases hd : isDigit d = true
-    · rw [if_pos hd] at h
+    · rw [ite_eq_left hd] at h
       intro c hc; rcases List.mem_cons.1 hc with rfl | hc'
       · exact hd
       · exact ih h c hc'
-    · rw [if_neg hd] at h; simp at h
+    · rw [ite_eq_right hd] at h; simp at h
 
 theorem dropDigits1_nil_all_digit (l : List Char) (h : dropDigits1 l = some []) :
     ∀ c ∈ l, isDigit c = true := by
@@ -149,12 +149,12 @@ theorem dropDigits1_nil_all_digit (l : List Char) (h : dropDigits1 l = some []) 
   | cons d rest =>
     simp only [dropDigits1] at h
     by_cases hd : isDigit d = true
-    · rw [if_pos hd] at h
+    · rw [ite_eq_left hd] at h
       have hdrop : dropDigits rest = [] := by simpa using h
       intro c hc; rcases List.mem_cons.1 hc with rfl | hc'
       · exact hd
       · exact dropDigits_nil_all_digit rest hdrop c hc'
-    · rw [if_neg hd] at h; simp at h
+    · rw [ite_eq_right hd] at h; simp at h
 
 theorem dropDigits_split (l : List Char) :
     ∃ pre, l = pre ++ dropDigits l ∧ (∀ c ∈ pre, isDigit c = true) := by
@@ -163,13 +163,13 @@ theorem dropDigits_split (l : List Char) :
   | cons d rest ih =>
     simp only [dropDigits]
     by_cases hd : isDigit d = true
-    · rw [if_pos hd]
+    · rw [ite_eq_left hd]
       obtain ⟨pre, hpre, hall⟩ := ih
       refine ⟨d :: pre, by rw [List.cons_append, ← hpre], ?_⟩
       intro c hc; rcases List.mem_cons.1 hc with rfl | hc'
       · exact hd
       · exact hall c hc'
-    · rw [if_neg hd]; exact ⟨[], by simp, by simp⟩
+    · rw [ite_eq_right hd]; exact ⟨[], by simp, by simp⟩
 
 theorem dropDigits1_split (l tail : List Char) (h : dropDigits1 l = some tail) :
     ∃ pre, l = pre ++ tail ∧ (∀ c ∈ pre, isDigit c = true) := by
@@ -178,14 +178,14 @@ theorem dropDigits1_split (l tail : List Char) (h : dropDigits1 l = some tail) :
   | cons d rest =>
     simp only [dropDigits1] at h
     by_cases hd : isDigit d = true
-    · rw [if_pos hd] at h
+    · rw [ite_eq_left hd] at h
       have htail : tail = dropDigits rest := by simpa using h.symm
       obtain ⟨pre, hpre, hall⟩ := dropDigits_split rest
       refine ⟨d :: pre, by rw [htail, List.cons_append, ← hpre], ?_⟩
       intro c hc; rcases List.mem_cons.1 hc with rfl | hc'
       · exact hd
       · exact hall c hc'
-    · rw [if_neg hd] at h; simp at h
+    · rw [ite_eq_right hd] at h; simp at h
 
 theorem allNumChar_cons (d : Char) (rest : List Char)
     (hd : isNumChar d = true) (hrest : ∀ c ∈ rest, isNumChar c = true) :
@@ -281,12 +281,12 @@ theorem validIntPart_split (cs tail : List Char) (h : validIntPart cs = some tai
         unfold validIntPart; simp only [hd0]
       rw [hstep] at h
       by_cases hd : isDigit d = true
-      · rw [if_pos hd] at h
+      · rw [ite_eq_left hd] at h
         have htail : tail = dropDigits rest := by simpa using h.symm
         obtain ⟨pre, hpre, hdig⟩ := dropDigits_split rest
         refine ⟨d :: pre, by rw [htail, List.cons_append, ← hpre], ?_⟩
         exact allNumChar_cons _ _ (isNumChar_of_isDigit d hd) (allDigit_imp_allNumChar pre hdig)
-      · rw [if_neg hd] at h; simp at h
+      · rw [ite_eq_right hd] at h; simp at h
 
 /-- Every RFC-valid JSON number literal consists solely of number-characters. -/
 theorem validNumberLitL_all_numChar (cs : List Char) (h : validNumberLitL cs = true) :

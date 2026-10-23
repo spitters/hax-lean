@@ -242,8 +242,8 @@ theorem denoteForLoop'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoop'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int lo)) = pb
@@ -278,8 +278,8 @@ theorem denoteForLoopRev'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoopRev'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
@@ -370,8 +370,8 @@ theorem denoteForLoopOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoopOrig'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int lo)) = pb
@@ -400,8 +400,8 @@ theorem denoteForLoopRevOrig'_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoopRevOrig'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
@@ -476,8 +476,8 @@ theorem denoteForLoop'Return_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoop'Return
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int lo)) = pb
@@ -588,8 +588,8 @@ theorem denoteForLoopRev'Return_earlyRet_not_cf (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoopRev'Return
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
@@ -1004,8 +1004,8 @@ theorem denoteForLoop'_no_earlyRet (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoop'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int lo)) = pb
@@ -1043,8 +1043,8 @@ theorem denoteForLoopRev'_no_earlyRet (bi : Builtins) (body : ImpExpr)
     intro env v
     unfold denoteForLoopRev'
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure]; intro h; exact Outcome.noConfusion h
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       generalize heqb : denote' bi (n + 1) body (Env.extend env var (.int (hi - 1))) = pb
@@ -1088,8 +1088,8 @@ theorem denoteForLoopRev'Return_sim (bi : Builtins) (var : String) (body : ImpEx
     intro lo hi env
     unfold denoteForLoopRev'Return
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure, Outcome.encodeCF4]
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure, Outcome.encodeCF4]
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [ih_body (n + 1) (Env.extend env var (.int (hi - 1)))]
@@ -1140,7 +1140,7 @@ theorem denoteWhile'_sim (bi : Builtins) (c body : ImpExpr)
     intro env
     unfold denoteWhile'
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel, bind, StateT.bind]
+    simp only [ite_eq_right hfuel, bind, StateT.bind]
     rw [ih_c (n + 1) env]
     generalize denote' bi (n + 1) c env = pc
     obtain ⟨rc, envc⟩ := pc
@@ -1200,8 +1200,8 @@ theorem denoteForLoop'Return_sim (bi : Builtins) (var : String) (body : ImpExpr)
     intro lo hi env
     unfold denoteForLoop'Return
     by_cases hge : lo ≥ hi
-    · simp only [if_pos hge, pure, Pure.pure, StateT.pure, Outcome.encodeCF4]
-    · simp only [if_neg hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
+    · simp only [ite_eq_left hge, pure, Pure.pure, StateT.pure, Outcome.encodeCF4]
+    · simp only [ite_eq_right hge, show ¬(n + 1 = 0) from by omega, ↓reduceIte]
       dsimp only [bind, Bind.bind, StateT.bind, modify, modifyGet,
         MonadStateOf.modifyGet, StateT.modifyGet, pure, Pure.pure, Id.run]
       rw [ih_body (n + 1) (Env.extend env var (.int lo))]
@@ -1255,7 +1255,7 @@ theorem denoteWhile'Return_sim (bi : Builtins) (c body : ImpExpr)
     intro env
     unfold denoteWhile'Return
     have hfuel : ¬(n + 1 = 0) := by omega
-    simp only [if_neg hfuel, bind, StateT.bind]
+    simp only [ite_eq_right hfuel, bind, StateT.bind]
     rw [ih_c (n + 1) env]
     generalize denote' bi (n + 1) c env = pc
     obtain ⟨rc, envc⟩ := pc

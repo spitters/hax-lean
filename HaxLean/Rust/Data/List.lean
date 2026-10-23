@@ -82,7 +82,7 @@ theorem getElem?_slice (i j k : Nat) (ls : List α)
   (h : j ≤ ls.length ∧ i + k < j) :
   (ls.slice i j)[k]? = ls[i + k]? := by
   simp only [slice, getElem?_take, getElem?_drop]
-  rw [if_pos (by omega)]
+  rw [ite_eq_left (by omega)]
 
 @[simp, grind =]
 theorem getElem!_slice [Inhabited α] (i j k : Nat) (ls : List α)
@@ -159,7 +159,7 @@ theorem setSlice!_getElem?_middle {α}
   rw [getElem?_append_right (by simp only [length_take]; omega),
     getElem?_append_left (by simp only [length_take]; omega), getElem?_take]
   simp only [length_take]
-  rw [if_pos (by omega)]
+  rw [ite_eq_left (by omega)]
   congr 1
   omega
 
