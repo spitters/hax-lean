@@ -558,7 +558,7 @@ theorem anfStmt_isNFK (e : ImpExpr) : ∀ n il, anfSrc il e = true →
     obtain ⟨⟨hb, hv⟩, hs⟩ := h
     have hr := (anfRhs_nf v n hv).1
     unfold anfStmt
-    simp only [hb, if_true]
+    simp only [hb, ite_true]
     exact hr.1.isNFK (by simp [isNFK, hr.2, ihb _ _ hs])
   | app f args ih =>
     intro n il h
@@ -588,7 +588,7 @@ theorem anfStmt_isNFK (e : ImpExpr) : ∀ n il, anfSrc il e = true →
     intro n il h
     simp only [anfSrc, Bool.and_eq_true] at h
     have hr := (anfRhs_nf r n h.2).1
-    simp only [anfStmt, h.1, if_true]
+    simp only [anfStmt, h.1, ite_true]
     exact hr.1.isNFK (by simp [isNFK, nfAssignRhs, hr.2])
   | tuple es ih =>
     intro n il h
@@ -713,7 +713,7 @@ theorem splitWhileGuard_eq (body : ImpExpr) (gs : List (String × ImpExpr)) (g :
     body = bindChain gs (.ifThenElse (.var g) t (.seq (.cfBreak .unitVal) .unitVal)) := by
   induction body using splitWhileGuard.induct generalizing gs with
   | case1 x v rest hb ih =>
-    simp only [splitWhileGuard, hb, if_true, Option.map_eq_some_iff] at h
+    simp only [splitWhileGuard, hb, ite_true, Option.map_eq_some_iff] at h
     obtain ⟨⟨gs', g', t'⟩, hrest, heq⟩ := h
     cases heq
     simp only [bindChain]
@@ -961,7 +961,7 @@ theorem normWhileTrue_denoteValueCF (bi : Builtins) (body : ImpExpr)
       denoteValueCF bi fuel (.whileFold (.lit (.bool true)) body) env =
         denoteValueCF bi fuel (normWhileTrue (.lit (.bool true)) body) env := by
   intro fuel env
-  simp only [normWhileTrue, hs, hc, if_true]
+  simp only [normWhileTrue, hs, hc, ite_true]
   rw [splitWhileGuard_eq body gs g t hs]
   simp only [denoteValueCF, StateT.run]
   rw [denote'_whileFold, denote'_bindChain, denote'_whileFold]

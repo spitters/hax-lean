@@ -428,7 +428,7 @@ theorem parse_complete {toks : List JsonToken} {j : Lean.Json}
     (h : ValuePStrict toks j []) : parse toks = .ok j := by
   have hpv : parseValue (2 * toks.length + 1) toks = .ok (j, []) :=
     parseValue_complete h (by simp only [List.length_nil]; omega)
-  simp only [parse, hpv, bind, Except.bind, List.isEmpty_nil, if_true]
+  simp only [parse, hpv, bind, Except.bind, List.isEmpty_nil, ite_true]
 
 /-! ## Strict refines loose
 

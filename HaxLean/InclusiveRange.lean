@@ -146,7 +146,7 @@ theorem denoteForLoop_succ_eq_denoteForInclusive (bi : Builtins) (fuel : Nat)
     rw [denoteForLoop]
     by_cases h : hi < lo
     · simp [denoteForInclusive, h, show lo ≥ hi + 1 by omega]
-    · simp only [denoteForInclusive, h, show ¬ lo ≥ hi + 1 by omega, if_false,
+    · simp only [denoteForInclusive, h, show ¬ lo ≥ hi + 1 by omega, ite_false,
         Nat.add_one_ne_zero, Nat.add_sub_cancel]
       congr 1
       funext u

@@ -82,9 +82,9 @@ theorem inferExpr_sound (env : ModEnv) (Γ : Ctx) :
           obtain ⟨τr, hr, h⟩ := h
           by_cases hm : m = "cast"
           · subst hm
-            simp only [if_true, liftK_eq_ok] at h
+            simp only [ite_true, liftK_eq_ok] at h
             exact .cast (inferExpr_sound env Γ recv τr hr) h
-          · simp only [hm, if_false, bind_eq_ok, liftK_eq_ok] at h
+          · simp only [hm, ite_false, bind_eq_ok, liftK_eq_ok] at h
             obtain ⟨τs, hs, h⟩ := h
             exact .method hm (inferExpr_sound env Γ recv τr hr) (inferExprs_sound env Γ args τs hs) h
       | [], .name q f =>

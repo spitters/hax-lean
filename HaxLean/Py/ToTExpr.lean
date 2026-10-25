@@ -676,9 +676,9 @@ theorem trExpr_pyImage (env : ModEnv) (Γ : Ctx) :
           obtain ⟨_, _, _, _, r, hr, h⟩ := h
           have hr' := trExpr_pyImage env Γ recv _ _ hr
           by_cases hm : m = "cast"
-          · simp only [hm, if_true, pure_bind] at h
+          · simp only [hm, ite_true, pure_bind] at h
             exact methodNode_pyImage hr' (by simp) h
-          · simp only [hm, if_false, bind_eq_ok] at h
+          · simp only [hm, ite_false, bind_eq_ok] at h
             obtain ⟨as, has, h⟩ := h
             exact methodNode_pyImage hr' (trExprs_pyImage env Γ args _ as has) h
       | [], .name q f =>
@@ -813,9 +813,9 @@ theorem trStmt_pyImage (env : ModEnv) (Γ : Ctx) :
         simp only [List.mem_singleton] at hs
         subst hs
         cases r.2.2
-        · simp only [Step.term, TExpr.erase, Bool.false_eq_true, if_false]
+        · simp only [Step.term, TExpr.erase, Bool.false_eq_true, ite_false]
           exact .forLoop hlo' hhi' hb
-        · simp only [Step.term, TExpr.erase, if_true]
+        · simp only [Step.term, TExpr.erase, ite_true]
           exact .forLoopRev hlo' hhi' hb
       · exact absurd h errAt_ne_ok
   | .ifStmt p c body orelse, ss, h => by

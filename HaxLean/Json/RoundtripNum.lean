@@ -200,7 +200,7 @@ theorem tokenizeAux_num_head (n : Nat) (c : Char) (rest : List Char)
   have hkw : takeKeyword (c :: rest) = none := takeKeyword_eq_none_of_head c rest h8 h9 h10
   rw [tokenizeAux, ite_eq_right (by simp [hws]), ite_eq_right h1, ite_eq_right h2, ite_eq_right h3, ite_eq_right h4,
     ite_eq_right h5, ite_eq_right h6, ite_eq_right h7, hkw]
-  simp only [hnum, if_true]
+  simp only [hnum, ite_true]
 
 /-- A number literal `c :: cs` (all `isNumChar`, valid, digit/`-` head) lexes to a
 single `numT` token carrying the same characters. -/
@@ -220,7 +220,7 @@ theorem tokenizeAux_numberLit (c : Char) (cs : List Char)
   have hn1 : tokenizeAux n [] = .ok [] := by
     obtain ⟨m, rfl⟩ : ∃ m, n = m + 1 := ⟨n - 1, by simp only [List.length_cons] at hf; omega⟩
     rfl
-  simp only [htn, hvalid, if_true, hn1, Except.map]
+  simp only [htn, hvalid, ite_true, hn1, Except.map]
 
 /-! ## Shape of `Int.repr i` as a character list -/
 

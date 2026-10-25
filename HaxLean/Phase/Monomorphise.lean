@@ -224,8 +224,8 @@ theorem forLoop'_errEq {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoop'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; exact ErrEq.refl _
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; exact ErrEq.refl _
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       errEq_step
 
 theorem forLoopRev'_errEq {v : String} {b₁ b₂ : ImpExpr}
@@ -239,8 +239,8 @@ theorem forLoopRev'_errEq {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRev'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; exact ErrEq.refl _
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; exact ErrEq.refl _
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       errEq_step
 
 theorem forLoopOrig'_errEq {v : String} {b₁ b₂ : ImpExpr}
@@ -254,8 +254,8 @@ theorem forLoopOrig'_errEq {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopOrig'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; exact ErrEq.refl _
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; exact ErrEq.refl _
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       errEq_step
 
 theorem forLoopRevOrig'_errEq {v : String} {b₁ b₂ : ImpExpr}
@@ -270,8 +270,8 @@ theorem forLoopRevOrig'_errEq {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRevOrig'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; exact ErrEq.refl _
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; exact ErrEq.refl _
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       errEq_step
 
 theorem forLoop'Return_errEq {v : String} {b₁ b₂ : ImpExpr}
@@ -286,8 +286,8 @@ theorem forLoop'Return_errEq {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoop'Return
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; exact ErrEq.refl _
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; exact ErrEq.refl _
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       errEq_step
 
 theorem forLoopRev'Return_errEq {v : String} {b₁ b₂ : ImpExpr}
@@ -303,8 +303,8 @@ theorem forLoopRev'Return_errEq {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRev'Return
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; exact ErrEq.refl _
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; exact ErrEq.refl _
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       errEq_step
 
 theorem while'_errEq {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -313,10 +313,10 @@ theorem while'_errEq {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, ErrEq (denoteWhile' bi₁ fuel c₁ b₁) (denoteWhile' bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhile'; simp only [if_true]; exact ErrEq.refl _
+  | zero => unfold denoteWhile'; simp only [ite_true]; exact ErrEq.refl _
   | succ n ih =>
     unfold denoteWhile'
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     errEq_step
 
 theorem whileOrig'_errEq {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -325,10 +325,10 @@ theorem whileOrig'_errEq {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, ErrEq (denoteWhileOrig' bi₁ fuel c₁ b₁) (denoteWhileOrig' bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhileOrig'; simp only [if_true]; exact ErrEq.refl _
+  | zero => unfold denoteWhileOrig'; simp only [ite_true]; exact ErrEq.refl _
   | succ n ih =>
     unfold denoteWhileOrig'
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     errEq_step
 
 theorem while'Return_errEq {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -337,10 +337,10 @@ theorem while'Return_errEq {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, ErrEq (denoteWhile'Return bi₁ fuel c₁ b₁) (denoteWhile'Return bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhile'Return; simp only [if_true]; exact ErrEq.refl _
+  | zero => unfold denoteWhile'Return; simp only [ite_true]; exact ErrEq.refl _
   | succ n ih =>
     unfold denoteWhile'Return
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     errEq_step
 
 end Loops

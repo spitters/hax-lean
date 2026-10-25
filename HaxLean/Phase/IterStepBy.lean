@@ -985,7 +985,7 @@ theorem refTable_spec : Spec refTable {} where
       show (if (0 : Int) ≤ ((k : Nat) : Int) then
           (stepList ((List.range (b - a).toNat).map fun i : Nat => Value.int (a + i))
             s.toNat)[((k : Nat) : Int).toNat]? else none) = some (Value.int (a + k * s))
-      simp only [stepList, Int.natCast_nonneg, if_true, Int.toNat_natCast]
+      simp only [stepList, Int.natCast_nonneg, ite_true, Int.toNat_natCast]
       rw [List.getElem?_map, List.getElem?_range (by simpa [stepCount] using hk)]
       simp only [Option.map_some, List.getD_eq_getElem?_getD, List.getElem?_map,
         List.getElem?_range hks, Option.getD_some, Option.some.injEq, Value.int.injEq]

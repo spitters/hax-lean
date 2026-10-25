@@ -496,7 +496,7 @@ theorem tEncodeForFoldBody_erase (accT : TExpr) (e : TExpr) :
     simp only [tEncodeForFoldBody, TExpr.erase, encodeForFoldBody, TExpr.eraseArms_eq]
     by_cases h :
         keepsTailEffect (.match_ scrut.erase (arms.map (fun pe => (pe.1, pe.2.erase))))
-    · simp only [h, if_true, TExpr.erase, TExpr.eraseArms_eq]
+    · simp only [h, ite_true, TExpr.erase, TExpr.eraseArms_eq]
       congr 1
       clear h
       induction arms with
@@ -707,7 +707,7 @@ theorem denoteForLoop'_eq_forFold
       | Break w =>
         rw [hg] at ha'
         rw [Hax.forFold_eq, ite_eq_right hge, hg]
-        simp only [ControlFlow.isBreak, ControlFlow.merge, if_true]
+        simp only [ControlFlow.isBreak, ControlFlow.merge, ite_true]
         exact ⟨env', rfl, ha'⟩
       | Continue w =>
         rw [hg] at ha'

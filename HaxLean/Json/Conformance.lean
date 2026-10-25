@@ -113,7 +113,7 @@ theorem takeNumber_consumes (cs : List Char) (acc : List Char) (n : Nat)
       have hc : isNumChar c = true := hnc c (by simp)
       have hrest : ∀ x ∈ rest, isNumChar x = true := fun x hx => hnc x (by simp [hx])
       have hlen : rest.length ≤ m := by simp only [List.length_cons] at hfuel; omega
-      simp only [takeNumber, hc, if_true]
+      simp only [takeNumber, hc, ite_true]
       rw [ih (c :: acc) m hrest hlen]
       simp [List.reverse_cons]
 
@@ -354,7 +354,7 @@ theorem tokenize_number_singleton (cs : List Char)
   have hpos : 0 < 2 * (c :: rest).length := by simp [List.length_cons]
   unfold tokenize
   rw [String.toList_ofList]
-  simp only [tokenizeAux, hws, if_false, p1, p2, p3, p4, p5, p6, p7, hkw, hc, if_true,
+  simp only [tokenizeAux, hws, ite_false, p1, p2, p3, p4, p5, p6, p7, hkw, hc, ite_true,
     htn, hv, tokenizeAux_nil _ hpos]
   simp [Except.map, String.ofList]
 

@@ -1831,9 +1831,9 @@ theorem structTab_closureTable {sf : StructFieldTys} {S T : Builtins} (hST : Str
   by_cases hg : g = f
   · subst hg
     simp only [structBi, hf]
-    simp only [InlineLocalClosures.closureTable, if_true] at h ⊢
+    simp only [InlineLocalClosures.closureTable, ite_true] at h ⊢
     by_cases hl : vals.length = ps.length
-    · simp only [hl, if_true] at h ⊢
+    · simp only [hl, ite_true] at h ⊢
       rcases hd : (denote' S fuel body).run (bindAll ρ₁ ps vals) with ⟨o, s⟩
       rw [hd] at h
       cases o with
@@ -1995,7 +1995,7 @@ theorem denoteSpine_tStructToTuple_of_structTab (sf : StructFieldTys) (t : Strin
       simp only [tStructToTuple, tStructToTuple.goKind, TExpr.erase, hv, hv', denoteSpine]
       cases hg₁ : (closureOk n ps bT.erase (inlineSpine b.erase) ||
           blockOk n ps bT.erase (inlineSpine b.erase))
-      · simp only [Bool.false_eq_true, if_false]
+      · simp only [Bool.false_eq_true, ite_false]
         refine Refines.of_bad (fun s => ?_)
         obtain ⟨m, hm⟩ := InlineLocalClosures.denote'_letBind_lam_err S fuel n ps bT.erase
           b.erase s
@@ -2004,7 +2004,7 @@ theorem denoteSpine_tStructToTuple_of_structTab (sf : StructFieldTys) (t : Strin
       · simp only [hg₁, Bool.not_true, Bool.false_or, Bool.and_eq_true,
           Option.isNone_iff_eq_none] at hg
         obtain ⟨hg₂, hn⟩ := hg
-        simp only [hg₂, if_true]
+        simp only [hg₂, ite_true]
         intro s₁ s₂ hs hb
         simp only [stateM_bind_apply, stateM_get_apply] at hb ⊢
         exact ihb _ _ (structTab_closureTable hST hn fuel ps

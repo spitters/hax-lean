@@ -609,7 +609,7 @@ theorem forLoop_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr) (
       | (.val _, e2) => (denoteForLoop' bi n i (lo + 1) hi body).run e2
       | (o, e2) => (o, e2) := by
   rw [denoteForLoop', ite_eq_right (Int.not_le.mpr h)]
-  simp only [Nat.add_one_ne_zero, if_false, StateT.run, bind, StateT.bind, pure, modify,
+  simp only [Nat.add_one_ne_zero, ite_false, StateT.run, bind, StateT.bind, pure, modify,
     modifyGet, MonadStateOf.modifyGet, StateT.modifyGet, Nat.add_sub_cancel]
   rcases (denote' bi (n + 1) body) (env.extend i (.int lo)) with ⟨o2, e2⟩
   rcases o2 with v2 | _ | _ | _ | _ <;> try rfl
@@ -637,7 +637,7 @@ theorem forLoopRet_succ_run (n : Nat) (i : String) (lo hi : Int) (body : ImpExpr
       | (.val _, e2) => (denoteForLoop'Return bi n i (lo + 1) hi body).run e2
       | (o, e2) => (o, e2) := by
   rw [denoteForLoop'Return, ite_eq_right (Int.not_le.mpr h)]
-  simp only [Nat.add_one_ne_zero, if_false, StateT.run, bind, StateT.bind, pure, modify,
+  simp only [Nat.add_one_ne_zero, ite_false, StateT.run, bind, StateT.bind, pure, modify,
     modifyGet, MonadStateOf.modifyGet, StateT.modifyGet, Nat.add_sub_cancel]
   rcases (denote' bi (n + 1) body) (env.extend i (.int lo)) with ⟨o2, e2⟩
   rcases o2 with v2 | _ | _ | _ | _ <;> try rfl

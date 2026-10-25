@@ -592,8 +592,8 @@ theorem argFor_run (fuel fuel₀ : Nat) (σ ρ : Env) (x : String) :
     by_cases hxp : x = p
     · subst hxp
       have ha := h2 (a, v) (by simp)
-      simp only [if_true, Option.getD_some, ha, ContinueFlag.var_run, Env.extend_same]
-    · simp only [hxp, if_false]
+      simp only [ite_true, Option.getD_some, ha, ContinueFlag.var_run, Env.extend_same]
+    · simp only [hxp, ite_false]
       rw [argFor_run fuel fuel₀ σ ρ x ps as vs (fun av h => h2 av (by simp [h]))
         (by simpa using hl) (by simpa using hl') (fun h => hx (by simp [hxp, h]))]
       simp only [ContinueFlag.var_run, Env.extend_other _ _ _ _ hxp]
@@ -735,8 +735,8 @@ theorem forLoop'_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
   | succ n ih =>
     intro lo hi; unfold denoteForLoop'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; ref_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; ref_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       refine Ref.modify_extend hv _ (fun _ => ?_)
       refine Ref.bind (h _) (fun o ho => ?_) (fun a ha s => ?_)
       · split <;> first | exact Ref.pure _ | exact ih _ _ | (exfalso; simp_all [IsErr])
@@ -753,8 +753,8 @@ theorem forLoopRev'_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRev'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; ref_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; ref_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       ref_step
 
 theorem forLoopOrig'_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
@@ -768,8 +768,8 @@ theorem forLoopOrig'_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
   | succ n ih =>
     intro lo hi; unfold denoteForLoopOrig'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; ref_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; ref_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       ref_step
 
 theorem forLoopRevOrig'_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
@@ -784,8 +784,8 @@ theorem forLoopRevOrig'_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRevOrig'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; ref_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; ref_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       ref_step
 
 theorem forLoop'Return_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
@@ -800,8 +800,8 @@ theorem forLoop'Return_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
   | succ n ih =>
     intro lo hi; unfold denoteForLoop'Return
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; ref_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; ref_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       ref_step
 
 theorem forLoopRev'Return_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
@@ -816,8 +816,8 @@ theorem forLoopRev'Return_ref {v : String} {b₁ b₂ : ImpExpr} (hv : v ∉ K)
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRev'Return
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; ref_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; ref_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       ref_step
 
 theorem while'_ref {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -826,10 +826,10 @@ theorem while'_ref {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, RefO (Agree K ρ) (denoteWhile' bi₁ fuel c₁ b₁) (denoteWhile' bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhile'; simp only [if_true]; ref_step
+  | zero => unfold denoteWhile'; simp only [ite_true]; ref_step
   | succ n ih =>
     unfold denoteWhile'
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     ref_step
 
 theorem whileOrig'_ref {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -839,10 +839,10 @@ theorem whileOrig'_ref {c₁ c₂ b₁ b₂ : ImpExpr}
       (denoteWhileOrig' bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhileOrig'; simp only [if_true]; ref_step
+  | zero => unfold denoteWhileOrig'; simp only [ite_true]; ref_step
   | succ n ih =>
     unfold denoteWhileOrig'
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     ref_step
 
 theorem while'Return_ref {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -852,10 +852,10 @@ theorem while'Return_ref {c₁ c₂ b₁ b₂ : ImpExpr}
       (denoteWhile'Return bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhile'Return; simp only [if_true]; ref_step
+  | zero => unfold denoteWhile'Return; simp only [ite_true]; ref_step
   | succ n ih =>
     unfold denoteWhile'Return
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     ref_step
 
 theorem args_ref (g : ImpExpr → ImpExpr) (args : List ImpExpr)
@@ -929,7 +929,7 @@ theorem call_ref (hbody : isPure body = true) (args : List ImpExpr)
   · obtain ⟨-, hvlen, hz⟩ := pureArgs_vals _ fuel σ args vals σ hpure hpa
     have hvl : vals.length = ps.length := hvlen.trans hlen
     dsimp only at hsrc
-    simp only [closureTable, if_true, hvl] at hsrc
+    simp only [closureTable, ite_true, hvl] at hsrc
     have htgt := subst_run bi ps (args.map (inlineCalls f ps body)) fuel fuel₀ σ
       (bindAll ρ ps vals) body hbody (fun x _ => by
         refine argFor_run bi fuel fuel₀ σ ρ x ps _ vals ?_ (by simp [hlen]) hvl ?_
@@ -991,7 +991,7 @@ theorem call_arity_err (args : List ImpExpr) (hpure : ∀ a, a ∈ args → isPu
   · exact ⟨_, rfl⟩
   · obtain ⟨-, hvlen, -⟩ := pureArgs_vals _ fuel env args vals env hpure hpa
     have : vals.length ≠ ps.length := hvlen ▸ hlen
-    simp only [closureTable, if_true, this, if_false]
+    simp only [closureTable, ite_true, this, ite_false]
     exact ⟨_, rfl⟩
 
 /-- **Inlining the calls of a closure.** For a pure body, a continuation `e` whose calls
@@ -1013,14 +1013,14 @@ theorem denote'_inlineCalls (hbody : isPure body = true) (e : ImpExpr) :
     · subst hgf
       have hp : ∀ a, a ∈ args → isPure a = true := hc.1.resolve_left (by simp)
       by_cases hl : args.length = ps.length
-      · simp only [inlineCalls, hl, and_self, if_true, inlineCalls.mapExpr_eq]
+      · simp only [inlineCalls, hl, and_self, ite_true, inlineCalls.mapExpr_eq]
         exact call_ref bi fuel₀ g ps body ρ hbody args hp hl ih' fuel
       · exact Ref.of_bad (call_arity_err bi fuel₀ g ps body ρ args hp hl fuel)
-    · simp only [inlineCalls, hgf, false_and, if_false, inlineCalls.mapExpr_eq, denote']
+    · simp only [inlineCalls, hgf, false_and, ite_false, inlineCalls.mapExpr_eq, denote']
       unfold denoteApp'
       refine Ref.bind (badα := fun o => o = none) (args_ref _ args ih' fuel)
         (fun r hr => ?_) (fun r hr s => by subst hr; exact ⟨_, rfl⟩)
-      simp only [closureTable, hgf, if_false]
+      simp only [closureTable, hgf, ite_false]
       split <;> (try split) <;> first | exact Ref.pure _ | exact absurd rfl hr
   | tuple es ih =>
     intro hK hc fuel
@@ -1268,8 +1268,8 @@ theorem forLoop'_rel {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoop'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; rel_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; rel_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       rel_step
 
 theorem forLoopRev'_rel {v : String} {b₁ b₂ : ImpExpr}
@@ -1284,8 +1284,8 @@ theorem forLoopRev'_rel {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRev'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; rel_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; rel_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       rel_step
 
 theorem forLoopOrig'_rel {v : String} {b₁ b₂ : ImpExpr}
@@ -1300,8 +1300,8 @@ theorem forLoopOrig'_rel {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopOrig'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; rel_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; rel_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       rel_step
 
 theorem forLoopRevOrig'_rel {v : String} {b₁ b₂ : ImpExpr}
@@ -1317,8 +1317,8 @@ theorem forLoopRevOrig'_rel {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRevOrig'
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; rel_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; rel_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       rel_step
 
 theorem forLoop'Return_rel {v : String} {b₁ b₂ : ImpExpr}
@@ -1334,8 +1334,8 @@ theorem forLoop'Return_rel {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoop'Return
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; rel_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; rel_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       rel_step
 
 theorem forLoopRev'Return_rel {v : String} {b₁ b₂ : ImpExpr}
@@ -1351,8 +1351,8 @@ theorem forLoopRev'Return_rel {v : String} {b₁ b₂ : ImpExpr}
   | succ n ih =>
     intro lo hi; unfold denoteForLoopRev'Return
     by_cases hl : lo ≥ hi
-    · simp only [hl, if_true]; rel_step
-    · simp only [hl, if_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
+    · simp only [hl, ite_true]; rel_step
+    · simp only [hl, ite_false, Nat.add_one_ne_zero, Nat.add_sub_cancel]
       rel_step
 
 theorem while'_rel {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -1361,10 +1361,10 @@ theorem while'_rel {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, RefE R (denoteWhile' bi₁ fuel c₁ b₁) (denoteWhile' bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhile'; simp only [if_true]; rel_step
+  | zero => unfold denoteWhile'; simp only [ite_true]; rel_step
   | succ n ih =>
     unfold denoteWhile'
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     rel_step
 
 theorem whileOrig'_rel {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -1373,10 +1373,10 @@ theorem whileOrig'_rel {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, RefE R (denoteWhileOrig' bi₁ fuel c₁ b₁) (denoteWhileOrig' bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhileOrig'; simp only [if_true]; rel_step
+  | zero => unfold denoteWhileOrig'; simp only [ite_true]; rel_step
   | succ n ih =>
     unfold denoteWhileOrig'
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     rel_step
 
 theorem while'Return_rel {c₁ c₂ b₁ b₂ : ImpExpr}
@@ -1385,10 +1385,10 @@ theorem while'Return_rel {c₁ c₂ b₁ b₂ : ImpExpr}
     ∀ fuel, RefE R (denoteWhile'Return bi₁ fuel c₁ b₁) (denoteWhile'Return bi₂ fuel c₂ b₂) := by
   intro fuel
   induction fuel with
-  | zero => unfold denoteWhile'Return; simp only [if_true]; rel_step
+  | zero => unfold denoteWhile'Return; simp only [ite_true]; rel_step
   | succ n ih =>
     unfold denoteWhile'Return
-    simp only [Nat.add_one_ne_zero, if_false, Nat.add_sub_cancel]
+    simp only [Nat.add_one_ne_zero, ite_false, Nat.add_sub_cancel]
     rel_step
 
 theorem args_rel (g : ImpExpr → ImpExpr) (args : List ImpExpr) (fuel : Nat)
@@ -1965,7 +1965,7 @@ theorem argFor_none (x : String) :
   | _ :: _, [], _ => by simp only [argFor]
   | p :: ps, a :: as, hx => by
     have hxp : x ≠ p := fun h => hx (h ▸ List.mem_cons_self)
-    simp only [argFor, hxp, if_false]
+    simp only [argFor, hxp, ite_false]
     exact argFor_none x ps as (fun h => hx (List.mem_cons_of_mem p h))
 
 theorem argFor_mem (x : String) :
@@ -2017,19 +2017,19 @@ theorem bindLits_param (ρ : Env) :
       have ha := hat a List.mem_cons_self
       cases a with
       | var y =>
-        simp only [argRen, argFor, if_true, bindLits]
+        simp only [argRen, argFor, ite_true, bindLits]
         have hyps : y ∉ ps := fun h => hy y List.mem_cons_self (List.mem_cons_of_mem x h)
         rw [bindLits_other y ps as e hyps]
         exact hza
       | lit l =>
-        simp only [argRen, argFor, if_true, bindLits]
+        simp only [argRen, argFor, ite_true, bindLits]
         rw [bindLits_other x ps as _ hpn, Env.extend_same]
         simpa [atomVal] using hza
       | _ => simp [isAtom] at ha
     · have hx' : x ∈ ps := by simpa [hxp] using hx
       simp only [bindAll, Env.extend_other _ _ _ _ hxp]
       have hren : argRen (p :: ps) (a :: as) x = argRen ps as x := by
-        simp only [argRen, argFor, hxp, if_false]
+        simp only [argRen, argFor, hxp, ite_false]
       rw [hren]
       cases a
       case lit l =>
@@ -2121,7 +2121,7 @@ theorem inlineBlocks_free (f : String) (ps : List String) (body e : ImpExpr)
   | app g args ih =>
     simp only [frameOk, frameOk.okList_eq, List.all_eq_true, Bool.and_eq_true, bne_iff_ne,
       ne_eq] at h
-    simp only [inlineBlocks, h.1, false_and, if_false, inlineBlocks.mapExpr_eq,
+    simp only [inlineBlocks, h.1, false_and, ite_false, inlineBlocks.mapExpr_eq,
       ImpExpr.app.injEq, true_and]
     exact (List.map_congr_left fun a ha => ih a ha (h.2 a ha)).trans (by simp)
   | tuple es ih =>
@@ -2209,9 +2209,9 @@ theorem callBlock_rel (hW : ∀ p, p ∈ ps → W.contains p = true)
     cases a <;> simp_all [isAtom, isPure]
   by_cases hl : args.length = ps.length
   case neg =>
-    simp only [inlineBlocks, hl, and_false, if_false]
+    simp only [inlineBlocks, hl, and_false, ite_false]
     exact RefR.of_bad (call_arity_err bi fuel₀ f ps body ρ args hpure hl fuel₀)
-  simp only [inlineBlocks, hl, and_self, if_true, callBlock]
+  simp only [inlineBlocks, hl, and_self, ite_true, callBlock]
   intro e₁ e₂ hR o s₂ hsrc hnb
   rw [ContinueFlag.app_run] at hsrc
   have hpa := pureArgs_run (closureTable bi fuel₀ f ps body ρ) args
@@ -2224,7 +2224,7 @@ theorem callBlock_rel (hW : ∀ p, p ∈ ps → W.contains p = true)
   obtain ⟨-, hvlen, hz⟩ := pureArgs_vals _ fuel₀ e₂ args vals e₂ hpure hpa
   have hvl : vals.length = ps.length := hvlen.trans hl
   dsimp only at hsrc
-  simp only [closureTable, if_true, hvl] at hsrc
+  simp only [closureTable, ite_true, hvl] at hsrc
   have hy : ∀ y, ImpExpr.var y ∈ args → W.contains y = false := fun y hy' => by
     simpa [frameOk] using (hat _ hy').2
   have hzv : ∀ av, av ∈ args.zip vals → atomVal e₁ av.1 = some av.2 := by
@@ -2330,11 +2330,11 @@ theorem denote'_inlineBlocks (hW : ∀ p, p ∈ ps → W.contains p = true)
     simp only [contOk, hfr, Bool.false_or] at h
     by_cases hgf : g = f
     · subst hgf
-      simp only [if_true, List.all_eq_true, Bool.and_eq_true] at h
+      simp only [ite_true, List.all_eq_true, Bool.and_eq_true] at h
       exact callBlock_rel bi fuel₀ g ps body ρ hW hKW hnd hbody args h
-    · simp only [hgf, if_false, contOk.contOkList_eq, List.all_eq_true] at h
+    · simp only [hgf, ite_false, contOk.contOkList_eq, List.all_eq_true] at h
       have ih' := fun a ha => ih a ha (h a ha)
-      simp only [inlineBlocks, hgf, false_and, if_false, inlineBlocks.mapExpr_eq, denote']
+      simp only [inlineBlocks, hgf, false_and, ite_false, inlineBlocks.mapExpr_eq, denote']
       unfold denoteApp'
       refine RefR.bind (badα := fun o => o = none) (args_rel _ args fuel₀ ih')
         (fun r hr => ?_) (fun r hr s => by subst hr; exact ⟨_, rfl⟩)
@@ -2584,7 +2584,7 @@ theorem denote'_inlineSpine (e : ImpExpr) : ∀ (bi : Builtins) (fuel : Nat),
       simp only [inlineSpine, denoteSpine, spineW]
       cases hp : closureOk x ps body (inlineSpine cont)
       case true =>
-        simp only [if_true, Bool.true_or]
+        simp only [ite_true, Bool.true_or]
         intro env _ heq o s hr ho
         subst heq
         have hr' : (denoteSpine (closureTable bi fuel x ps body env) fuel cont).run env =
@@ -2595,9 +2595,9 @@ theorem denote'_inlineSpine (e : ImpExpr) : ∀ (bi : Builtins) (fuel : Nat),
           hp.1.2 fuel env (fun _ _ => rfl) o sm h1 ho).1, hQ⟩
       cases hb : blockOk x ps body (inlineSpine cont)
       case false =>
-        simp only [Bool.false_or, Bool.false_eq_true, if_false]
+        simp only [Bool.false_or, Bool.false_eq_true, ite_false]
         exact RefR.of_bad (denote'_letBind_lam_err bi fuel x ps body cont)
-      simp only [Bool.false_or, Bool.false_eq_true, if_false, if_true]
+      simp only [Bool.false_or, Bool.false_eq_true, ite_false, ite_true]
       intro env _ heq o s hr ho
       subst heq
       have hr' : (denoteSpine (closureTable bi fuel x ps body env) fuel cont).run env =

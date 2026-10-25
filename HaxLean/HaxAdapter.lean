@@ -1078,7 +1078,7 @@ theorem fieldTagRepr?_fieldTagHeadRepr {method : String} (hm : '#' ∉ method.to
       splitAtHash_append hm]
     simp only
     rw [splitAtHash_of_not_mem (not_hash_mem_toDigits p)]
-    simp only [decDigitsOk_toDigits, if_true, String.ofList_toList, Nat.ofDigitChars_ten_toDigits]
+    simp only [decDigitsOk_toDigits, ite_true, String.ofList_toList, Nat.ofDigitChars_ten_toDigits]
   | mont k =>
     simp only [fieldTagRepr?, fieldTagHeadRepr, fieldTagHeadMont, fieldTagHead,
       String.toList_append, hs]
@@ -1088,7 +1088,7 @@ theorem fieldTagRepr?_fieldTagHeadRepr {method : String} (hm : '#' ∉ method.to
       fieldTagReprChars?, splitAtHash_append hm]
     simp only
     rw [splitAtHash_append (not_hash_mem_toDigits p)]
-    simp only [decDigitsOk_toDigits, Bool.and_self, if_true, String.ofList_toList,
+    simp only [decDigitsOk_toDigits, Bool.and_self, ite_true, String.ofList_toList,
       Nat.ofDigitChars_ten_toDigits]
 
 /-- No method of `fieldTaggedMethods` has `#` in its name. -/
@@ -1198,7 +1198,7 @@ theorem natLimbs_of_lt {v : Nat} (hv : v < 2 ^ 64) (n : Nat) :
     | zero => rfl
     | succ k ih => simp [natLimbs, ih, List.replicate_succ]
   rw [natLimbs, Nat.mod_eq_of_lt hv, Nat.div_eq_of_lt hv, hz, List.range_succ_eq_map]
-  simp only [List.map_cons, if_true, List.map_map]
+  simp only [List.map_cons, ite_true, List.map_map]
   congr 1
   apply List.ext_getElem <;> simp
 
@@ -1296,7 +1296,7 @@ theorem fieldConstLit?_eq_some_iff {globalName : Json} {m : ImplSelfTypeMap}
         cases hf : m.fieldImpls with
         | nil => simp [hf] at he
         | cons _ _ => rfl
-      simp only [he, hne, guard, if_true, Option.bind_eq_bind, Option.bind_some,
+      simp only [he, hne, guard, ite_true, Option.bind_eq_bind, Option.bind_some,
         Option.some.injEq, Prod.mk.injEq, exists_and_left, pure]
       rw [fieldConstLitRepr_eq _ _ _ (by decide : (0 : Nat) < 2 ^ 64),
         fieldConstLitRepr_eq _ _ _ (by decide : (1 : Nat) < 2 ^ 64)]

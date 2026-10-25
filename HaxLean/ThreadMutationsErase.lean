@@ -643,7 +643,7 @@ def returnMutParams (names : List String) (hasRes : Bool) (body : ImpExpr) : Imp
       by_cases h : f = "index_mut"
       · subst h
         simp only [tMutArgSlice, mutArgSlice, TExpr.erase, TExpr.eraseList_eq,
-          List.map_cons, List.map_nil, beq_self_eq_true, if_true,
+          List.map_cons, List.map_nil, beq_self_eq_true, ite_true,
           ← tMutArgRoot_erase, ← tRangeBounds_erase]
         cases tMutArgRoot aE with
         | none => rfl

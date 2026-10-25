@@ -132,7 +132,7 @@ theorem mapVals_spec (bi : Builtins) (fuel : Nat) (ρ : Env) (p : String) (body 
     · rename_i w hw
       cases hc : w.isControlFlow
       · rw [hc] at h
-        simp only [Bool.false_eq_true, if_false] at h
+        simp only [Bool.false_eq_true, ite_false] at h
         cases hr : mapVals bi fuel ρ p body vs with
         | none => rw [hr] at h; cases h
         | some rs =>
@@ -200,7 +200,7 @@ theorem take_append_drop_set {α : Type} (ws vs : List α) (j : Nat) (hl : ws.le
     simp only [List.getElem_set, List.getElem_append, List.getElem_take, List.getElem_drop,
       List.length_take] at *
     by_cases hk : j = k
-    · subst hk; simp only [if_true]; rw [dite_eq_left (by omega)]
+    · subst hk; simp only [ite_true]; rw [dite_eq_left (by omega)]
     · rw [ite_eq_right hk]
       split <;> split <;> first | rfl | omega | (congr 1; omega)
 
@@ -242,11 +242,11 @@ theorem loop_run (hbi : ArrayOps bi) (y s i x p : String) (body : ImpExpr)
     have hjw : j < ws.length := by omega
     rw [forLoop_succ_run bi f' i j vs.length _ E (by omega)]
     have hs1 : (E.extend i (.int j)) s = some (.array vs) := by
-      simp only [Env.extend, beq_iff_eq, hsi, if_false]
+      simp only [Env.extend, beq_iff_eq, hsi, ite_false]
       exact (hE s hsy hsi hsx).trans hρs
     have hi1 : (E.extend i (.int j)) i = some (.int j) := Env.extend_same _ _ _
     have hy1 : (E.extend i (.int j)) y = some (.array (ws.take j ++ vs.drop j)) := by
-      simp only [Env.extend, beq_iff_eq, Ne.symm hiy, if_false]
+      simp only [Env.extend, beq_iff_eq, Ne.symm hiy, ite_false]
       exact hEy
     have hvar : ∀ z, z ∈ pureVars body →
         (denote' bi (f' + 1) ((argFor [p] [.var x] z).getD (.var z))).run
@@ -256,11 +256,11 @@ theorem loop_run (hbi : ArrayOps bi) (y s i x p : String) (body : ImpExpr)
       intro z hz
       by_cases hzp : z = p
       · subst hzp
-        simp only [argFor, if_true, Option.getD_some, var_run, Env.extend_same]
+        simp only [argFor, ite_true, Option.getD_some, var_run, Env.extend_same]
       · obtain ⟨h1, h2, h3⟩ := hread z hz hzp
-        simp only [argFor, hzp, if_false, Option.getD_none, var_run]
+        simp only [argFor, hzp, ite_false, Option.getD_none, var_run]
         have : ((E.extend i (.int j)).extend x vs[j]) z = (ρb.extend p vs[j]) z := by
-          simp only [Env.extend, beq_iff_eq, h3, h2, hzp, if_false]
+          simp only [Env.extend, beq_iff_eq, h3, h2, hzp, ite_false]
           exact (hE z h1 h2 h3).trans (hρb z hz hzp)
         rw [this]
         cases (ρb.extend p vs[j]) z <;> rfl
@@ -273,7 +273,7 @@ theorem loop_run (hbi : ArrayOps bi) (y s i x p : String) (body : ImpExpr)
     have hcast : (j : Int) + 1 = ((j + 1 : Nat) : Int) := by omega
     rw [hcast, take_append_drop_set ws vs j hlen hjw]
     refine ih (j + 1) f' _ (by omega) (by omega) (fun z hz1 hz2 hz3 => ?_) (Env.extend_same _ _ _)
-    simp only [Env.extend, beq_iff_eq, hz1, hz2, hz3, if_false]
+    simp only [Env.extend, beq_iff_eq, hz1, hz2, hz3, ite_false]
     exact hE z hz1 hz2 hz3
 
 /-- **The loop.** When the reference array is defined, the loop ends normally, in an
@@ -315,11 +315,11 @@ theorem mapStmt_run (hbi : ArrayOps bi) (y s i x n p : String) (body : ImpExpr)
   intro lv hlvn
   generalize hρ1 : ρ.extend n lv = ρ1
   have hρ1s : ρ1 s = some (.array vs) := by
-    rw [← hρ1]; simp only [Env.extend, beq_iff_eq, hsn, if_false]; exact hρs
+    rw [← hρ1]; simp only [Env.extend, beq_iff_eq, hsn, ite_false]; exact hρs
   have hρ1n : ρ1 n = some lv := by
     rw [← hρ1]; exact Env.extend_same _ _ _
   have hn0 : (ρ1.extend y (.array vs)) n = some lv := by
-    simp only [Env.extend, beq_iff_eq, hny, if_false, hρ1n]
+    simp only [Env.extend, beq_iff_eq, hny, ite_false, hρ1n]
   have hff : ∀ (B : ImpExpr), (denote' bi fuel (.forFold i (.lit (.int 0))
       (.var n) B)).run (ρ1.extend y (.array vs)) =
       (denoteForLoop' bi fuel i 0 vs.length B).run (ρ1.extend y (.array vs)) := by
@@ -333,17 +333,17 @@ theorem mapStmt_run (hbi : ArrayOps bi) (y s i x n p : String) (body : ImpExpr)
   obtain ⟨E', hrun, hE', hEy⟩ := loop_run bi hbi y s i x p body hpure fuel ρ1 ρ vs ws hlen
     hvals
     (fun z hz hzp => by
-      rw [← hρ1]; simp only [Env.extend, beq_iff_eq, (hread z hz hzp).2.2.2, if_false])
+      rw [← hρ1]; simp only [Env.extend, beq_iff_eq, (hread z hz hzp).2.2.2, ite_false])
     hcfv hρ1s hsy hsi hsx hxi hxy hiy (fun z hz hzp => by
       obtain ⟨h1, h2, h3, _⟩ := hread z hz hzp; exact ⟨h1, h2, h3⟩)
     vs.length 0 fuel (ρ1.extend y (.array vs)) (by omega)
-    hfuel (fun z hz _ _ => by simp only [Env.extend, beq_iff_eq, hz, if_false])
+    hfuel (fun z hz _ _ => by simp only [Env.extend, beq_iff_eq, hz, ite_false])
     (by simp)
   refine ⟨E', by simpa using hrun, fun z hzi hzx hzn => ?_⟩
   by_cases hzy : z = y
   · subst hzy; rw [hEy, Env.extend_same]
   · rw [hE' z hzy hzi hzx, ← hρ1]
-    simp only [Env.extend, beq_iff_eq, hzy, hzn, if_false]
+    simp only [Env.extend, beq_iff_eq, hzy, hzn, ite_false]
 
 end Trip
 
@@ -470,7 +470,7 @@ theorem denote'_inlineMaps (bi : Builtins) (fuel : Nat) (hbi : ArrayOps bi) (e :
       obtain ⟨s, p, body⟩ := t
       cases hok : mapOk y s p body (inlineMaps k) with
       | true =>
-        simp only [inlineMaps, denoteMapSpine, mapW, hv, hok, if_true]
+        simp only [inlineMaps, denoteMapSpine, mapW, hv, hok, ite_true]
         intro env _ heq o s₂ hr ho
         subst heq
         simp only [mapOk, Bool.and_eq_true, bne_iff_ne, ne_eq, List.all_eq_true,
@@ -520,7 +520,7 @@ theorem denote'_inlineMaps (bi : Builtins) (fuel : Nat) (hbi : ArrayOps bi) (e :
               ne_eq] at hz
             rw [hR z (by simp [hz.1, hz.2.1, hz.2.2.1]), hQ z hz.2.2.2]
       | false =>
-        simp only [inlineMaps, denoteMapSpine, mapW, hv, hok, Bool.false_eq_true, if_false,
+        simp only [inlineMaps, denoteMapSpine, mapW, hv, hok, Bool.false_eq_true, ite_false,
           denote']
         refine RefR.bind (badα := IsErr) (RefR.refl _) (fun o _ => ?_)
           (fun a ha s => by obtain ⟨m, hm⟩ := ha; subst hm; exact ⟨m, rfl⟩)

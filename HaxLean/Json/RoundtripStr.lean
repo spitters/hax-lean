@@ -134,7 +134,7 @@ theorem tokenize_string_singleton (bs : List Char)
   rw [String.toList_ofList]
   rw [tokenizeAux_quote]
   rw [takeString_wf (2 * ('"' :: (bs ++ ['"'])).length) bs [] [] hwf (by simp; omega)]
-  simp only [List.reverse_nil, List.nil_append, hv, if_true]
+  simp only [List.reverse_nil, List.nil_append, hv, ite_true]
   rw [tokenizeAux_nil _ (by simp)]
   simp [Except.map]
 

@@ -253,7 +253,7 @@ theorem fieldTagChars?_head (m : FieldMethod) (p : Nat) :
     fieldTagChars? (m.nameChars ++ '#' :: 'p' :: Nat.toDigits 10 p) = some (m, p) := by
   unfold fieldTagChars?
   rw [splitTag_append (not_hash_mem_nameChars m), splitTag.eq_2]
-  simp only [List.append_nil, digitsOk_toDigits, if_true, ofChars?_nameChars, Option.map_some,
+  simp only [List.append_nil, digitsOk_toDigits, ite_true, ofChars?_nameChars, Option.map_some,
     digitsVal_toDigits]
 
 /-- **The Montgomery heads round-trip**: `fieldTagM?` reads the method, the modulus and the
@@ -274,7 +274,7 @@ theorem fieldTagM?_head (m : FieldMethod) (p k : Nat) :
     simp at this
   rw [fieldTagM?, fieldTagMChars?, hl, splitMontTag_append (not_hash_mem_nameChars m),
     splitMontTag_hash_p, splitMontTag_append hp, splitMontTag.eq_2]
-  simp only [List.append_nil, digitsOk_toDigits, if_true, fieldTagChars?_head, Option.map_some,
+  simp only [List.append_nil, digitsOk_toDigits, ite_true, fieldTagChars?_head, Option.map_some,
     digitsVal_toDigits]
 
 /-- `evalMontHead?` at a head `fieldTagM?` reads is `fieldCallMont` of the head. -/

@@ -1637,7 +1637,7 @@ theorem emitLiteralBodies_proc (structMeta : StructMeta)
             (procTdefs.map fun (n, te) => (n, tInitMissingFoldAccums [] te))).map
               fun (n, t) => (n, t.erase)) := by
   have hne : procTdefs.isEmpty = false := List.isEmpty_eq_false_iff.mpr h
-  simp only [emitLiteralBodies, emitLiteralTerms, hne, Bool.false_eq_true, if_false]
+  simp only [emitLiteralBodies, emitLiteralTerms, hne, Bool.false_eq_true, ite_false]
 
 /-- Without pipelined terms, the literals are `literalPost` of the untyped
     pipeline applied to the erased raw terms. -/
@@ -1648,7 +1648,7 @@ theorem emitLiteralBodies_raw (structMeta : StructMeta)
     emitLiteralBodies structMeta fnTypes newStructMap projConflicts rawTdefs [] heads
       = literalPost structMeta fnTypes newStructMap projConflicts heads
           (rawTdefs.map fun (n, te) => (n, pipeline te.erase)) := by
-  simp only [emitLiteralBodies, emitLiteralTerms, List.isEmpty_nil, if_true, List.map_map]
+  simp only [emitLiteralBodies, emitLiteralTerms, List.isEmpty_nil, ite_true, List.map_map]
   congr 2
   funext p
   simp [tPipeline_erase]

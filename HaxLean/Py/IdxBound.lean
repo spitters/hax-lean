@@ -550,7 +550,7 @@ theorem lookup_filter_ne {x y : String} (h : y ≠ x) :
     · subst hz
       have : (y == z) = false := by simpa using h
       simp [List.lookup, this, ih]
-    · simp only [List.filter_cons, hz, decide_false, Bool.not_false, if_true, List.lookup]
+    · simp only [List.filter_cons, hz, decide_false, Bool.not_false, ite_true, List.lookup]
       split <;> simp_all
 
 theorem nameBnd_setB (env : ModEnv) (σ : Bnds) (x y : String) (b : Bnd) :
@@ -559,7 +559,7 @@ theorem nameBnd_setB (env : ModEnv) (σ : Bnds) (x y : String) (b : Bnd) :
   · subst h
     simp [nameBnd, setB]
   · have : (y == x) = false := by simpa using h
-    simp only [nameBnd, setB, List.lookup, this, lookup_filter_ne h σ, h, if_false]
+    simp only [nameBnd, setB, List.lookup, this, lookup_filter_ne h σ, h, ite_false]
 
 theorem holds_setB {env : ModEnv} {σ : Bnds} {ρ : String → Option Nat} (h : Holds env σ ρ)
     {x : String} {b : Bnd} (hb : ∀ v, ρ x = some v → b.Mem v) : Holds env (setB x b σ) ρ := by
@@ -652,7 +652,7 @@ theorem exprBnd_sound {env : ModEnv} {ρ : String → Option Nat} {e : PyExpr} {
   induction he with
   | lit hn =>
     intro σ _
-    simp only [exprBnd, hn, if_true]
+    simp only [exprBnd, hn, ite_true]
     exact mem_exact _
   | name hx =>
     intro σ h

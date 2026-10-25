@@ -412,7 +412,7 @@ theorem parse_rejects_trailing_true (toks : List JsonToken) (h : 0 < toks.length
     -- The `rest.isEmpty` check on the non-empty tail forces an `.error`.
     intro hEq
     simp only [parse, parseValue, bind, Except.bind, List.isEmpty,
-               if_false, reduceCtorEq] at hEq
+               ite_false, reduceCtorEq] at hEq
 
 /-- If a `falseT` is followed by any non-empty token tail, `parse` does **not**
 return `.ok (.bool false)`. -/
@@ -423,7 +423,7 @@ theorem parse_rejects_trailing_false (toks : List JsonToken) (h : 0 < toks.lengt
   | cons t ts =>
     intro hEq
     simp only [parse, parseValue, bind, Except.bind, List.isEmpty,
-               if_false, reduceCtorEq] at hEq
+               ite_false, reduceCtorEq] at hEq
 
 /-- If a `nullT` is followed by any non-empty token tail, `parse` does **not**
 return `.ok .null`. -/
@@ -434,7 +434,7 @@ theorem parse_rejects_trailing_null (toks : List JsonToken) (h : 0 < toks.length
   | cons t ts =>
     intro hEq
     simp only [parse, parseValue, bind, Except.bind, List.isEmpty,
-               if_false, reduceCtorEq] at hEq
+               ite_false, reduceCtorEq] at hEq
 
 /-- If a `strT s` is followed by any non-empty token tail, `parse` does **not**
 return `.ok (.str s)`. -/
@@ -446,7 +446,7 @@ theorem parse_rejects_trailing_str (s : String) (toks : List JsonToken)
   | cons t ts =>
     intro hEq
     simp only [parse, parseValue, bind, Except.bind, List.isEmpty,
-               if_false, reduceCtorEq] at hEq
+               ite_false, reduceCtorEq] at hEq
 
 /-! ### Fuel sufficiency — partial result
 

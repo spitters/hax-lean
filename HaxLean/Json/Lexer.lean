@@ -338,7 +338,7 @@ theorem tokenizeAcc_eq : ∀ (n : Nat) (cs : List Char) (acc : Array JsonToken),
     by_cases hws : isWs c
     · simp only [hws, ite_eq_left]
       exact tokenizeAcc_eq n rest acc
-    all_goals simp only [hws, Bool.false_eq_true, if_false]
+    all_goals simp only [hws, Bool.false_eq_true, ite_false]
     split
     · rw [tokenizeAcc_eq n rest (acc.push JsonToken.lbrace)]
       cases tokenizeAux n rest <;> simp [Except.map]
