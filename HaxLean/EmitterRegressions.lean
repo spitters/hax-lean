@@ -3040,6 +3040,88 @@ def fieldItemJson (id : Nat) (item : String) : Json :=
     (.mk (.app "Fe130" [.mk (.var "x") (.array (.uint .w64) 3)]) (.adt "Fe130" []))).erase
   == .var "x"
 
+/-! A function generic over `F : primeir_hax::Field` is specialised at the self
+type of the crate's one field `impl` (`HaxAdapter.specializeFieldGenerics`). -/
+
+open Lean in
+/-- The `def_id` node of the path `segs` of the crate `k`. -/
+def localDefIdJson (segs : List Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("value", mkDefIdJson "k" segs)])]
+
+open Lean in
+/-- The type parameter `F`. -/
+def paramFJson : Json := Json.mkObj [("Param", Json.mkObj [("index", Json.num 0),
+  ("name", Json.str "F")])]
+
+open Lean in
+/-- The trait reference `F : primeir_hax::Field`. -/
+def fieldOfFJson : Json :=
+  Json.mkObj [("def_id", Json.mkObj [("contents", Json.mkObj [("value",
+      mkDefIdJson "primeir_hax" [defIdSeg "TypeNs" "Field"])])]),
+    ("generic_args", Json.arr #[Json.mkObj [("Type", Json.mkObj [("value", paramFJson)])]])]
+
+open Lean in
+/-- The call `F::mul(a, b)` through the bound `F : primeir_hax::Field`. -/
+def boundMulCallJson : Json :=
+  haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", haxNode (Json.mkObj [("GlobalName", Json.mkObj [("item", Json.mkObj [("value",
+      Json.mkObj [("def_id", Json.mkObj [("contents", Json.mkObj [("value",
+          mkDefIdJson "primeir_hax" [defIdSeg "TypeNs" "Field", defIdSeg "ValueNs" "mul"])])]),
+        ("in_trait", Json.mkObj [("impl", Json.mkObj [("LocalBound", Json.mkObj [
+          ("path", Json.arr #[]),
+          ("trait", Json.mkObj [("value", Json.mkObj [("value", fieldOfFJson)])])])])])])])])])),
+    ("args", Json.arr #[haxVarRef "a", haxVarRef "b"])])])
+
+open Lean in
+/-- `fn gmul<F: Field>(a: F, b: F) -> F { a.mul(b) }`. -/
+def genericMulFnJson : Json :=
+  Json.mkObj [
+    ("owner_id", localDefIdJson [defIdSeg "ValueNs" "gmul"]),
+    ("kind", Json.mkObj [("Fn", Json.mkObj [
+      ("generics", Json.mkObj [("bounds", Json.arr #[Json.mkObj [("kind", Json.mkObj [("value",
+        Json.mkObj [("Trait", Json.mkObj [("trait_ref", Json.mkObj [("value",
+          fieldOfFJson)])])])])]])]),
+      ("def", Json.mkObj [("ty", Json.mkObj [("value", paramFJson)]),
+        ("body", boundMulCallJson)])])])]
+
+open Lean in
+/-- A function whose body refers to `gmul` at the type `t`. -/
+def gmulUserJson (t : Json) : Json :=
+  Json.mkObj [
+    ("owner_id", localDefIdJson [defIdSeg "ValueNs" "user"]),
+    ("kind", Json.mkObj [("Fn", Json.mkObj [("def", Json.mkObj [("body", Json.mkObj [
+      ("def_id", localDefIdJson [defIdSeg "ValueNs" "gmul"]),
+      ("generic_args", Json.arr #[Json.mkObj [("Type", t)]])])])])])]
+
+/-- The export of a `BabyBear` field `impl`, `gmul` and a use of `gmul` at `t`. -/
+def specExport (t : Lean.Json) : Lean.Json :=
+  .arr #[newtypeJson "BabyBear" u64TyJson, fieldImplJson 5 "BabyBear" [2013265921],
+    genericMulFnJson, gmulUserJson t]
+
+/-- The body of `gmul` in the specialised export of `specExport t`. -/
+def specializedGmulBody (t : Lean.Json) : Option Lean.Json := do
+  let j ← (HaxAdapter.specializeFieldGenerics (specExport t)).toOption
+  let fn ← (j.getArrVal? 2 >>= (·.getObjVal? "kind") >>= (·.getObjVal? "Fn")
+    >>= (·.getObjVal? "def")).toOption
+  (fn.getObjVal? "body").toOption
+
+/-- The adapter state with the `BabyBear` field `impl`. -/
+def bbMap : HaxAdapter.ImplSelfTypeMap := { fieldImpls := [(5, "BabyBear", 2013265921, 1)] }
+
+-- Used at `BabyBear`, the bound call of `gmul` takes the modulus-tagged head.
+#guard (do
+    let body ← specializedGmulBody (AssocFieldType.adtTyJson "BabyBear")
+    (HaxAdapter.parseHaxTExpr body bbMap).toOption.map (fun (e : TExpr) => e.erase))
+  == some (.app "mul#p2013265921" [.var "a", .var "b"])
+-- Used at a type other than `BabyBear`, the export is refused.
+#guard (HaxAdapter.specializeFieldGenerics (specExport (AssocFieldType.adtTyJson "Other"))
+  matches .error _)
+-- With two field `impl`s the export is refused.
+#guard (HaxAdapter.specializeFieldGenerics (.arr #[newtypeJson "BabyBear" u64TyJson,
+    newtypeJson "KoalaBear" u64TyJson, fieldImplJson 5 "BabyBear" [2013265921],
+    fieldImplJson 6 "KoalaBear" [2130706433], genericMulFnJson])
+  matches .error _)
+
 end FieldTagged
 
 namespace FrontAdapterFixes

@@ -6415,6 +6415,206 @@ partial def tEraseFieldNewtypes (names : List (String × ImpType)) (e : TExpr) :
   | .mk (.proj x 0) _ => if isFieldNewtypeTy names x.ty then go x else rest ()
   | _ => rest ()
 
+/-! ## Specialisation of field-generic functions
+
+A function of the crate generic over `F : primeir_hax::Field` is specialised at
+the self type `T` of the crate's one field `impl` (`buildFieldImplMap`): in its
+body every type `F` is `T`, and every `LocalBound` atom of the bound `F : Field`
+is the `Concrete` atom of that `impl`. Its calls of `Field` methods and its
+reads of `ZERO` and `ONE` then take the modulus-tagged heads and the literals of
+the concrete calls (`fieldTaggedHead?`, `fieldConstLit?`), and the erasure of
+`T` (`tEraseFieldNewtypes`) gives the function the types of its callers. The
+specialisation requires every reference of the crate to such a function to
+instantiate it at `T` (`fieldGenericBadRef?`). -/
+
+/-- Whether a `def_id` node names the trait `Field` of the crate `primeir_hax`. -/
+def isPrimeirFieldTrait (defId : Json) : Bool :=
+  defIdKrate defId == "primeir_hax" && defIdLeafName defId == some "Field"
+
+/-- The name of the type parameter a trait reference applies its trait to, when
+    its first generic argument is a type parameter. -/
+def traitRefParamName? (traitRef : Json) : Option String := do
+  let ga ← (traitRef.getObjValAs? (Array Json) "generic_args").toOption
+  let t ← ga[0]?
+  let ty ← (t.getObjVal? "Type").toOption
+  let p ← (ty.getObjVal? "value" >>= (·.getObjVal? "Param")).toOption
+  (p.getObjValAs? String "name").toOption
+
+/-- The type parameters a `generics` node of a function bounds by
+    `primeir_hax::Field`. -/
+def fieldBoundParams (generics : Json) : List String :=
+  match generics.getObjValAs? (Array Json) "bounds" with
+  | .ok bs => bs.toList.filterMap fun b => do
+    let tr ← (b.getObjVal? "kind" >>= (·.getObjVal? "value") >>= (·.getObjVal? "Trait")
+      >>= (·.getObjVal? "trait_ref") >>= (·.getObjVal? "value")).toOption
+    let d ← (tr.getObjVal? "def_id").toOption
+    guard (isPrimeirFieldTrait d)
+    traitRefParamName? tr
+  | _ => []
+
+/-- Whether a `LocalBound` atom is the bound `F : primeir_hax::Field` itself
+    (an empty path) of a type parameter `F` of `ps`. -/
+def isFieldLocalBound (ps : List String) (lb : Json) : Bool :=
+  let r : Option Unit := do
+    let path ← (lb.getObjValAs? (Array Json) "path").toOption
+    guard path.isEmpty
+    let tr ← (lb.getObjVal? "trait" >>= (·.getObjVal? "value")
+      >>= (·.getObjVal? "value")).toOption
+    let d ← (tr.getObjVal? "def_id").toOption
+    guard (isPrimeirFieldTrait d)
+    let n ← traitRefParamName? tr
+    guard (ps.contains n)
+  r.isSome
+
+/-- `j` with every type parameter of `ps` replaced by the type `selfTy`, and
+    every `LocalBound` atom of the bound `F : Field` of one of them replaced by
+    the `Concrete` atom of the `impl` with the `def_id` `implDefId`. -/
+partial def specializeFieldJson (ps : List String) (selfTy implDefId : Json) (j : Json) :
+    Json :=
+  let go := specializeFieldJson ps selfTy implDefId
+  match j with
+  | .arr xs => .arr (xs.map go)
+  | .obj t =>
+    match t.toList with
+    | [("Param", p)] =>
+      match p.getObjValAs? String "name" with
+      | .ok n => if ps.contains n then selfTy else j
+      | _ => j
+    | [("LocalBound", lb)] =>
+      if isFieldLocalBound ps lb then
+        Json.mkObj [("Concrete", Json.mkObj [("value", Json.mkObj [("def_id", implDefId),
+          ("generic_args", .arr #[]), ("impl_exprs", .arr #[]), ("in_trait", .null)])])]
+      else Json.mkObj [("LocalBound", go lb)]
+    | kvs => Json.mkObj (kvs.map fun (k, v) => (k, go v))
+  | _ => j
+
+/-- The interning id of a `def_id` node. -/
+def defIdNum? (defId : Json) : Option Nat :=
+  (defId.getObjVal? "contents" >>= (·.getObjValAs? Nat "id")).toOption
+
+/-- The crate and the path of a `def_id` node, as one string. -/
+def defIdPathKey? (defId : Json) : Option String := do
+  let v ← (defId.getObjVal? "contents" >>= (·.getObjVal? "value")).toOption
+  let k ← (v.getObjVal? "krate").toOption
+  let p ← (v.getObjVal? "path").toOption
+  pure (Json.arr #[k, p]).compress
+
+mutual
+
+/-- The items of an export with each function generic over `primeir_hax::Field`
+    specialised (`specializeFieldJson`), the sub-items of `Mod` items included,
+    together with the keys (`defIdPathKey?`, the empty string when the item has
+    none) of the specialised functions. -/
+partial def specializeFieldItems (selfTy implDefId : Json) (j : Json) :
+    Json × List String :=
+  match j with
+  | .arr xs =>
+    let rs := xs.map (specializeFieldItem selfTy implDefId)
+    (.arr (rs.map (·.1)), rs.toList.flatMap (·.2))
+  | _ => (j, [])
+
+/-- One item of `specializeFieldItems`, with the keys of the functions it
+    specialises. -/
+partial def specializeFieldItem (selfTy implDefId : Json) (item : Json) :
+    Json × List String :=
+  match item.getObjVal? "kind" with
+  | .ok kind =>
+    match kind.getObjVal? "Fn", kind.getObjVal? "Mod" with
+    | .ok fn, _ =>
+      let ps := match fn.getObjVal? "generics" with
+        | .ok g => fieldBoundParams g
+        | _ => []
+      match ps, fn.getObjVal? "def" with
+      | _ :: _, .ok d =>
+        let key := ((item.getObjVal? "owner_id").toOption.bind defIdPathKey?).getD ""
+        (item.setObjVal! "kind" (kind.setObjVal! "Fn"
+            (fn.setObjVal! "def" (specializeFieldJson ps selfTy implDefId d))),
+          [key])
+      | _, _ => (item, [])
+    | _, .ok (.arr modData) =>
+      match (modData[1]? : Option Json) with
+      | some sub =>
+        let (sub', ids) := specializeFieldItems selfTy implDefId sub
+        (item.setObjVal! "kind" (kind.setObjVal! "Mod" (.arr (modData.set! 1 sub'))), ids)
+      | none => (item, [])
+    | _, .ok modData =>
+      match modData.getObjVal? "items" with
+      | .ok sub =>
+        let (sub', ids) := specializeFieldItems selfTy implDefId sub
+        (item.setObjVal! "kind" (kind.setObjVal! "Mod" (modData.setObjVal! "items" sub')),
+          ids)
+      | _ => (item, [])
+    | _, _ => (item, [])
+  | _ => (item, [])
+
+end
+
+/-- The key (`defIdPathKey?`) of the type a type node denotes, when it is an
+    `Adt`. -/
+def adtTyKey? (ty : Json) : Option String :=
+  (ty.getObjVal? "value" >>= (·.getObjVal? "Adt") >>= (·.getObjVal? "value")
+    >>= (·.getObjVal? "def_id")).toOption.bind defIdPathKey?
+
+/-- The key of the first function of `keys` that a reference in `j` (a node with
+    a `def_id` and `generic_args`) instantiates at a type argument other than the
+    type with the key `selfKey`. `none` when every reference instantiates each
+    function of `keys` at that type. -/
+partial def fieldGenericBadRef? (keys : List String) (selfKey : String) (j : Json) :
+    Option String :=
+  let go := fieldGenericBadRef? keys selfKey
+  match j with
+  | .arr xs => xs.findSome? go
+  | .obj t =>
+    let here : Option String := do
+      let d ← (j.getObjVal? "def_id").toOption
+      let ga ← (j.getObjValAs? (Array Json) "generic_args").toOption
+      let n ← defIdPathKey? d
+      guard (keys.contains n)
+      guard (ga.any fun a => match a.getObjVal? "Type" with
+        | .ok ty => adtTyKey? ty != some selfKey
+        | _ => false)
+      pure n
+    here <|> t.toList.findSome? fun (_, v) => go v
+  | _ => none
+
+/-- The export `j` with its functions generic over `primeir_hax::Field`
+    specialised at the self type of the crate's field `impl`
+    (`specializeFieldItems`). The export is returned unchanged when it has no
+    such function or no field `impl` (`buildFieldImplMap`). An export with such
+    a function and more than one field `impl`, or with a reference instantiating
+    such a function at another type, is refused. -/
+def specializeFieldGenerics (j : Json) : Except String Json := do
+  let impls := buildFieldImplMap j (buildNewtypeMap j)
+  match impls with
+  | [] => pure j
+  | [(implId, sn, _, _)] =>
+    let some implItem := (exportItems j).find? fun it =>
+        ((it.getObjVal? "kind" >>= (·.getObjVal? "Impl")).toOption.isSome) &&
+          ((it.getObjVal? "owner_id").toOption.bind defIdNum? == some implId)
+      | throw s!"field specialisation: the field impl for {sn} is not an item of the export"
+    let some implDefId := (implItem.getObjVal? "owner_id").toOption
+      | throw s!"field specialisation: the field impl for {sn} has no owner_id"
+    let some selfTyJ := (implItem.getObjVal? "kind" >>= (·.getObjVal? "Impl")
+        >>= (·.getObjVal? "self_ty")).toOption
+      | throw s!"field specialisation: the field impl for {sn} has no self type"
+    let some selfTy := (selfTyJ.getObjVal? "value").toOption
+      | throw s!"field specialisation: the self type of the field impl for {sn} has no value"
+    let some selfKey := adtTyKey? selfTyJ
+      | throw s!"field specialisation: the self type of the field impl for {sn} is not an Adt"
+    let (j', keys) := specializeFieldItems selfTy implDefId j
+    if keys.isEmpty then return j
+    match fieldGenericBadRef? keys selfKey j' with
+    | some n =>
+      throw s!"field specialisation: the function {n}, generic over primeir_hax::Field, \
+        is used at a type other than {sn}"
+    | none => pure j'
+  | _ =>
+    let (_, ids) := specializeFieldItems .null .null j
+    if ids.isEmpty then pure j
+    else throw s!"field specialisation: the crate has {impls.length} field impls \
+      ({", ".intercalate (impls.map (·.2.1))}) and functions generic over \
+      primeir_hax::Field; the specialisation needs exactly one"
+
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
     processed typed defs (for pipeline/rendering)).
@@ -6446,7 +6646,10 @@ partial def tEraseFieldNewtypes (names : List (String × ImpType)) (e : TExpr) :
     `buildFieldImplMap` takes its modulus-tagged head (`fieldTaggedHead?`),
     and the self types of those `impl`s are erased to their inner types, `u64`
     or `[u64; n]`, in every definition and signature (`tEraseFieldNewtypes`),
-    whatever the other flags.
+    whatever the other flags. The functions generic over `primeir_hax::Field`
+    are first specialised at the self type of the crate's field `impl`
+    (`specializeFieldGenerics`), and an export that does not admit the
+    specialisation is refused.
 
     Projection types are read at the types `resolveAssocTypes` gives them. -/
 partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
@@ -6454,7 +6657,7 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
     (nominalKrates : List String := []) :
     Except String (ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr)) := do
-  let j := resolveAssocTypes j
+  let j ← specializeFieldGenerics (resolveAssocTypes j)
   -- Build the impl-self-type map once from the full JSON. This lets the
   -- recursive parse disambiguate user-defined methods (e.g. `Crs::len`)
   -- from stdlib ones (`slice::len`) at every Call node. `structFields`
