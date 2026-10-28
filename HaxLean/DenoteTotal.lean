@@ -6,7 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.SemanticsCF
-public import HaxLean.AnfLowCT
+public import HaxLean.AnfDenote
 
 /-!
 # Totality of `denote'` on a checked class of terms

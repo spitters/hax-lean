@@ -6,7 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.Phase.ContinueFlag
-public import HaxLean.AnfLowCT
+public import HaxLean.AnfDenote
 
 /-!
 # `while true` as a loop on a flag variable
