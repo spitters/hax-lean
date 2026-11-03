@@ -19,8 +19,9 @@ names that output uses beyond the vendored `Aeneas.Std` (`HaxLean/Rust`, Aeneas 
 `import HaxLean.AeneasBackendPrelude`:
 
 * `Result` is `Aeneas.Std.RustM`, with `Result.ok`, `Result.fail`, `Result.div`;
-* `core.iter.range.Step`, `core.iter.range.StepUsize` and
-  `core.iter.range.IteratorRange.next`, the iteration of `start..end`;
+* `core.iter.range.Step`, `core.iter.range.StepUsize`, `core.iter.range.StepU8` to
+  `core.iter.range.StepU64` and `core.iter.range.IteratorRange.next`, the iteration of
+  `start..end`;
 * the simp attributes `global_simps`, `rust_loop_body` and `rust_loop`, which the backend
   places on its definitions;
 * the command `open N hiding namespace a b` and the `CoreModels.core` names the output of
@@ -80,6 +81,18 @@ def core.iter.range.UScalarStep (ty : UScalarTy) : core.iter.range.Step (UScalar
 
 /-- `Step` on `usize`. -/
 abbrev core.iter.range.StepUsize := core.iter.range.UScalarStep .Usize
+
+/-- `Step` on `u8`. -/
+abbrev core.iter.range.StepU8 := core.iter.range.UScalarStep .U8
+
+/-- `Step` on `u16`. -/
+abbrev core.iter.range.StepU16 := core.iter.range.UScalarStep .U16
+
+/-- `Step` on `u32`. -/
+abbrev core.iter.range.StepU32 := core.iter.range.UScalarStep .U32
+
+/-- `Step` on `u64`. -/
+abbrev core.iter.range.StepU64 := core.iter.range.UScalarStep .U64
 
 /-- `Range::next`: `some start` and the range from `start + 1` when `start < end`, `none`
     and the range unchanged otherwise. -/
