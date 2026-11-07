@@ -230,6 +230,8 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
       -- digest loop reads four bytes of it and the padding reads eight.
       "to_be_bytes", "to_le_bytes", "from_be_bytes", "from_le_bytes",
       "overflowing_add", "overflowing_sub",
+      -- The byte reversal `uN::swap_bytes` reverses `N / 8` bytes.
+      "swap_bytes",
       -- Associated integer consts (`u32::MAX`, `i64::MIN`, …): without
       -- the width suffix they collapse to a bare `MAX`/`MIN` shared
       -- across all integer types and leak into the Deps class as an

@@ -1040,7 +1040,7 @@ def rewrapForFoldReturn {α β γ : Type}
 /-! ### Width-indexed byte (de)serialization and overflowing arithmetic
 
 The inherent integer methods `uN::to_be_bytes`, `uN::from_le_bytes`,
-`uN::overflowing_add`, … depend on the width `N`. The adapter suffixes each
+`uN::swap_bytes`, `uN::overflowing_add`, … depend on the width `N`. The adapter suffixes each
 call with its width (`to_be_bytes#32`), and the printer renders it as the
 builtin of that width below, so the extraction carries no untyped dependency
 field for them. -/
@@ -1065,6 +1065,12 @@ field for them. -/
     element is the least significant byte. -/
 @[inline] def from_le_bytes_w (w : Nat) (a : Array Int) : Int :=
   mod2w w (a.foldr (fun b acc => acc * 256 + b % 256) 0)
+
+/-- The `w / 8` bytes of `a mod 2^w` in reverse order, the Rust `uN::swap_bytes`: byte `k`
+    of the result is byte `w / 8 - 1 - k` of `a mod 2^w`. -/
+@[inline] def swap_bytes_w (w : Nat) (a : Int) : Int :=
+  let v := mod2w w a
+  (List.range (w / 8)).foldl (fun acc k => acc * 256 + v / (256 : Int) ^ k % 256) 0
 
 /-- `(a + b) mod 2^w`, with the carry-out. -/
 @[inline] def overflowing_add_w (w : Nat) (a b : Int) : Int × Bool :=

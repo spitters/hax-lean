@@ -177,6 +177,7 @@ def widthAwareRuntime (f : String) : String :=
       | "to_le_bytes"        => s!"Hax.to_le_bytes_w {w}"
       | "from_be_bytes"      => s!"Hax.from_be_bytes_w {w}"
       | "from_le_bytes"      => s!"Hax.from_le_bytes_w {w}"
+      | "swap_bytes"         => s!"Hax.swap_bytes_w {w}"
       | "overflowing_add"    => s!"Hax.overflowing_add_w {w}"
       | "overflowing_sub"    => s!"Hax.overflowing_sub_w {w}"
       | _ => s!"Hax.{op}"

@@ -2936,6 +2936,8 @@ namespace FieldTagged
 -- A head of a method outside the field interface, or a tag that is not a
 -- modulus, keeps its rendering.
 #guard widthAwareRuntime "wrapping_add#64" == "Hax.wrapping_add_w 64"
+-- The byte reversal of a `u64` prints as the width-indexed runtime function.
+#guard widthAwareRuntime "swap_bytes#64" == "Hax.swap_bytes_w 64"
 #guard widthAwareRuntime "mul#pq" == "Hax.mul"
 
 /-- The modulus `2^130 - 5`. -/

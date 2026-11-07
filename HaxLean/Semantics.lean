@@ -672,6 +672,12 @@ def rotrNat (w x n : Nat) : Nat :=
 def rotlNat (w x n : Nat) : Nat :=
   (((x % 2 ^ w) <<< (n % w)) ||| ((x % 2 ^ w) >>> (w - n % w))) % 2 ^ w
 
+/-- The bytes of a `64`-bit word in reverse order: byte `i` of the result is byte `7 - i` of
+    `x`, the Rust `u64::swap_bytes` (`Hax.swap_bytes_w 64`). -/
+def bswap64 (x : BitVec 64) : BitVec 64 :=
+  x.extractLsb' 0 8 ++ x.extractLsb' 8 8 ++ x.extractLsb' 16 8 ++ x.extractLsb' 24 8 ++
+    x.extractLsb' 32 8 ++ x.extractLsb' 40 8 ++ x.extractLsb' 48 8 ++ x.extractLsb' 56 8
+
 /-- The Rust equality `==` of two scalar values of `u64` code: of two `int` values and of
     two `bool` values; `none` on any other pair. -/
 def hax64EqScalar : Value → Value → Option Bool
@@ -908,8 +914,8 @@ def hax64CmpOps : Builtins
     * the conversions `cast#u32`, `cast#u64`, `cast#usize` of an `int` value, its residue
       modulo `2^32`, `2^64`, `2^64` (Rust `as` truncates to the target width, a negative
       value in two's complement), the conversion `cast#i128`, the residue modulo `2^128`
-      in `[-2^127, 2^127)` (`Int.bmod`), and the negation `wrapping_neg#64`,
-      `(2^64 - x mod 2^64) mod 2^64`;
+      in `[-2^127, 2^127)` (`Int.bmod`), the negation `wrapping_neg#64`,
+      `(2^64 - x mod 2^64) mod 2^64`, and the byte reversal `swap_bytes#64` (`bswap64`);
     * the rotations `rotate_right#w` (`rotrNat`) and `rotate_left#w`
       (`rotlNat`) and the complement `Not#w`, `2^w - 1 - x mod 2^w`, for
       `w ∈ {8, 16, 32, 64, size}`;
@@ -928,6 +934,7 @@ def hax64NarrowOps : Builtins
   | "cast#usize", [.int a] => some (.int (a % 2 ^ 64))
   | "cast#i128", [.int a] => some (.int (a.bmod (2 ^ 128)))
   | "wrapping_neg#64", [.int a] => u64UnOp a fun x => (2 ^ 64 - x % 2 ^ 64) % 2 ^ 64
+  | "swap_bytes#64", [.int a] => u64UnOp a fun x => (bswap64 (BitVec.ofNat 64 x)).toNat
   | "wrapping_add#16", [.int a, .int b] => u64BinOp a b fun x y => some ((x + y) % 2 ^ 16)
   | "wrapping_sub#16", [.int a, .int b] => u64BinOp a b fun x y =>
       some ((x % 2 ^ 16 + 2 ^ 16 - y % 2 ^ 16) % 2 ^ 16)
@@ -1439,6 +1446,10 @@ theorem hax64WordOps_notSize : hax64WordOps "Not#size" [.int a] =
 
 theorem hax64WordOps_wrappingNeg : hax64WordOps "wrapping_neg#64" [.int a] =
     u64UnOp a fun x => (2 ^ 64 - x % 2 ^ 64) % 2 ^ 64 := rfl
+
+/-- The byte reversal `swap_bytes#64` of a word is `bswap64` on its bits. -/
+theorem hax64WordOps_swapBytes64 : hax64WordOps "swap_bytes#64" [.int a] =
+    u64UnOp a fun x => (bswap64 (BitVec.ofNat 64 x)).toNat := rfl
 
 theorem hax64WordOps_castU32 : hax64WordOps "cast#u32" [.int a] = some (.int (a % 2 ^ 32)) :=
   rfl
