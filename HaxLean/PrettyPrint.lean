@@ -2793,6 +2793,9 @@ partial def collectFreeVars (bound : List String := []) : ImpExpr → List Strin
     collectFreeVars bound lo ++ collectFreeVars bound hi ++ collectFreeVars (v :: bound) body
   | .whileFoldReturn c body => collectFreeVars bound c ++ collectFreeVars bound body
   | .cfBreak e | .cfContinue e | .cfBreakContinue e => collectFreeVars bound e
+  -- A local function binds its parameters in its body; a name free in the body (a static
+  -- table it indexes) is free in the expression.
+  | .lam ps body => collectFreeVars (ps ++ bound) body
   | _ => []
 
 /-- Collect all (function_name, arg_count) pairs from app calls in an expression. -/
