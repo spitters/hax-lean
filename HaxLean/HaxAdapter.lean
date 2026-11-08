@@ -2156,11 +2156,17 @@ def tTupleDestructBinds (parent : String) (parentTy : ImpType) :
 /-- The field subpatterns of a hax struct pattern: for a `Variant` pattern whose
     `info.kind` is `Struct`, each entry of `subpatterns` as the field name (named by
     `extractDefIdName`, as the `Field` projection names it) and the subpattern JSON;
-    `none` for any other pattern. -/
-def structPatFields? (j : Json) : Option (List (String × Json)) := do
+    `none` for any other pattern. A struct pattern under `Deref` or
+    `AscribeUserType` (the pattern of `let S(x) = r;` with `r : &S`) is read
+    through them, as references are values in the translation. -/
+partial def structPatFields? (j : Json) : Option (List (String × Json)) := do
   let patKind := match j.getObjVal? "contents" with
     | .ok c => c
     | _ => j
+  let through := ["Deref", "AscribeUserType"].findSome? fun k =>
+    (patKind.getObjVal? k >>= (·.getObjVal? "subpattern")).toOption
+  if let some sub := through then
+    return ← structPatFields? sub
   let vd ← (patKind.getObjVal? "Variant").toOption
   let info ← (vd.getObjVal? "info").toOption
   let kindJ ← (info.getObjVal? "kind").toOption
@@ -4642,6 +4648,149 @@ partial def structPatKeepsBinders (fields : List (String × Json)) : Bool :=
       | some fs => structPatKeepsBinders fs
       | none => (patLocalBinders p).isEmpty
 
+/-- Whether a hax pattern matches every value of its type: a wildcard, a
+    variable without subpattern, and a tuple or struct pattern
+    (`structPatFields?`) of such patterns, read through `Deref` and
+    `AscribeUserType`. -/
+partial def patIrrefutable (j : Json) : Bool :=
+  let k := decoratedContents j
+  match k with
+  | .str "Wild" => true
+  | _ =>
+    match structPatFields? j with
+    | some fs => fs.all fun (_, p) => patIrrefutable p
+    | none =>
+      match objKey? k with
+      | some "Binding" =>
+        match (k.getObjVal? "Binding" >>= (·.getObjVal? "subpattern")) with
+        | .ok .null | .error _ => true
+        | .ok _ => false
+      | some "Deref" | some "AscribeUserType" =>
+        match (k.getObjVal? ((objKey? k).getD "") >>= (·.getObjVal? "subpattern")) with
+        | .ok p => patIrrefutable p
+        | .error _ => false
+      | some "Tuple" =>
+        match (k.getObjVal? "Tuple" >>= (·.getObjValAs? (Array Json) "subpatterns")) with
+        | .ok ps => ps.all patIrrefutable
+        | .error _ => false
+      | _ => false
+
+/-- Whether a pattern of the translation matches every value: a variable, a
+    wildcard, the unit literal, and a tuple of such patterns. -/
+def impPatIrrefutable : ImpPat → Bool
+  | .varPat _ | .wildcard | .litPat .unit => true
+  | .tuplePat ps => ps.attach.all fun ⟨p, _⟩ => impPatIrrefutable p
+  | _ => false
+
+/-- The decorated pattern `j` with the payload `k` in place of its contents. -/
+def withPatContents (j k : Json) : Json :=
+  match j.getObjVal? "contents" with
+  | .ok _ => j.setObjVal! "contents" k
+  | .error _ => k
+
+/-- A struct pattern in a `match` arm, an `if let` or a `let`-`else`, following the
+    hax engine's import of struct and tuple-struct patterns by field id: the
+    pattern `j` with each struct subpattern (`structPatFields?`) replaced by a
+    binding of the variable `pre` followed by its position, and the bindings
+    that destructure each such variable by field projections
+    (`tStructDestructBinds`), which the arm's body is placed under. Structs are
+    tuple-encoded or erased newtypes in the emitted Lean, so they are matched
+    through their projections rather than by a constructor pattern. A struct
+    pattern with a refutable field subpattern (`S { tag: 0, x }`) is refused. -/
+partial def lowerStructPats (pre : String) (j : Json) :
+    Except String (Json × List (String × TExpr)) := do
+  match structPatFields? j with
+  | some fs =>
+    unless fs.all (fun (_, p) => patIrrefutable p) && structPatKeepsBinders fs do
+      throw ("unsupported construct: a struct pattern with a refutable field subpattern " ++
+        "(`S { f: 0, .. }`)")
+    let ty := (j.getObjVal? "ty").toOption.getD .null
+    let bind := Json.mkObj [("ty", ty), ("contents", Json.mkObj [("Binding",
+      Json.mkObj [("var", Json.mkObj [("name", .str pre)]), ("subpattern", .null)])])]
+    return (bind, tStructDestructBinds pre (extractExprType j) fs)
+  | none =>
+    let k := decoratedContents j
+    match objKey? k with
+    | some "Tuple" =>
+      let d := (k.getObjVal? "Tuple").toOption.getD .null
+      let ps := (d.getObjValAs? (Array Json) "subpatterns").toOption.getD #[]
+      let rs ← (ps.toList.zip (List.range ps.size)).mapM fun (p, i) =>
+        lowerStructPats s!"{pre}_{i}" p
+      return (withPatContents j (Json.mkObj [("Tuple",
+        d.setObjVal! "subpatterns" (.arr (rs.map (·.1)).toArray))]), rs.flatMap (·.2))
+    | some "Variant" =>
+      let d := (k.getObjVal? "Variant").toOption.getD .null
+      let fps := (d.getObjValAs? (Array Json) "subpatterns").toOption.getD #[]
+      let rs ← (fps.toList.zip (List.range fps.size)).mapM fun (fp, i) => do
+        match fp.getObjVal? "pattern" with
+        | .ok p =>
+          let (p', bs) ← lowerStructPats s!"{pre}_{i}" p
+          pure (fp.setObjVal! "pattern" p', bs)
+        | .error _ => pure (fp, [])
+      return (withPatContents j (Json.mkObj [("Variant",
+        d.setObjVal! "subpatterns" (.arr (rs.map (·.1)).toArray))]), rs.flatMap (·.2))
+    | some "Deref" | some "AscribeUserType" =>
+      let key := (objKey? k).getD ""
+      let d := (k.getObjVal? key).toOption.getD .null
+      match d.getObjVal? "subpattern" with
+      | .ok p =>
+        let (p', bs) ← lowerStructPats pre p
+        return (withPatContents j (Json.mkObj [(key, d.setObjVal! "subpattern" p')]), bs)
+      | .error _ => return (j, [])
+    | _ => return (j, [])
+
+/-- `e` under the bindings `binds`, the first outermost. -/
+def tWrapBinds (binds : List (String × TExpr)) (e : TExpr) : TExpr :=
+  binds.foldr (fun (n, v) acc => TExpr.mk (.letBind n v acc) acc.ty) e
+
+/-- A `match` of the variable `s` with guarded arms `(p, some g, a)`, following
+    the hax engine's `DropMatchGuards`: the first guarded arm and the arms after
+    it become `match s { p => if g then a else R, _ => R }`, `R` the
+    translation of the remaining arms, under a wildcard arm of the unguarded
+    arms before it (the inner `_` arm is left out when `p` is irrefutable). The
+    variables of a guarded arm's pattern are renamed apart by the caller, so
+    that they do not capture the variables of `R`. A guarded last arm is
+    refused. The remaining arms are copied once per guarded arm with a
+    refutable pattern. -/
+partial def tGuardedMatch (s : TExpr) (ty : ImpType) :
+    List (ImpPat × Option TExpr × TExpr) → Except String TExpr
+  | arms =>
+    match arms.findIdx? (·.2.1.isSome) with
+    | none => pure (TExpr.mk (.match_ s (arms.map fun (p, _, b) => (p, b))) ty)
+    | some i =>
+      match arms[i]? with
+      | some (p, some g, a) => do
+        let rest := arms.drop (i + 1)
+        if rest.isEmpty then
+          throw "unsupported construct: a `match` whose last arm has a guard"
+        let r ← tGuardedMatch s ty rest
+        let armBody := TExpr.mk (.ifThenElse g a r) ty
+        let inner : TExpr := TExpr.mk (.match_ s
+          (if impPatIrrefutable p then [(p, armBody)] else [(p, armBody), (.wildcard, r)])) ty
+        let pre := (arms.take i).map fun (q, _, b) => (q, b)
+        if pre.isEmpty then pure inner
+        else pure (TExpr.mk (.match_ s (pre ++ [(.wildcard, inner)])) ty)
+      | _ => pure (TExpr.mk (.match_ s (arms.map fun (p, _, b) => (p, b))) ty)
+
+/-- The heads of the calls of an expression and the variables it reads. -/
+partial def impAppHeads : ImpExpr → List String
+  | .var n => [n]
+  | .app f args => f :: args.flatMap impAppHeads
+  | .letBind _ v b => impAppHeads v ++ impAppHeads b
+  | .lam _ b => impAppHeads b
+  | .tuple es => es.flatMap impAppHeads
+  | .proj e _ | .borrow e | .deref e | .earlyReturn e | .questionMark e
+  | .cfBreak e | .cfContinue e | .cfBreakContinue e | .typeAscription e _
+  | .assign _ e | .break_ (some e) => impAppHeads e
+  | .ifThenElse c t e => impAppHeads c ++ impAppHeads t ++ impAppHeads e
+  | .match_ s arms => impAppHeads s ++ arms.flatMap fun (_, b) => impAppHeads b
+  | .seq a b | .whileLoop a b | .whileFold a b | .whileFoldReturn a b =>
+    impAppHeads a ++ impAppHeads b
+  | .forLoop _ lo hi b | .forLoopRev _ lo hi b | .forFold _ lo hi b
+  | .forFoldRev _ lo hi b | .forFoldReturn _ lo hi b | .forFoldRevReturn _ lo hi b =>
+    impAppHeads lo ++ impAppHeads hi ++ impAppHeads b
+  | _ => []
+
 /-- The krate and the last path segment of the ADT a hax type names. -/
 def adtKrateLeaf? (tyJ : Json) : Option (String × String) := do
   let tyKind := match tyJ.getObjVal? "value" with
@@ -4768,16 +4917,43 @@ partial def closureWritesCapture (cdata : Json) : Bool :=
 partial def haxTyHasParam : Json → Bool
   | .obj kvs => kvs.toList.any fun (k, v) =>
     (k == "Param" && (v.getObjValAs? String "name").toOption != some "_dyn") ||
-      (k != "Alias" && haxTyHasParam v)
+      (k != "Alias" && k != "FnDef" && haxTyHasParam v)
   | .arr xs => xs.toList.any haxTyHasParam
   | _ => false
+
+/-- The names of the generic type parameters (`Param`, other than `_dyn`) a hax
+    type mentions outside an associated-type projection (`Alias`). -/
+partial def haxTyParamNames : Json → List String
+  | .obj kvs => kvs.toList.flatMap fun (k, v) =>
+    if k == "Param" then
+      match (v.getObjValAs? String "name").toOption with
+      | some n => if n == "_dyn" then [] else [n]
+      | none => []
+    else if k == "Alias" then [] else haxTyParamNames v
+  | .arr xs => xs.toList.flatMap haxTyParamNames
+  | _ => []
+
+/-- The type parameters a hax function body uses as trait dictionaries: the
+    `Param`s in the function-item types (`FnDef`) of its callees, as `C` in
+    `C::group_mul(a, b)` (the `Self` of the trait reference) or in
+    `blind::<C>(m)` (a generic argument). `haxTyHasParam` does not look into a
+    `FnDef`: a value of a parameter type has a node of that type of its own. A
+    trait method called through a parameter is a `Deps` field, so one parameter
+    per body is translated; two would be read as one `Deps` instance. -/
+partial def fnDefParamNames : Json → List String
+  | .obj kvs => kvs.toList.flatMap fun (k, v) =>
+    if k == "FnDef" then haxTyParamNames v else fnDefParamNames v
+  | .arr xs => xs.toList.flatMap fnDefParamNames
+  | _ => []
 
 /-- The refusal of a construct of a hax function body that the typed parse does
     not translate, found by one walk of the body JSON:
 
-    * a node whose type has a generic type parameter (`Param`), which outside the
-      trait-to-class emission (whose `Hax.ClassEmit.keepTypeParams` rewrites
-      every `Param` to a `TypeVar`) `parseHaxType` reads as `Array Int`;
+    * a value whose type has a generic type parameter (`Param`, by
+      `haxTyHasParam`, which does not look into the function-item type of a
+      callee), which outside the trait-to-class emission (whose
+      `Hax.ClassEmit.keepTypeParams` rewrites every `Param` to a `TypeVar`)
+      `parseHaxType` reads as `Array Int`;
     * a `break` or `continue` whose target scope (`label`) is not the innermost
       enclosing `loop` (the `hir_id` of the loop node), as a labelled jump to an
       outer loop or out of a labelled block;
@@ -4802,7 +4978,8 @@ partial def bodyRefusal? (loopId : Option Nat) (argPos : Bool) (j : Json) :
     match j.getObjVal? "contents", j.getObjVal? "ty" with
     | .ok c@(.obj _), .ok tyJ =>
       if haxTyHasParam tyJ then
-        some "unsupported construct: a generic type parameter outside the trait-to-class emission"
+        some ("unsupported construct: a value of a generic type parameter outside the " ++
+          "trait-to-class emission (`--emit-classes`)")
       else
       let field (key sub : String) : Json :=
         (c.getObjVal? key >>= (·.getObjVal? sub)).toOption.getD .null
@@ -5007,6 +5184,22 @@ where
       else return .lit (parseTLiteral data)
 
     else if let .ok data := j.getObjVal? "If" then
+      -- `if let p = e { a } else { b }` is `match e { p => a, _ => b }`, a missing
+      -- `else` being `()` (the hax engine's import); a let chain is not a `Let`
+      -- condition and is refused by the `Let` case.
+      if let .ok letD := (decoratedContents (← data.getObjVal? "cond")).getObjVal? "Let" then
+        let (patJ, binds) ← lowerStructPats "_sp_if" (← letD.getObjVal? "pat")
+        let pat ← parseHaxPatChecked patJ
+        let scrut ← parseHaxTExpr (← letD.getObjVal? "expr") implMap
+        let thn ← parseHaxTExpr (← data.getObjVal? "then") implMap
+        let els ← match data.getObjVal? "else_opt" with
+          | .ok (.null) => pure (TExpr.mk .unitVal .unit)
+          | .ok elsJ => parseHaxTExpr elsJ implMap
+          | _ => pure (TExpr.mk .unitVal .unit)
+        let thn := tWrapBinds binds thn
+        let arms := if impPatIrrefutable pat then [(pat, thn)]
+          else [(pat, thn), (.wildcard, els)]
+        return (tReadMatch scrut arms (extractNodeType _parentJ)).kind
       let cond ← parseHaxTExpr (← data.getObjVal? "cond") implMap
       let thn ← parseHaxTExpr (← data.getObjVal? "then") implMap
       let els ← match data.getObjVal? "else_opt" with
@@ -5153,10 +5346,11 @@ where
             TExpr.mk (.letBind n proj acc) .unknown) (TExpr.mk .unitVal .unit)
           return .letBind "_st" rhs inner
         | none =>
-          -- A refutable pattern (`if let p = e`, a let chain) is not a binding.
+          -- A refutable pattern of a let chain (`if let p = e && c`) or of an
+          -- `if let` guard is not a binding.
           if pat matches .wildcard then
             return .letBind "_let" rhs (TExpr.mk .unitVal .unit)
-          throw "unsupported construct: `if let` or a let chain with a refutable pattern"
+          throw "unsupported construct: a let chain or `if let` guard with a refutable pattern"
 
     else if let .ok data := j.getObjVal? "Block" then
       -- Strip assertion-shape Blocks. `assert!`/`assert_eq!` expands
@@ -5188,20 +5382,34 @@ where
         | _ => false
       if exprIsPanic then
         return .unitVal
-      let stmts ← match data.getObjValAs? (Array Json) "stmts" with
-        | .ok ss => ss.toList.attach.mapM (fun ⟨s, _h⟩ => parseTStmt s)
-        | _ => pure []
+      let stmtsJ := (data.getObjValAs? (Array Json) "stmts").toOption.getD #[]
       let tail ← match data.getObjVal? "expr" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
         | .ok e => parseHaxTExpr e implMap
         | _ => pure (TExpr.mk .unitVal .unit)
-      return (tStmtsToSeq stmts tail).kind
+      return (← parseTStmtsSeq stmtsJ.toList tail).kind
 
     else if let .ok data := j.getObjVal? "Match" then
       let scrut ← parseHaxTExpr (← data.getObjVal? "scrutinee") implMap
       let armsJ ← data.getObjValAs? (Array Json) "arms"
-      let arms ← armsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseTArm a)
-      return (tReadMatch scrut arms (extractNodeType _parentJ)).kind
+      let pos := match _parentJ.getObjVal? "hir_id" with
+        | .ok (.arr #[_, n]) => n.getNat?.toOption.getD 0
+        | _ => 0
+      let arms ← (armsJ.toList.zip (List.range armsJ.size)).mapM fun (a, i) =>
+        parseTArm a s!"{pos}_{i}"
+      if arms.all (·.2.1.isNone) then
+        return (tReadMatch scrut (arms.map fun (p, _, b) => (p, b))
+          (extractNodeType _parentJ)).kind
+      -- Guarded arms (`tGuardedMatch`) read the scrutinee more than once; it is
+      -- bound to a variable first.
+      let (bs, s) := tPeelTryLets scrut
+      let ty := extractNodeType _parentJ
+      match s.kind with
+      | .var _ => return (tWrapTryLets bs (← tGuardedMatch s ty arms)).kind
+      | _ =>
+        let sv := TExpr.mk (.var s!"_ms{pos}") s.ty
+        let m ← tGuardedMatch sv ty arms
+        return (tWrapTryLets bs (TExpr.mk (.letBind s!"_ms{pos}" s m) ty)).kind
 
     else if let .ok data := j.getObjVal? "Tuple" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
@@ -5638,18 +5846,59 @@ where
     | [s] => tReplaceDeepestUnit s tail
     | s :: rest => tReplaceDeepestUnit s (tStmtsToSeq rest tail)
 
-  /-- Parse a hax Arm into (ImpPat, TExpr). -/
-  parseTArm (j : Json) : Except String (ImpPat × TExpr) := do
-    match j.getObjVal? "guard" with
-    | .ok .null | .error _ => pure ()
-    | .ok _ => throw "unsupported construct: a `match` arm with a guard (`p if g => …`)"
-    let pat ← match j.getObjVal? "pattern" with
-      | .ok p => parseHaxPatChecked p
-      | _ => pure .wildcard
+  /-- Parse a hax Arm into its pattern, its guard and its body. The struct
+      subpatterns of the pattern are bound to variables named after `tag` and
+      destructured in front of the guard and the body (`lowerStructPats`). The
+      variables of a guarded arm are renamed apart with the suffix `_g` and
+      `tag` (`renameLocals`), so that the arms `tGuardedMatch` places under
+      them read the outer variables of the same names. A boolean guard is
+      translated; an `if let` guard is refused by the `Let` case. -/
+  parseTArm (j : Json) (tag : String) :
+      Except String (ImpPat × Option TExpr × TExpr) := do
+    let guarded := match j.getObjVal? "guard" with
+      | .ok .null | .error _ => false
+      | .ok _ => true
+    let j := if guarded then
+        renameLocals (patBinderIds ((j.getObjVal? "pattern").toOption.getD .null))
+          s!"_g{tag}" j
+      else j
+    let (patJ, binds) ← match j.getObjVal? "pattern" with
+      | .ok p => lowerStructPats s!"_sp{tag}" p
+      | _ => pure (Json.str "Wild", [])
+    let pat ← parseHaxPatChecked patJ
     let body ← match j.getObjVal? "body" with
       | .ok b => parseHaxTExpr b implMap
       | _ => pure (TExpr.mk .unitVal .unit)
-    return (pat, body)
+    let guard ← match j.getObjVal? "guard" with
+      | .ok .null | .error _ => pure none
+      | .ok g => some <$> parseHaxTExpr g implMap
+    return (pat, guard.map (tWrapBinds binds), tWrapBinds binds body)
+
+  /-- The statements `stmts` of a block in front of its value `tail`. A
+      `let p = e else { b };` statement is `match e { p => rest, _ => b }`, `rest`
+      the statements after it and `tail` (the hax engine's import); the else arm
+      is left out when `p` is irrefutable. -/
+  parseTStmtsSeq (stmts : List Json) (tail : TExpr) : Except String TExpr := do
+    let isLetElse (s : Json) : Bool :=
+      match (s.getObjVal? "kind" >>= (·.getObjVal? "Let") >>= (·.getObjVal? "else_block")) with
+      | .ok .null | .error _ => false
+      | .ok _ => true
+    match stmts.findIdx? isLetElse with
+    | none => return tStmtsToSeq (← stmts.mapM parseTStmt) tail
+    | some i =>
+      let before ← (stmts.take i).mapM parseTStmt
+      let cont ← parseTStmtsSeq (stmts.drop (i + 1)) tail
+      let data ← ((stmts[i]?.getD .null).getObjVal? "kind") >>= (·.getObjVal? "Let")
+      let (patJ, binds) ← lowerStructPats "_sp_le" (← data.getObjVal? "pattern")
+      let pat ← parseHaxPatChecked patJ
+      let init ← parseHaxTExpr (← data.getObjVal? "initializer") implMap
+      let els ← parseHaxTExpr
+        (Json.mkObj [("contents", Json.mkObj [("Block", ← data.getObjVal? "else_block")])])
+        implMap
+      let thn := tWrapBinds binds cont
+      let arms := if impPatIrrefutable pat then [(pat, thn)]
+        else [(pat, thn), (.wildcard, els)]
+      return tStmtsToSeq before (tReadMatch init arms cont.ty)
 
   /-- Parse a hax AdtExpr into TExprKind. -/
   parseTAdtExpr (j : Json) : Except String TExprKind := do
@@ -6158,6 +6407,37 @@ def tDropParamRebinds (ps : List String) : TExpr → TExpr
     else .mk (.letBind n (.mk (.var v) vt) b) t
   | e => e
 
+/-- The keep-going mode's omission of callers: the definitions of `parsed` that
+    call or read a definition named in `refused`, directly or through other
+    such definitions, are removed and added to `refused` with the name of the
+    omitted definition they call. -/
+partial def omitCallersOfRefused {α β γ : Type}
+    (parsed : List (String × α × TExpr × β)) (refused : List (String × γ))
+    (callerNote : String → γ) : List (String × α × TExpr × β) × List (String × γ) :=
+  let omitted := refused.map (·.1)
+  let hit := parsed.findSome? fun (n, _, proc, _) =>
+    ((impAppHeads proc.erase).find? omitted.contains).map (n, ·)
+  match hit with
+  | none => (parsed, refused)
+  | some (n, f) =>
+    omitCallersOfRefused (parsed.filter (·.1 != n)) (refused ++ [(n, callerNote f)]) callerNote
+
+/-- The name of the definition of a hax `Fn` item `j` with payload `fnData`.
+    Top-level `Fn` items have `ident` under `kind.Fn`, impl methods on the item
+    itself. A short name in `collisions` (two modules define it) is qualified
+    from the item's `def_id` path, by the rule of the call sites. -/
+def haxFnItemName (j fnData : Json) (collisions : List String) : String :=
+  let baseName := match fnData.getObjVal? "ident" with
+    | .ok ident => extractFnName ident
+    | _ => match j.getObjVal? "ident" with
+      | .ok ident => extractFnName ident
+      | _ => "unknown_fn"
+  if collisions.contains baseName then
+    match j.getObjVal? "def_id" with
+    | .ok defId => extractDefIdName defId collisions
+    | _ => baseName
+  else baseName
+
 /-- Parse a single hax Fn item into a typed TExpr with full type information.
     Returns `some (name, rawTExpr, processedTExpr, fnTypeInfo)` for Fn items.
     `rawTExpr` preserves types from hax JSON (for type extraction).
@@ -6167,21 +6447,7 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     Except String (Option (String × TExpr × TExpr × FnTypeInfo)) := do
   let kind ← j.getObjVal? "kind"
   if let .ok fnData := kind.getObjVal? "Fn" then
-    -- Top-level Fn items have `ident` under `kind.Fn`; impl methods
-    -- have it on the item itself. Try both.
-    let baseName := match fnData.getObjVal? "ident" with
-      | .ok ident => extractFnName ident
-      | _ => match j.getObjVal? "ident" with
-        | .ok ident => extractFnName ident
-        | _ => "unknown_fn"
-    -- Bug-2: if this function's short name collides across modules, qualify the
-    -- DEF name from the item's def_id path (same rule as call sites). Non-colliding
-    -- names keep the bare `extractFnName` form (zero churn for them).
-    let name := if implMap.collisions.contains baseName then
-        match j.getObjVal? "def_id" with
-        | .ok defId => extractDefIdName defId implMap.collisions
-        | _ => baseName
-      else baseName
+    let name := haxFnItemName j fnData implMap.collisions
     -- Top-level Fn items wrap params/body/ret in a `def` field; impl
     -- methods inline them directly under `kind.Fn`. Use `def` when
     -- present, otherwise the Fn data itself.
@@ -6203,8 +6469,13 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     let sigTys : List Json := ((fnDefParams? defLike).getD #[]).toList.filterMap
       (fun p => (p.getObjVal? "ty").toOption) ++ (defLike.getObjVal? "ret").toOption.toList
     if sigTys.any haxTyHasParam then
-      throw (s!"unsupported construct in `{name}`: a generic type parameter outside " ++
-        "the trait-to-class emission")
+      throw (s!"unsupported construct in `{name}`: a generic type parameter in the " ++
+        "signature outside the trait-to-class emission (`--emit-classes`)")
+    let dictParams := (fnDefParamNames bodyJ).eraseDups
+    if dictParams.length ≥ 2 then
+      throw (s!"unsupported construct in `{name}`: the type parameters {dictParams} are " ++
+        "used as trait dictionaries outside the trait-to-class emission (`--emit-classes`); " ++
+        "their trait methods would be read as one `Deps` instance")
     if let some msg := bodyRefusal? none false bodyJ then
       throw s!"{msg} (in `{name}`)"
     let body ← parseHaxTExpr bodyJ implMap
@@ -7125,12 +7396,18 @@ def specializeFieldGenerics (j : Json) : Except String Json := do
     (`specializeFieldGenerics`), and an export that does not admit the
     specialisation is refused.
 
-    Projection types are read at the types `resolveAssocTypes` gives them. -/
-partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
+    Projection types are read at the types `resolveAssocTypes` gives them.
+
+    Under `keepGoing` an item the parse refuses is omitted and listed with its
+    definition name and refusal in the second component, and so is every
+    definition that calls or reads an omitted one (`omitCallersOfRefused`);
+    otherwise the first refusal is the error of the parse. -/
+partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
-    (nominalKrates : List String := []) :
-    Except String (ImpExpr × List (String × FnTypeInfo)
-                   × List (String × TExpr) × List (String × TExpr)) := do
+    (nominalKrates : List String := []) (keepGoing : Bool := false) :
+    Except String ((ImpExpr × List (String × FnTypeInfo)
+                   × List (String × TExpr) × List (String × TExpr))
+                   × List (String × String)) := do
   let j ← specializeFieldGenerics (resolveAssocTypes j)
   -- Build the impl-self-type map once from the full JSON. This lets the
   -- recursive parse disambiguate user-defined methods (e.g. `Crs::len`)
@@ -7146,11 +7423,25 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
       fieldImpls := buildFieldImplMap j (buildNewtypeMap j)
       fieldReprs := buildFieldReprMap j (buildNewtypeMap j) }
   let fieldNewtypes := (implMap.fieldImpls.map fun e => (e.2.1, fieldReprTy e.2.2.2)).eraseDups
+  -- Under `keepGoing` a refused item is recorded with the name of its
+  -- definition and omitted; otherwise the refusal aborts the parse.
+  let tryItem (it : Json) (nm : String) : Except String
+      (Option (String × TExpr × TExpr × FnTypeInfo) × List (String × String)) :=
+    match parseHaxItemTExpr it implMap with
+    | .ok r => .ok (r, [])
+    | .error msg => if keepGoing then .ok (none, [(nm, msg)]) else .error msg
+  let itemName (it : Json) : String :=
+    match (it.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption with
+    | some fd => haxFnItemName it fd implMap.collisions
+    | none => ((it.getObjVal? "ident").toOption.map extractFnName).getD "unknown_item"
   let rec parseItemsTExpr (items : List Json) :
-      Except String (List (String × TExpr × TExpr × FnTypeInfo)) := do
+      Except String (List (String × TExpr × TExpr × FnTypeInfo) × List (String × String)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
+    let mut refused : List (String × String) := []
     for item in items do
-      match ← parseHaxItemTExpr item implMap with
+      let (r?, rf) ← tryItem item (itemName item)
+      refused := refused ++ rf
+      match r? with
       | some r => result := result ++ [r]
       | none =>
         let kind := (item.getObjVal? "kind").toOption
@@ -7162,15 +7453,17 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
             | some subJ =>
               match subJ with
               | .arr subItems =>
-                let sub ← parseItemsTExpr subItems.toList
+                let (sub, subR) ← parseItemsTExpr subItems.toList
                 result := result ++ sub
+                refused := refused ++ subR
               | _ => pure ()
             | _ => pure ()
           | .ok modData =>
             match modData.getObjValAs? (Array Json) "items" with
             | .ok subItems =>
-              let sub ← parseItemsTExpr subItems.toList
+              let (sub, subR) ← parseItemsTExpr subItems.toList
               result := result ++ sub
+              refused := refused ++ subR
             | _ => pure ()
           | _ =>
             -- Recurse into impl blocks. An inherent impl's method becomes a
@@ -7197,7 +7490,9 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
                 match selfName, impl.getObjValAs? (Array Json) "items" with
                 | some sn, .ok implItems =>
                   for implItem in implItems do
-                    match ← parseHaxItemTExpr implItem implMap with
+                    let (r?, rf) ← tryItem implItem s!"{sn}_{itemName implItem}"
+                    refused := refused ++ rf
+                    match r? with
                     | some (mName, raw, proc, ti) =>
                       result := result ++ [(s!"{sn}_{mName}", raw, proc, ti)]
                     | none => pure ()
@@ -7210,7 +7505,12 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
                 match implId, impl.getObjValAs? (Array Json) "items" with
                 | some iid, .ok implItems =>
                   for implItem in implItems do
-                    match ← parseHaxItemTExpr implItem implMap with
+                    let m := itemName implItem
+                    let defName := ((implMap.traitImplMethods.find? fun p =>
+                      p.1 == iid && p.2.1 == m).map (·.2.2)).getD m
+                    let (r?, rf) ← tryItem implItem defName
+                    refused := refused ++ rf
+                    match r? with
                     | some (mName, raw, proc, ti) =>
                       match implMap.traitImplMethods.find? fun p =>
                           p.1 == iid && p.2.1 == mName with
@@ -7231,10 +7531,12 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
                 | _, _ => pure ()
             | _ => pure ()
         | none => pure ()
-    return result
+    return (result, refused)
   match j with
   | .arr items =>
-    let parsed ← parseItemsTExpr items.toList
+    let (parsed, refused) ← parseItemsTExpr items.toList
+    let (parsed, refused) := omitCallersOfRefused parsed refused
+      fun f => s!"calls the omitted function `{f}`"
     let parsed :=
       if fieldNewtypes.isEmpty then parsed
       else
@@ -7250,11 +7552,21 @@ partial def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames :=
       let fnTypes := parsed.map fun (name, _, _, ti) => (name, ti)
       let rawTexprs := parsed.map fun (name, rawTe, _, _) => (name, rawTe)
       let procTexprs := parsed.map fun (name, _, procTe, _) => (name, procTe)
-      return (expr, fnTypes, rawTexprs, procTexprs)
+      return ((expr, fnTypes, rawTexprs, procTexprs), refused)
   | _ =>
     let te ← parseHaxTExpr j implMap
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr te)
-    return (processed.erase, [], [("expr", te)], [("expr", processed)])
+    return ((processed.erase, [], [("expr", te)], [("expr", processed)]), [])
+
+/-- `parseHaxFileWithTExprReport` without the keep-going mode: the first refused
+    item aborts the parse. -/
+def parseHaxFileWithTExpr (j : Json) (structFields : StructFieldNames := [])
+    (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
+    (nominalKrates : List String := []) :
+    Except String (ImpExpr × List (String × FnTypeInfo)
+                   × List (String × TExpr) × List (String × TExpr)) :=
+  (·.1) <$> parseHaxFileWithTExprReport j structFields resolveTraitImpls traitImplConsts
+    nominalKrates
 
 /-! ## Struct Definition Extraction
 

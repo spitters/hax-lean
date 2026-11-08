@@ -178,7 +178,12 @@ def main (args : List String) : IO UInt32 := do
     -- The typed definitions, read again with every trait `impl` opaque when a
     -- `Deps` name is used at two types (`typedDefsOfExport`).
     let td ← IO.ofExcept (typedDefsOfExport inputJson structMeta structFields newtypes
-      (classMode := classMode) (nominalKrates := opts.nominalKrates))
+      (classMode := classMode) (nominalKrates := opts.nominalKrates)
+      (keepGoing := opts.keepGoing))
+    for (n, msg) in td.refused do
+      IO.eprintln s!"REFUSED {n}: {msg}"
+    if opts.keepGoing then
+      IO.eprintln s!"INFO refused={td.refused.length}"
     let depTypeConflicts := td.depTypeConflicts
     let traitImplNames := td.traitImplNames
     if !depTypeConflicts.isEmpty then

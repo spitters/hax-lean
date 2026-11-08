@@ -130,6 +130,11 @@ structure Options where
       a secret newtype) carries the head `declassify` with the value as its one
       argument (`Hax.tDeclassifyHeads`). -/
   keepDeclassify : Bool := false
+  /-- With `--emit-certified --hax`: a function the adapter refuses is reported on
+      stderr with its name and construct and omitted, and so is every function that
+      calls an omitted one; the rest of the crate is translated. Without the flag the
+      first refusal aborts the run. -/
+  keepGoing : Bool := false
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -161,6 +166,7 @@ where
     | "--struct-tuples" :: rest, opts => go rest { opts with structTuples := true }
     | "--trait-heads" :: rest, opts => go rest { opts with traitHeads := true }
     | "--keep-declassify" :: rest, opts => go rest { opts with keepDeclassify := true }
+    | "--keep-going" :: rest, opts => go rest { opts with keepGoing := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest opts  -- skip unknown flags
       else go rest { opts with inputFile := some arg }
@@ -209,6 +215,9 @@ OPTIONS:
                     literals, each declassification call (.declassify(),
                     .declassify_ref(), the method of a secret newtype)
                     carries the head declassify with one argument
+  --keep-going      With --emit-certified --hax: report each refused function
+                    (REFUSED name: construct) and each function calling an
+                    omitted one on stderr, omit them, and translate the rest
   --python DUMP     Read the py2json dump of a module of the Python subset and
                     print its extraction module (with --name NAME, -o FILE);
                     a refusal is printed with its position and the run fails

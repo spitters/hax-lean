@@ -3419,4 +3419,182 @@ def u32ArrowJ : Json :=
 
 end VariantFnValue
 
+namespace PatternTranslations
+
+/-! ## Guards, `if let`, `let`-`else`, struct patterns, type parameters, keep-going
+
+The typed parse translates these constructs following the hax engine's THIR
+import: a guarded arm by nesting the arms after it (`HaxAdapter.tGuardedMatch`),
+`if let` and `let`-`else` as two-arm matches, and a struct pattern by a variable
+destructured through field projections (`HaxAdapter.lowerStructPats`). A type
+parameter used only as a trait dictionary is translated outside the
+trait-to-class emission (`HaxAdapter.fnDefParamNames`). Under the keep-going mode
+a refused function and its callers are omitted and reported
+(`HaxAdapter.parseHaxFileWithTExprReport`). -/
+
+open Lean Hax.HaxAdapter QuestionMarkExport FrontAdapterFixes
+
+/-- The wildcard pattern. -/
+def wildPatJ : Json := Json.mkObj [("contents", Json.str "Wild")]
+
+/-- The pattern `Some(sub)`. -/
+def somePatJ (sub : Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Variant", Json.mkObj [
+    ("info", Json.mkObj [("variant", defIdJ "core" [("TypeNs", "Option"), ("TypeNs", "Some")])]),
+    ("subpatterns", Json.arr #[Json.mkObj [("pattern", sub)]])])])]
+
+/-- The pattern `None`. -/
+def nonePatJ : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Variant", Json.mkObj [
+    ("info", Json.mkObj [("variant", defIdJ "core" [("TypeNs", "Option"), ("TypeNs", "None")])]),
+    ("subpatterns", Json.arr #[])])])]
+
+/-- The binding pattern of the variable `n` with the local id `i`. -/
+def bindIdJ (n : String) (i : Nat) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Binding", Json.mkObj [
+    ("var", Json.mkObj [("name", Json.str n), ("id", Json.num i)])])])]
+
+/-- A read of the `u32` variable `n` with the local id `i`. -/
+def varIdJ (n : String) (i : Nat) : Json :=
+  nodeJ u32J (Json.mkObj [("VarRef", Json.mkObj [
+    ("id", Json.mkObj [("name", Json.str n), ("id", Json.num i)])])])
+
+/-- The struct pattern `s { f: p, … }` of the struct `k::s`. -/
+def structPatJ (s : String) (fields : List (String × Json)) : Json :=
+  nodeJ (adtJ "k" s []) (Json.mkObj [("Variant", Json.mkObj [
+    ("info", Json.mkObj [("variant", defIdJ "k" [("TypeNs", s)]),
+      ("kind", Json.mkObj [("Struct", Json.mkObj [("named", Json.bool true)])])]),
+    ("subpatterns", Json.arr (fields.map fun (f, p) => Json.mkObj [
+      ("field", defIdJ "k" [("TypeNs", s), ("ValueNs", f)]), ("pattern", p)]).toArray)])])
+
+/-- The arm `p if g => b`. -/
+def armJ (p : Json) (g : Option Json) (b : Json) : Json :=
+  Json.mkObj [("pattern", p), ("guard", g.getD .null), ("body", b)]
+
+/-- `match scrut { arms }`. -/
+def matchJ (scrut : Json) (arms : List Json) : Json :=
+  nodeJ u32J (Json.mkObj [("Match", Json.mkObj [
+    ("scrutinee", scrut), ("arms", Json.arr arms.toArray)])])
+
+/-- The variable `o : Option<u32>`. -/
+def oJ : Json := varJ (optJ u32J) "o"
+
+/-- `match o { _ => z }` after the guarded arms, the arm `Some(w) => w` first. -/
+def restAfterGuard : ImpExpr :=
+  .match_ (.var "o") [(.somePat (.varPat "w"), .var "w"), (.wildcard, .var "z")]
+
+-- `match o { Some(x) if x == z => x, Some(w) => w, _ => z }`: the guarded arm's
+-- variable is renamed apart and the remaining arms are its fall-through.
+#guard tParse (matchJ oJ [
+    armJ (somePatJ (bindIdJ "x" 1)) (some (binaryJ "Eq" (varIdJ "x" 1) (varJ u32J "z")))
+      (varIdJ "x" 1),
+    armJ (somePatJ (bindPatJ "w")) none (varJ u32J "w"),
+    armJ wildPatJ none (varJ u32J "z")]) ==
+  some (.match_ (.var "o") [
+    (.somePat (.varPat "x_g0_0"),
+      .ifThenElse (.app "Eq" [.var "x_g0_0", .var "z"]) (.var "x_g0_0") restAfterGuard),
+    (.wildcard, restAfterGuard)])
+-- The unguarded arms before a guarded arm stay in front of it.
+#guard tParse (matchJ oJ [
+    armJ nonePatJ none (varJ u32J "z"),
+    armJ (somePatJ (bindIdJ "x" 1)) (some (binaryJ "Eq" (varIdJ "x" 1) (varJ u32J "z")))
+      (varIdJ "x" 1),
+    armJ (somePatJ (bindPatJ "w")) none (varJ u32J "w")]) ==
+  some (.match_ (.var "o") [(.nonePat, .var "z"),
+    (.wildcard, .match_ (.var "o") [
+      (.somePat (.varPat "x_g0_1"),
+        .ifThenElse (.app "Eq" [.var "x_g0_1", .var "z"]) (.var "x_g0_1")
+          (.match_ (.var "o") [(.somePat (.varPat "w"), .var "w")])),
+      (.wildcard, .match_ (.var "o") [(.somePat (.varPat "w"), .var "w")])])])
+-- A guarded last arm is refused.
+#guard tRefused (matchJ oJ [
+    armJ (somePatJ (bindPatJ "w")) none (varJ u32J "w"),
+    armJ wildPatJ (some (binaryJ "Eq" (varJ u32J "y") (varJ u32J "z"))) (varJ u32J "z")])
+  "unsupported construct: a `match` whose last arm has a guard"
+
+-- `if let Some(x) = o { x } else { z }` is `match o { Some(x) => x, _ => z }`.
+#guard tParse (nodeJ u32J (Json.mkObj [("If", Json.mkObj [
+    ("cond", nodeJ (tyJ (Json.str "Bool")) (Json.mkObj [("Let", Json.mkObj [
+      ("expr", oJ), ("pat", somePatJ (bindPatJ "x"))])])),
+    ("then", varJ u32J "x"), ("else_opt", varJ u32J "z")])])) ==
+  some (.match_ (.var "o") [(.somePat (.varPat "x"), .var "x"), (.wildcard, .var "z")])
+
+-- `let Some(x) = o else { z }; x` is `match o { Some(x) => x, _ => z }`.
+#guard tParse (nodeJ u32J (Json.mkObj [("Block", Json.mkObj [
+    ("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj [("Let", Json.mkObj [
+      ("pattern", somePatJ (bindPatJ "x")), ("initializer", oJ),
+      ("else_block", Json.mkObj [("stmts", Json.arr #[]), ("expr", varJ u32J "z")])])])]]),
+    ("expr", varJ u32J "x")])])) ==
+  some (.match_ (.var "o") [(.somePat (.varPat "x"), .var "x"), (.wildcard, .var "z")])
+
+-- `match s { S { a, b: _ } => a }`: the struct is the variable `_sp0_0`,
+-- destructured by its field projection.
+#guard tParse (matchJ (varJ (adtJ "k" "S" []) "s") [
+    armJ (structPatJ "S" [("a", bindPatJ "a"), ("b", wildPatJ)]) none (varJ u32J "a")]) ==
+  some (.match_ (.var "s") [(.varPat "_sp0_0",
+    .letBind "a" (.app ".a" [.var "_sp0_0"]) (.var "a"))])
+-- `Some(S { a })` in an arm: the struct inside the variant is destructured too.
+#guard tParse (matchJ oJ [
+    armJ (somePatJ (structPatJ "S" [("a", bindPatJ "a")])) none (varJ u32J "a"),
+    armJ wildPatJ none (varJ u32J "z")]) ==
+  some (.match_ (.var "o") [(.somePat (.varPat "_sp0_0_0"),
+    .letBind "a" (.app ".a" [.var "_sp0_0_0"]) (.var "a")), (.wildcard, .var "z")])
+-- A struct pattern with a refutable field subpattern is refused.
+#guard tRefused (matchJ (varJ (adtJ "k" "S" []) "s") [
+    armJ (structPatJ "S" [("a", somePatJ (bindPatJ "a"))]) none (varJ u32J "a"),
+    armJ wildPatJ none (varJ u32J "z")])
+  "unsupported construct: a struct pattern with a refutable field subpattern"
+
+-- `let HandshakeData(x) = r; x` with `r : &HandshakeData` (a `Deref` pattern over
+-- the tuple-struct pattern, as hax exports it) destructures by the projection `.0`.
+#guard tParse (nodeJ u32J (Json.mkObj [("Block", Json.mkObj [
+    ("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj [("Let", Json.mkObj [
+      ("pattern", Json.mkObj [("contents", Json.mkObj [("Deref", Json.mkObj [
+        ("subpattern", structPatJ "HandshakeData" [("0", bindPatJ "x")])])])]),
+      ("initializer", varJ (adtJ "k" "HandshakeData" []) "r")])])]]),
+    ("expr", varJ u32J "x")])])) ==
+  some (.letBind "_st" (.var "r") (.letBind "x" (.app ".0" [.var "_st"]) (.var "x")))
+
+/-- The type parameter `p`. -/
+def paramTyJ (p : String) : Json :=
+  tyJ (Json.mkObj [("Param", Json.mkObj [("index", Json.num 0), ("name", Json.str p)])])
+
+/-- `Tr::gen::<ps>()`, a call whose function-item type has the type arguments `ps`. -/
+def dictCallJ (ps : List String) : Json :=
+  nodeJ u32J (Json.mkObj [("Call", Json.mkObj [
+    ("fun", nodeJ (tyJ (Json.mkObj [("FnDef", Json.mkObj [("item", Json.mkObj [
+        ("value", Json.mkObj [("generic_args",
+          Json.arr (ps.map fun p => Json.mkObj [("Type", paramTyJ p)]).toArray)])])])]))
+      (Json.mkObj [("GlobalName", Json.mkObj [("item", Json.mkObj [("value", Json.mkObj [
+        ("def_id", defIdJ "k" [("TypeNs", "Tr"), ("ValueNs", "gen")])])])])])),
+    ("args", Json.arr #[])])])
+
+-- `C::gen()` with one type parameter `C` used as a trait dictionary is translated.
+#guard (itemBody (fnJ [] (dictCallJ ["C"]))).isSome
+-- Two type parameters used as dictionaries are refused.
+#guard match parseHaxItemTExpr (fnJ [] (dictCallJ ["C", "G"])) with
+  | .error e => e.startsWith "unsupported construct in `unknown_fn`: the type parameters"
+  | .ok _ => false
+-- A value of a type parameter is refused outside the trait-to-class emission.
+#guard match parseHaxItemTExpr (fnJ ["c"] (varJ (paramTyJ "C") "c")) with
+  | .error e => e.startsWith "unsupported construct: a value of a generic type parameter"
+  | .ok _ => false
+
+/-- An export of `f a = a`, of `bad a` reading a value of a type parameter, and of
+    `g x y = bad x y`. -/
+def keepGoingExport : Json :=
+  Json.arr #[fnItemWithParams "f" #[boolParamJson "a"] (haxVarRef "a"),
+    fnItemWithParams "bad" #[boolParamJson "a"] (haxVarRefT (paramTyJ "C") "a"),
+    fnItemWithParams "g" #[boolParamJson "x", boolParamJson "y"] (callTwoJson "bad")]
+
+-- Under the keep-going mode `bad` is refused, its caller `g` omitted, and `f`
+-- translated; without it the parse fails.
+#guard match parseHaxFileWithTExprReport keepGoingExport (keepGoing := true) with
+  | .ok ((_, _, raw, _), refused) =>
+    raw.map (·.1) == ["f"] && refused.map (·.1) == ["bad", "g"]
+  | .error _ => false
+#guard (parseHaxFileWithTExpr keepGoingExport).toOption.isNone
+
+end PatternTranslations
+
 end Hax.EmitterRegressions

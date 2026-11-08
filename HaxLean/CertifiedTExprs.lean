@@ -59,6 +59,9 @@ structure TypedDefs where
   traitImplNames : List String
   /-- The `Deps` names `traitImplDepTypeConflicts` finds used at two types. -/
   depTypeConflicts : List String
+  /-- Under the keep-going mode, the omitted definitions with the reason of each:
+      the refused construct, or the omitted definition it calls. -/
+  refused : List (String × String) := []
 
 /-- The typed definitions of the export `inputJson` (`HaxAdapter.parseHaxFileWithTExpr`).
 
@@ -73,11 +76,12 @@ bound are class items rather than `Deps` fields, the conflict does not arise and
 `impl`s stay resolved. -/
 def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
     (structFields : StructFieldNames) (newtypes : HaxAdapter.NewtypeMap)
-    (classMode : Bool := false) (nominalKrates : List String := []) :
+    (classMode : Bool := false) (nominalKrates : List String := [])
+    (keepGoing : Bool := false) :
     Except String TypedDefs := do
-  let (_expr, fnTypes, rawTdefs, procTdefs) ←
-    HaxAdapter.parseHaxFileWithTExpr inputJson structFields
-      (traitImplConsts := classMode) (nominalKrates := nominalKrates)
+  let ((_expr, fnTypes, rawTdefs, procTdefs), refused) ←
+    HaxAdapter.parseHaxFileWithTExprReport inputJson structFields
+      (traitImplConsts := classMode) (nominalKrates := nominalKrates) (keepGoing := keepGoing)
   let fnTypes := dedupByName fnTypes
   let rawTdefs := dedupByName rawTdefs
   let procTdefs := dedupByName procTdefs
@@ -93,13 +97,13 @@ def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
         (n, HaxAdapter.tUnqualifyNominalHeads nominalKrates te)
       traitImplDepTypeConflicts raw traitImplNames sl (newtypes.map (·.1))
   if depTypeConflicts.isEmpty then
-    pure { fnTypes, rawTdefs, procTdefs, traitImplNames, depTypeConflicts }
+    pure { fnTypes, rawTdefs, procTdefs, traitImplNames, depTypeConflicts, refused }
   else
-    let (_expr, fnTypes, rawTdefs, procTdefs) ←
-      HaxAdapter.parseHaxFileWithTExpr inputJson structFields
-        (resolveTraitImpls := false) (nominalKrates := nominalKrates)
+    let ((_expr, fnTypes, rawTdefs, procTdefs), refused) ←
+      HaxAdapter.parseHaxFileWithTExprReport inputJson structFields
+        (resolveTraitImpls := false) (nominalKrates := nominalKrates) (keepGoing := keepGoing)
     pure { fnTypes := dedupByName fnTypes, rawTdefs := dedupByName rawTdefs,
-           procTdefs := dedupByName procTdefs, traitImplNames, depTypeConflicts }
+           procTdefs := dedupByName procTdefs, traitImplNames, depTypeConflicts, refused }
 
 /-- The write-back normalisation of a crate's definitions and its tables. -/
 structure Writeback where
