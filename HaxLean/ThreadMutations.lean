@@ -1373,6 +1373,45 @@ partial def tQualifyWritebackFields (sf : StructFieldNames) : TExpr → TExpr
     .mk (.app f args') ty
   | e => tMapChildren (tQualifyWritebackFields sf) e
 
+/-- Whether `ty` is a newtype of `newtypes` or a reference to one, by its raw ADT
+    name or its sanitized short name (`ImpType.sanitizeAdtShortName`). -/
+def tIsNewtypeTy (newtypes : List (String × ImpType)) : ImpType → Bool
+  | .ref t _ => tIsNewtypeTy newtypes t
+  | .adt n _ => newtypes.any fun p => p.1 == n || p.1 == ImpType.sanitizeAdtShortName n
+  | _ => false
+
+/-- The place of a `&mut` argument with its newtype projections removed, seen
+    through `borrow`, `deref` and ascription: the projection `.0` of a value `r`
+    whose type is a newtype of `newtypes`, as the head `.0`, the projection
+    `.proj r 0` or the marker `.namedProj`, is `r`. A newtype `T` is emitted as
+    an `abbrev` of its inner type with the identity unwrap `«T.0»`, so `&mut r.0`
+    and `&mut r` denote the same place and a write-back through either rebinds
+    `r`. The projection `.0` of a tuple struct of more than one field is kept. -/
+partial def tElideNewtypeArg (newtypes : List (String × ImpType)) : TExpr → TExpr
+  | .mk (.borrow e) ty => .mk (.borrow (tElideNewtypeArg newtypes e)) ty
+  | .mk (.deref e) ty => .mk (.deref (tElideNewtypeArg newtypes e)) ty
+  | .mk (.ann e) ty => .mk (.ann (tElideNewtypeArg newtypes e)) ty
+  | e@(.mk (.app f [sE]) _) =>
+    if f == ".0" && tIsNewtypeTy newtypes sE.ty then tElideNewtypeArg newtypes sE else e
+  | e@(.mk (.proj sE 0) _) =>
+    if tIsNewtypeTy newtypes sE.ty then tElideNewtypeArg newtypes sE else e
+  | e@(.mk (.namedProj _ sE) _) =>
+    if tIsNewtypeTy newtypes sE.ty then tElideNewtypeArg newtypes sE else e
+  | e => e
+
+/-- `tElideNewtypeArg` applied to every `&mut`-typed call argument: a call
+    `f(&mut r.0, …)` with `r` of a newtype of `newtypes` becomes `f(&mut r, …)`,
+    whose write-back argument is the plain place `r` (`tMutArgRoot`). -/
+partial def tElideWritebackNewtypes (newtypes : List (String × ImpType)) : TExpr → TExpr
+  | .mk (.app f args) ty =>
+    let args' := args.map fun a =>
+      let a' := tElideWritebackNewtypes newtypes a
+      match a'.ty with
+      | .ref _ true => tElideNewtypeArg newtypes a'
+      | _ => a'
+    .mk (.app f args') ty
+  | e => tMapChildren (tElideWritebackNewtypes newtypes) e
+
 /-- The head `.S.f` written by `tQualifyWritebackFields` as the qualified
     projection name `S.f`; every other head is kept. -/
 partial def tUnqualifyFieldHeads : TExpr → TExpr

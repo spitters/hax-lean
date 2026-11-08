@@ -919,6 +919,91 @@ def traceSetCaller : TExpr :=
   .seq (.assign "t" (.app "Trace_set" [.borrow (.var "t"), .lit (.int 0), .var "v"]))
     (.var "t")
 
+/-! ## A `&mut self` method writing through a newtype's field
+
+`struct Bytes(Vec<U8>)` is a newtype, and `fn push(&mut self, x: U8) { self.0.push(x) }`
+passes the place `&mut (*self).0` to `Vec::push`. The newtype is emitted as an `abbrev` of
+its inner type with the identity unwrap `«Bytes.0»`, so `tElideWritebackNewtypes` reads the
+place as `&mut *self`: the builtin write rebinds `self`, `Bytes_push` becomes a write-back
+function, and a caller `b.push(y)` rebinds `b`. Without the newtype in the map the
+projection `.0` is kept and the call is reported. -/
+
+namespace NewtypeWriteback
+
+/-- The newtype `Bytes`. -/
+def bytesTy : ImpType := .adt "Bytes" []
+
+/-- The inner type of `Bytes`. -/
+def bytesInner : ImpType := .slice (.uint .w8)
+
+/-- The newtype map holding `Bytes`. -/
+def bytesNewtypes : HaxAdapter.NewtypeMap := [("Bytes", bytesInner)]
+
+/-- The place `&(*v).0`, or `&mut (*v).0` when `m`, with `v : &Bytes`. -/
+def bytesInnerOf (v : String) (m : Bool) : TExpr :=
+  .mk (.borrow (.mk (.app ".0" [.mk (.deref (.mk (.var v) (.ref bytesTy m))) bytesTy])
+    bytesInner)) (.ref bytesInner m)
+
+/-- `push`'s body: `self.0.push(x)`. -/
+def bytesPushBody : TExpr :=
+  .mk (.app "push" [bytesInnerOf "self" true, .mk (.var "x") (.uint .w8)]) .unit
+
+/-- `extend_from_slice`'s body: `self.0.extend_from_slice(&x.0)`. -/
+def bytesExtendBody : TExpr :=
+  .mk (.app "extend_from_slice" [bytesInnerOf "self" true, bytesInnerOf "x" false]) .unit
+
+/-- `fn push(&mut self, x: U8)`. -/
+def bytesPushSig : FnTypeInfo := ⟨[("self", .ref bytesTy true), ("x", .uint .w8)], .unit⟩
+
+/-- `fn extend_from_slice(&mut self, x: &Bytes)`. -/
+def bytesExtendSig : FnTypeInfo :=
+  ⟨[("self", .ref bytesTy true), ("x", .ref bytesTy false)], .unit⟩
+
+/-- `b.push(y); b` — a caller of `Bytes_push`. -/
+def bytesCaller : TExpr :=
+  .mk (.seq
+    (.mk (.app "Bytes_push" [.mk (.borrow (.mk (.var "b") bytesTy)) (.ref bytesTy true),
+      .mk (.var "y") (.uint .w8)]) .unit)
+    (.mk (.var "b") bytesTy)) bytesTy
+
+/-- The signatures of the two methods. -/
+def bytesSigs : List (String × FnTypeInfo) :=
+  [("Bytes_push", bytesPushSig), ("Bytes_extend_from_slice", bytesExtendSig)]
+
+/-- The two methods and the caller. -/
+def bytesDefs : List (String × TExpr) :=
+  [("Bytes_push", bytesPushBody), ("Bytes_extend_from_slice", bytesExtendBody),
+   ("caller", bytesCaller)]
+
+-- The projection `.0` of `self : &mut Bytes` is elided in the `&mut` argument only.
+#guard (tElideWritebackNewtypes bytesNewtypes bytesExtendBody).erase ==
+  .app "extend_from_slice"
+    [.borrow (.deref (.var "self")), .borrow (.app ".0" [.deref (.var "x")])]
+
+-- Before the elision the builtin `push` writes no variable and is reported; after it, none is.
+#guard tDroppedMutCalls [] [] builtinWriteTable [] bytesPushBody == [("push", [0])]
+#guard tDroppedMutCalls [] [] builtinWriteTable []
+  (tElideWritebackNewtypes bytesNewtypes bytesPushBody) == []
+
+-- Both methods are write-back functions of `self`, and nothing is reported.
+#guard (writebackOf [] bytesNewtypes bytesSigs bytesDefs).writeFns ==
+  [("Bytes_push", [0], ["self"], false), ("Bytes_extend_from_slice", [0], ["self"], false)]
+#guard (writebackOf [] bytesNewtypes bytesSigs bytesDefs).dropped == []
+
+-- The caller rebinds `b` to the call's result.
+#guard
+  let w := writebackOf [] bytesNewtypes bytesSigs bytesDefs
+  (tRebindMutCalls [] w.writers w.tupWriters bytesCaller).erase ==
+    .seq (.assign "b" (.app "Bytes_push" [.borrow (.var "b"), .var "y"])) (.var "b")
+
+-- Without `Bytes` in the newtype map, no method is a write-back function and every call
+-- through `&mut` is reported.
+#guard (writebackOf [] [] bytesSigs bytesDefs).writeFns == []
+#guard ((writebackOf [] [] bytesSigs bytesDefs).dropped.map (·.1)) ==
+  ["Bytes_push", "Bytes_extend_from_slice", "caller"]
+
+end NewtypeWriteback
+
 /-! ## A `Vec` passed to a `&mut [T]` parameter
 
 A `Vec` variable `v` passed where `&mut [T]` is expected, as in
@@ -3672,7 +3757,7 @@ def droppedDefs : List (String × TExpr) :=
 -- Under the keep-going mode `bad` and its caller `g` are omitted and `f` is kept, with
 -- no call left outside the write-back rewrite.
 #guard
-  let ((_, raw, proc), w, omitted) := omitDroppedWritebacks [] [] droppedDefs droppedDefs
+  let ((_, raw, proc), w, omitted) := omitDroppedWritebacks [] [] [] droppedDefs droppedDefs
   raw.map (·.1) == ["f"] && proc.map (·.1) == ["f"] && w.dropped.isEmpty &&
     omitted.map (·.1) == ["bad", "g"]
 

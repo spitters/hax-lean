@@ -230,8 +230,10 @@ def main (args : List String) : IO UInt32 := do
     -- write-back rewrite is omitted with its callers (`omitDroppedWritebacks`), so that
     -- the module holds every other definition.
     let ((fnTypes, rawTdefs, procTdefs), w, wbRefused) :=
-      if opts.keepGoing then omitDroppedWritebacks structFields fnTypes rawTdefs procTdefs
-      else ((fnTypes, rawTdefs, procTdefs), writebackOf structFields fnTypes procTdefs, [])
+      if opts.keepGoing then
+        omitDroppedWritebacks structFields newtypes fnTypes rawTdefs procTdefs
+      else
+        ((fnTypes, rawTdefs, procTdefs), writebackOf structFields newtypes fnTypes procTdefs, [])
     for (n, msg) in wbRefused do
       IO.eprintln s!"REFUSED {n}: {msg}"
     if opts.keepGoing then

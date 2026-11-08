@@ -73,7 +73,7 @@ def passRows (input : String) : Except String (List (String × List String)) := 
   let structFields : StructFieldNames :=
     structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
   let td ← typedDefsOfExport inputJson structMeta structFields newtypes
-  let w := writebackOf structFields td.fnTypes td.procTdefs
+  let w := writebackOf structFields newtypes td.fnTypes td.procTdefs
   if let some (n, (f, ps)) := w.dropped.head? then
     throw (s!"`{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the " ++
       s!"write-back rewrite ({w.dropped.length} such calls)")

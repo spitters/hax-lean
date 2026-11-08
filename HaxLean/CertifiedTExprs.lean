@@ -124,17 +124,20 @@ structure Writeback where
 
 /-- The write-back normalisation of `ThreadMutations` on `procTdefs`.
 
-Calls outside the write-back fragment are first brought into it (`tHoistMutCalls`,
-`tQualifyWritebackFields`, `externalWriteTable`). A parameter written only through a
+Calls outside the write-back fragment are first brought into it
+(`tElideWritebackNewtypes`, `tHoistMutCalls`, `tQualifyWritebackFields`,
+`externalWriteTable`); the first reads a `&mut` argument `&mut r.0`, with `r` of a newtype
+of `newtypes`, as the place `r`. A parameter written only through a
 builtin write (`copy_from_slice` into `okm[a..b]`) makes its function a write-back
 function too. The builtin and external tables are appended to the call-site rebind table
 only, not to `writeReturns`: `tReturnMutParams` rewrites a callee to return its written
 parameters, and these callees have no body in the export to rewrite. -/
-def writebackOf (structFields : StructFieldNames)
+def writebackOf (structFields : StructFieldNames) (newtypes : HaxAdapter.NewtypeMap)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo)) (procTdefs : List (String × TExpr)) :
     Writeback :=
   let procTdefs := procTdefs.map fun (n, te) =>
-    (n, tQualifyWritebackFields structFields (tHoistMutCalls fnTypes te))
+    (n, tQualifyWritebackFields structFields
+      (tHoistMutCalls fnTypes (tElideWritebackNewtypes newtypes te)))
   let extWriters := externalWriteTable procTdefs
   let procTdefs := procTdefs.map fun (n, te) => (n, tRetypeExtWriters extWriters te)
   let writeFns :=
@@ -154,11 +157,12 @@ def writebackOf (structFields : StructFieldNames)
     prepared definitions, their write-back normalisation, and the removed definitions with
     the reason of each. -/
 partial def omitDroppedWritebacks (structFields : StructFieldNames)
+    (newtypes : HaxAdapter.NewtypeMap)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo)) (rawTdefs procTdefs : List (String × TExpr))
     (omitted : List (String × String) := []) :
     (List (String × HaxAdapter.FnTypeInfo) × List (String × TExpr) × List (String × TExpr))
       × Writeback × List (String × String) :=
-  let w := writebackOf structFields fnTypes procTdefs
+  let w := writebackOf structFields newtypes fnTypes procTdefs
   if w.dropped.isEmpty then ((fnTypes, rawTdefs, procTdefs), w, omitted)
   else
     let roots := dedupByName (w.dropped.map fun (n, f, ps) =>
@@ -169,7 +173,7 @@ partial def omitDroppedWritebacks (structFields : StructFieldNames)
     let (kept, removed) := HaxAdapter.omitCallersOfRefused parsed roots
       fun f => s!"calls the omitted function `{f}`"
     let keptNames := kept.map (·.1)
-    omitDroppedWritebacks structFields (fnTypes.filter (keptNames.contains ·.1))
+    omitDroppedWritebacks structFields newtypes (fnTypes.filter (keptNames.contains ·.1))
       (rawTdefs.filter (keptNames.contains ·.1)) (procTdefs.filter (keptNames.contains ·.1))
       (omitted ++ removed)
 
@@ -204,7 +208,7 @@ def certifiedTExprs (input : String) (nominalKrates : List String := []) :
     structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
   let td ← typedDefsOfExport inputJson structMeta structFields newtypes
     (nominalKrates := nominalKrates)
-  let w := writebackOf structFields td.fnTypes td.procTdefs
+  let w := writebackOf structFields newtypes td.fnTypes td.procTdefs
   if let some (n, (f, ps)) := w.dropped.head? then
     throw (s!"`{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the " ++
       s!"write-back rewrite ({w.dropped.length} such calls); haxpipeT emits no extraction")
