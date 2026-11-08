@@ -17,6 +17,8 @@ public meta import HaxLean.Pipeline
 public import HaxLean.Pipeline
 public meta import HaxLean.Phase.WrapMatchArms
 public import HaxLean.Phase.WrapMatchArms
+public meta import HaxLean.CertifiedTExprs
+public import HaxLean.CertifiedTExprs
 
 /-!
 # Emitter regressions
@@ -3539,11 +3541,73 @@ def restAfterGuard : ImpExpr :=
     armJ wildPatJ none (varJ u32J "z")]) ==
   some (.match_ (.var "o") [(.somePat (.varPat "_sp0_0_0"),
     .letBind "a" (.app ".a" [.var "_sp0_0_0"]) (.var "a")), (.wildcard, .var "z")])
--- A struct pattern with a refutable field subpattern is refused.
+-- `match s { S { a: Some(x), b } => x, _ => z }`: the field `a` is matched against
+-- `Some(x)` and falls through to the remaining arms; the pattern's variables are
+-- renamed apart and bound back after the steps (`HaxAdapter.lowerArmPat`).
+#guard tParse (matchJ (varJ (adtJ "k" "S" []) "s") [
+    armJ (structPatJ "S" [("a", somePatJ (bindIdJ "x" 1)), ("b", bindIdJ "b" 2)]) none
+      (varIdJ "x" 1),
+    armJ wildPatJ none (varJ u32J "z")]) ==
+  some (.match_ (.var "s") [(.varPat "_sp0_0",
+    .match_ (.app ".a" [.var "_sp0_0"]) [
+      (.somePat (.varPat "x_c0_0_0"),
+        .letBind "b_c0_0_0" (.app ".b" [.var "_sp0_0"])
+          (.letBind "x" (.var "x_c0_0_0") (.letBind "b" (.var "b_c0_0_0") (.var "x")))),
+      (.wildcard, .match_ (.var "s") [(.wildcard, .var "z")])])])
+-- A last arm with a refutable struct field subpattern has no arm to fall through to
+-- and is refused.
 #guard tRefused (matchJ (varJ (adtJ "k" "S" []) "s") [
-    armJ (structPatJ "S" [("a", somePatJ (bindPatJ "a"))]) none (varJ u32J "a"),
+    armJ (structPatJ "S" [("a", somePatJ (bindIdJ "x" 1))]) none (varIdJ "x" 1)])
+  "unsupported construct: a `match` whose last arm has a refutable struct field subpattern"
+-- `let S { a: Some(x) } = s else { y }; x`: the failing check reaches the else block.
+#guard tParse (nodeJ u32J (Json.mkObj [("Block", Json.mkObj [
+    ("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj [("Let", Json.mkObj [
+      ("pattern", structPatJ "S" [("a", somePatJ (bindIdJ "x" 1))]),
+      ("initializer", varJ (adtJ "k" "S" []) "s"),
+      ("else_block", Json.mkObj [("stmts", Json.arr #[]), ("expr", varJ u32J "y")])])])]]),
+    ("expr", varIdJ "x" 1)])])) ==
+  some (.match_ (.var "s") [(.varPat "_sp_le",
+    .match_ (.app ".a" [.var "_sp_le"]) [
+      (.somePat (.varPat "x_c_le0"), .letBind "x" (.var "x_c_le0") (.var "x")),
+      (.wildcard, .match_ (.var "s") [(.wildcard, .var "y")])])])
+
+/-- The `u32` literal pattern `n`. -/
+def litPatJ (n : Nat) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Constant", Json.mkObj [("value", Json.mkObj [
+    ("contents", Json.mkObj [("Literal", Json.mkObj [("Int", Json.mkObj [
+      ("Uint", Json.arr #[Json.str (toString n), Json.str "U32"])])])])])])])]
+
+/-- The or-pattern `p₁ | … | pₙ`. -/
+def orPatJ (ps : List Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("Or", Json.mkObj [("pats", Json.arr ps.toArray)])])]
+
+-- `match o { Some(1) | None => z, Some(w) => w }`: one arm per alternative.
+#guard tParse (matchJ oJ [
+    armJ (orPatJ [somePatJ (litPatJ 1), nonePatJ]) none (varJ u32J "z"),
+    armJ (somePatJ (bindIdJ "w" 2)) none (varIdJ "w" 2)]) ==
+  some (.match_ (.var "o") [(.somePat (.litPat (.int 1)), .var "z"),
+    (.nonePat, .var "z"), (.somePat (.varPat "w"), .var "w")])
+-- `(x, 1) | (1, x) => x`: alternatives binding the same variables.
+#guard tParse (matchJ (varJ u32J "t") [
+    armJ (orPatJ [tuplePatJ [bindIdJ "x" 1, litPatJ 1], tuplePatJ [litPatJ 1, bindIdJ "x" 3]])
+      none (varIdJ "x" 1),
+    armJ wildPatJ none (varJ u32J "z")]) ==
+  some (.match_ (.var "t") [
+    (.tuplePat [.varPat "x", .litPat (.int 1)], .var "x"),
+    (.tuplePat [.litPat (.int 1), .varPat "x"], .var "x"), (.wildcard, .var "z")])
+-- Alternatives binding different variables are refused.
+#guard tRefused (matchJ (varJ u32J "t") [
+    armJ (orPatJ [tuplePatJ [bindIdJ "x" 1, litPatJ 1], tuplePatJ [litPatJ 1, bindIdJ "y" 3]])
+      none (varIdJ "x" 1),
     armJ wildPatJ none (varJ u32J "z")])
-  "unsupported construct: a struct pattern with a refutable field subpattern"
+  "unsupported construct: an or-pattern whose alternatives bind different variables"
+-- `if let Some(1) | None = o { z } else { y }`.
+#guard tParse (nodeJ u32J (Json.mkObj [("If", Json.mkObj [
+    ("cond", nodeJ (tyJ (Json.str "Bool")) (Json.mkObj [("Let", Json.mkObj [
+      ("expr", oJ), ("pat", orPatJ [somePatJ (litPatJ 1), nonePatJ])])])),
+    ("then", varJ u32J "z"), ("else_opt", varJ u32J "y")])])) ==
+  some (.match_ (.var "o") [(.somePat (.litPat (.int 1)), .var "z"),
+    (.nonePat, .var "z"), (.wildcard, .var "y")])
 
 -- `let HandshakeData(x) = r; x` with `r : &HandshakeData` (a `Deref` pattern over
 -- the tuple-struct pattern, as hax exports it) destructures by the projection `.0`.
@@ -3594,6 +3658,23 @@ def keepGoingExport : Json :=
     raw.map (·.1) == ["f"] && refused.map (·.1) == ["bad", "g"]
   | .error _ => false
 #guard (parseHaxFileWithTExpr keepGoingExport).toOption.isNone
+
+/-- A `&mut` reference to a `u32` variable `n`. -/
+def mutRefT (n : String) : TExpr := .mk (.var n) (.ref (.uint .w32) true)
+
+/-- `bad` calls the external `ext` with two `&mut` arguments, outside the write-back
+    rewrite; `g` calls `bad`; `f` returns its variable. -/
+def droppedDefs : List (String × TExpr) :=
+  [("f", .mk (.var "x") (.uint .w32)),
+   ("bad", .mk (.app "ext" [mutRefT "a", mutRefT "b"]) .unit),
+   ("g", .mk (.app "bad" []) .unit)]
+
+-- Under the keep-going mode `bad` and its caller `g` are omitted and `f` is kept, with
+-- no call left outside the write-back rewrite.
+#guard
+  let ((_, raw, proc), w, omitted) := omitDroppedWritebacks [] [] droppedDefs droppedDefs
+  raw.map (·.1) == ["f"] && proc.map (·.1) == ["f"] && w.dropped.isEmpty &&
+    omitted.map (·.1) == ["bad", "g"]
 
 end PatternTranslations
 

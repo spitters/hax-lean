@@ -182,8 +182,6 @@ def main (args : List String) : IO UInt32 := do
       (keepGoing := opts.keepGoing))
     for (n, msg) in td.refused do
       IO.eprintln s!"REFUSED {n}: {msg}"
-    if opts.keepGoing then
-      IO.eprintln s!"INFO refused={td.refused.length}"
     let depTypeConflicts := td.depTypeConflicts
     let traitImplNames := td.traitImplNames
     if !depTypeConflicts.isEmpty then
@@ -228,7 +226,23 @@ def main (args : List String) : IO UInt32 := do
     -- `«.0»`. Pass is verified (`tElideToNamedProj_erase`).
     -- Pre-pipeline normalisation: the write-back tables and the calls through
     -- `&mut` outside the rewrite (`writebackOf`).
-    let w := writebackOf structFields fnTypes procTdefs
+    -- Under the keep-going mode a definition with a call through `&mut` outside the
+    -- write-back rewrite is omitted with its callers (`omitDroppedWritebacks`), so that
+    -- the module holds every other definition.
+    let ((fnTypes, rawTdefs, procTdefs), w, wbRefused) :=
+      if opts.keepGoing then omitDroppedWritebacks structFields fnTypes rawTdefs procTdefs
+      else ((fnTypes, rawTdefs, procTdefs), writebackOf structFields fnTypes procTdefs, [])
+    for (n, msg) in wbRefused do
+      IO.eprintln s!"REFUSED {n}: {msg}"
+    if opts.keepGoing then
+      IO.eprintln s!"INFO refused={td.refused.length + wbRefused.length}"
+    -- Under the keep-going mode an instance whose fields name an omitted definition
+    -- is left out too.
+    let classHooks := if opts.keepGoing then
+        let kept := rawTdefs.map (·.1)
+        { classHooks with instances := classHooks.instances.filter fun inst =>
+            inst.fields.all fun (_, d) => kept.contains d }
+      else classHooks
     let writeFns := w.writeFns
     let writeReturns := w.writeReturns
     IO.eprintln s!"INFO mut-writeback-fns={w.writers.length + w.tupWriters.length}/{(mutWriteCandidates fnTypes).length + builtinWriteTable.length}"

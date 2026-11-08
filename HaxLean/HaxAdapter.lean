@@ -4688,26 +4688,61 @@ def withPatContents (j k : Json) : Json :=
   | .ok _ => j.setObjVal! "contents" k
   | .error _ => k
 
+/-- A step of a lowered pattern (`lowerStructPats`), taken after the arm's pattern
+    has matched and before its guard and body. -/
+inductive PatStep where
+  /-- The binding `let n := v`. -/
+  | bind (n : String) (v : TExpr)
+  /-- The match of the field projection `e` against the pattern `p`; when `p` does
+      not match, the arm falls through. -/
+  | check (e : TExpr) (p : ImpPat)
+  deriving Inhabited
+
+/-- Whether a step can fail: a check against a refutable pattern. -/
+def PatStep.refutable : PatStep → Bool
+  | .check _ p => !impPatIrrefutable p
+  | .bind .. => false
+
+/-- `e` under the steps `steps`, the first outermost: a binding is a `let`, a check
+    is `match x { p => …, _ => fail }`, the `_` arm left out when `p` is
+    irrefutable. -/
+def tWrapSteps (steps : List PatStep) (fail : TExpr) (e : TExpr) : TExpr :=
+  steps.foldr (fun s acc => match s with
+    | .bind n v => TExpr.mk (.letBind n v acc) acc.ty
+    | .check x p => TExpr.mk (.match_ x
+        (if impPatIrrefutable p then [(p, acc)] else [(p, acc), (.wildcard, fail)])) acc.ty) e
+
 /-- A struct pattern in a `match` arm, an `if let` or a `let`-`else`, following the
     hax engine's import of struct and tuple-struct patterns by field id: the
     pattern `j` with each struct subpattern (`structPatFields?`) replaced by a
-    binding of the variable `pre` followed by its position, and the bindings
-    that destructure each such variable by field projections
-    (`tStructDestructBinds`), which the arm's body is placed under. Structs are
-    tuple-encoded or erased newtypes in the emitted Lean, so they are matched
-    through their projections rather than by a constructor pattern. A struct
-    pattern with a refutable field subpattern (`S { tag: 0, x }`) is refused. -/
+    binding of the variable `pre` followed by its position, and the steps that
+    destructure each such variable by field projections, which the arm's guard and
+    body are placed under. Structs are tuple-encoded or erased newtypes in the
+    emitted Lean, so they are matched through their projections rather than by a
+    constructor pattern. A struct pattern whose field subpatterns are irrefutable
+    binds them (`tStructDestructBinds`); otherwise each field is bound to a variable,
+    a wildcard field is skipped, and any other field subpattern is lowered in turn
+    and becomes a check of the field projection against it (`PatStep.check`). -/
 partial def lowerStructPats (pre : String) (j : Json) :
-    Except String (Json × List (String × TExpr)) := do
+    Except String (Json × List PatStep) := do
   match structPatFields? j with
   | some fs =>
-    unless fs.all (fun (_, p) => patIrrefutable p) && structPatKeepsBinders fs do
-      throw ("unsupported construct: a struct pattern with a refutable field subpattern " ++
-        "(`S { f: 0, .. }`)")
     let ty := (j.getObjVal? "ty").toOption.getD .null
     let bind := Json.mkObj [("ty", ty), ("contents", Json.mkObj [("Binding",
       Json.mkObj [("var", Json.mkObj [("name", .str pre)]), ("subpattern", .null)])])]
-    return (bind, tStructDestructBinds pre (extractExprType j) fs)
+    let parentTy := extractExprType j
+    if fs.all (fun (_, p) => patIrrefutable p) && structPatKeepsBinders fs then
+      return (bind, (tStructDestructBinds pre parentTy fs).map fun (n, v) => .bind n v)
+    let steps ← (fs.zip (List.range fs.length)).mapM fun ((f, pj), i) => do
+      let proj := TExpr.mk (.app ("." ++ f) [TExpr.mk (.var pre) parentTy]) (extractExprType pj)
+      let (q, st) ← lowerStructPats s!"{pre}_{i}" pj
+      match ← parseHaxPatChecked q with
+      | .wildcard => pure st
+      | .varPat n =>
+        let n := if (structPatFields? pj).isNone && n.startsWith "_" then "_" else n
+        pure (.bind n proj :: st)
+      | p => pure (.check proj p :: st)
+    return (bind, steps.flatten)
   | none =>
     let k := decoratedContents j
     match objKey? k with
@@ -4739,38 +4774,166 @@ partial def lowerStructPats (pre : String) (j : Json) :
       | .error _ => return (j, [])
     | _ => return (j, [])
 
-/-- `e` under the bindings `binds`, the first outermost. -/
-def tWrapBinds (binds : List (String × TExpr)) (e : TExpr) : TExpr :=
-  binds.foldr (fun (n, v) acc => TExpr.mk (.letBind n v acc) acc.ty) e
+/-- The cartesian product of a list of lists. -/
+def listProduct {α : Type} : List (List α) → List (List α)
+  | [] => [[]]
+  | xs :: rest => xs.flatMap fun x => (listProduct rest).map (x :: ·)
 
-/-- A `match` of the variable `s` with guarded arms `(p, some g, a)`, following
-    the hax engine's `DropMatchGuards`: the first guarded arm and the arms after
-    it become `match s { p => if g then a else R, _ => R }`, `R` the
-    translation of the remaining arms, under a wildcard arm of the unguarded
-    arms before it (the inner `_` arm is left out when `p` is irrefutable). The
-    variables of a guarded arm's pattern are renamed apart by the caller, so
-    that they do not capture the variables of `R`. A guarded last arm is
-    refused. The remaining arms are copied once per guarded arm with a
-    refutable pattern. -/
-partial def tGuardedMatch (s : TExpr) (ty : ImpType) :
-    List (ImpPat × Option TExpr × TExpr) → Except String TExpr
+/-- The alternatives of a hax pattern: an or-pattern `p | q` at any depth (under a
+    tuple, a variant or struct field, `Deref` or `AscribeUserType`) is replaced by
+    each of its alternatives in turn, in the order Rust tries them; a pattern
+    without an or-pattern is its only alternative. -/
+partial def orAlternatives (j : Json) : List Json :=
+  let k := decoratedContents j
+  match objKey? k with
+  | some "Or" =>
+    match (k.getObjVal? "Or" >>= (·.getObjValAs? (Array Json) "pats")) with
+    | .ok ps => ps.toList.flatMap orAlternatives
+    | .error _ => [j]
+  | some "Tuple" =>
+    let d := (k.getObjVal? "Tuple").toOption.getD .null
+    let ps := (d.getObjValAs? (Array Json) "subpatterns").toOption.getD #[]
+    (listProduct (ps.toList.map orAlternatives)).map fun qs =>
+      withPatContents j (Json.mkObj [("Tuple", d.setObjVal! "subpatterns" (.arr qs.toArray))])
+  | some "Variant" =>
+    let d := (k.getObjVal? "Variant").toOption.getD .null
+    let fps := (d.getObjValAs? (Array Json) "subpatterns").toOption.getD #[]
+    let alts := fps.toList.map fun fp => match fp.getObjVal? "pattern" with
+      | .ok p => (orAlternatives p).map (fp.setObjVal! "pattern" ·)
+      | .error _ => [fp]
+    (listProduct alts).map fun qs =>
+      withPatContents j (Json.mkObj [("Variant", d.setObjVal! "subpatterns" (.arr qs.toArray))])
+  | some "Deref" | some "AscribeUserType" =>
+    let key := (objKey? k).getD ""
+    let d := (k.getObjVal? key).toOption.getD .null
+    match d.getObjVal? "subpattern" with
+    | .ok p => (orAlternatives p).map fun q =>
+        withPatContents j (Json.mkObj [(key, d.setObjVal! "subpattern" q)])
+    | .error _ => [j]
+  | _ => [j]
+
+/-- The variables a hax pattern binds, each once with the type of its decorated
+    binding node. -/
+partial def patBinderTys (j : Json) : List (String × ImpType) :=
+  let rec go : Json → List (String × ImpType)
+    | .arr xs => xs.toList.flatMap go
+    | j@(.obj kvs) =>
+      let here := match ((decoratedContents j).getObjVal? "Binding" >>= (·.getObjVal? "var")
+          >>= (·.getObjValAs? String "name")) with
+        | .ok n => [(n, extractExprType j)]
+        | .error _ => []
+      here ++ kvs.toList.flatMap fun (_, v) => go v
+    | _ => []
+  (go j).foldl (fun acc (n, t) => if acc.any (·.1 == n) then acc else acc ++ [(n, t)]) []
+
+/-- The hax pattern `j` with the name of each variable it binds followed by
+    `suffix`. -/
+partial def renamePatBinders (suffix : String) : Json → Json
+  | .arr xs => .arr (xs.map (renamePatBinders suffix))
+  | .obj kvs =>
+    let kvs := kvs.toList.map fun (k, v) =>
+      if k == "Binding" then
+        match v.getObjVal? "var" >>= (·.getObjValAs? String "name") with
+        | .ok n =>
+          let var := (v.getObjVal? "var").toOption.getD .null
+          (k, renamePatBinders suffix
+            (v.setObjVal! "var" (var.setObjVal! "name" (.str (n ++ suffix)))))
+        | .error _ => (k, renamePatBinders suffix v)
+      else if k == "var" then (k, v)
+      else (k, renamePatBinders suffix v)
+    Json.mkObj kvs
+  | j => j
+
+/-- The alternatives of the pattern `j` (`orAlternatives`); an or-pattern whose
+    alternatives bind different variables, or that has more than 64 alternatives,
+    is refused. -/
+def orAlternativesChecked (j : Json) : Except String (List Json) := do
+  let alts := orAlternatives j
+  if alts.length > 64 then
+    throw "unsupported construct: an or-pattern with more than 64 alternatives"
+  let names (a : Json) : List String := ((patBinderTys a).map (·.1)).eraseDups
+  match alts with
+  | a :: rest =>
+    unless rest.all (fun b => (names b).all (names a).contains &&
+        (names a).all (names b).contains) do
+      throw "unsupported construct: an or-pattern whose alternatives bind different variables"
+  | [] => pure ()
+  return alts
+
+/-- The pattern and the steps of one alternative `j` of an arm (`lowerStructPats`
+    with the prefix `pre`). When a step can fail and the arm's variables are not
+    renamed apart already (`renamed`), the variables of the pattern are renamed with
+    `suffix` (`renamePatBinders`) and bound back to their names after the steps,
+    so that they do not capture the variables of the arms the arm falls through
+    to. -/
+def lowerArmPat (pre suffix : String) (renamed : Bool) (j : Json) :
+    Except String (ImpPat × List PatStep) := do
+  let (q, steps) ← lowerStructPats pre j
+  let pat ← parseHaxPatChecked q
+  if renamed || !steps.any (·.refutable) then return (pat, steps)
+  let (q', steps') ← lowerStructPats pre (renamePatBinders suffix j)
+  let pat' ← parseHaxPatChecked q'
+  let back := ((patBinderTys j).filter (!·.1.startsWith "_")).map fun (n, ty) =>
+    PatStep.bind n (TExpr.mk (.var (n ++ suffix)) ty)
+  return (pat', steps' ++ back)
+
+/-- An arm of a lowered `match`: its pattern, the steps of its pattern
+    (`lowerStructPats`), its guard and its body. -/
+abbrev TArm := ImpPat × List PatStep × Option TExpr × TExpr
+
+/-- Whether an arm cannot fall through once its pattern matches: no guard and no
+    step that can fail. -/
+def TArm.total (a : TArm) : Bool := a.2.2.1.isNone && !a.2.1.any (·.refutable)
+
+/-- A `match` of the variable `s` with arms that can fall through (`TArm.total`),
+    following the hax engine's `DropMatchGuards`: the first such arm `p` with the
+    steps `st`, the guard `g` and the body `a`, and the arms after it, become
+    `match s { p => st(if g then a else R), _ => R }`, `R` the translation of the
+    remaining arms and each failing step of `st` falling through to `R`, under a
+    wildcard arm of the total arms before it (the inner `_` arm is left out when
+    `p` is irrefutable). The variables of such an arm's pattern are renamed apart
+    by the caller (`lowerArmPat`), so that they do not capture the variables of
+    `R`. Such an arm in the last place is refused. The remaining arms are copied
+    once per arm that can fall through. -/
+partial def tGuardedMatch (s : TExpr) (ty : ImpType) : List TArm → Except String TExpr
   | arms =>
-    match arms.findIdx? (·.2.1.isSome) with
-    | none => pure (TExpr.mk (.match_ s (arms.map fun (p, _, b) => (p, b))) ty)
+    let plain := fun (a : TArm) => (a.1, tWrapSteps a.2.1 a.2.2.2 a.2.2.2)
+    match arms.findIdx? (!·.total) with
+    | none => pure (TExpr.mk (.match_ s (arms.map plain)) ty)
     | some i =>
       match arms[i]? with
-      | some (p, some g, a) => do
+      | some (p, st, g, a) => do
         let rest := arms.drop (i + 1)
         if rest.isEmpty then
-          throw "unsupported construct: a `match` whose last arm has a guard"
+          throw (if g.isSome then "unsupported construct: a `match` whose last arm has a guard"
+            else "unsupported construct: a `match` whose last arm has a refutable struct " ++
+              "field subpattern")
         let r ← tGuardedMatch s ty rest
-        let armBody := TExpr.mk (.ifThenElse g a r) ty
+        let core := match g with
+          | some g => TExpr.mk (.ifThenElse g a r) ty
+          | none => a
+        let armBody := tWrapSteps st r core
         let inner : TExpr := TExpr.mk (.match_ s
           (if impPatIrrefutable p then [(p, armBody)] else [(p, armBody), (.wildcard, r)])) ty
-        let pre := (arms.take i).map fun (q, _, b) => (q, b)
+        let pre := (arms.take i).map plain
         if pre.isEmpty then pure inner
         else pure (TExpr.mk (.match_ s (pre ++ [(.wildcard, inner)])) ty)
-      | _ => pure (TExpr.mk (.match_ s (arms.map fun (p, _, b) => (p, b))) ty)
+      | _ => pure (TExpr.mk (.match_ s (arms.map plain)) ty)
+
+/-- The `match` of `scrut` with the arms `arms`, of type `ty`: `tReadMatch` when every
+    arm is total (`TArm.total`), and otherwise `tGuardedMatch` of the scrutinee,
+    bound first to the variable `tmp` unless it is a variable. -/
+def tMatchArms (scrut : TExpr) (ty : ImpType) (tmp : String) (arms : List TArm) :
+    Except String TExpr := do
+  if arms.all (·.total) then
+    return tReadMatch scrut (arms.map fun a => (a.1, tWrapSteps a.2.1 a.2.2.2 a.2.2.2)) ty
+  let (bs, s) := tPeelTryLets scrut
+  match s.kind with
+  | .var _ => return tWrapTryLets bs (← tGuardedMatch s ty arms)
+  | _ =>
+    let sv := TExpr.mk (.var tmp) s.ty
+    let m ← tGuardedMatch sv ty arms
+    return tWrapTryLets bs (TExpr.mk (.letBind tmp s m) ty)
 
 /-- The heads of the calls of an expression and the variables it reads. -/
 partial def impAppHeads : ImpExpr → List String
@@ -5187,19 +5350,22 @@ where
       -- `if let p = e { a } else { b }` is `match e { p => a, _ => b }`, a missing
       -- `else` being `()` (the hax engine's import); a let chain is not a `Let`
       -- condition and is refused by the `Let` case.
+      -- An or-pattern is one arm per alternative (`orAlternativesChecked`).
       if let .ok letD := (decoratedContents (← data.getObjVal? "cond")).getObjVal? "Let" then
-        let (patJ, binds) ← lowerStructPats "_sp_if" (← letD.getObjVal? "pat")
-        let pat ← parseHaxPatChecked patJ
+        let alts ← orAlternativesChecked (← letD.getObjVal? "pat")
         let scrut ← parseHaxTExpr (← letD.getObjVal? "expr") implMap
         let thn ← parseHaxTExpr (← data.getObjVal? "then") implMap
         let els ← match data.getObjVal? "else_opt" with
           | .ok (.null) => pure (TExpr.mk .unitVal .unit)
           | .ok elsJ => parseHaxTExpr elsJ implMap
           | _ => pure (TExpr.mk .unitVal .unit)
-        let thn := tWrapBinds binds thn
-        let arms := if impPatIrrefutable pat then [(pat, thn)]
-          else [(pat, thn), (.wildcard, els)]
-        return (tReadMatch scrut arms (extractNodeType _parentJ)).kind
+        let arms : List TArm ← (alts.zip (List.range alts.length)).mapM fun (a, k) => do
+          let pre := if k == 0 then "_sp_if" else s!"_sp_if_{k}"
+          let (pat, steps) ← lowerArmPat pre s!"_c_if{k}" false a
+          pure (pat, steps, none, thn)
+        let covers := arms.any fun a => a.total && impPatIrrefutable a.1
+        let arms := if covers then arms else arms ++ [(.wildcard, [], none, els)]
+        return (← tMatchArms scrut (extractNodeType _parentJ) "_ms_if" arms).kind
       let cond ← parseHaxTExpr (← data.getObjVal? "cond") implMap
       let thn ← parseHaxTExpr (← data.getObjVal? "then") implMap
       let els ← match data.getObjVal? "else_opt" with
@@ -5397,19 +5563,9 @@ where
         | _ => 0
       let arms ← (armsJ.toList.zip (List.range armsJ.size)).mapM fun (a, i) =>
         parseTArm a s!"{pos}_{i}"
-      if arms.all (·.2.1.isNone) then
-        return (tReadMatch scrut (arms.map fun (p, _, b) => (p, b))
-          (extractNodeType _parentJ)).kind
-      -- Guarded arms (`tGuardedMatch`) read the scrutinee more than once; it is
-      -- bound to a variable first.
-      let (bs, s) := tPeelTryLets scrut
-      let ty := extractNodeType _parentJ
-      match s.kind with
-      | .var _ => return (tWrapTryLets bs (← tGuardedMatch s ty arms)).kind
-      | _ =>
-        let sv := TExpr.mk (.var s!"_ms{pos}") s.ty
-        let m ← tGuardedMatch sv ty arms
-        return (tWrapTryLets bs (TExpr.mk (.letBind s!"_ms{pos}" s m) ty)).kind
+      -- Arms that can fall through (`tGuardedMatch`) read the scrutinee more than
+      -- once; it is bound to a variable first (`tMatchArms`).
+      return (← tMatchArms scrut (extractNodeType _parentJ) s!"_ms{pos}" arms.flatten).kind
 
     else if let .ok data := j.getObjVal? "Tuple" then
       let fieldsJ ← data.getObjValAs? (Array Json) "fields"
@@ -5846,15 +6002,16 @@ where
     | [s] => tReplaceDeepestUnit s tail
     | s :: rest => tReplaceDeepestUnit s (tStmtsToSeq rest tail)
 
-  /-- Parse a hax Arm into its pattern, its guard and its body. The struct
-      subpatterns of the pattern are bound to variables named after `tag` and
-      destructured in front of the guard and the body (`lowerStructPats`). The
-      variables of a guarded arm are renamed apart with the suffix `_g` and
-      `tag` (`renameLocals`), so that the arms `tGuardedMatch` places under
-      them read the outer variables of the same names. A boolean guard is
-      translated; an `if let` guard is refused by the `Let` case. -/
-  parseTArm (j : Json) (tag : String) :
-      Except String (ImpPat × Option TExpr × TExpr) := do
+  /-- Parse a hax Arm into one arm per alternative of its pattern
+      (`orAlternativesChecked`), each with the same guard and body, in the order
+      Rust tries them. The struct subpatterns of each alternative are bound to
+      variables named after `tag` and destructured in the steps in front of the
+      guard and the body (`lowerArmPat`). The variables of a guarded arm are
+      renamed apart with the suffix `_g` and `tag` (`renameLocals`), so that the
+      arms `tGuardedMatch` places under them read the outer variables of the same
+      names. A boolean guard is translated; an `if let` guard is refused by the
+      `Let` case. -/
+  parseTArm (j : Json) (tag : String) : Except String (List TArm) := do
     let guarded := match j.getObjVal? "guard" with
       | .ok .null | .error _ => false
       | .ok _ => true
@@ -5862,17 +6019,17 @@ where
         renameLocals (patBinderIds ((j.getObjVal? "pattern").toOption.getD .null))
           s!"_g{tag}" j
       else j
-    let (patJ, binds) ← match j.getObjVal? "pattern" with
-      | .ok p => lowerStructPats s!"_sp{tag}" p
-      | _ => pure (Json.str "Wild", [])
-    let pat ← parseHaxPatChecked patJ
+    let alts ← orAlternativesChecked ((j.getObjVal? "pattern").toOption.getD (Json.str "Wild"))
     let body ← match j.getObjVal? "body" with
       | .ok b => parseHaxTExpr b implMap
       | _ => pure (TExpr.mk .unitVal .unit)
     let guard ← match j.getObjVal? "guard" with
       | .ok .null | .error _ => pure none
       | .ok g => some <$> parseHaxTExpr g implMap
-    return (pat, guard.map (tWrapBinds binds), tWrapBinds binds body)
+    (alts.zip (List.range alts.length)).mapM fun (a, k) => do
+      let pre := if k == 0 then s!"_sp{tag}" else s!"_sp{tag}_{k}"
+      let (pat, steps) ← lowerArmPat pre s!"_c{tag}_{k}" guarded a
+      pure (pat, steps, guard, body)
 
   /-- The statements `stmts` of a block in front of its value `tail`. A
       `let p = e else { b };` statement is `match e { p => rest, _ => b }`, `rest`
@@ -5889,16 +6046,18 @@ where
       let before ← (stmts.take i).mapM parseTStmt
       let cont ← parseTStmtsSeq (stmts.drop (i + 1)) tail
       let data ← ((stmts[i]?.getD .null).getObjVal? "kind") >>= (·.getObjVal? "Let")
-      let (patJ, binds) ← lowerStructPats "_sp_le" (← data.getObjVal? "pattern")
-      let pat ← parseHaxPatChecked patJ
+      let alts ← orAlternativesChecked (← data.getObjVal? "pattern")
       let init ← parseHaxTExpr (← data.getObjVal? "initializer") implMap
       let els ← parseHaxTExpr
         (Json.mkObj [("contents", Json.mkObj [("Block", ← data.getObjVal? "else_block")])])
         implMap
-      let thn := tWrapBinds binds cont
-      let arms := if impPatIrrefutable pat then [(pat, thn)]
-        else [(pat, thn), (.wildcard, els)]
-      return tStmtsToSeq before (tReadMatch init arms cont.ty)
+      let arms : List TArm ← (alts.zip (List.range alts.length)).mapM fun (a, k) => do
+        let pre := if k == 0 then "_sp_le" else s!"_sp_le_{k}"
+        let (pat, steps) ← lowerArmPat pre s!"_c_le{k}" false a
+        pure (pat, steps, none, cont)
+      let covers := arms.any fun a => a.total && impPatIrrefutable a.1
+      let arms := if covers then arms else arms ++ [(.wildcard, [], none, els)]
+      return tStmtsToSeq before (← tMatchArms init cont.ty "_ms_le" arms)
 
   /-- Parse a hax AdtExpr into TExprKind. -/
   parseTAdtExpr (j : Json) : Except String TExprKind := do

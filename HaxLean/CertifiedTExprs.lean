@@ -120,6 +120,7 @@ structure Writeback where
   writeReturns : List (String × List String × Bool)
   /-- The calls through `&mut` outside the write-back rewrite, by caller. -/
   dropped : List (String × String × List Nat)
+  deriving Inhabited
 
 /-- The write-back normalisation of `ThreadMutations` on `procTdefs`.
 
@@ -144,6 +145,33 @@ def writebackOf (structFields : StructFieldNames)
   let dropped := procTdefs.flatMap fun (n, te) =>
     (tDroppedMutCalls fnTypes structFields writers tupWriters te).map fun d => (n, d)
   { procTdefs, writeFns, writers, tupWriters, writeReturns, dropped }
+
+/-- The keep-going mode's omission of the write-back failures: each definition with a call
+    through `&mut` outside the write-back rewrite (`Writeback.dropped`) is removed, and so is
+    every definition that calls or reads a removed one
+    (`HaxAdapter.omitCallersOfRefused`); the normalisation is taken again on the remaining
+    definitions until it drops no call. The result is the remaining signatures, raw and
+    prepared definitions, their write-back normalisation, and the removed definitions with
+    the reason of each. -/
+partial def omitDroppedWritebacks (structFields : StructFieldNames)
+    (fnTypes : List (String × HaxAdapter.FnTypeInfo)) (rawTdefs procTdefs : List (String × TExpr))
+    (omitted : List (String × String) := []) :
+    (List (String × HaxAdapter.FnTypeInfo) × List (String × TExpr) × List (String × TExpr))
+      × Writeback × List (String × String) :=
+  let w := writebackOf structFields fnTypes procTdefs
+  if w.dropped.isEmpty then ((fnTypes, rawTdefs, procTdefs), w, omitted)
+  else
+    let roots := dedupByName (w.dropped.map fun (n, f, ps) =>
+      (n, s!"calls `{f}` through `&mut` (parameter positions {ps}) outside the " ++
+        "write-back rewrite"))
+    let rootNames := roots.map (·.1)
+    let parsed := (procTdefs.filter (!rootNames.contains ·.1)).map fun (n, te) => (n, (), te, ())
+    let (kept, removed) := HaxAdapter.omitCallersOfRefused parsed roots
+      fun f => s!"calls the omitted function `{f}`"
+    let keptNames := kept.map (·.1)
+    omitDroppedWritebacks structFields (fnTypes.filter (keptNames.contains ·.1))
+      (rawTdefs.filter (keptNames.contains ·.1)) (procTdefs.filter (keptNames.contains ·.1))
+      (omitted ++ removed)
 
 /-- The definitions after the typed pipeline: each `&mut` write-back turned into an
     assignment (`tRebindMutCalls` at the call, `tReturnMutParams` at the definition; the
