@@ -35,19 +35,26 @@ open Lean (Json)
 
 namespace Hax
 
-/-- Keep the first entry for each name, in first-occurrence order.
-
-The export is read through `parseHaxExport`, which lists each item once, but
-two items can still define the same name. `toLeanCertifiedFileTyped` keeps the
-first definition of each name before rendering; applying the same rule here
-keeps the later ones out of the pipeline, the erasure and the validator. -/
+/-- Keep the first entry for each name, in first-occurrence order. -/
 def dedupByName {α : Type} (xs : List (String × α)) : List (String × α) :=
   let step (acc : Array (String × α) × List String) (p : String × α) :
       Array (String × α) × List String :=
     if acc.2.contains p.1 then acc else (acc.1.push p, p.1 :: acc.2)
   (xs.foldl step (#[], [])).1.toList
 
-/-- The typed definitions of an export, each name kept once (`dedupByName`). -/
+/-- `xs` when its names are distinct; otherwise an error naming the first name that
+    occurs twice. The typed parse refuses two definitions with one emitted name
+    (`HaxAdapter.distinctDefNames`), so a definition list it returns passes. -/
+def distinctByName {α : Type} (xs : List (String × α)) : Except String (List (String × α)) :=
+  let step (seen : List String × Option String) (p : String × α) :
+      List String × Option String :=
+    if seen.2.isSome then seen
+    else if seen.1.contains p.1 then (seen.1, some p.1) else (p.1 :: seen.1, none)
+  match (xs.foldl step ([], none)).2 with
+  | some n => .error s!"two definitions have the emitted name `{n}`"
+  | none => .ok xs
+
+/-- The typed definitions of an export, with distinct names (`distinctByName`). -/
 structure TypedDefs where
   /-- The signatures of the definitions. -/
   fnTypes : List (String × HaxAdapter.FnTypeInfo)
@@ -82,9 +89,9 @@ def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
   let ((_expr, fnTypes, rawTdefs, procTdefs), refused) ←
     HaxAdapter.parseHaxFileWithTExprReport inputJson structFields
       (traitImplConsts := classMode) (nominalKrates := nominalKrates) (keepGoing := keepGoing)
-  let fnTypes := dedupByName fnTypes
-  let rawTdefs := dedupByName rawTdefs
-  let procTdefs := dedupByName procTdefs
+  let fnTypes ← distinctByName fnTypes
+  let rawTdefs ← distinctByName rawTdefs
+  let procTdefs ← distinctByName procTdefs
   let traitImplNames :=
     ((HaxAdapter.buildTraitImplMethodMap inputJson).map (·.2.2)).eraseDups
   let depTypeConflicts :=
@@ -102,8 +109,8 @@ def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
     let ((_expr, fnTypes, rawTdefs, procTdefs), refused) ←
       HaxAdapter.parseHaxFileWithTExprReport inputJson structFields
         (resolveTraitImpls := false) (nominalKrates := nominalKrates) (keepGoing := keepGoing)
-    pure { fnTypes := dedupByName fnTypes, rawTdefs := dedupByName rawTdefs,
-           procTdefs := dedupByName procTdefs, traitImplNames, depTypeConflicts, refused }
+    pure { fnTypes := ← distinctByName fnTypes, rawTdefs := ← distinctByName rawTdefs,
+           procTdefs := ← distinctByName procTdefs, traitImplNames, depTypeConflicts, refused }
 
 /-- The write-back normalisation of a crate's definitions and its tables. -/
 structure Writeback where
@@ -193,6 +200,46 @@ def postPipeline (structFields : StructFieldNames) (newtypes : HaxAdapter.Newtyp
     (n, tUnqualifyFieldHeads
       (tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te))))
 
+/-- The `validateExtraction` warnings that do not refuse their definition, by a substring
+    of the warning. The list is empty: every warning refuses its definition. -/
+def allowedExtractionWarnings : List String := []
+
+/-- The refusals of the erased post-pipeline definitions `defs`, as
+    `(definition, kind, reason)`:
+
+    * `dropped-loop-state`: a fold rebinds a variable read after it but not in its state
+      (`droppedLoopState`);
+    * `unbound-fold-accumulator`: a fold accumulator bound nowhere, which
+      `initMissingFoldAccums` would bind to `0` (`freeFoldAccums`);
+    * `canonicalize`: a binding that Pass D or Pass G of `Canonicalize.canonicalize`
+      keeps because it is read (`Canonicalize.canonicalizeRefusals`);
+    * `validate`: a `validateExtraction` warning outside `allowedExtractionWarnings`. -/
+def postPipelineRefusals (defs : List (String × ImpExpr)) : List (String × String × String) :=
+  defs.flatMap fun (n, e) =>
+    ((droppedLoopState [] e).map fun (i, x) => (n, "dropped-loop-state",
+      s!"the fold over `{i}` rebinds `{x}`, which is read after the fold, but `{x}` is " ++
+        "not in the fold's state; the rebinding does not reach the continuation.")) ++
+    ((freeFoldAccums [] e).eraseDups.map fun v => (n, "unbound-fold-accumulator",
+      s!"the fold accumulator `{v}` is bound nowhere before the fold")) ++
+    ((Canonicalize.canonicalizeRefusals e).map fun m => (n, "canonicalize", m)) ++
+    (((HaxAdapter.validateExtraction e n).filter fun w =>
+      !allowedExtractionWarnings.any fun a => (w.splitOn a).length > 1).map fun w =>
+        (n, "validate", w))
+
+/-- The keep-going mode's omission of the post-pipeline refusals: the names of the
+    definitions of `defs` kept when every definition `refusals` names is removed, and so
+    is every definition that calls or reads a removed one
+    (`HaxAdapter.omitCallersOfRefused`), and the removed definitions with the reason of
+    each. -/
+def omitPostPipelineRefusals (refusals : List (String × String × String))
+    (defs : List (String × TExpr)) : List String × List (String × String) :=
+  let roots := dedupByName (refusals.map fun (n, k, m) => (n, s!"{k}: {m}"))
+  let rootNames := roots.map (·.1)
+  let parsed := (defs.filter (!rootNames.contains ·.1)).map fun (n, te) => (n, (), te, ())
+  let (kept, removed) := HaxAdapter.omitCallersOfRefused parsed roots
+    fun f => s!"calls the omitted function `{f}`"
+  (kept.map (·.1), removed)
+
 /-- The typed extraction of the functions of a hax frontend export: the terms
     `haxpipeT --hax --emit-certified` prints as `f_texpr` literals, by name, in the order of
     the extraction module, under no `--emit-classes`, no `--emit-contracts` and no function
@@ -213,7 +260,10 @@ def certifiedTExprs (input : String) (nominalKrates : List String := []) :
   if let some (n, (f, ps)) := w.dropped.head? then
     throw (s!"`{n}` calls `{f}` through `&mut` (parameter positions {ps}) outside the " ++
       s!"write-back rewrite ({w.dropped.length} such calls); haxpipeT emits no extraction")
+  let post := postPipeline structFields newtypes w
+  if let some (n, k, m) := (postPipelineRefusals (post.map fun (n, te) => (n, te.erase))).head?
+  then throw s!"{k}: in `{n}`, {m}; haxpipeT emits no extraction"
   pure <| certifiedLiteralTExprs td.rawTdefs "Generated" structMeta td.fnTypes
-    (postPipeline structFields newtypes w) newtypes (nominalKrates := nominalKrates)
+    post newtypes (nominalKrates := nominalKrates)
 
 end Hax

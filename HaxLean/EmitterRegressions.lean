@@ -3853,4 +3853,153 @@ def droppedDefs : List (String × TExpr) :=
 
 end PatternTranslations
 
+namespace SilentDropRefusals
+
+/-! ## Refusals of constructs the typed path would drop
+
+Two definitions with one emitted name are refused (`HaxAdapter.distinctDefNames`); a trait
+`impl` on a scalar self type is named by that type (`HaxAdapter.selfTyShortName?`). An
+indirect call, a call with a const generic argument, a function with a const generic
+parameter, a struct expression with default field values, a reference type of an unread
+shape and an `unsafe` block are refused. After the pipeline, a fold accumulator bound
+nowhere (`freeFoldAccums`), a binding the canonicalization keeps because it is read
+(`Canonicalize.canonicalizeRefusals`) and a `validateExtraction` warning refuse their
+definition (`postPipelineRefusals`). An unknown option is recorded (`Options.unknownArgs`). -/
+
+open Lean Hax.HaxAdapter QuestionMarkExport FrontAdapterFixes
+
+/-- The trait `impl` of `k::Tr` with interning id `iid` on the self type `selfTy` (a
+    `TyKind`), with the method `m(self)`. -/
+def scalarTraitImpl (iid : Nat) (selfTy : Json) : Json :=
+  Json.mkObj [
+    ("owner_id", Json.mkObj [("contents", Json.mkObj [
+      ("id", Json.num iid), ("value", Json.mkObj [("is_local", Json.bool true)])])]),
+    ("kind", Json.mkObj [("Impl", Json.mkObj [
+      ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id",
+        resolvedDefId [defIdSeg "TypeNs" "Tr"])])]),
+      ("self_ty", Json.mkObj [("value", selfTy)]),
+      ("items", Json.arr #[Json.mkObj [
+        ("ident", Json.arr #[Json.str "m"]),
+        ("kind", Json.mkObj [("Fn", Json.mkObj [("params", Json.arr #[])])])]])])])]
+
+-- `impl Tr for u32` and `impl Tr for u64` are `Tr_u32_m` and `Tr_u64_m`.
+#guard buildTraitImplMethodMap (Json.arr #[
+    scalarTraitImpl 1 (Json.mkObj [("Uint", Json.str "U32")]),
+    scalarTraitImpl 2 (Json.mkObj [("Uint", Json.str "U64")])]) ==
+  [(1, "m", "Tr_u32_m"), (2, "m", "Tr_u64_m")]
+
+/-- The inherent `impl S<arg>` with the method `m(p: u32) -> u32 { p }`. -/
+def inherentImpl (arg : Json) (p : String) : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Impl", Json.mkObj [
+    ("of_trait", Json.null), ("self_ty", adtJ "k" "S" [arg]),
+    ("items", Json.arr #[Json.mkObj [
+      ("ident", Json.arr #[Json.str "m"]),
+      ("kind", Json.mkObj [("Fn", Json.mkObj [("def", Json.mkObj [
+        ("params", Json.arr #[Json.mkObj [("pat", bindPatJ p), ("ty", u32J)]]),
+        ("ret", u32J), ("body", varJ u32J p)])])])]])])])]
+
+/-- `impl S<u32> { fn m(x) }` and `impl S<bool> { fn m(y) }`, both emitted as `S_m`. -/
+def twoImplsExport : Json :=
+  Json.arr #[inherentImpl u32J "x", inherentImpl (tyJ (Json.str "Bool")) "y"]
+
+-- The two definitions of `S_m` are refused; under the keep-going mode the name is omitted.
+#guard match parseHaxFileWithTExpr twoImplsExport with
+  | .error e => e.startsWith "unsupported construct: two definitions have the emitted name `S_m`"
+  | .ok _ => false
+#guard match parseHaxFileWithTExprReport twoImplsExport (keepGoing := true) with
+  | .ok _ => false
+  | .error e => e == "no functions or constants found in hax export"
+-- One item listed twice (one source, one body) is one definition.
+#guard
+  let d : String × Unit × TExpr × Unit := ("f", (), .mk (.var "x") .int, ())
+  let (kept, refused) := distinctDefNames [d, d] ["k::f", "k::f"]
+  kept.length == 1 && refused.isEmpty
+#guard (Hax.distinctByName [("a", 1), ("a", 2)]).toOption.isNone
+
+-- A call through a function pointer held in a variable.
+#guard tRefused (nodeJ u32J (Json.mkObj [("Call", Json.mkObj [
+    ("fun", varJ (tyJ (Json.str "Never")) "h"), ("args", Json.arr #[])])]))
+  "unsupported construct: a call whose callee is not a named function"
+-- `k::f::<4>()`.
+#guard tRefused (nodeJ u32J (Json.mkObj [("Call", Json.mkObj [
+    ("fun", nodeJ (tyJ (Json.str "Never")) (Json.mkObj [("GlobalName", Json.mkObj [
+      ("item", Json.mkObj [("value", Json.mkObj [
+        ("def_id", defIdJ "k" [("ValueNs", "f")]),
+        ("generic_args", Json.arr #[Json.mkObj [("Const", Json.num 4)]])])])])])),
+    ("args", Json.arr #[])])]))
+  "unsupported construct: a call of `f` with a const generic argument"
+-- `S { a: x, .. }` with the default value of the other fields.
+#guard tRefused (nodeJ (adtJ "k" "S" []) (Json.mkObj [("Adt", Json.mkObj [
+    ("info", Json.mkObj [("variant", defIdJ "k" [("TypeNs", "S")])]),
+    ("fields", Json.arr #[]), ("base", Json.mkObj [("DefaultFields", Json.arr #[])])])]))
+  "unsupported construct: a struct expression of `S` with default field values"
+-- A function reading its const generic parameter `N`.
+#guard match parseHaxItemTExpr (fnJ [] (nodeJ u32J (Json.mkObj [("ConstParam", Json.mkObj [
+    ("param", Json.mkObj [("index", Json.num 0), ("name", Json.str "N")])])]))) with
+  | .error e => e == "unsupported construct in `unknown_fn`: a const generic parameter"
+  | .ok _ => false
+-- A reference type that is not `[region, inner(, mutability)]`.
+#guard (bodyRefusal? none false (varJ (tyJ (Json.mkObj [("Ref", Json.mkObj [])])) "r")).isSome
+#guard (bodyRefusal? none false
+  (varJ (tyJ (Json.mkObj [("Ref", Json.arr #[Json.null, u32J, Json.bool true])])) "r")).isNone
+
+/-- The block `{ x }` with the safety mode `mode`. -/
+def blockJ (mode : String) : Json :=
+  nodeJ u32J (Json.mkObj [("Block", Json.mkObj [("stmts", Json.arr #[]),
+    ("expr", varJ u32J "x"), ("safety_mode", Json.str mode)])])
+
+#guard bodyRefusal? none false (blockJ "ExplicitUnsafe") ==
+  some "unsupported construct: an `unsafe` block"
+#guard (bodyRefusal? none false (blockJ "BuiltinUnsafe")).isNone
+#guard (bodyRefusal? none false (blockJ "Safe")).isNone
+
+/-- `for i in 0..4 { acc = acc + i }` with the accumulator `acc`. -/
+def accFold : ImpExpr :=
+  .forFold "i" (.lit (.int 0)) (.lit (.int 4))
+    (.seq (.letBind "acc" (.app "add" [.var "acc", .var "i"]) (.var "acc")) .unitVal)
+
+-- An accumulator bound nowhere is listed; a bound one is not, and the pass leaves the
+-- term unchanged.
+#guard freeFoldAccums [] accFold == ["acc"]
+#guard freeFoldAccums [] (.letBind "acc" (.lit (.int 0)) accFold) == []
+#guard initMissingFoldAccums [] (.letBind "acc" (.lit (.int 0)) accFold) ==
+  .letBind "acc" (.lit (.int 0)) accFold
+
+/-- `let r := cfContinue v; body`. -/
+def cfLet (body : ImpExpr) : ImpExpr := .letBind "r" (.cfContinue (.var "v")) body
+
+-- Pass D rewrites a binding that is not read and keeps one that is.
+#guard Canonicalize.canonicalizeDeadCFBindings (cfLet .unitVal) ==
+  .letBind "r" (.cfBreak .unitVal) .unitVal
+#guard Canonicalize.canonicalizeDeadCFBindings (cfLet (.var "r")) == cfLet (.var "r")
+#guard (Canonicalize.canonicalizeRefusals (cfLet .unitVal)).isEmpty
+#guard (Canonicalize.canonicalizeRefusals (cfLet (.var "r"))).length == 1
+
+/-- `let _assign1 := if c then a else _assign0; body`. -/
+def assignLet (body : ImpExpr) : ImpExpr :=
+  .letBind "_assign1" (.ifThenElse (.var "c") (.var "a") (.var "_assign0")) body
+
+-- Pass G rewrites a binding that is not read and keeps one that is.
+#guard Canonicalize.canonicalizeIfElseAssign (assignLet .unitVal) ==
+  .letBind "_assign1" (.ifThenElse (.var "c") (.var "a") .unitVal) .unitVal
+#guard Canonicalize.canonicalizeIfElseAssign (assignLet (.var "_assign1")) ==
+  assignLet (.var "_assign1")
+#guard (Canonicalize.canonicalizeRefusals (assignLet (.var "_assign1"))).length == 1
+
+-- The post-pipeline refusals and their keep-going omission: `bad` holds a hax `Todo` and
+-- an unbound accumulator, `g` calls `bad`, `f` is kept.
+#guard (postPipelineRefusals [("f", .var "x"), ("bad", .seq (.app "todo:x" []) accFold)]).map
+    (fun (n, k, _) => (n, k)) == [("bad", "unbound-fold-accumulator"), ("bad", "validate")]
+#guard
+  let defs : List (String × TExpr) :=
+    [("f", .mk (.var "x") .int), ("bad", .mk .unitVal .unit), ("g", .mk (.app "bad" []) .unit)]
+  let (kept, removed) := omitPostPipelineRefusals [("bad", "validate", "w")] defs
+  kept == ["f"] && removed.map (·.1) == ["bad", "g"]
+
+-- An unknown option is recorded; a known one is not.
+#guard (parseArgs ["--hxa", "--emit-certified", "f.json"]).unknownArgs == ["--hxa"]
+#guard (parseArgs ["--hax", "--emit-certified", "f.json"]).unknownArgs.isEmpty
+
+end SilentDropRefusals
+
 end Hax.EmitterRegressions

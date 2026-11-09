@@ -117,6 +117,9 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--python" then
     return ← runPython (parsePyArgs args {})
   let opts := parseArgs args
+  unless opts.unknownArgs.isEmpty do
+    IO.eprintln s!"haxpipeT: unknown options {opts.unknownArgs}; see --help"
+    return 1
 
   if opts.help then
     IO.println helpText
@@ -212,7 +215,7 @@ def main (args : List String) : IO UInt32 := do
     -- left out is left out too.
     let classHooks := match opts.filterFns with
       | some _ =>
-        let kept := rawTdefs.map (·.1)
+        let kept := rawTdefs.map fun (p : String × TExpr) => p.1
         { classHooks with instances := classHooks.instances.filter fun inst =>
             inst.fields.all fun (_, d) => kept.contains d }
       | none => classHooks
@@ -264,20 +267,32 @@ def main (args : List String) : IO UInt32 := do
 
     -- Validate via erasure
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
-    -- A variable a `for` fold body rebinds that is live after the fold but
-    -- not in the fold's state: the rebinding does not reach the continuation.
-    let droppedState := erased.flatMap fun (n, e) => (droppedLoopState [] e).map (n, ·)
-    for (n, (i, x)) in droppedState do
-      IO.eprintln s!"ERROR dropped-loop-state: in `{n}`, the fold over `{i}` rebinds `{x}`, which is read after the fold, but `{x}` is not in the fold's state; the rebinding does not reach the continuation."
+    -- The refusals after the pipeline (`postPipelineRefusals`): a fold rebinding a
+    -- variable outside its state, an unbound fold accumulator, a binding the
+    -- canonicalization keeps, a `validateExtraction` warning.
+    let postRefusals := postPipelineRefusals erased
+    for (n, k, m) in postRefusals do
+      IO.eprintln s!"ERROR {k}: in `{n}`, {m}"
+    let droppedState := postRefusals.filter (·.2.1 == "dropped-loop-state")
     IO.eprintln s!"INFO dropped-loop-state={droppedState.length}"
-    let allWarnings := erased.foldl (fun acc (_, e) =>
-      acc ++ HaxAdapter.validateExtraction e) ([] : List String)
+    let allWarnings := erased.foldl (fun acc (n, e) =>
+      acc ++ HaxAdapter.validateExtraction e n) ([] : List String)
     IO.eprintln s!"INFO warnings={allWarnings.length}"
     let t ← phaseTick "erase-validate" t
-    if !allWarnings.isEmpty then
-      for w in allWarnings do
-        IO.eprintln s!"WARNING: {w}"
-      IO.eprintln s!"Total warnings: {allWarnings.length}"
+    if !postRefusals.isEmpty && !opts.keepGoing then
+      IO.eprintln (s!"haxpipeT: no output; {postRefusals.length} refusals after the " ++
+        "pipeline; pass --keep-going to omit the refused definitions")
+      return 1
+    -- Under the keep-going mode the refused definitions and their callers are omitted.
+    let (keptNames, postRemoved) := omitPostPipelineRefusals postRefusals postPipelineTdefs
+    for (n, msg) in postRemoved do
+      IO.eprintln s!"REFUSED {n}: {msg}"
+    let keep : String → Bool := fun n => postRefusals.isEmpty || keptNames.contains n
+    let postPipelineTdefs := postPipelineTdefs.filter (keep ·.1)
+    let rawTdefs := rawTdefs.filter (keep ·.1)
+    let fnTypes := fnTypes.filter (keep ·.1)
+    let classHooks := { classHooks with instances := classHooks.instances.filter (fun inst =>
+      inst.fields.all fun (_, d) => keep d) }
 
     -- Generate typed certified output (rawTdefs for param annotations, postPipelineTdefs for bodies)
     -- rawTdefs has hax types preserved (for deps class + param annotations)

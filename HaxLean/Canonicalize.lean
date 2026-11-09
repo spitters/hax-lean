@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.AST
+public import HaxLean.FreeVars
 
 /-!
 # Canonicalization passes for the post-pipeline ImpExpr
@@ -18,7 +19,12 @@ syntax mapping and per-function agreement is `rfl` by construction.
 ## Pass list (this file)
 
 * `canonicalizeDeadCFBindings` — drops `letBind n (cfBreak _) body` when
-  `n.startsWith "_"` (and similar for `cfContinue` / `cfBreakContinue`).
+  `n.startsWith "_"` (and similar for `cfContinue` / `cfBreakContinue`), and
+  binds any other such `n` to `cfBreak ()`, when `n` is not free in `body`.
+* `canonicalizeIfElseAssign` — replaces the `_assign` else branch of
+  `letBind n (ifThenElse c t (var m)) body` by `()` when `n` is not free in `body`.
+* `canonicalizeRefusals` — the bindings these two passes keep because `body`
+  reads `n`.
 * `canonicalizePanic` — rewrites `app "panic" _` and `app "panic_fmt" _` to
   `.unitVal`.
 * `canonicalizeMutationDiscard` — rewrites
@@ -46,19 +52,23 @@ open Hax
 
 /-! ## Pass D — dead ControlFlow bindings -/
 
-/-- Pass D. Drops `letBind n (cfBreak _) body` (similarly for `cfContinue`
-    and `cfBreakContinue`) when `n` starts with `"_"`. The binding's value is
-    a discarded ControlFlow node and the parser-introduced variable is unused.
-    Rendering the body alone is sound because the cfBreak/etc. nodes carry no
-    runtime effect at the post-pipeline `Hax.cfBreak`/`Hax.cfContinue` shapes. -/
+/-- Whether `e` is a ControlFlow node: `cfBreak`, `cfContinue` or `cfBreakContinue`. -/
+def isControlFlowNode : ImpExpr → Bool
+  | .cfBreak _ | .cfContinue _ | .cfBreakContinue _ => true
+  | _ => false
+
+/-- Pass D. On `letBind n v body` with `v` a ControlFlow node
+    (`isControlFlowNode`) and `n` not free in `body`, drops the binding when `n`
+    starts with `"_"` and otherwise binds `n` to `cfBreak ()`. The value is not
+    read, and the ControlFlow nodes carry no runtime effect at the post-pipeline
+    `Hax.cfBreak`/`Hax.cfContinue` shapes. A binding whose variable `body` reads
+    is kept; `deadCFRefusals` lists it. -/
 def canonicalizeDeadCFBindings : ImpExpr → ImpExpr
-  | .letBind n (.cfBreak _) body
-  | .letBind n (.cfContinue _) body
-  | .letBind n (.cfBreakContinue _) body =>
-    if n.startsWith "_" then canonicalizeDeadCFBindings body
-    else .letBind n (.cfBreak (.unitVal)) (canonicalizeDeadCFBindings body)
   | .letBind n v body =>
-    .letBind n (canonicalizeDeadCFBindings v) (canonicalizeDeadCFBindings body)
+    if isControlFlowNode v && !(freeVars body).contains n then
+      if n.startsWith "_" then canonicalizeDeadCFBindings body
+      else .letBind n (.cfBreak (.unitVal)) (canonicalizeDeadCFBindings body)
+    else .letBind n (canonicalizeDeadCFBindings v) (canonicalizeDeadCFBindings body)
   | .seq a b =>
     .seq (canonicalizeDeadCFBindings a) (canonicalizeDeadCFBindings b)
   | .ifThenElse c t e =>
@@ -255,13 +265,16 @@ where
     self-referential else branch (which would refer to a previous `_assign`
     of possibly different type). The canonical form replaces the else
     branch with `.unitVal`. Combined with Pass C, downstream rendering
-    of `_assign` patterns is uniform. -/
+    of `_assign` patterns is uniform. The rewrite applies only when `n` is not
+    free in `body`, so that the value is not read; otherwise the binding is
+    kept and `ifElseAssignRefusals` lists it. -/
 def canonicalizeIfElseAssign : ImpExpr → ImpExpr
   | .letBind n (.ifThenElse c thn (.var elsV)) body =>
     let c' := canonicalizeIfElseAssign c
     let thn' := canonicalizeIfElseAssign thn
     let body' := canonicalizeIfElseAssign body
-    if n.startsWith "_assign" && elsV.startsWith "_assign" then
+    if n.startsWith "_assign" && elsV.startsWith "_assign" &&
+        !(freeVars body).contains n then
       .letBind n (.ifThenElse c' thn' .unitVal) body'
     else
       .letBind n (.ifThenElse c' thn' (.var elsV)) body'
@@ -325,6 +338,52 @@ where
   | cons pa arms ih =>
     obtain ⟨p, e⟩ := pa
     simp [canonicalizeIfElseAssign.mapArms, ih]
+
+/-! ## Bindings the passes keep -/
+
+/-- The immediate subexpressions of `e`. -/
+def subExprs : ImpExpr → List ImpExpr
+  | .letBind _ v b => [v, b]
+  | .lam _ b => [b]
+  | .app _ es | .tuple es => es
+  | .match_ s arms => s :: arms.map (·.2)
+  | .ifThenElse c t e => [c, t, e]
+  | .seq a b | .whileLoop a b | .whileFold a b | .whileFoldReturn a b => [a, b]
+  | .forLoop _ lo hi b | .forLoopRev _ lo hi b | .forFold _ lo hi b | .forFoldRev _ lo hi b
+  | .forFoldReturn _ lo hi b | .forFoldRevReturn _ lo hi b => [lo, hi, b]
+  | .proj e _ | .borrow e | .deref e | .assign _ e | .break_ (some e) | .earlyReturn e
+  | .questionMark e | .cfBreak e | .cfContinue e | .cfBreakContinue e
+  | .typeAscription e _ => [e]
+  | .lit _ | .var _ | .unitVal | .break_ none | .continue_ => []
+
+/-- The bindings `letBind n v body` of `e`, with `v` a ControlFlow node and `n`
+    free in `body`, that Pass D (`canonicalizeDeadCFBindings`) keeps: the
+    variables read after the binding of a ControlFlow value. -/
+partial def deadCFRefusals (e : ImpExpr) : List String :=
+  let here := match e with
+    | .letBind n v body =>
+      if isControlFlowNode v && (freeVars body).contains n then
+        [s!"the ControlFlow value bound to `{n}` is read after its binding"]
+      else []
+    | _ => []
+  here ++ (subExprs e).flatMap deadCFRefusals
+
+/-- The bindings `letBind n (ifThenElse c t (var m)) body` of `e`, with `n` and
+    `m` starting with `_assign` and `n` free in `body`, that Pass G
+    (`canonicalizeIfElseAssign`) keeps. -/
+partial def ifElseAssignRefusals (e : ImpExpr) : List String :=
+  let here := match e with
+    | .letBind n (.ifThenElse _ _ (.var m)) body =>
+      if n.startsWith "_assign" && m.startsWith "_assign" && (freeVars body).contains n then
+        [s!"the conditional assignment `{n}` with the else branch `{m}` is read after its binding"]
+      else []
+    | _ => []
+  here ++ (subExprs e).flatMap ifElseAssignRefusals
+
+/-- The bindings of `e` that Pass D and Pass G keep (`deadCFRefusals`,
+    `ifElseAssignRefusals`); `haxpipeT` refuses a definition that has one. -/
+def canonicalizeRefusals (e : ImpExpr) : List String :=
+  deadCFRefusals e ++ ifElseAssignRefusals e
 
 /-! ## Composite entry point -/
 

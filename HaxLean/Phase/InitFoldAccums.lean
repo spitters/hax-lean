@@ -188,6 +188,31 @@ where
     | [] => []
     | (p, e) :: rest => (p, initMissingFoldAccums bound e) :: mapArms bound rest
 
+/-- The accumulators to which `initMissingFoldAccums bound` binds `0`: for each
+    fold, the names of `extractAccumNamesFromBody` of its body that are not bound
+    in the enclosing scope, with the scopes of `initMissingFoldAccums`. When the
+    list is empty, `initMissingFoldAccums bound e = e`. -/
+partial def freeFoldAccums (bound : List String := []) : ImpExpr → List String
+  | .letBind n v body => freeFoldAccums bound v ++ freeFoldAccums (n :: bound) body
+  | .lam ps body => freeFoldAccums (ps ++ bound) body
+  | .seq a b => freeFoldAccums bound a ++ freeFoldAccums (bound ++ collectBoundNamesT a) b
+  | .forFold v lo hi body | .forFoldRev v lo hi body
+  | .forFoldReturn v lo hi body | .forFoldRevReturn v lo hi body =>
+    freeFoldAccums bound lo ++ freeFoldAccums bound hi ++ freeFoldAccums (v :: bound) body ++
+      (extractAccumNamesFromBody body).filter (!bound.contains ·)
+  | .ifThenElse c t e =>
+    freeFoldAccums bound c ++ freeFoldAccums bound t ++ freeFoldAccums bound e
+  | .match_ s arms => freeFoldAccums bound s ++ arms.flatMap (freeFoldAccums bound ·.2)
+  | .tuple es | .app _ es => es.flatMap (freeFoldAccums bound)
+  | .whileFold c body | .whileFoldReturn c body | .whileLoop c body =>
+    freeFoldAccums bound c ++ freeFoldAccums bound body
+  | .forLoop _ lo hi body | .forLoopRev _ lo hi body =>
+    freeFoldAccums bound lo ++ freeFoldAccums bound hi ++ freeFoldAccums bound body
+  | .proj e _ | .cfBreak e | .cfContinue e | .cfBreakContinue e | .borrow e | .deref e
+  | .assign _ e | .break_ (some e) | .earlyReturn e | .questionMark e
+  | .typeAscription e _ => freeFoldAccums bound e
+  | .lit _ | .var _ | .unitVal | .break_ none | .continue_ => []
+
 @[simp] theorem initMissingFoldAccums.mapExpr_eq (bound : List String) (es : List ImpExpr) :
     initMissingFoldAccums.mapExpr bound es =
       es.map (initMissingFoldAccums bound) := by

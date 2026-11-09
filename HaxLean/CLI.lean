@@ -135,6 +135,9 @@ structure Options where
       calls an omitted one; the rest of the crate is translated. Without the flag the
       first refusal aborts the run. -/
   keepGoing : Bool := false
+  /-- The arguments starting with `--` that name no option, in order; `haxpipeT`
+      stops with an error when there is one. -/
+  unknownArgs : List String := []
 
 /-- Parse command-line arguments. -/
 def parseArgs (args : List String) : Options :=
@@ -168,7 +171,7 @@ where
     | "--keep-declassify" :: rest, opts => go rest { opts with keepDeclassify := true }
     | "--keep-going" :: rest, opts => go rest { opts with keepGoing := true }
     | arg :: rest, opts =>
-      if arg.startsWith "--" then go rest opts  -- skip unknown flags
+      if arg.startsWith "--" then go rest { opts with unknownArgs := opts.unknownArgs ++ [arg] }
       else go rest { opts with inputFile := some arg }
 
 def helpText : String :=

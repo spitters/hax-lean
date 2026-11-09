@@ -5109,6 +5109,37 @@ partial def haxTyHasParam : Json → Bool
   | .arr xs => xs.toList.any haxTyHasParam
   | _ => false
 
+/-- Whether a hax type has a reference type `Ref` whose payload is not the array
+    `[region, inner]` or `[region, inner, mutability]` that `parseHaxType` reads.
+    `parseHaxType` reads such a node as `.unknown`, which hides a `&mut` from the
+    write-back tables. -/
+partial def haxTyHasUnreadRef : Json → Bool
+  | .obj kvs => kvs.toList.any fun (k, v) =>
+    (k == "Ref" && !(match v with | .arr xs => xs.size == 2 || xs.size == 3 | _ => false)) ||
+      haxTyHasUnreadRef v
+  | .arr xs => xs.toList.any haxTyHasUnreadRef
+  | _ => false
+
+/-- Whether a hax JSON value mentions a const generic parameter: a `ConstRef` (the
+    parameter in a constant expression, as the length of `[u8; N]`) or a `ConstParam`
+    (the parameter read as a value). -/
+partial def haxMentionsConstParam : Json → Bool
+  | .obj kvs => kvs.toList.any fun (k, v) =>
+    k == "ConstRef" || k == "ConstParam" || haxMentionsConstParam v
+  | .arr xs => xs.toList.any haxMentionsConstParam
+  | _ => false
+
+/-- Whether the callee of the hax `fun` expression `funJ`, a `GlobalName`, is
+    applied to a const generic argument (`f::<4>()`): an entry `Const` of the
+    `generic_args` of its item. -/
+def callHasConstGenericArg (funJ : Json) : Bool :=
+  let gas : Option (Array Json) := do
+    let gn ← ((decoratedContents funJ).getObjVal? "GlobalName").toOption
+    let item ← (gn.getObjVal? "item").toOption
+    let v := (item.getObjVal? "value").toOption.getD item
+    (v.getObjValAs? (Array Json) "generic_args").toOption
+  (gas.getD #[]).any fun ga => (ga.getObjVal? "Const").toOption.isSome
+
 /-- The names of the generic type parameters (`Param`, other than `_dyn`) a hax
     type mentions outside an associated-type projection (`Alias`). -/
 partial def haxTyParamNames : Json → List String
@@ -5149,7 +5180,11 @@ partial def fnDefParamNames : Json → List String
       pointer coercion or as the reborrow `&mut *(&mut p)`: the writes through
       the reference are not written back to `p`;
     * a closure that writes a captured variable (`closureWritesCapture`);
-    * a `for` loop over an iterator `forLoopRefusal?` refuses.
+    * a `for` loop over an iterator `forLoopRefusal?` refuses;
+    * a value whose type has a reference `Ref` of a shape `parseHaxType` does not
+      read (`haxTyHasUnreadRef`);
+    * an `unsafe` block (`safety_mode` `ExplicitUnsafe`); a compiler-generated
+      unsafe block (`BuiltinUnsafe`) is not refused.
 
     `loopId` is the local id of the innermost enclosing loop; `argPos` says that
     the node is a call argument. -/
@@ -5168,6 +5203,9 @@ partial def bodyRefusal? (loopId : Option Nat) (argPos : Bool) (j : Json) :
       if haxTyHasParam tyJ then
         some ("unsupported construct: a value of a generic type parameter outside the " ++
           "trait-to-class emission (`--emit-classes`)")
+      else if haxTyHasUnreadRef tyJ then
+        some ("unsupported construct: a reference type `Ref` of a shape the type reader " ++
+          "does not read")
       else
       let field (key sub : String) : Json :=
         (c.getObjVal? key >>= (·.getObjVal? sub)).toOption.getD .null
@@ -5220,6 +5258,14 @@ partial def bodyRefusal? (loopId : Option Nat) (argPos : Bool) (j : Json) :
         match forLoopRefusal? ((c.getObjVal? "Match").toOption.getD .null) with
         | some msg => some msg
         | none => children loopId c
+      | some "Block" =>
+        let explicitUnsafe := match (c.getObjVal? "Block" >>= (·.getObjVal? "safety_mode")) with
+          | .ok (.str s) => s == "ExplicitUnsafe"
+          | .ok m => (m.getObjVal? "ExplicitUnsafe").toOption.isSome
+          | .error _ => false
+        if explicitUnsafe then
+          some "unsupported construct: an `unsafe` block"
+        else children loopId c
       | _ => children loopId c
     | _, _ => children loopId j
   | _ => none
@@ -5405,6 +5451,10 @@ where
     else if let .ok data := j.getObjVal? "Call" then
       let funJ ← data.getObjVal? "fun"
       let funName := extractCallName funJ implMap.collisions implMap.localCrate
+      -- A callee other than a named item (a function pointer or a field holding one).
+      if funName == "indirect_call" then
+        throw ("unsupported construct: a call whose callee is not a named function " ++
+          "(a function pointer in a variable or a field)")
       -- Strip panicking calls. `assert!`, `assert_eq!`, `panic!`,
       -- `unreachable!` etc. expand through hax into calls to
       -- `core::panicking::*` helpers (`assert_failed`, `panic`,
@@ -5430,6 +5480,10 @@ where
       -- of the crate takes its modulus-tagged head (`fieldTaggedHead?`).
       if let some h := fieldTaggedHead? funJ args.length implMap then
         return .app h args
+      -- A const generic argument of a callee outside `core`, `std` and `alloc`
+      -- (`f::<4>()`): the head names the callee without it.
+      if callHasConstGenericArg funJ && !builtinKrates.contains (callKrate funJ) then
+        throw s!"unsupported construct: a call of `{funName}` with a const generic argument"
       -- A `Vec` passed through a `deref_mut` re-borrow is the `Vec` place
       -- itself (`tDerefMutArg`), so a write-back through the argument reaches
       -- its root variable.
@@ -6101,6 +6155,11 @@ where
             | .ok n => n
             | _ => "Adt"
       | _ => "Adt"
+    -- `S { a: 1, .. }` takes the fields it does not list from their default values
+    -- (`base` `DefaultFields`), which the constructor would not receive.
+    if (j.getObjVal? "base" >>= (·.getObjVal? "DefaultFields")).toOption.isSome then
+      throw (s!"unsupported construct: a struct expression of `{name}` with default " ++
+        "field values (`..`)")
     let fieldsJ : List Json := match j.getObjValAs? (Array Json) "fields" with
       | .ok fs => fs.toList
       | _ => []
@@ -6655,6 +6714,12 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     if sigTys.any haxTyHasParam then
       throw (s!"unsupported construct in `{name}`: a generic type parameter in the " ++
         "signature outside the trait-to-class emission (`--emit-classes`)")
+    -- A const generic parameter: its value at a call site is not passed.
+    if sigTys.any haxMentionsConstParam || haxMentionsConstParam bodyJ then
+      throw s!"unsupported construct in `{name}`: a const generic parameter"
+    if sigTys.any haxTyHasUnreadRef then
+      throw (s!"unsupported construct in `{name}`: a reference type `Ref` of a shape the " ++
+        "type reader does not read in the signature")
     let dictParams := (fnDefParamNames bodyJ).eraseDups
     if dictParams.length ≥ 2 then
       throw (s!"unsupported construct in `{name}`: the type parameters {dictParams} are " ++
@@ -6807,8 +6872,27 @@ def implFnTakesSelf (implItem : Json) : Bool :=
   | some ps => (extractParamNames ps).head? == some "self"
   | none => false
 
+/-- The short name of the self type `stVal` (a hax `TyKind`) of an `impl`: the
+    short name of an ADT (`extractAdtShortName`), or the Rust name of a scalar
+    type (`u32`, `i64`, `bool`, `char`, `str`). `none` for any other type. -/
+def selfTyShortName? (stVal : Json) : Option String :=
+  match stVal with
+  | .str "Bool" => some "bool"
+  | .str "Char" => some "char"
+  | .str "Str" => some "str"
+  | _ =>
+    let scalar (k : String) : Option String := do
+      match ← (stVal.getObjVal? k).toOption with
+      | .str s => some s.toLower
+      | .obj kvs => kvs.toList.head?.map (·.1.toLower)
+      | _ => none
+    ((stVal.getObjVal? "Adt").toOption.bind extractAdtShortName) <|> scalar "Uint" <|>
+      scalar "Int"
+
 /-- The methods every trait `impl` block of the extracted crate defines, as
     `(impl interning id, trait short name, self-type short name, method name)`,
+    the self-type short name by `selfTyShortName?` (the trait name for a self type
+    it does not name),
     recursing into `Mod` sub-items. Two kinds of `impl` are excluded and keep
     opaque methods: one whose `owner_id` is not local, which belongs to a
     dependency crate, and one of a trait of `core`, `alloc` or `std`. The
@@ -6844,8 +6928,7 @@ partial def collectLocalTraitImplMethods (j : Json) (itemKind : String := "Fn")
     let selfName : Option String := do
       let selfTy ← (impl.getObjVal? "self_ty").toOption
       let stVal ← (selfTy.getObjVal? "value").toOption
-      let adt ← (stVal.getObjVal? "Adt").toOption
-      extractAdtShortName adt
+      selfTyShortName? stVal
     match isLocal, implId, traitName with
     | true, some iid, some tn =>
       let sn := selfName.getD tn
@@ -7544,6 +7627,57 @@ def specializeFieldGenerics (j : Json) : Except String Json := do
       ({", ".intercalate (impls.map (·.2.1))}) and functions generic over \
       primeir_hax::Field; the specialisation needs exactly one"
 
+/-- The source of the hax item `it` in a message: the krate and path of its
+    `def_id`, joined by `::`, each segment with its disambiguator `#d` when that is
+    not 0; `fallback` when the item has no `def_id`. -/
+def itemSourceDesc (it : Json) (fallback : String) : String :=
+  match it.getObjVal? "def_id" with
+  | .ok defId =>
+    let inner := match defId.getObjVal? "contents" with
+      | .ok c => (c.getObjVal? "value").toOption.getD c
+      | _ => defId
+    match inner.getObjVal? "path" with
+    | .ok (.arr segs) =>
+      let seg (s : Json) : String :=
+        let n := match s.getObjVal? "data" with
+          | .ok (.str d) => d
+          | .ok (.obj kvs) =>
+            match kvs.toList.head? with
+            | some (k, .str v) => if k == "TypeNs" || k == "ValueNs" || k == "MacroNs" then v
+                else s!"{k}:{v}"
+            | some (k, _) => k
+            | none => "?"
+          | _ => "?"
+        match (s.getObjValAs? Nat "disambiguator").toOption with
+        | some d => if d == 0 then n else s!"{n}#{d}"
+        | none => n
+      "::".intercalate ((inner.getObjValAs? String "krate").toOption.getD "" ::
+        segs.toList.map seg)
+    | _ => fallback
+  | _ => fallback
+
+/-- The definitions `parsed`, with the source `srcs` of each in the same order,
+    kept once per emitted name, and the refusal of every name two definitions share.
+    Two entries of one name with one source and equal erased definitions are one
+    item listed twice and are kept once; any other two entries of one name are two
+    definitions, and the name is refused, its refusal naming both sources. -/
+def distinctDefNames {α β : Type} (parsed : List (String × α × TExpr × β))
+    (srcs : List String) : List (String × α × TExpr × β) × List (String × String) :=
+  let step (acc : List ((String × α × TExpr × β) × String) × List (String × String))
+      (e : (String × α × TExpr × β) × String) :
+      List ((String × α × TExpr × β) × String) × List (String × String) :=
+    let n := e.1.1
+    if acc.2.any (·.1 == n) then acc
+    else match acc.1.find? (·.1.1 == n) with
+      | none => (acc.1 ++ [e], acc.2)
+      | some prev =>
+        if prev.2 == e.2 && prev.1.2.2.1.erase == e.1.2.2.1.erase then acc
+        else (acc.1.filter (·.1.1 != n), acc.2 ++ [(n,
+          s!"unsupported construct: two definitions have the emitted name `{n}`: " ++
+            s!"{prev.2} and {e.2}")])
+  let (kept, refused) := (parsed.zip srcs).foldl step ([], [])
+  (kept.map (·.1), refused)
+
 /-- Parse a full hax export file into typed TExprs.
     Returns (combined ImpExpr, fnTypes, raw typed defs (with hax types preserved),
     processed typed defs (for pipeline/rendering)).
@@ -7585,7 +7719,8 @@ def specializeFieldGenerics (j : Json) : Except String Json := do
     Under `keepGoing` an item the parse refuses is omitted and listed with its
     definition name and refusal in the second component, and so is every
     definition that calls or reads an omitted one (`omitCallersOfRefused`);
-    otherwise the first refusal is the error of the parse. -/
+    otherwise the first refusal is the error of the parse. Two definitions with
+    one emitted name are refused (`distinctDefNames`). -/
 partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
     (nominalKrates : List String := []) (keepGoing : Bool := false) :
@@ -7618,15 +7753,21 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
     match (it.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption with
     | some fd => haxFnItemName it fd implMap.collisions
     | none => ((it.getObjVal? "ident").toOption.map extractFnName).getD "unknown_item"
+  -- Each definition is listed with its source (`itemSourceDesc`), so that two
+  -- definitions of one name are refused naming both (`distinctDefNames`).
   let rec parseItemsTExpr (items : List Json) :
-      Except String (List (String × TExpr × TExpr × FnTypeInfo) × List (String × String)) := do
+      Except String (List (String × TExpr × TExpr × FnTypeInfo) × List String
+        × List (String × String)) := do
     let mut result : List (String × TExpr × TExpr × FnTypeInfo) := []
+    let mut srcs : List String := []
     let mut refused : List (String × String) := []
     for item in items do
       let (r?, rf) ← tryItem item (itemName item)
       refused := refused ++ rf
       match r? with
-      | some r => result := result ++ [r]
+      | some r =>
+        result := result ++ [r]
+        srcs := srcs ++ [itemSourceDesc item r.1]
       | none =>
         let kind := (item.getObjVal? "kind").toOption
         match kind with
@@ -7637,16 +7778,18 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
             | some subJ =>
               match subJ with
               | .arr subItems =>
-                let (sub, subR) ← parseItemsTExpr subItems.toList
+                let (sub, subS, subR) ← parseItemsTExpr subItems.toList
                 result := result ++ sub
+                srcs := srcs ++ subS
                 refused := refused ++ subR
               | _ => pure ()
             | _ => pure ()
           | .ok modData =>
             match modData.getObjValAs? (Array Json) "items" with
             | .ok subItems =>
-              let (sub, subR) ← parseItemsTExpr subItems.toList
+              let (sub, subS, subR) ← parseItemsTExpr subItems.toList
               result := result ++ sub
+              srcs := srcs ++ subS
               refused := refused ++ subR
             | _ => pure ()
           | _ =>
@@ -7679,6 +7822,8 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                     match r? with
                     | some (mName, raw, proc, ti) =>
                       result := result ++ [(s!"{sn}_{mName}", raw, proc, ti)]
+                      srcs := srcs ++ [itemSourceDesc implItem
+                        s!"{itemSourceDesc item s!"impl of {sn}"}::{mName}"]
                     | none => pure ()
                 | _, _ => pure ()
               else
@@ -7698,7 +7843,10 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                     | some (mName, raw, proc, ti) =>
                       match implMap.traitImplMethods.find? fun p =>
                           p.1 == iid && p.2.1 == mName with
-                      | some entry => result := result ++ [(entry.2.2, raw, proc, ti)]
+                      | some entry =>
+                        result := result ++ [(entry.2.2, raw, proc, ti)]
+                        srcs := srcs ++ [itemSourceDesc implItem
+                          s!"{itemSourceDesc item s!"impl #{iid}"}::{mName}"]
                       | none => pure ()
                     | none =>
                       let cName := match implItem.getObjVal? "ident" with
@@ -7710,16 +7858,21 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                         match ← parseImplConstTExpr implItem implMap with
                         | some (raw, proc, ti) =>
                           result := result ++ [(entry.2.2, raw, proc, ti)]
+                          srcs := srcs ++ [itemSourceDesc implItem
+                            s!"{itemSourceDesc item s!"impl #{iid}"}::{cName}"]
                         | none => pure ()
                       | none => pure ()
                 | _, _ => pure ()
             | _ => pure ()
         | none => pure ()
-    return (result, refused)
+    return (result, srcs, refused)
   match j with
   | .arr items =>
-    let (parsed, refused) ← parseItemsTExpr items.toList
-    let (parsed, refused) := omitCallersOfRefused parsed refused
+    let (parsed, srcs, refused) ← parseItemsTExpr items.toList
+    let (parsed, collided) := distinctDefNames parsed srcs
+    if !keepGoing then
+      if let some (_, msg) := collided.head? then throw msg
+    let (parsed, refused) := omitCallersOfRefused parsed (refused ++ collided)
       fun f => s!"calls the omitted function `{f}`"
     let parsed :=
       if fieldNewtypes.isEmpty then parsed
