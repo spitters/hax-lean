@@ -29,6 +29,12 @@ lean_exe haxpipeT where
 lean_exe «certified-checks» where
   root := `HaxLean.CertifiedChecksMain
 
+-- For each function of a hax frontend export, the operations that panic in Rust, how many
+-- of them an interval analysis proves safe, and the function's class
+-- (`HaxLean/RangeProbe.lean`).
+lean_exe rangeprobe where
+  root := `HaxLean.RangeProbe
+
 -- API documentation (opt-in, dev only). Generate with:
 --   lake -R -Kenv=doc update && lake -R -Kenv=doc build HaxLean:docs
 -- Output: .lake/build/doc/ (open index.html). Fast — no mathlib dependency.
