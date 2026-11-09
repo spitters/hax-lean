@@ -807,18 +807,20 @@ def mutWriteStep (sf : StructFieldNames) (defs : List (String × TExpr))
 /-- Iterate `mutWriteStep` from `cur` until it is stationary or `fuel` runs
     out. -/
 def mutWriteIter (sf : StructFieldNames) (defs : List (String × TExpr))
-    (ext : List (String × Nat))
+    (ext : List (String × Nat)) (extTup : List (String × List Nat × Bool))
     (cands : List (String × List Nat × List String × Bool)) :
     Nat → List (String × List Nat × List String × Bool) →
     List (String × List Nat × List String × Bool)
   | 0, cur => cur
   | fuel + 1, cur =>
-    let next := mutWriteStep sf defs (mutWriteTable cur ++ ext) (mutWriteTupleTable cur) cands
-    if next == cur then cur else mutWriteIter sf defs ext cands fuel next
+    let next :=
+      mutWriteStep sf defs (mutWriteTable cur ++ ext) (mutWriteTupleTable cur ++ extTup) cands
+    if next == cur then cur else mutWriteIter sf defs ext extTup cands fuel next
 
 /-- The write-back functions of an export, given the single-form write-back
-    entries `ext` of callees outside it: `mutWriteStep` iterated from the table
-    `ext` to a fixpoint. A parameter written only by a nested write-back call is
+    entries `ext` and the tuple-form entries `extTup` of callees outside it:
+    `mutWriteStep` iterated from the tables `ext` and `extTup` to a fixpoint.
+    A parameter written only by a nested write-back call is
     reached one round after the callee that writes it, so a chain of calls
     needs as many rounds as it is long; each round that is not the fixpoint
     admits at least one further parameter, so the total number of candidate
@@ -826,11 +828,12 @@ def mutWriteIter (sf : StructFieldNames) (defs : List (String × TExpr))
     the definitions, so the two sides cannot disagree about what a callee
     returns. -/
 def mutWriteFnsExt (sf : StructFieldNames) (fns : List (String × FnTypeInfo))
-    (defs : List (String × TExpr)) (ext : List (String × Nat)) :
+    (defs : List (String × TExpr)) (ext : List (String × Nat))
+    (extTup : List (String × List Nat × Bool) := []) :
     List (String × List Nat × List String × Bool) :=
   let cands := mutWriteCandidates fns
   let fuel := cands.foldl (fun n c => n + c.2.1.length) 0
-  mutWriteIter sf defs ext cands fuel (mutWriteStep sf defs ext [] cands)
+  mutWriteIter sf defs ext extTup cands fuel (mutWriteStep sf defs ext extTup cands)
 
 /-- The write-back functions of an export with no callee outside it
     (`mutWriteFnsExt` with an empty external table). -/
@@ -1421,5 +1424,150 @@ partial def tUnqualifyFieldHeads : TExpr → TExpr
       .mk (.app (pf.drop 1).toString args') ty
     else .mk (.app pf args') ty
   | e => tMapChildren tUnqualifyFieldHeads e
+
+/-! ### External callees with a value result
+
+A callee without a definition in the export whose result carries a value and
+that writes through its `&mut` arguments (`HashMap::insert`, `Option::take`) is
+a tuple-form write-back function: the runtime models it as returning the pair of
+its Rust result and the new value of the written place, `(t, v)`, and a call
+site in `let`, assignment or statement position binds that pair to `_wb`
+(`tTupleBind`). A field place `&mut root.f` in write-back position is first read
+into a local `_wbfld<p>`, which the call writes back, and `root` is then
+rebound to its field update with that local (`tLocalizeFieldWritebacks`), so
+the tuple-form rewrite, which writes plain variables only, covers it. -/
+
+/-- The tuple-form write-back entries `(f, positions, true)` of the callees of
+    `defs` that have no definition among `defs` (not a place head, not in
+    `builtinWriteTable`): a callee every call of which passes its `&mut`
+    arguments at the same positions, each a variable (`tMutArgRoot`) or a field
+    of a variable (`tMutArgField`), and has a result type other than `()` and
+    `.unknown`. A callee with a `()` result is `externalWriteTable`'s. -/
+def externalTupleWriteTable (defs : List (String × TExpr)) :
+    List (String × List Nat × Bool) :=
+  let calls := (defs.flatMap fun d => tCallsIn d.2).filter fun c =>
+    (defs.lookup c.1).isNone && !tPlaceHead c.1 && c.1 != ".0"
+      && (builtinWriteTable.lookup c.1).isNone && !(tMutArgPositions c.2.1).isEmpty
+  let placeOk : TExpr → Bool := fun a => (tMutArgRoot a).isSome || (tMutArgField a).isSome
+  let shape : String × List TExpr × ImpType → Option (List Nat) := fun c =>
+    match c.2.2 with
+    | .unit | .unknown => none
+    | _ =>
+      let ps := tMutArgPositions c.2.1
+      if ps.all fun p => (c.2.1[p]?).any placeOk then some ps else none
+  let heads := (calls.map (·.1)).eraseDups
+  heads.filterMap fun f =>
+    match (calls.filter (·.1 == f)).map shape with
+    | some ps :: rest => if rest.all (· == some ps) then some (f, ps, true) else none
+    | _ => none
+
+/-- The local a field place at argument position `p` is read into. -/
+def tWbFieldTmp (p : Nat) : String := s!"_wbfld{p}"
+
+/-- The field read `.f sE` of a field-place argument `&mut sE.f`, seen through
+    `borrow`, `deref` and ascription. -/
+def tFieldPlaceOf : TExpr → Option TExpr
+  | .mk (.borrow e) _ => tFieldPlaceOf e
+  | .mk (.deref e) _ => tFieldPlaceOf e
+  | .mk (.ann e) _ => tFieldPlaceOf e
+  | e@(.mk (.app pf [_]) _) => if pf.startsWith "." && pf != ".0" then some e else none
+  | _ => none
+
+/-- The field places among the write-back arguments of a call to `f` under the
+    tuple table `tup`: for each position `p` whose argument is `&mut root.f`
+    with `f` resolved through `sf`, the binding of `tWbFieldTmp p` to the field
+    read; the arguments with `&mut tWbFieldTmp p` in those positions; and the
+    assignments rebinding each `root` to its field update with the local.
+    `none` when no write-back argument is such a field place. -/
+def tLocalizeFieldArgs (sf : StructFieldNames) (tup : List (String × List Nat × Bool))
+    (f : String) (args : List TExpr) :
+    Option (List (String × TExpr) × List TExpr × List TExpr) :=
+  match tup.lookup f with
+  | none => none
+  | some (ps, _) =>
+    let fields := ps.filterMap fun p => (args[p]?).bind fun a =>
+      (tMutArgField a).bind fun rf => (resolveStructField sf rf.2).bind fun sin =>
+        (tFieldPlaceOf a).map fun place => (p, rf.1, sin, place)
+    if fields.isEmpty then none
+    else
+      let lets := fields.map fun c => (tWbFieldTmp c.1, c.2.2.2)
+      let args' := args.zipIdx.map fun (a, i) =>
+        if fields.any (·.1 == i) then
+          .mk (.borrow (.mk (.var (tWbFieldTmp i)) a.ty.pointee)) a.ty
+        else a
+      let upds := fields.map fun (p, root, (sname, i, n), _) =>
+        .mk (.assign root (.mk (.app (structUpdateHead sname i n)
+          [.mk (.var root) .unknown, .mk (.var (tWbFieldTmp p)) .unknown]) .unknown)) .unit
+      some (lets, args', upds)
+
+/-- `s₀; s₁; …; sₖ` for the statement `s₀` and the list `[s₁, …, sₖ]`. -/
+def tSeqList : TExpr → List TExpr → TExpr
+  | s, [] => s
+  | s, t :: ts => .mk (.seq s (tSeqList t ts)) (tSeqList t ts).ty
+
+/-- Read each field place in write-back position of a tuple-form external call
+    into a local (`tLocalizeFieldArgs`) at the three tuple-form call sites: the
+    head of a `seq`, the value of a `let` and the right-hand side of an
+    assignment. The call writes the local back, and the root is rebound to its
+    field update right after the call. A call elsewhere is unchanged. -/
+partial def tLocalizeFieldWritebacks (sf : StructFieldNames)
+    (tup : List (String × List Nat × Bool)) : TExpr → TExpr
+  | .mk (.seq a b) ty =>
+    let a' := tLocalizeFieldWritebacks sf tup a
+    let b' := tLocalizeFieldWritebacks sf tup b
+    match tStripAnn a' with
+    | .mk (.app f args) cty =>
+      match tLocalizeFieldArgs sf tup f args with
+      | some (lets, args', upds) =>
+        .mk (.seq (tWrapLets lets (tSeqList (.mk (.app f args') cty) upds)) b') ty
+      | none => .mk (.seq a' b') ty
+    | _ => .mk (.seq a' b') ty
+  | .mk (.letBind n v body) ty =>
+    let v' := tLocalizeFieldWritebacks sf tup v
+    let body' := tLocalizeFieldWritebacks sf tup body
+    match tStripAnn v' with
+    | .mk (.app f args) cty =>
+      match tLocalizeFieldArgs sf tup f args with
+      | some (lets, args', upds) =>
+        tWrapLets lets (.mk (.letBind n (.mk (.app f args') cty)
+          (match upds with
+           | [] => body'
+           | u :: us => .mk (.seq (tSeqList u us) body') body'.ty)) ty)
+      | none => .mk (.letBind n v' body') ty
+    | _ => .mk (.letBind n v' body') ty
+  | .mk (.assign x rhs) ty =>
+    let rhs' := tLocalizeFieldWritebacks sf tup rhs
+    match tStripAnn rhs' with
+    | .mk (.app f args) cty =>
+      match tLocalizeFieldArgs sf tup f args with
+      | some (lets, args', upds) =>
+        tWrapLets lets (tSeqList (.mk (.assign x (.mk (.app f args') cty)) ty) upds)
+      | none => .mk (.assign x rhs') ty
+    | _ => .mk (.assign x rhs') ty
+  | e => tMapChildren (tLocalizeFieldWritebacks sf tup) e
+
+/-- Give each call of a tuple-form external callee of `tup` the type of its
+    tuple-form result: the product of its own result, when it carries a value,
+    and the types of the places it writes back. -/
+partial def tRetypeExtTupleWriters (tup : List (String × List Nat × Bool)) : TExpr → TExpr
+  | .mk (.app f args) ty =>
+    let args' := args.map (tRetypeExtTupleWriters tup)
+    match tup.lookup f with
+    | some (ps, hasRes) =>
+      let placeTys := ps.filterMap fun p => (args[p]?).map (·.ty.pointee)
+      .mk (.app f args') (.tuple (if hasRes then ty :: placeTys else placeTys))
+    | none => .mk (.app f args') ty
+  | e => tMapChildren (tRetypeExtTupleWriters tup) e
+
+/-- The tuple-form write-back of the external callees of `defs` with a value
+    result: the table `externalTupleWriteTable defs`, and the definitions with
+    their field places localized (`tLocalizeFieldWritebacks`) and those calls
+    retyped (`tRetypeExtTupleWriters`). The table is appended to the call-site
+    tuple table and passed to `mutWriteFnsExt` as its `extTup`. -/
+def externalTupleWriteback (sf : StructFieldNames) (defs : List (String × TExpr)) :
+    List (String × List Nat × Bool) × List (String × TExpr) :=
+  let tup := externalTupleWriteTable defs
+  (tup, defs.map fun (n, te) =>
+    (n, tRetypeExtTupleWriters tup (tLocalizeFieldWritebacks sf tup te)))
 
 end Hax

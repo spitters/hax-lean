@@ -107,8 +107,8 @@ def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
 
 /-- The write-back normalisation of a crate's definitions and its tables. -/
 structure Writeback where
-  /-- The definitions after `tHoistMutCalls`, `tQualifyWritebackFields` and
-      `tRetypeExtWriters`. -/
+  /-- The definitions after `tHoistMutCalls`, `tQualifyWritebackFields`,
+      `externalTupleWriteback` and `tRetypeExtWriters`. -/
   procTdefs : List (String × TExpr)
   /-- The write-back functions of the crate (`mutWriteFnsExt`). -/
   writeFns : List (String × List Nat × List String × Bool)
@@ -126,8 +126,8 @@ structure Writeback where
 
 Calls outside the write-back fragment are first brought into it
 (`tElideWritebackNewtypes`, `tHoistMutCalls`, `tQualifyWritebackFields`,
-`externalWriteTable`); the first reads a `&mut` argument `&mut r.0`, with `r` of a newtype
-of `newtypes`, as the place `r`. A parameter written only through a
+`externalWriteTable`, `externalTupleWriteback`); the first reads a `&mut` argument
+`&mut r.0`, with `r` of a newtype of `newtypes`, as the place `r`. A parameter written only through a
 builtin write (`copy_from_slice` into `okm[a..b]`) makes its function a write-back
 function too. The builtin and external tables are appended to the call-site rebind table
 only, not to `writeReturns`: `tReturnMutParams` rewrites a callee to return its written
@@ -139,11 +139,12 @@ def writebackOf (structFields : StructFieldNames) (newtypes : HaxAdapter.Newtype
     (n, tQualifyWritebackFields structFields
       (tHoistMutCalls fnTypes (tElideWritebackNewtypes newtypes te)))
   let extWriters := externalWriteTable procTdefs
+  let (extTupWriters, procTdefs) := externalTupleWriteback structFields procTdefs
   let procTdefs := procTdefs.map fun (n, te) => (n, tRetypeExtWriters extWriters te)
-  let writeFns :=
-    mutWriteFnsExt structFields fnTypes procTdefs (extWriters ++ builtinWriteTable)
+  let writeFns := mutWriteFnsExt structFields fnTypes procTdefs
+    (extWriters ++ builtinWriteTable) extTupWriters
   let writers := mutWriteTable writeFns ++ builtinWriteTable ++ extWriters
-  let tupWriters := mutWriteTupleTable writeFns
+  let tupWriters := mutWriteTupleTable writeFns ++ extTupWriters
   let writeReturns := mutWriteReturns writeFns
   let dropped := procTdefs.flatMap fun (n, te) =>
     (tDroppedMutCalls fnTypes structFields writers tupWriters te).map fun d => (n, d)

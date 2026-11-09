@@ -160,6 +160,17 @@ def shadowsLocalFn (lc : LocalCrate) (krate n : String) : Bool :=
   !lc.krates.isEmpty && krate != "" && !lc.krates.contains krate
     && !builtinKrates.contains krate && lc.fnNames.contains n
 
+/-- The call head of a standard-library method whose short name the runtime
+    could not carry without ambiguity, by krate and path segments: the
+    `HashMap` method `std::collections::hash::map::{impl}::insert` is
+    `HashMap_insert` and `core::option::{impl}::take` is `Option_take`, distinct
+    from `Vec::insert` and `Iterator::take`. `none` for every other method. -/
+def stdMethodHead (krate : String) (names : List String) (n : String) : Option String :=
+  match krate, names.take 3, n with
+  | "std", ["collections", "hash", "map"], "insert" => some "HashMap_insert"
+  | "core", ["option", "Impl", _], "take" => some "Option_take"
+  | _, _, _ => none
+
 /-- Extract the last meaningful name from a hax `DefId` path.
     DefId JSON: `{"krate": "...", "path": [{"data": {"TypeNs": "..."}, "disambiguator": 0}, ...]}` -/
 partial def extractDefIdName (j : Json) (collisions : List String := [])
@@ -198,7 +209,8 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
     -- (`intTypeTag?`) so the runtime can truncate correctly. The signed impls
     -- 0–5 are read only in the `core` crate; the typed parser replaces the tag
     -- by the one of the call's operand type where that type is an integer.
-    let isCore := (inner.getObjValAs? String "krate").toOption == some "core"
+    let krateOf := (inner.getObjValAs? String "krate").toOption.getD ""
+    let isCore := krateOf == "core"
     let implWidth : Option String := do
       let segs := segments.toList
       let implSeg ← segs.find? fun seg =>
@@ -244,6 +256,7 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
         -- must add one to the upper bound for the inclusive form.
         if n == "new" && names.getD (names.length - 2) "" == "RangeInclusive" then
           "RangeInclusive::new"
+        else if let some h := stdMethodHead krateOf names n then h
         else if widthSensitiveOps.contains n then
           match implWidth with
           | some w => s!"{n}#{w}"
@@ -1719,6 +1732,15 @@ def extractAdtPathName (adtInner : Json) : Option String :=
     names.getLast?
   | _ => none
 
+/-- The type of an ADT `n` of krate `krate` with type arguments `args`:
+    `std::collections::HashMap<K, V, S>` is the sequence of its entries,
+    `Vec<(K, V)>`, rendered `Array (K × V)`; the runtime's map operations
+    (`insert`) act on that sequence. Every other ADT is `.adt n args`. -/
+def hashMapAsEntries (krate n : String) (args : List ImpType) : ImpType :=
+  match krate, n, args with
+  | "std", "HashMap", k :: v :: _ => .adt "Vec" [.tuple [k, v]]
+  | _, _, _ => .adt n args
+
 /-- Extract generic_args from an Adt/Array/Tuple inner value. -/
 def extractGenericArgs (adtInner : Json) : Array Json :=
   -- adtInner might be {id, value: {def_id, generic_args, ...}} or {def_id, generic_args, ...}
@@ -1869,8 +1891,11 @@ partial def parseHaxType (j : Json) : ImpType :=
         match ga.getObjVal? "Type" with
         | .ok tyJ => some (parseHaxType tyJ)
         | _ => none
+      let krate := match adtInner.getObjVal? "def_id" with
+        | .ok d => defIdKrate d
+        | _ => ""
       match pathName with
-      | some n => .adt n typeArgs
+      | some n => hashMapAsEntries krate n typeArgs
       | none => .adt "unknown" typeArgs
     else if let .ok _ := tyKind.getObjVal? "Arrow" then .unknown
     else if let .ok alias := tyKind.getObjVal? "Alias" then

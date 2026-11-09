@@ -1628,6 +1628,96 @@ def shoAbsorb : TExpr :=
   | _ => false
 #guard tDroppedMutCalls [] shoFields [("update", 0)] [] shoAbsorb == []
 
+/-! ### External callees with a value result
+
+`self.keys.insert(h, k);` (Bertie, `KeySchedule::set` of `TLSkeyscheduler`) calls
+`HashMap::insert`, which has no definition in the export, returns the key's
+previous value and writes through its receiver, the field place `self.keys`.
+`externalTupleWriteTable` makes it a tuple-form write-back function; the field
+place is read into a local, the call writes the local back from `_wb.1` and
+drops `_wb.0`, and `self` is rebound to its field update. The map type
+`HashMap<K, V>` is the entry sequence `Vec<(K, V)>`. -/
+
+/-- The struct `TLSkeyscheduler`. -/
+def ksTy : ImpType := .adt "TLSkeyscheduler" []
+
+/-- The entry sequence of a `HashMap<i64, i64>`. -/
+def ksMapTy : ImpType := .adt "Vec" [.tuple [.int, .int]]
+
+/-- The fields of `TLSkeyscheduler`. -/
+def ksFields : StructFieldNames := [("TLSkeyscheduler", ["keys"])]
+
+/-- `fn set(&mut self, h, k)`. -/
+def ksSetSig : FnTypeInfo := ⟨[("self", .ref ksTy true), ("h", .int), ("k", .int)], .unit⟩
+
+/-- `self.keys.insert(h, k);` -/
+def ksSetBody : TExpr :=
+  let self : TExpr := .mk (.var "self") (.ref ksTy true)
+  let place : TExpr := .mk (.app ".keys" [.mk (.deref self) ksTy]) ksMapTy
+  .mk (.seq (.mk (.app "HashMap_insert" [.mk (.borrow place) (.ref ksMapTy true),
+      .mk (.var "h") .unknown, .mk (.var "k") .unknown]) (.option .int))
+    (.mk .unitVal .unit)) .unit
+
+-- `std::collections::HashMap<K, V, S>` is `Vec<(K, V)>`; another `HashMap` is kept.
+#guard HaxAdapter.hashMapAsEntries "std" "HashMap" [.int, .int, .adt "RandomState" []] ==
+  ksMapTy
+#guard HaxAdapter.hashMapAsEntries "mycrate" "HashMap" [.int] == .adt "HashMap" [.int]
+
+-- The call heads of `HashMap::insert` and `Option::take`; `Vec::insert` and
+-- `Iterator::take` keep their short names.
+#guard HaxAdapter.stdMethodHead "std" ["collections", "hash", "map", "Impl", "insert"]
+  "insert" == some "HashMap_insert"
+#guard HaxAdapter.stdMethodHead "core" ["option", "Impl", "take"] "take" == some "Option_take"
+#guard HaxAdapter.stdMethodHead "alloc" ["vec", "Impl", "insert"] "insert" == none
+#guard HaxAdapter.stdMethodHead "core" ["iter", "traits", "iterator", "Iterator", "take"]
+  "take" == none
+
+-- `HashMap_insert` is a tuple-form write-back function of position 0 with a value.
+#guard externalTupleWriteTable [("set", ksSetBody)] == [("HashMap_insert", [0], true)]
+#guard externalWriteTable [("set", ksSetBody)] == []
+
+-- Without the tuple entry the call is dropped; with it, after localization, it is not.
+#guard tDroppedMutCalls [("set", ksSetSig)] ksFields [] [] ksSetBody ==
+  [("HashMap_insert", [0])]
+#guard (externalTupleWriteback ksFields [("set", ksSetBody)]).2.map
+    (fun (_, te) =>
+      tDroppedMutCalls [("set", ksSetSig)] ksFields [] [("HashMap_insert", [0], true)] te) ==
+  [[]]
+
+-- The call site: the field read into `_wbfld0`, written back from `_wb.1`, and `self`
+-- rebound to its field update.
+#guard (let w := externalTupleWriteback ksFields [("set", ksSetBody)]
+    w.2.map fun (n, te) => (n, (tRebindMutCalls ksFields [] w.1 te).erase)) ==
+  [("set", .seq (.letBind "_wbfld0" (.app ".keys" [.deref (.var "self")])
+    (.letBind "_wb" (.app "HashMap_insert" [.borrow (.var "_wbfld0"), .var "h", .var "k"])
+      (.seq (.assign "_wbfld0" (.proj (.var "_wb") 1))
+        (.assign "self" (.app "struct_update#TLSkeyscheduler#0#1"
+          [.var "self", .var "_wbfld0"]))))) .unitVal)]
+
+-- The call is typed as the pair of its result and the map.
+#guard (externalTupleWriteback ksFields [("set", ksSetBody)]).2.all fun (_, te) =>
+  match te with
+  | .mk (.seq (.mk (.letBind _ _ (.mk (.seq (.mk (.app _ _) ty) _) _)) _) _) _ =>
+    ty == .tuple [.option .int, ksMapTy]
+  | _ => false
+
+-- `set` writes back `self`.
+#guard (let w := externalTupleWriteback ksFields [("set", ksSetBody)]
+    mutWriteFnsExt ksFields [("set", ksSetSig)] w.2 [] w.1) == [("set", [0], ["self"], false)]
+
+/-- `let s = self.keys.take(); s`: `Option::take` on a field place, as a `let` value. -/
+def takeField : TExpr :=
+  let self : TExpr := .mk (.var "self") (.ref ksTy true)
+  let place : TExpr := .mk (.app ".keys" [.mk (.deref self) ksTy]) (.option .int)
+  .mk (.letBind "s" (.mk (.app "Option_take" [.mk (.borrow place) (.ref (.option .int) true)])
+    (.option .int)) (.mk (.var "s") (.option .int))) (.option .int)
+
+-- `Option_take` is a tuple-form entry; the call is not dropped and rebinds `self`.
+#guard (let w := externalTupleWriteback ksFields [("w", takeField)]
+    (w.1, w.2.map fun (_, te) => tDroppedMutCalls [] ksFields [] w.1 te,
+      w.2.map fun (_, te) => tAssignedVars (tRebindMutCalls ksFields [] w.1 te))) ==
+  ([("Option_take", [0], true)], [[]], [["_wbfld0", "self"]])
+
 /-- `update(&mut a[i], x)`: an element place, which no write-back covers. -/
 def elemExtWrite : TExpr :=
   let hTy : ImpType := .adt "Hasher" []
