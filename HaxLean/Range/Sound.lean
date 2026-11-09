@@ -14,20 +14,26 @@ public import HaxLean.Range.Check
 guarded builtin table `guardBi g bi` exactly as with `bi`, from every environment in the
 abstract environment that holds no control-flow value, so no guard `g` fails on any run; its
 value and final environment lie in the abstract ones (`Post`). The hypotheses are `Sound g H
-bi`: the transfer functions of `H` prove the guards `g`, describe the results of `bi`, and the
-comparison heads of `bi` answer with the truth of their relation.
+bi`: the transfer functions of `H` prove the guards `g`, describe the results of `bi`, the
+comparison heads of `bi` answer with the truth of their relation, and, when `H.logic`, the
+Boolean and equality heads answer as `LogicSem` says.
 
 ## Main definitions
 
 * `cfBind`: the continuation of `denote'` after a subterm, which passes control-flow values
   and other outcomes through.
 * `Post`: the postcondition of a checked term.
+* `paramEnv`: the environment of a function body on its arguments.
 
 ## Main results
 
+* `condOk_env`: a `condOk` condition that answers a Boolean leaves the environment.
+* `refineAtoms_sound`, `refineCond_sound_of`, `refineCond_sound`: soundness of the
+  refinement by a guard.
 * `denoteForLoop'_sound`: a loop body that keeps the invariant gives a loop that keeps it.
 * `check_sound`, `checkArgs_sound`, `checkArms_sound`: soundness of the checker.
 * `checkT_sound`: soundness for a `TExpr` literal through `TExpr.erase`.
+* `mem_of_body`: a checked function body returns a value in its abstract value.
 -/
 
 @[expose] public section
@@ -752,43 +758,214 @@ theorem refineLt_sound {Γ : AEnv} {env : Env} {A B : ImpExpr} {s : Bool} {va vb
     Sat (refineLt Γ A B s) env :=
   refineLower_sound h (refineUpper_sound h h hA hB hrel) hA hB hrel
 
-/-- The refinement by a comparison of two atoms that evaluated to `b` is sound. -/
-theorem refineCond_sound {g : String → List Value → Bool} {H : Spec} {bi : Builtins}
-    (hS : Sound g H bi) {fuel : Nat} {c : ImpExpr} {b : Bool} {Γ : AEnv} {env e : Env}
-    (hc : denote' bi fuel c env = (.val (.bool b), e)) (hΓ : Sat Γ e) :
-    Sat (refineCond c b Γ) e := by
+/-- The refinement by a call of a head on two atoms that answered `b` is sound, for a table
+    whose comparison heads answer as `cmp` says and, with `lg`, whose Boolean heads answer
+    as `LogicSem` says. -/
+theorem refineAtoms_sound {bi : Builtins} {lg : Bool}
+    (hcmp : ∀ op strict swapped vl vr b m n, cmpOf op = some (strict, swapped) →
+      bi op [vl, vr] = some (.bool b) → vl.toInt = some m → vr.toInt = some n →
+      (b = true ↔ cmpRel strict swapped m n))
+    (hL : lg = true → LogicSem bi) {op : String} {l r : ImpExpr} {b : Bool} {Γ : AEnv}
+    {env : Env} {vl vr : Value} (hΓ : Sat Γ env) (hvl : atomVal env l = some vl)
+    (hvr : atomVal env r = some vr) (hb : bi op [vl, vr] = some (.bool b)) :
+    Sat (refineAtoms lg op l r b Γ) env := by
+  unfold refineAtoms
+  rcases hop : cmpOf op with _ | ⟨strict, swapped⟩
+  · rcases hq : eqOf op with _ | q
+    · exact hΓ
+    · by_cases hc : (lg && b == q) = true
+      · simp only [hc, ↓reduceIte]
+        simp only [Bool.and_eq_true, beq_iff_eq] at hc
+        have key := fun m n hm hn => ((hL hc.1).eq op q vl vr b m n hq hb hm hn).1 hc.2
+        refine refineLt_sound (refineLt_sound hΓ hvl hvr fun m n hm hn => ?_) hvr hvl
+          fun n m hn hm => ?_
+        · have := key m n hm hn
+          simp only [Bool.false_eq_true, ↓reduceIte]
+          omega
+        · have := key m n hm hn
+          simp only [Bool.false_eq_true, ↓reduceIte]
+          omega
+      · simp only [hc, Bool.false_eq_true, ↓reduceIte]
+        exact hΓ
+  · have key := fun m n hm hn => hcmp op strict swapped vl vr b m n hop hb hm hn
+    by_cases hps : b = swapped
+    · simp only [hps, ↓reduceIte]
+      refine refineLt_sound hΓ hvr hvl fun n m hn hm => ?_
+      have := key m n hm hn
+      subst hps
+      revert this
+      cases b <;> cases strict <;> simp [cmpRel] <;> omega
+    · simp only [hps, ↓reduceIte]
+      refine refineLt_sound hΓ hvl hvr fun m n hm hn => ?_
+      have := key m n hm hn
+      revert this hps
+      cases b <;> cases swapped <;> cases strict <;> simp [cmpRel] <;> omega
+
+/-- A call that evaluates to a value evaluated its arguments to a list on which the table
+    answers with that value. -/
+theorem denote'_app_val {bi : Builtins} {fuel : Nat} {op : String} {args : List ImpExpr}
+    {env e : Env} {w : Value} (h : denote' bi fuel (.app op args) env = (.val w, e)) :
+    ∃ vs, denoteArgs' bi fuel args env = (some vs, e) ∧ bi op vs = some w := by
+  rw [denote'_app_cf] at h
+  rcases hr : denoteArgs' bi fuel args env with ⟨_ | vs, e'⟩ <;> rw [hr] at h
+  · cases h
+  · rcases hb : bi op vs with _ | w' <;> simp only [hb] at h
+    · cases h
+    · cases h; exact ⟨vs, rfl, hb⟩
+
+/-- Arguments that evaluate to a list evaluate their first element to a value. -/
+theorem denoteArgs'_cons_val {bi : Builtins} {fuel : Nat} {x : ImpExpr} {xs : List ImpExpr}
+    {env e : Env} {vs : List Value} (h : denoteArgs' bi fuel (x :: xs) env = (some vs, e)) :
+    ∃ v e1 ws, denote' bi fuel x env = (.val v, e1) ∧
+      denoteArgs' bi fuel xs e1 = (some ws, e) ∧ vs = v :: ws := by
+  rw [denoteArgs'_cons_cf] at h
+  rcases hx : denote' bi fuel x env with ⟨o, e1⟩
+  rw [hx] at h
+  cases o with
+  | val v =>
+    by_cases hc : v.isControlFlow = true
+    · simp only [argsCons, hc, ↓reduceIte] at h; cases h
+    · simp only [argsCons, hc, Bool.false_eq_true, ↓reduceIte] at h
+      rcases hr : denoteArgs' bi fuel xs e1 with ⟨_ | ws, e2⟩ <;> rw [hr] at h
+      · cases h
+      · simp only [Option.map_some] at h
+        cases h
+        exact ⟨v, e1, ws, rfl, hr, rfl⟩
+  | _ => simp only [argsCons] at h; cases h
+
+/-- The empty argument list evaluates to the empty list in the same environment. -/
+theorem denoteArgs'_nil_val {bi : Builtins} {fuel : Nat} {env e : Env} {vs : List Value}
+    (h : denoteArgs' bi fuel [] env = (some vs, e)) : vs = [] ∧ e = env := by
+  rw [Total.denoteArgs'_nil_run] at h
+  cases h; exact ⟨rfl, rfl⟩
+
+/-- A call of two arguments that evaluates to a value. -/
+theorem denote'_app2_val {bi : Builtins} {fuel : Nat} {op : String} {l r : ImpExpr}
+    {env e : Env} {w : Value} (h : denote' bi fuel (.app op [l, r]) env = (.val w, e)) :
+    ∃ vl vr e1, denote' bi fuel l env = (.val vl, e1) ∧ denote' bi fuel r e1 = (.val vr, e) ∧
+      bi op [vl, vr] = some w := by
+  obtain ⟨vs, ha1, hb⟩ := denote'_app_val h
+  obtain ⟨vl, e1, ws, hl, ha2, rfl⟩ := denoteArgs'_cons_val ha1
+  obtain ⟨vr, e2, us, hr, ha3, rfl⟩ := denoteArgs'_cons_val ha2
+  obtain ⟨rfl, rfl⟩ := denoteArgs'_nil_val ha3
+  exact ⟨vl, vr, e1, hl, hr, hb⟩
+
+/-- A call of one argument that evaluates to a value. -/
+theorem denote'_app1_val {bi : Builtins} {fuel : Nat} {op : String} {c : ImpExpr}
+    {env e : Env} {w : Value} (h : denote' bi fuel (.app op [c]) env = (.val w, e)) :
+    ∃ v, denote' bi fuel c env = (.val v, e) ∧ bi op [v] = some w := by
+  obtain ⟨vs, ha1, hb⟩ := denote'_app_val h
+  obtain ⟨v, e1, ws, hc, ha2, rfl⟩ := denoteArgs'_cons_val ha1
+  obtain ⟨rfl, rfl⟩ := denoteArgs'_nil_val ha2
+  exact ⟨v, hc, hb⟩
+
+/-- A `condOk` condition that answers a Boolean leaves the environment. -/
+theorem condOk_env {bi : Builtins} (hL : LogicSem bi) (c : ImpExpr) (hc : condOk c = true)
+    {fuel : Nat} {env e : Env} {b : Bool} (h : denote' bi fuel c env = (.val (.bool b), e)) :
+    e = env := by
+  cases c with
+  | var _ => exact (denote'_atom rfl h).1
+  | lit _ => exact (denote'_atom rfl h).1
+  | app op args =>
+    match args, hc, h with
+    | [l, r], hc, h =>
+      by_cases hat : (isAtom l && isAtom r) = true
+      · simp only [Bool.and_eq_true] at hat
+        exact (denote'_cmp_atoms hat.1 hat.2 h).1
+      · simp only [condOk, hat, Bool.false_or, Bool.and_eq_true, Bool.or_eq_true] at hc
+        obtain ⟨⟨hop, hl⟩, hr⟩ := hc
+        obtain ⟨vl, vr, e1, h1, h2, hb⟩ := denote'_app2_val h
+        obtain ⟨x, y, rfl, rfl⟩ : ∃ x y, vl = .bool x ∧ vr = .bool y := by
+          rcases hop with hop | hop
+          · obtain ⟨x, y, h1, h2, -⟩ := hL.and_ op vl vr _ hop hb; exact ⟨x, y, h1, h2⟩
+          · obtain ⟨x, y, h1, h2, -⟩ := hL.or_ op vl vr _ hop hb; exact ⟨x, y, h1, h2⟩
+        rw [condOk_env hL r hr h2, condOk_env hL l hl h1]
+    | [c], hc, h =>
+      simp only [condOk, Bool.and_eq_true] at hc
+      obtain ⟨v, h1, hb⟩ := denote'_app1_val h
+      obtain ⟨x, rfl, -⟩ := hL.not_ op v _ hc.1 hb
+      exact condOk_env hL c hc.2 h1
+    | [], hc, _ => simp [condOk] at hc
+    | _ :: _ :: _ :: _, hc, _ => simp [condOk] at hc
+  | _ => simp [condOk] at hc
+
+/-- The refinement by a condition that answered `b` is sound, for a table whose comparison
+    heads answer as `cmp` says and, with `lg`, whose Boolean heads answer as `LogicSem`
+    says. -/
+theorem refineCond_sound_of {bi : Builtins} {lg : Bool}
+    (hcmp : ∀ op strict swapped vl vr b m n, cmpOf op = some (strict, swapped) →
+      bi op [vl, vr] = some (.bool b) → vl.toInt = some m → vr.toInt = some n →
+      (b = true ↔ cmpRel strict swapped m n))
+    (hL : lg = true → LogicSem bi) (c : ImpExpr) (b : Bool) (Γ : AEnv) {fuel : Nat}
+    {env e : Env} (hc : denote' bi fuel c env = (.val (.bool b), e)) (hΓ : Sat Γ e) :
+    Sat (refineCond lg c b Γ) e := by
   cases c with
   | app op args =>
     match args, hc with
     | [l, r], hc =>
-      unfold refineCond
+      simp only [refineCond]
       by_cases hat : (isAtom l && isAtom r) = true
       · simp only [hat, ↓reduceIte]
-        simp only [Bool.and_eq_true] at hat
-        obtain ⟨rfl, vl, vr, hvl, hvr, hb⟩ := denote'_cmp_atoms hat.1 hat.2 hc
-        rcases hop : cmpOf op with _ | ⟨strict, swapped⟩
+        have hat' := hat
+        simp only [Bool.and_eq_true] at hat'
+        obtain ⟨rfl, vl, vr, hvl, hvr, hb⟩ := denote'_cmp_atoms hat'.1 hat'.2 hc
+        exact refineAtoms_sound hcmp hL hΓ hvl hvr hb
+      simp only [hat, Bool.false_eq_true, ↓reduceIte]
+      by_cases hand : (lg && isAnd op && condOk l && condOk r) = true
+      · simp only [hand, ↓reduceIte]
+        simp only [Bool.and_eq_true] at hand
+        obtain ⟨⟨⟨hlg, hop⟩, hl⟩, hr⟩ := hand
+        cases b
         · exact hΓ
-        simp only
-        have key := fun m n hm hn => hS.cmp op strict swapped vl vr b m n hop hb hm hn
-        by_cases hps : b = swapped
-        · simp only [hps, ↓reduceIte]
-          refine refineLt_sound hΓ hvr hvl fun n m hn hm => ?_
-          have := key m n hm hn
-          subst hps
-          revert this
-          cases b <;> cases strict <;> simp [cmpRel] <;> omega
-        · simp only [hps, ↓reduceIte]
-          refine refineLt_sound hΓ hvl hvr fun m n hm hn => ?_
-          have := key m n hm hn
-          revert this hps
-          cases b <;> cases swapped <;> cases strict <;> simp [cmpRel] <;> omega
-      · simp only [Bool.not_eq_true] at hat
-        simp only [hat]
+        obtain ⟨vl, vr, e1, h1, h2, hb⟩ := denote'_app2_val hc
+        obtain ⟨x, y, rfl, rfl, hxy⟩ := (hL hlg).and_ op vl vr true hop hb
+        obtain ⟨rfl, rfl⟩ : x = true ∧ y = true := by
+          simpa only [Bool.and_eq_true] using hxy.symm
+        have he2 := condOk_env (hL hlg) r hr h2
+        subst he2
+        have he1 := condOk_env (hL hlg) l hl h1
+        subst he1
+        exact refineCond_sound_of hcmp hL r true _ h2
+          (refineCond_sound_of hcmp hL l true Γ h1 hΓ)
+      simp only [hand, Bool.false_eq_true, ↓reduceIte]
+      by_cases hor : (lg && isOr op && condOk l && condOk r) = true
+      · simp only [hor, ↓reduceIte]
+        simp only [Bool.and_eq_true] at hor
+        obtain ⟨⟨⟨hlg, hop⟩, hl⟩, hr⟩ := hor
+        cases b
+        · obtain ⟨vl, vr, e1, h1, h2, hb⟩ := denote'_app2_val hc
+          obtain ⟨x, y, rfl, rfl, hxy⟩ := (hL hlg).or_ op vl vr false hop hb
+          obtain ⟨rfl, rfl⟩ : x = false ∧ y = false := by
+            simpa only [Bool.or_eq_false_iff] using hxy.symm
+          have he2 := condOk_env (hL hlg) r hr h2
+          subst he2
+          have he1 := condOk_env (hL hlg) l hl h1
+          subst he1
+          exact refineCond_sound_of hcmp hL r false _ h2
+            (refineCond_sound_of hcmp hL l false Γ h1 hΓ)
+        · exact hΓ
+      simp only [hor, Bool.false_eq_true, ↓reduceIte]
+      exact hΓ
+    | [c], hc =>
+      simp only [refineCond]
+      by_cases hn : (lg && isNot op) = true
+      · simp only [hn, ↓reduceIte]
+        simp only [Bool.and_eq_true] at hn
+        obtain ⟨v, h1, hb⟩ := denote'_app1_val hc
+        obtain ⟨x, rfl, rfl⟩ := (hL hn.1).not_ op v b hn.2 hb
+        simpa using refineCond_sound_of hcmp hL c x Γ h1 hΓ
+      · simp only [hn, Bool.false_eq_true, ↓reduceIte]
         exact hΓ
     | [], _ => simpa [refineCond] using hΓ
-    | [_], _ => simpa [refineCond] using hΓ
     | _ :: _ :: _ :: _, _ => simpa [refineCond] using hΓ
   | _ => simpa [refineCond] using hΓ
+
+/-- The refinement by a condition that evaluated to `b` is sound under `Sound`. -/
+theorem refineCond_sound {g : String → List Value → Bool} {H : Spec} {bi : Builtins}
+    (hS : Sound g H bi) {fuel : Nat} {c : ImpExpr} {b : Bool} {Γ : AEnv} {env e : Env}
+    (hc : denote' bi fuel c env = (.val (.bool b), e)) (hΓ : Sat Γ e) :
+    Sat (refineCond H.logic c b Γ) e :=
+  refineCond_sound_of hS.cmp hS.logic c b Γ hc hΓ
 
 /-- A loop bound is the integer of the value. -/
 theorem Value.toInt_of_loopBound {v : Value} {n : Int} (h : v.loopBound = some n) :
@@ -855,7 +1032,7 @@ theorem denoteWhile'_sound {g : String → List Value → Bool} {H : Spec} {bi :
       denote' (guardBi g bi) fuel c env = denote' bi fuel c env ∧
         Post J Γc ac (denote' bi fuel c env))
     (hci : entails Γc inv = true)
-    (hb : ∀ fuel env, Sat (refineCond c true Γc) env → Env.NoControlFlow env →
+    (hb : ∀ fuel env, Sat (refineCond H.logic c true Γc) env → Env.NoControlFlow env →
       denote' (guardBi g bi) fuel body env = denote' bi fuel body env ∧
         Post inv inv .top (denote' bi fuel body env)) :
     ∀ fuel env, Sat inv env → Env.NoControlFlow env →
@@ -988,11 +1165,11 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
       rcases hb : bi f vs with _ | w
       · exact ⟨by trivial, trivial⟩
       · exact ⟨by trivial, post_val hNe (hS.deep f vs w hb hdl)
-          (hS.result f avs a0 vs w hx hml hb) hSe⟩
+          (hS.result f avs a0 vs w hx hml hdl hb) hSe⟩
   | .ifThenElse c t el, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hc : check H J Γ c with _ | ⟨ac, Γ1⟩ <;> simp only [check, hc, reduceCtorEq] at h
-    rcases ht : check H J (refineCond c true Γ1) t with _ | ⟨at', Γt⟩ <;>
-      rcases he : check H J (refineCond c false Γ1) el with _ | ⟨ae, Γe⟩ <;>
+    rcases ht : check H J (refineCond H.logic c true Γ1) t with _ | ⟨at', Γt⟩ <;>
+      rcases he : check H J (refineCond H.logic c false Γ1) el with _ | ⟨ae, Γe⟩ <;>
       simp only [ht, he, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
     have ihc := check_sound hS c J Γ ac Γ1 hc fuel env hΓ hN
@@ -1078,7 +1255,7 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
     by_cases he1 : entails Γ inv = true <;> simp only [he1, ↓reduceIte, reduceCtorEq] at h
     rcases hc : check H J inv c with _ | ⟨ac, Γc⟩ <;> simp only [hc, reduceCtorEq] at h
     by_cases he2 : entails Γc inv = true <;> simp only [he2, ↓reduceIte, reduceCtorEq] at h
-    rcases hb : check H inv (refineCond c true Γc) body with _ | ⟨ab, Γb⟩ <;>
+    rcases hb : check H inv (refineCond H.logic c true Γc) body with _ | ⟨ab, Γb⟩ <;>
       simp only [hb, reduceCtorEq] at h
     by_cases he3 : entails Γb inv = true <;>
       simp only [he3, ↓reduceIte, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
@@ -1237,5 +1414,46 @@ theorem checkT_sound {g : String → List Value → Bool} {H : Spec} {bi : Built
   refine ⟨h1, fun v env' hr hcf => ?_⟩
   rw [hr] at h2
   exact (h2.of_val hcf).2.2.1
+
+/-! ## Function bodies -/
+
+/-- The environment of a function body: the parameters `ps` bound to the values `vs`, a
+    parameter repeated in the list taking the value of its first position. -/
+def paramEnv : List String → List Value → Env
+  | p :: ps, v :: vs => Env.extend (paramEnv ps vs) p v
+  | _, _ => Env.empty
+
+/-- Arguments in the abstract values `pre` give a parameter environment in `ps.zip pre`. -/
+theorem sat_paramEnv : ∀ (ps : List String) (pre : List AV) (vs : List Value),
+    MemList pre vs → Sat (ps.zip pre) (paramEnv ps vs)
+  | [], _, _, _ => fun x a h => by simp at h
+  | _ :: _, [], _, _ => fun x a h => by simp at h
+  | p :: ps, a :: pre, [], hm => absurd hm id
+  | p :: ps, a :: pre, v :: vs, hm => by
+    simp only [List.zip_cons_cons, paramEnv]
+    exact (sat_paramEnv ps pre vs hm.2).cons hm.1
+
+/-- Arguments free of control flow give a parameter environment free of control flow. -/
+theorem paramEnv_noControlFlow : ∀ (ps : List String) (vs : List Value),
+    (∀ w ∈ vs, w.deepNoControlFlow = true) → Env.NoControlFlow (paramEnv ps vs)
+  | [], _, _ => by simpa [paramEnv] using Env.NoControlFlow.empty
+  | _ :: _, [], _ => by simpa [paramEnv] using Env.NoControlFlow.empty
+  | p :: ps, v :: vs, hd => by
+    simp only [paramEnv]
+    exact (paramEnv_noControlFlow ps vs fun w hw => hd w (List.mem_cons_of_mem _ hw)).extend
+      (hd v (List.mem_cons_self))
+
+/-- A function body the checker accepts at `a` from its parameters at `pre` returns, on
+    arguments in `pre` free of control flow, a value in `a`. -/
+theorem mem_of_body {g : String → List Value → Bool} {H : Spec} {bi : Builtins}
+    (hS : Sound g H bi) {ps : List String} {pre : List AV} {body : ImpExpr} {a : AV}
+    {Γ' : AEnv} (hc : check H [] (ps.zip pre) body = some (a, Γ')) {vs : List Value}
+    {v : Value} (hm : MemList pre vs) (hd : ∀ w ∈ vs, w.deepNoControlFlow = true) {fuel : Nat}
+    {e : Env} (hr : denote' bi fuel body (paramEnv ps vs) = (.val v, e))
+    (hv : v.isControlFlow = false) : a.Mem v := by
+  have h2 := (check_sound hS body [] _ a Γ' hc fuel _ (sat_paramEnv ps pre vs hm)
+    (paramEnv_noControlFlow ps vs hd)).2
+  rw [hr] at h2
+  exact (h2.of_val hv).2.2.1
 
 end Hax.Range

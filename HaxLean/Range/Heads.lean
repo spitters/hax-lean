@@ -24,11 +24,16 @@ words takes the width of its first argument.
 `stdSpec sums` gives the transfer functions: exact interval arithmetic on the shared domain
 (`ivAddZ`, `ivSubZ`, `ivCorner`) checked against the range of the width, the divisor and
 shift-amount checks, index bounds against the least array length, `len` as the length
-interval, the length of an array built by `repeat` or `array_lit`, and a function of the crate through its summary `(pre, post)` in `sums`: a call is
+interval, the length of an array built by `repeat` or `array_lit`, and a function of the
+crate through its summary `(pre, post)` in `sums`: a call is
 accepted when its arguments lie in `pre`, with result in `post`.
 
 `stdSpec_sound` instantiates `Sound` for `rustGuard` and `stdSpec sums` under `HeadSem`,
 which states what the builtin table computes at these heads and that the summaries hold.
+The summaries need not be assumed: `checkSums` checks each against the body of the function
+it summarises, with the summaries of its callees, and `headSem_of_checkSums` derives
+`HeadSem bi sums` from `HeadSem bi []` and `DefsSem`, the reading of the crate's definitions
+by the table.
 
 ## Main definitions
 
@@ -36,12 +41,16 @@ which states what the builtin table computes at these heads and that the summari
 * `rustGuard`: the panic guards.
 * `stdXfer`, `stdSpec`: the transfer functions.
 * `HeadSem`: the semantics of the heads that the transfer functions read.
+* `DefsSem`, `checkSums`: the crate's definitions read by the table, and the check of the
+  summaries against their bodies.
 
 ## Main results
 
 * `stdXfer_guard`: an accepted call has its guard.
-* `stdSpec_sound`: `Sound rustGuard (stdSpec sums ann) bi` under `HeadSem bi sums`.
+* `stdSpec_sound`: `Sound rustGuard (stdSpec sums ann logic) bi` under `HeadSem bi sums`.
 * `checkT_rust_sound`: a checked typed literal never fails a Rust guard under `denote'`.
+* `headSem_of_checkSums`: summaries that `checkSums` accepts hold.
+* `checkT_rust_sound_defs`: `checkT_rust_sound` with checked summaries.
 -/
 
 @[expose] public section
@@ -269,10 +278,11 @@ def stdXfer (sums : List (String × (List AV × AV))) (f : String) (avs : List A
     | some (pre, post) => if leList avs pre then some post else none
     | none => defaultXfer f avs
 
-/-- The specification of the heads with the summaries `sums` and the loop annotation
-    `ann`. -/
-def stdSpec (sums : List (String × (List AV × AV))) (ann : AEnv := []) : Spec :=
-  { xfer := stdXfer sums, ann }
+/-- The specification of the heads with the summaries `sums`, the loop annotation `ann`, and
+    the refinement by Boolean guards when `logic`. -/
+def stdSpec (sums : List (String × (List AV × AV))) (ann : AEnv := []) (logic : Bool := false) :
+    Spec :=
+  { xfer := stdXfer sums, ann, logic }
 
 /-! ## Accepted calls have their guards -/
 
@@ -481,8 +491,8 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
     truth of comparisons, the exact result of a checked operation whose guard holds, the
     remainder of a nonnegative dividend by a positive divisor, the length kept by an update,
     the length returned by `len`, the length of an array built by `repeat` or `array_lit`,
-    and each summary's postcondition on arguments in its
-    precondition. -/
+    and each summary's postcondition on arguments in its precondition that are free of
+    control flow. -/
 structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Prop where
   deep : Builtins.DeepNoControlFlow bi
   cmp : ∀ op strict swapped vl vr b m n, cmpOf op = some (strict, swapped) →
@@ -499,7 +509,7 @@ structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Pr
   arrayLit : ∀ vs v, bi "array_lit" vs = some v → v.arrayLen = some vs.length
   len : ∀ arr v, bi "len" [arr] = some v → ∃ n, arr.arrayLen = some n ∧ v.toInt = some n
   sums : ∀ g pre post, sums.lookup g = some (pre, post) → ∀ vs v, MemList pre vs →
-    bi g vs = some v → post.Mem v
+    (∀ w ∈ vs, w.deepNoControlFlow = true) → bi g vs = some v → post.Mem v
 
 theorem memList_length {as : List AV} {vs : List Value} (h : MemList as vs) :
     as.length = vs.length := by
@@ -566,7 +576,8 @@ theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × A
 /-- An accepted call's result lies in the transfer function's value. -/
 theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
     (hH : HeadSem bi sums) {f : String} {avs : List AV} {a : AV} {vs : List Value} {v : Value}
-    (h : stdXfer sums f avs = some a) (hm : MemList avs vs) (hb : bi f vs = some v) :
+    (h : stdXfer sums f avs = some a) (hm : MemList avs vs)
+    (hd : ∀ w ∈ vs, w.deepNoControlFlow = true) (hb : bi f vs = some v) :
     a.Mem v := by
   have hg := stdXfer_guard h hm
   unfold stdXfer at h
@@ -712,28 +723,103 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
     by_cases hle : leList avs pre = true
     · simp only [hle, ↓reduceIte, Option.some.injEq] at h
       subst h
-      exact hH.sums f pre post hs vs v (memList_le hm hle) hb
+      exact hH.sums f pre post hs vs v (memList_le hm hle) hd hb
     · simp [hle] at h
 
-/-- The standard specification is sound for the Rust guards under `HeadSem`. -/
+/-- The standard specification is sound for the Rust guards under `HeadSem`, and under
+    `LogicSem` when it refines by Boolean guards. -/
 theorem stdSpec_sound {bi : Builtins} {sums : List (String × (List AV × AV))} {ann : AEnv}
-    (hH : HeadSem bi sums) : Sound rustGuard (stdSpec sums ann) bi where
+    {logic : Bool} (hH : HeadSem bi sums)
+    (hL : logic = true → LogicSem bi := by intro h; cases h) :
+    Sound rustGuard (stdSpec sums ann logic) bi where
   deep := hH.deep
   guard := fun _ _ _ _ h hm => stdXfer_guard h hm
-  result := fun _ _ _ _ _ h hm hb => stdXfer_result hH h hm hb
+  result := fun _ _ _ _ _ h hm hd hb => stdXfer_result hH h hm hd hb
   cmp := hH.cmp
+  logic := hL
 
 /-- A typed literal the checker accepts with the standard specification fails no Rust guard
     under `denote'`: from every environment in `Γ` with no control-flow value, at every
     fuel, its run with the guarded table `guardBi rustGuard bi` is its run with `bi`, and a
     value it returns lies in `a`. -/
 theorem checkT_rust_sound {bi : Builtins} {sums : List (String × (List AV × AV))}
-    {ann : AEnv} (hH : HeadSem bi sums) {e : TExpr} {Γ Γ' : AEnv} {a : AV}
-    (h : checkT (stdSpec sums ann) Γ e = some (a, Γ')) (fuel : Nat) {env : Env}
+    {ann : AEnv} {logic : Bool} (hH : HeadSem bi sums)
+    (hL : logic = true → LogicSem bi := by intro h; cases h) {e : TExpr} {Γ Γ' : AEnv}
+    {a : AV} (h : checkT (stdSpec sums ann logic) Γ e = some (a, Γ')) (fuel : Nat) {env : Env}
     (hΓ : Sat Γ env) (hN : Env.NoControlFlow env) :
     denote' (guardBi rustGuard bi) fuel e.erase env = denote' bi fuel e.erase env ∧
       ∀ v env', denote' bi fuel e.erase env = (.val v, env') → v.isControlFlow = false →
         a.Mem v :=
-  checkT_sound (stdSpec_sound hH) h fuel hΓ hN
+  checkT_sound (stdSpec_sound hH hL) h fuel hΓ hN
+
+/-! ## Summaries of the crate's functions -/
+
+/-- The crate's definitions (name, parameters, body) read by the builtin table: a call of a
+    defined function on arguments free of control flow that the table answers with `v` is
+    answered by a run of its body from `paramEnv` that returns `v`. -/
+def DefsSem (bi : Builtins) (defs : List (String × List String × ImpExpr)) : Prop :=
+  ∀ g ps body, defs.lookup g = some (ps, body) → ∀ vs v,
+    (∀ w ∈ vs, w.deepNoControlFlow = true) → bi g vs = some v →
+    ∃ fuel e, denote' bi fuel body (paramEnv ps vs) = (.val v, e)
+
+/-- The check of a list of summaries against the bodies of `defs`: each summary
+    `(g, (pre, post))` is checked with the summaries after it in the list, the body of `g`
+    accepted from its parameters at `pre` with a value included in `post` (loop annotation
+    `ann g`). A callee's summary comes after its callers'; a call of a function without a
+    summary in the rest, a recursive call among them, is read as an unknown head. -/
+def checkSums (defs : List (String × List String × ImpExpr)) (ann : String → AEnv)
+    (logic : Bool) : List (String × (List AV × AV)) → Bool
+  | [] => true
+  | (g, (pre, post)) :: rest => checkSums defs ann logic rest &&
+    match defs.lookup g with
+    | some (ps, body) =>
+      match check (stdSpec rest (ann g) logic) [] (ps.zip pre) body with
+      | some (a, _) => a.le post
+      | none => false
+    | none => false
+
+/-- Summaries that `checkSums` accepts hold: from the semantics of the heads without
+    summaries and the reading of the crate's definitions by the table, `HeadSem` holds with
+    the summaries. -/
+theorem headSem_of_checkSums {bi : Builtins} {defs : List (String × List String × ImpExpr)}
+    {ann : String → AEnv} {logic : Bool} (hH : HeadSem bi [])
+    (hL : logic = true → LogicSem bi) (hD : DefsSem bi defs) :
+    ∀ sums, checkSums defs ann logic sums = true → HeadSem bi sums
+  | [], _ => hH
+  | (g, (pre, post)) :: rest, hc => by
+    simp only [checkSums, Bool.and_eq_true] at hc
+    obtain ⟨hrest, hg⟩ := hc
+    have ih := headSem_of_checkSums hH hL hD rest hrest
+    rcases hdef : defs.lookup g with _ | ⟨ps, body⟩
+    · simp [hdef] at hg
+    rcases hck : check (stdSpec rest (ann g) logic) [] (ps.zip pre) body with _ | ⟨a, Γ'⟩
+    · simp [hdef, hck] at hg
+    simp only [hdef, hck] at hg
+    refine { ih with sums := fun h pre' post' hl vs v hm hd hb => ?_ }
+    by_cases hh : h = g
+    · subst hh
+      simp only [List.lookup_cons, BEq.rfl, Option.some.injEq, Prod.mk.injEq] at hl
+      obtain ⟨rfl, rfl⟩ := hl
+      obtain ⟨fuel, e, hr⟩ := hD h ps body hdef vs v hd hb
+      have hv : v.isControlFlow = false :=
+        Value.deepNoControlFlow_implies_isControlFlow_false (hH.deep h vs v hb hd)
+      exact (mem_of_body (stdSpec_sound ih hL) hck hm hd hr hv).le hg
+    · have hbe : (h == g) = false := by simpa using hh
+      have hl' : rest.lookup h = some (pre', post') := by
+        simpa only [List.lookup_cons, hbe] using hl
+      exact ih.sums h pre' post' hl' vs v hm hd hb
+
+/-- `checkT_rust_sound` with the summaries discharged by `checkSums` against the bodies of
+    the crate's definitions, under the semantics of the heads without summaries. -/
+theorem checkT_rust_sound_defs {bi : Builtins} {defs : List (String × List String × ImpExpr)}
+    {anns : String → AEnv} {sums : List (String × (List AV × AV))} {ann : AEnv} {logic : Bool}
+    (hH : HeadSem bi []) (hL : logic = true → LogicSem bi) (hD : DefsSem bi defs)
+    (hs : checkSums defs anns logic sums = true) {e : TExpr} {Γ Γ' : AEnv} {a : AV}
+    (h : checkT (stdSpec sums ann logic) Γ e = some (a, Γ')) (fuel : Nat) {env : Env}
+    (hΓ : Sat Γ env) (hN : Env.NoControlFlow env) :
+    denote' (guardBi rustGuard bi) fuel e.erase env = denote' bi fuel e.erase env ∧
+      ∀ v env', denote' bi fuel e.erase env = (.val v, env') → v.isControlFlow = false →
+        a.Mem v :=
+  checkT_rust_sound (headSem_of_checkSums hH hL hD sums hs) hL h fuel hΓ hN
 
 end Hax.Range

@@ -23,8 +23,9 @@ Rust counterpart panics are those of `HaxLean/RuntimeM.lean`; a transfer functio
 a head only when the intervals prove its guard (`HaxLean/Range/Heads.lean`).
 
 The checker refines an interval by the guard of an `if` whose condition compares two atoms
-(`refineCond`), drops the variables a `match` arm binds, checks a counted loop (`forFold`)
-against a loop invariant, and reads a call of a function of the crate through its summary,
+(`refineCond`), and, when the specification sets `Spec.logic`, by an equality of two atoms
+and through negations, conjunctions that hold and disjunctions that fail; it drops the
+variables a `match` arm binds, checks a counted loop (`forFold`) against a loop invariant, and reads a call of a function of the crate through its summary,
 which is one more head of `Spec.xfer`. The loop invariant is a candidate (`loopInv`, from the
 annotation `Spec.ann` that an untrusted inference supplies): the checker verifies that the
 environment before the loop, after each iteration and at each `cfBreak`/`cfContinue` of the
@@ -45,7 +46,8 @@ environment in the final abstract environment (`Post`).
 * `AV`, `AV.Mem`, `AEnv`, `Sat`: abstract values and environments and their meaning.
 * `Spec`: the transfer functions of the heads and the loop annotation.
 * `guardBi`: the builtin table that fails where a guard fails.
-* `refineCond`: the refinement of an environment by a comparison of two atoms.
+* `LogicSem`: the reading of the Boolean and equality heads that the refinement uses.
+* `refineAtoms`, `condOk`, `refineCond`: the refinement of an environment by a guard.
 * `check`, `checkArgs`, `checkArms`: the checker.
 * `Sound`: the hypotheses relating a specification to a builtin table.
 
@@ -182,6 +184,9 @@ structure Spec where
   xfer : String → List AV → Option AV
   /-- The candidate abstract value of a variable written in a loop. -/
   ann : AEnv := []
+  /-- Whether the refinement by a guard reads negations, conjunctions, disjunctions and
+      equalities (`refineCond`), which `Sound` then relates to the table by `LogicSem`. -/
+  logic : Bool := false
 
 /-- Each value of a list lies in the abstract value at its position. -/
 def MemList : List AV → List Value → Prop
@@ -202,16 +207,47 @@ def cmpOf : String → Option (Bool × Bool)
 def cmpRel (strict swapped : Bool) (m n : Int) : Prop :=
   if swapped then (if strict then n < m else n ≤ m) else (if strict then m < n else m ≤ n)
 
+/-- A conjunction head. -/
+def isAnd (op : String) : Bool := op == "&&" || op == "and"
+
+/-- A disjunction head. -/
+def isOr (op : String) : Bool := op == "||" || op == "or"
+
+/-- A negation head. -/
+def isNot (op : String) : Bool := op == "Not" || op == "not"
+
+/-- The equality heads: `some true` for `==`, `some false` for `!=`. -/
+def eqOf : String → Option Bool
+  | "Eq" | "eq" => some true
+  | "Ne" | "ne" => some false
+  | _ => none
+
+/-- What the refinement by a Boolean combination of guards reads of the table: a negation,
+    conjunction or disjunction answering a Boolean takes Boolean arguments and computes the
+    connective, and an equality head answers with the truth of the equality of the integers. -/
+structure LogicSem (bi : Builtins) : Prop where
+  and_ : ∀ op vl vr b, isAnd op = true → bi op [vl, vr] = some (.bool b) →
+    ∃ x y, vl = .bool x ∧ vr = .bool y ∧ b = (x && y)
+  or_ : ∀ op vl vr b, isOr op = true → bi op [vl, vr] = some (.bool b) →
+    ∃ x y, vl = .bool x ∧ vr = .bool y ∧ b = (x || y)
+  not_ : ∀ op v b, isNot op = true → bi op [v] = some (.bool b) → ∃ x, v = .bool x ∧ b = !x
+  eq : ∀ op q vl vr b m n, eqOf op = some q → bi op [vl, vr] = some (.bool b) →
+    vl.toInt = some m → vr.toInt = some n → (b = q ↔ m = n)
+
 /-- The hypotheses relating a specification to a builtin table and a guard: the table keeps
-    values free of control flow, an accepted call has its guard and its result in the
-    transfer function's value, and a comparison head answers with the truth of its relation. -/
+    values free of control flow, an accepted call has its guard and, on arguments free of
+    control flow, its result in the transfer function's value, a comparison head answers with
+    the truth of its relation, and the Boolean heads are read as `LogicSem` when the
+    specification refines by them. -/
 structure Sound (g : String → List Value → Bool) (H : Spec) (bi : Builtins) : Prop where
   deep : Builtins.DeepNoControlFlow bi
   guard : ∀ f avs a vs, H.xfer f avs = some a → MemList avs vs → g f vs = true
-  result : ∀ f avs a vs v, H.xfer f avs = some a → MemList avs vs → bi f vs = some v → a.Mem v
+  result : ∀ f avs a vs v, H.xfer f avs = some a → MemList avs vs →
+    (∀ w ∈ vs, w.deepNoControlFlow = true) → bi f vs = some v → a.Mem v
   cmp : ∀ op strict swapped vl vr b m n, cmpOf op = some (strict, swapped) →
     bi op [vl, vr] = some (.bool b) → vl.toInt = some m → vr.toInt = some n →
     (b = true ↔ cmpRel strict swapped m n)
+  logic : H.logic = true → LogicSem bi
 
 /-! ## Refinement by a guard -/
 
@@ -252,17 +288,40 @@ def isAtom : ImpExpr → Bool
   | .var _ | .lit _ => true
   | _ => false
 
-/-- `Γ` refined by the condition `c` holding (`pos`) or failing, when `c` compares two
-    atoms; `Γ` otherwise. -/
-def refineCond : ImpExpr → Bool → AEnv → AEnv
+/-- `Γ` refined by the call `op l r` of two atoms answering `pos`: a comparison bounds each
+    variable by the other side; with `lg`, an equality that holds bounds each side by the
+    other from both directions. -/
+def refineAtoms (lg : Bool) (op : String) (l r : ImpExpr) (pos : Bool) (Γ : AEnv) : AEnv :=
+  match cmpOf op with
+  | some (strict, swapped) =>
+    if pos = swapped then refineLt Γ r l (if pos then strict else !strict)
+    else refineLt Γ l r (if pos then strict else !strict)
+  | none =>
+    match eqOf op with
+    | some q => if lg && pos == q then refineLt (refineLt Γ l r false) r l false else Γ
+    | none => Γ
+
+/-- A condition whose run with a Boolean answer leaves the environment: an atom, a call on
+    two atoms, or a negation, conjunction or disjunction of such conditions. -/
+def condOk : ImpExpr → Bool
+  | .var _ | .lit _ => true
+  | .app op [l, r] => (isAtom l && isAtom r) || ((isAnd op || isOr op) && condOk l && condOk r)
+  | .app op [c] => isNot op && condOk c
+  | _ => false
+
+/-- `Γ` refined by the condition `c` holding (`pos`) or failing: by `refineAtoms` when `c`
+    calls a head on two atoms; with `lg`, through a negation, and through both sides of a
+    conjunction that holds or a disjunction that fails when the sides are `condOk`; `Γ`
+    otherwise. -/
+def refineCond (lg : Bool) : ImpExpr → Bool → AEnv → AEnv
   | .app op [l, r], pos, Γ =>
-    if isAtom l && isAtom r then
-      match cmpOf op with
-      | some (strict, swapped) =>
-        if pos = swapped then refineLt Γ r l (if pos then strict else !strict)
-        else refineLt Γ l r (if pos then strict else !strict)
-      | none => Γ
+    if isAtom l && isAtom r then refineAtoms lg op l r pos Γ
+    else if lg && isAnd op && condOk l && condOk r then
+      if pos then refineCond lg r true (refineCond lg l true Γ) else Γ
+    else if lg && isOr op && condOk l && condOk r then
+      if pos then Γ else refineCond lg r false (refineCond lg l false Γ)
     else Γ
+  | .app op [c], pos, Γ => if lg && isNot op then refineCond lg c (!pos) Γ else Γ
   | _, _, Γ => Γ
 
 /-! ## Loop invariants (untrusted) -/
@@ -361,7 +420,8 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
   | Γ, .ifThenElse c t e =>
     match check H J Γ c with
     | some (_, Γ1) =>
-      match check H J (refineCond c true Γ1) t, check H J (refineCond c false Γ1) e with
+      match check H J (refineCond H.logic c true Γ1) t,
+          check H J (refineCond H.logic c false Γ1) e with
       | some (at', Γt), some (ae, Γe) => some (at'.join ae, AEnv.join Γt Γe)
       | _, _ => none
     | none => none
@@ -388,7 +448,7 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
       match check H J inv c with
       | some (_, Γc) =>
         if entails Γc inv then
-          match check H inv (refineCond c true Γc) body with
+          match check H inv (refineCond H.logic c true Γc) body with
           | some (_, Γb) => if entails Γb inv then some (.top, inv) else none
           | none => none
         else none

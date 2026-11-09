@@ -67,11 +67,14 @@ its type ranges or at its own `pre`.
 The analysis above is untrusted: its intervals (`Itv`, `AV`) are a candidate generator. The
 column `checked` of each function reports whether the verified checker
 `Hax.Range.checkT` (`HaxLean/Range/Check.lean`, sound by `Hax.Range.checkT_rust_sound`) accepts
-the function on the shared interval domain, from the candidates this analysis proposes
-(`checkedFn`): its parameters at the call-site precondition of round (B) or at their type
-ranges, the functions of the crate through summaries (their call-site precondition, and as
-postcondition the value a first pass of the checker gives them, which the second pass
-verifies), and the type ranges of the variables a loop writes as loop annotation (or none).
+the function on the shared interval domain, refining by Boolean guards, from the candidates
+this analysis proposes (`checkedFn`): the functions of the crate through summaries, and the
+type ranges of the variables a loop writes as loop annotation (or none). The summaries are
+built callee first (`verifiedSums`): a function enters with its call-site precondition of
+round (B) as precondition when its body checks there with the summaries already entered, and
+the value of that check as postcondition; the list passes `Hax.Range.checkSums`, so the
+summaries hold by `Hax.Range.headSem_of_checkSums`. A function with a summary counts as
+checked at its precondition, every other function when its body checks at its type ranges.
 
 ## Main definitions
 
@@ -80,8 +83,9 @@ verifies), and the type ranges of the variables a loop writes as loop annotation
 * `ev`: the abstract evaluation of a `TExpr`, counting operations.
 * `analyzeFn`: the analysis of one function under parameter intervals.
 * `classify`: the four rounds and the classes of a crate's functions.
-* `toRangeAV`, `typeAV`, `annOfTypes`, `checkedFn`: the candidates for the verified checker
-  and its value.
+* `toRangeAV`, `typeAV`, `annOfTypes`, `paramAVs`, `checkedWith`, `checkedFn`: the
+  candidates for the verified checker and its value.
+* `verifiedSums`: the summaries of the crate's functions, checked against their bodies.
 * `Hax.RangeProbe.run`: the command line `rangeprobe [--name N] PATH...`.
 -/
 
@@ -882,24 +886,67 @@ partial def annOfTypes : TExpr → Range.AEnv
   | .mk (.assign x r) _ => (x, typeAV r.ty) :: annOfTypes r
   | .mk k _ => (kids k).flatMap annOfTypes
 
+/-- The abstract values of parameters `ps` at `pre` met with their type ranges, or at their
+    type ranges when `pre` is absent or of another arity. -/
+def paramAVs (ps : List (String × ImpType)) (pre : Option (List AV)) : List Range.AV :=
+  match pre with
+  | some vs => if vs.length = ps.length then
+      (ps.zip vs).map fun ((_, t), v) =>
+        match toRangeAV v, typeAV t with
+        | .num a, .num b => .num (CatCrypt.Crypto.SecureCompilation.RangeDomain.ivMeet a b)
+        | a, .top => a
+        | _, b => b
+    else ps.map fun (_, t) => typeAV t
+  | none => ps.map fun (_, t) => typeAV t
+
+/-- The abstract environment of parameters `ps` at the abstract values `pv`. -/
+def paramEnvOf (ps : List (String × ImpType)) (pv : List Range.AV) : Range.AEnv :=
+  (ps.zip pv).map fun ((x, _), a) => (x, a)
+
+/-- The value the verified checker, refining by Boolean guards, gives `e` from `Γ` with the
+    summaries `sums`, and the loop annotation it accepted: the type ranges of the variables a
+    loop writes, or none. -/
+def checkedWith (sums : List (String × (List Range.AV × Range.AV))) (Γ : Range.AEnv)
+    (e : TExpr) : Option (Range.AV × Range.AEnv) :=
+  match Range.checkT (Range.stdSpec sums (annOfTypes e) true) Γ e with
+  | some (a, _) => some (a, annOfTypes e)
+  | none => (Range.checkT (Range.stdSpec sums [] true) Γ e).map fun (a, _) => (a, [])
+
 /-- The value the verified checker gives a definition with parameters `ps` at `pre` (their
     type ranges when absent) and the summaries `sums`, with the type ranges as loop
     annotation or with none; `none` when it refuses the definition. -/
 def checkedFn (sums : List (String × (List Range.AV × Range.AV))) (ps : List (String × ImpType))
     (pre : Option (List AV)) (e : TExpr) : Option Range.AV :=
-  let pv : List Range.AV := match pre with
-    | some vs => if vs.length = ps.length then
-        (ps.zip vs).map fun ((_, t), v) =>
-          match toRangeAV v, typeAV t with
-          | .num a, .num b => .num (CatCrypt.Crypto.SecureCompilation.RangeDomain.ivMeet a b)
-          | a, .top => a
-          | _, b => b
-      else ps.map fun (_, t) => typeAV t
-    | none => ps.map fun (_, t) => typeAV t
-  let Γ : Range.AEnv := (ps.zip pv).map fun ((x, _), a) => (x, a)
-  match Range.checkT (Range.stdSpec sums (annOfTypes e)) Γ e with
-  | some (a, _) => some a
-  | none => (Range.checkT (Range.stdSpec sums []) Γ e).map (·.1)
+  (checkedWith sums (paramEnvOf ps (paramAVs ps pre)) e).map (·.1)
+
+/-- Summaries that `Range.checkSums` accepts, built callee first: a function with a call-site
+    precondition of the arity of its parameters enters when its body checks there, with the
+    summaries already entered, and its postcondition is the value of that check. Returns the
+    summaries, the loop annotation used for each, and the definitions as `checkSums` reads
+    them. -/
+def verifiedSums (defs0 : List (String × TExpr)) (pre : Std.HashMap String (List AV)) :
+    List (String × (List Range.AV × Range.AV)) × Std.HashMap String Range.AEnv ×
+      List (String × List String × ImpExpr) := Id.run do
+  let defsI : List (String × List String × ImpExpr) :=
+    defs0.map fun (n, e) => (n, (stripParams e).1.map (·.1), e.erase)
+  let mut sums : List (String × (List Range.AV × Range.AV)) := []
+  let mut anns : Std.HashMap String Range.AEnv := {}
+  let mut changed := true
+  let mut rounds := 0
+  while changed && rounds < 64 do
+    changed := false
+    rounds := rounds + 1
+    for (n, e) in defs0 do
+      if (sums.lookup n).isNone then
+        if let some vs := pre.get? n then
+          let ps := (stripParams e).1
+          if vs.length == ps.length then
+            let pv := paramAVs ps (some vs)
+            if let some (a, an) := checkedWith sums (paramEnvOf ps pv) e then
+              sums := (n, (pv, a)) :: sums
+              anns := anns.insert n an
+              changed := true
+  (sums, anns, defsI)
 
 /-- The class of each function and its analyses (C) and (D) (see the module docstring). -/
 structure FnRow where
@@ -917,6 +964,8 @@ structure FnRow where
   baseline : Bool
   /-- Whether the verified checker accepts the function (`checkedFn`). -/
   checked : Bool := false
+  /-- Whether the function has a summary that `Range.checkSums` verifies. -/
+  summarised : Bool := false
   deriving Inhabited
 
 /-- The join of the argument values at the call sites of each function, of the arity of its
@@ -974,29 +1023,20 @@ def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
       if base.get? n != some true && cs.any (fun g => base.get? g == some true) then
         base := base.insert n true
         changed := true
-  -- The verified checker, twice: first with no postcondition in the summaries, then with
-  -- the values of the first pass as postconditions. A function with a summary is checked
-  -- when its value lies in its postcondition, so that every summary the checker reads holds
-  -- of the function it summarises (its arguments are checked at each call site).
-  let run (sums : List (String × (List Range.AV × Range.AV))) : Std.HashMap String Range.AV :=
-    defs.foldl (fun m (n, ps, _) =>
-      match checkedFn sums ps (pre.get? n) ((defs0.lookup n).getD default) with
-      | some a => m.insert n a
-      | none => m) {}
-  let sums1 : List (String × (List Range.AV × Range.AV)) := defs.filterMap fun (n, _, _) =>
-    (pre.get? n).map fun vs => (n, (vs.map toRangeAV, Range.AV.top))
-  let res1 := run sums1
-  let sums2 := sums1.map fun (n, (p, _)) => (n, (p, (res1.get? n).getD .top))
-  let res2 := run sums2
-  let chk : Std.HashMap String Bool := defs.foldl (fun m (n, _, _) =>
-    m.insert n (match res2.get? n, sums2.lookup n with
-      | some a, some (_, post) => a.le post
-      | some _, none => true
-      | none, _ => false)) {}
+  -- The verified checker: the summaries `verifiedSums` enters are checked against the
+  -- bodies (`Range.checkSums`, sound by `Range.headSem_of_checkSums`); a function with a
+  -- summary is checked at its call-site precondition, every other function at its type
+  -- ranges, with the summaries at every call.
+  let (sums, anns, defsI) := verifiedSums defs0 pre
+  let sumsOk := Range.checkSums defsI (fun n => (anns.get? n).getD []) true sums
+  let chk : Std.HashMap String Bool := defs.foldl (fun m (n, ps, _) =>
+    m.insert n ((sums.lookup n).isSome ||
+      (checkedFn sums ps none ((defs0.lookup n).getD default)).isSome)) {}
   pure <| (rc.zip rd).map fun ((n, c), (_, d)) =>
     { name := n, full := c.obls, ctx := d.obls, cls := (cls.get? n).getD 3,
       monadicCalls := (d.calls.filter fun (g, _) => cls.get? g == some 3).size,
-      baseline := (base.get? n).getD false, checked := (chk.get? n).getD false }
+      baseline := (base.get? n).getD false, checked := sumsOk && (chk.get? n).getD false,
+      summarised := (sums.lookup n).isSome }
 
 /-- The kinds of the unproved operations with their counts, as `kind=count,…`. -/
 def residual (os : Array (String × Bool)) : List (String × Nat) :=
@@ -1025,7 +1065,7 @@ def summaryLines (crate : String) (rows : List FnRow) : List String :=
     s!"class2={count (·.cls == 2)}\tclass3={count (·.cls == 3)}\t" ++
     s!"baseline_monadic={count (·.baseline)}\tbaseline_to_pure=" ++
     s!"{count (fun r => r.baseline && r.cls != 3)}\tops={ops}\tsafe_full={safeFull}\t" ++
-    s!"safe={safeCtx}\tchecked={count (·.checked)}\t" ++
+    s!"safe={safeCtx}\tchecked={count (·.checked)}\tsummarised={count (·.summarised)}\t" ++
     s!"checked_with_ops={count (fun r => r.checked && !r.full.isEmpty)}"] ++
   ((res.toArray.qsort (fun a b => a.2 > b.2)).toList.map fun (k, c) =>
     s!"# {crate}\tresidual\t{k}\t{c}")
@@ -1095,12 +1135,20 @@ def chkWhile : Bool :=
     [(1, #[("index", true), ("add", true)])]
 #guard chkWhile
 
-/-- The verified checker accepts the guarded index, the counted loop over `0..16`, `x + 100`
-    under `x < 100`, and `h` under its call site in `k`; it refuses the loop over `0..17` and
-    `x + 1`. -/
+/-- `if j < 16 && !(16 <= i) { a[i] } else { 0 }` with `i j : usize`. -/
+def guardedAnd : TExpr := prm "a" a16 (prm "i" us (prm "j" us (.mk (.ifThenElse
+  (ap "&&" [ap "Lt" [v "j" us, n 16 us] .bool, ap "Not" [ap "Le" [n 16 us, v "i" us] .bool] .bool]
+    .bool) (ap "index" [v "a" a16, v "i" us] u8) (n 0 u8)) u8)))
+
+/-- The verified checker accepts the guarded index (also under a conjunction with a negated
+    guard), the counted loop over `0..16`, `x + 100` under `x < 100`, and `h` under its call
+    site in `k`, with the summary of `h` checked against its body; it refuses the loop over
+    `0..17` and `x + 1`. -/
 def chkVerified : Bool :=
   let ck (ds : List (String × TExpr)) := (classify ds).map (·.checked)
-  ck [("g", guarded)] == [true] && ck [("f", loopIdx 16)] == [true] &&
+  ck [("g", guarded)] == [true] && ck [("g", guardedAnd)] == [true] &&
+    (classify [("h", hF), ("k", kF)]).map (·.summarised) == [true, false] &&
+    ck [("f", loopIdx 16)] == [true] &&
     ck [("f", loopIdx 17)] == [false] && ck [("a", addF false), ("b", addF true)] == [false, true]
     && ck [("h", hF), ("k", kF)] == [true, true]
 #guard chkVerified
