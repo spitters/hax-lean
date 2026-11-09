@@ -231,6 +231,52 @@ theorem mem_of_lookup {J : AEnv} {x : String} {a : AV} (h : J.lookup x = some a)
     · rw [lookup_cons_ne _ _ hxz] at h
       exact List.mem_cons_of_mem _ (ih h)
 
+/-- A fact that `Γ` entails at the bound `h` holds of every integer at most `h`. -/
+theorem LenGt.of_lenEntails {Γ : AEnv} {env : Env} {h k : Int} {p : String × Int}
+    (hs : Sat Γ env) (hk : k ≤ h) (he : lenEntails Γ h p = true) : AV.LenGt env k p := by
+  unfold lenEntails at he
+  split at he
+  · rename_i l hl
+    obtain ⟨w, hw, ⟨n, hn, h1, -⟩, -⟩ := hs _ _ hl
+    simp only [decide_eq_true_eq] at he
+    exact ⟨w, n, hw, hn, by omega⟩
+  · cases he
+
+/-- Inclusion in an environment of `Γ` keeps membership and the facts. -/
+theorem AV.leIn_sat {Γ : AEnv} {env : Env} {a b : AV} {v : Value} (hs : Sat Γ env)
+    (hm : a.Mem v) (hr : a.RelIn env v) (hab : a.leIn Γ b = true) :
+    b.Mem v ∧ b.RelIn env v := by
+  unfold AV.leIn at hab
+  rcases Bool.or_eq_true_iff.1 hab with hle | hab
+  · exact ⟨hm.le hle, hr.le hle⟩
+  cases b with
+  | idx lo hi rs =>
+    cases a with
+    | num i =>
+      obtain ⟨n, hn, h1, h2⟩ := hm
+      simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hab
+      obtain ⟨⟨hlo, hhi⟩, hrs⟩ := hab
+      refine ⟨⟨n, hn, by omega, fun h' hh => ?_⟩, fun p hp => ⟨n, hn, ?_⟩⟩
+      · subst hh; simp only [hiLe, decide_eq_true_eq] at hhi; omega
+      · exact LenGt.of_lenEntails hs h2 (hrs p hp)
+    | idx lo' hi' ra =>
+      cases hi' with
+      | none => simp at hab
+      | some h' =>
+        obtain ⟨n, hn, h1, h2⟩ := hm
+        have h2' := h2 h' rfl
+        simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true, Bool.or_eq_true] at hab
+        obtain ⟨⟨hlo, hhi⟩, hrs⟩ := hab
+        refine ⟨⟨n, hn, by omega, fun h'' hh => ?_⟩, fun p hp => ?_⟩
+        · subst hh; simp only [hiLe, decide_eq_true_eq] at hhi; omega
+        · rcases hrs p hp with hq | hq
+          · have hq' : AV.le (.idx lo' (some h') ra) (.idx lo' (some h') [p]) = true := by
+              simp [AV.le, hiLe, hq]
+            exact hr.le hq' p (by simp [AV.rels])
+          · exact ⟨n, hn, LenGt.of_lenEntails hs h2' hq⟩
+    | _ => simp at hab
+  | _ => cases a <;> simp at hab
+
 theorem Sat.entails {Γ J : AEnv} {env : Env} (h : Sat Γ env) (he : entails Γ J = true) :
     Sat J env := by
   intro x a hx
@@ -239,7 +285,8 @@ theorem Sat.entails {Γ J : AEnv} {env : Env} (h : Sat Γ env) (he : entails Γ 
   rcases hl : Γ.lookup x with _ | b <;> rw [hl] at hm
   · cases hm
   obtain ⟨v, hv, hb, hr⟩ := h x b hl
-  exact ⟨v, hv, hb.le hm, hr.le hm⟩
+  obtain ⟨h1, h2⟩ := AV.leIn_sat h hb hr hm
+  exact ⟨v, hv, h1, h2⟩
 
 /-! ## Patterns -/
 

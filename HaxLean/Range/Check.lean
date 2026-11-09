@@ -55,6 +55,8 @@ environment in the final abstract environment (`Post`).
 
 * `AV`, `AV.Mem`, `AV.RelIn`, `AEnv`, `Sat`: abstract values and environments and their
   meaning.
+* `AV.leIn`, `entails`: inclusion of abstract values and environments, a fact of an index
+  following from an upper bound and the length interval of its array (`lenEntails`).
 * `Spec`: the transfer functions of the heads and the loop annotation.
 * `guardBi`: the builtin table that fails where a guard fails.
 * `LogicSem`: the reading of the Boolean and equality heads that the refinement uses.
@@ -384,11 +386,30 @@ def AEnv.get (Γ : AEnv) (x : String) : AV := (Γ.lookup x).getD .top
 def Sat (Γ : AEnv) (env : Env) : Prop :=
   ∀ x a, Γ.lookup x = some a → ∃ v, env x = some v ∧ a.Mem v ∧ a.RelIn env v
 
+/-- The fact `(s, c)` holds of every integer at most `h` in an environment that lies in `Γ`:
+    `Γ` gives `s` an array length of at least `h + c + 1`. -/
+def lenEntails (Γ : AEnv) (h : Int) (p : String × Int) : Bool :=
+  match Γ.lookup p.1 with
+  | some (.arr l) => decide (h + p.2 < l.1)
+  | _ => false
+
+/-- Inclusion of abstract values in an environment that lies in `Γ`: `AV.le`, or an integer
+    with an upper bound into an index whose bounds hold of it and each of whose facts either
+    the integer has or `Γ` entails by the length of its array (`lenEntails`). -/
+def AV.leIn (Γ : AEnv) (a b : AV) : Bool :=
+  a.le b || match a, b with
+    | .num i, .idx lo hi rs =>
+      decide (lo ≤ i.1) && hiLe (some i.2) hi && rs.all (lenEntails Γ i.2)
+    | .idx lo' (some h') ra, .idx lo hi rs =>
+      decide (lo ≤ lo') && hiLe (some h') hi &&
+        rs.all fun p => relsLe [p] ra || lenEntails Γ h' p
+    | _, _ => false
+
 /-- Every variable `J` names is named in `Γ` at an abstract value included in its value in
-    `J`. -/
+    `J` (`AV.leIn`). -/
 def entails (Γ J : AEnv) : Bool :=
   J.all fun p => match Γ.lookup p.1 with
-    | some b => b.le p.2
+    | some b => b.leIn Γ p.2
     | none => false
 
 /-- The join of two abstract environments: the variables both name, at the join. -/

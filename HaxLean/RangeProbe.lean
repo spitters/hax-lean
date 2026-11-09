@@ -48,8 +48,11 @@ variable and an expression refines the variable on each branch (`refine`). The a
 `if` or `match` are joined. A counted loop binds its counter to `[lo, hi - 1]`; the variables
 it rebinds are iterated to a fixed point from the loop head, joined with the environments
 at `break` and `continue`, widened from the third round on to the integer constants of the
-function (`widenEnv`), and set to no information after eight rounds. The operations of a
-loop body are counted once, on the fixed point.
+function (`widenEnv`), and set to no information after eight rounds. A stable head is then
+narrowed by up to two descending rounds, each replacing the head by the join of the entry
+environment and the environment after one iteration when that lies below it. The operations
+of a loop body are counted once, on the fixed point, and the head values of the variables the
+body writes are kept as loop annotation (`recordHead`).
 
 ## Call-site intervals and classes
 
@@ -68,8 +71,9 @@ The analysis above is untrusted: its intervals (`Itv`, `AV`) are a candidate gen
 column `checked` of each function reports whether the verified checker
 `Hax.Range.checkT` (`HaxLean/Range/Check.lean`, sound by `Hax.Range.checkT_rust_sound`) accepts
 the function on the shared interval domain, refining by Boolean guards, from the candidates
-this analysis proposes (`checkedFn`): the functions of the crate through summaries, and the
-type ranges of the variables a loop writes as loop annotation (or none). The summaries are
+this analysis proposes (`checkedFn`): the functions of the crate through summaries, and as
+loop annotation the loop-head values of the variables a loop writes (`annOfLoops`), else
+their type ranges, else none; the checker verifies each annotation. The summaries are
 built callee first (`verifiedSums`): a function enters with its call-site precondition of
 round (B) as precondition when its body checks there with the summaries already entered, and
 the value of that check as postcondition; the list passes `Hax.Range.checkSums`, so the
@@ -83,7 +87,7 @@ checked at its precondition, every other function when its body checks at its ty
 * `ev`: the abstract evaluation of a `TExpr`, counting operations.
 * `analyzeFn`: the analysis of one function under parameter intervals.
 * `classify`: the four rounds and the classes of a crate's functions.
-* `toRangeAV`, `typeAV`, `annOfTypes`, `paramAVs`, `checkedWith`, `checkedFn`: the
+* `toRangeAV`, `typeAV`, `annOfTypes`, `annOfLoops`, `paramAVs`, `checkedWith`, `checkedFn`: the
   candidates for the verified checker and its value.
 * `verifiedSums`: the summaries of the crate's functions, checked against their bodies.
 * `Hax.RangeProbe.run`: the command line `rangeprobe [--name N] PATH...`.
@@ -202,6 +206,14 @@ def itv : AV → Itv
 def len : AV → Itv
   | .arr l => l
   | _ => ⟨0, big⟩
+
+/-- Inclusion of abstract values. -/
+partial def le : AV → AV → Bool
+  | _, .top => true
+  | .num a, .num b => a.sub? b
+  | .arr a, .arr b => a.sub? b
+  | .tup es, .tup fs => es.length == fs.length && (es.zip fs).all fun (a, b) => le a b
+  | _, _ => false
 
 end AV
 
@@ -411,6 +423,8 @@ structure St where
   obls : Array (String × Bool) := #[]
   /-- The calls of crate functions with the abstract values of their arguments. -/
   calls : Array (String × List AV) := #[]
+  /-- The join, per variable, of its values at the heads of the loops that write it. -/
+  anns : AEnv := []
   deriving Inhabited
 
 /-- The evaluation monad. -/
@@ -430,6 +444,12 @@ def setVar (x : String) (v : AV) : M Unit := modify fun s => { s with env := s.e
 /-- Join the current environment into the loop's jump environment. -/
 def addJump : M Unit := modify fun s =>
   { s with jump := some (match s.jump with | some j => joinEnv j s.env | none => s.env) }
+
+/-- Join the values of the head environment `head` of a loop into the loop annotations, for
+    the variables of `ws` (those the loop body writes). -/
+def recordHead (ws : List String) (head : AEnv) : M Unit := do
+  if (← read).record then
+    modify fun s => { s with anns := joinEnv s.anns (head.filter fun p => ws.contains p.1) }
 
 /-- Join a value into the early-return value. -/
 def addRet (v : AV) : M Unit := modify fun s =>
@@ -615,7 +635,20 @@ partial def loopHead (head0 : AEnv) (step : AEnv → M Unit) : M AEnv := do
       stable := true
       break
     head := nxt
-  if stable then pure head
+  if stable then
+    -- Descending: below a post-fixed point `head`, `head0 ⊔ F(head)` is one again.
+    for _ in [0:2] do
+      modify fun s => { s with jump := none }
+      withReader (fun c => { c with record := false }) (step head)
+      let s ← get
+      let after := match s.jump with
+        | some j => joinEnv s.env j
+        | none => s.env
+      let nxt := (joinEnv head0 after).filter fun p => (head.lookup p.1).isSome
+      if !envEq nxt head && head.all fun (x, a) => (nxt.lookup x).any (·.le a) then
+        head := nxt
+      else break
+    pure head
   else
     modify fun s => { s with jump := none }
     withReader (fun c => { c with record := false }) (step head)
@@ -635,6 +668,7 @@ partial def evFor (x : String) (lo hi b : TExpr) : M AV := do
     setEnv (env.set x ctr)
     let _ ← ev b
   modify fun s => { s with jump := none }
+  recordHead (Range.writes b.erase) head
   setEnv (head.set x ctr)
   let _ ← ev b
   let s ← get
@@ -653,6 +687,7 @@ partial def evWhile (c b : TExpr) : M AV := do
     setEnv (← refine c true (← get).env)
     let _ ← ev b
   modify fun s => { s with jump := none }
+  recordHead (Range.writes (TExpr.mk (.seq c b) .unit).erase) head
   setEnv head
   let _ ← ev c
   let afterC := (← get).env
@@ -844,6 +879,8 @@ structure FnResult where
   calls : Array (String × List AV)
   /-- The value of the function. -/
   ret : AV
+  /-- The values of the variables loops write, at the loop heads (`St.anns`). -/
+  anns : AEnv := []
   deriving Inhabited
 
 /-- The analysis of the function with parameters `ps` and body `body`, the parameters bound
@@ -859,7 +896,7 @@ def analyzeFn (fns : Std.HashMap String (Option AV)) (ps : List (String × ImpTy
   let ret := match s.ret with
     | some r => r.join v
     | none => v
-  { obls := s.obls, calls := s.calls, ret }
+  { obls := s.obls, calls := s.calls, ret, anns := s.anns }
 
 /-! ## Candidates for the verified checker -/
 
@@ -903,28 +940,39 @@ def paramAVs (ps : List (String × ImpType)) (pre : Option (List AV)) : List Ran
 def paramEnvOf (ps : List (String × ImpType)) (pv : List Range.AV) : Range.AEnv :=
   (ps.zip pv).map fun ((x, _), a) => (x, a)
 
+/-- The loop annotation from the loop-head values `inf` of the inference: each variable at
+    its inferred value, at its type range where the inference has no interval for it, and the
+    other variables a loop writes at their type ranges (`annOfTypes`). -/
+def annOfLoops (inf : AEnv) (e : TExpr) : Range.AEnv :=
+  let tys := annOfTypes e
+  (inf.map fun (y, a) => match toRangeAV a with
+    | .top => (y, (tys.lookup y).getD .top)
+    | r => (y, r)) ++ tys
+
 /-- The value the verified checker, refining by Boolean guards, gives `e` from `Γ` with the
-    summaries `sums`, and the loop annotation it accepted: the type ranges of the variables a
-    loop writes, or none. -/
-def checkedWith (sums : List (String × (List Range.AV × Range.AV))) (Γ : Range.AEnv)
-    (e : TExpr) : Option (Range.AV × Range.AEnv) :=
-  match Range.checkT (Range.stdSpec sums (annOfTypes e) true) Γ e with
-  | some (a, _) => some (a, annOfTypes e)
-  | none => (Range.checkT (Range.stdSpec sums [] true) Γ e).map fun (a, _) => (a, [])
+    summaries `sums`, and the loop annotation it accepted: the loop-head values `inf` of the
+    inference (`annOfLoops`), the type ranges of the variables a loop writes, or none. -/
+def checkedWith (sums : List (String × (List Range.AV × Range.AV))) (inf : AEnv)
+    (Γ : Range.AEnv) (e : TExpr) : Option (Range.AV × Range.AEnv) :=
+  let cands : List Range.AEnv :=
+    (if inf.isEmpty then [] else [annOfLoops inf e]) ++ [annOfTypes e, []]
+  cands.findSome? fun an =>
+    (Range.checkT (Range.stdSpec sums an true) Γ e).map fun (a, _) => (a, an)
 
 /-- The value the verified checker gives a definition with parameters `ps` at `pre` (their
-    type ranges when absent) and the summaries `sums`, with the type ranges as loop
-    annotation or with none; `none` when it refuses the definition. -/
+    type ranges when absent) and the summaries `sums`, with the loop annotations of
+    `checkedWith` from the loop-head values `inf`; `none` when it refuses the definition. -/
 def checkedFn (sums : List (String × (List Range.AV × Range.AV))) (ps : List (String × ImpType))
-    (pre : Option (List AV)) (e : TExpr) : Option Range.AV :=
-  (checkedWith sums (paramEnvOf ps (paramAVs ps pre)) e).map (·.1)
+    (pre : Option (List AV)) (inf : AEnv) (e : TExpr) : Option Range.AV :=
+  (checkedWith sums inf (paramEnvOf ps (paramAVs ps pre)) e).map (·.1)
 
 /-- Summaries that `Range.checkSums` accepts, built callee first: a function with a call-site
     precondition of the arity of its parameters enters when its body checks there, with the
     summaries already entered, and its postcondition is the value of that check. Returns the
     summaries, the loop annotation used for each, and the definitions as `checkSums` reads
-    them. -/
-def verifiedSums (defs0 : List (String × TExpr)) (pre : Std.HashMap String (List AV)) :
+    them. `infs` gives the loop-head values of each function's inference under `pre`. -/
+def verifiedSums (defs0 : List (String × TExpr)) (pre : Std.HashMap String (List AV))
+    (infs : Std.HashMap String AEnv) :
     List (String × (List Range.AV × Range.AV)) × Std.HashMap String Range.AEnv ×
       List (String × List String × ImpExpr) := Id.run do
   let defsI : List (String × List String × ImpExpr) :=
@@ -942,7 +990,8 @@ def verifiedSums (defs0 : List (String × TExpr)) (pre : Std.HashMap String (Lis
           let ps := (stripParams e).1
           if vs.length == ps.length then
             let pv := paramAVs ps (some vs)
-            if let some (a, an) := checkedWith sums (paramEnvOf ps pv) e then
+            if let some (a, an) := checkedWith sums ((infs.get? n).getD []) (paramEnvOf ps pv) e
+            then
               sums := (n, (pv, a)) :: sums
               anns := anns.insert n an
               changed := true
@@ -1027,11 +1076,14 @@ def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
   -- bodies (`Range.checkSums`, sound by `Range.headSem_of_checkSums`); a function with a
   -- summary is checked at its call-site precondition, every other function at its type
   -- ranges, with the summaries at every call.
-  let (sums, anns, defsI) := verifiedSums defs0 pre
+  let infC : Std.HashMap String AEnv := rc.foldl (fun m (n, r) => m.insert n r.anns) {}
+  let infD : Std.HashMap String AEnv := rd.foldl (fun m (n, r) => m.insert n r.anns) {}
+  let (sums, anns, defsI) := verifiedSums defs0 pre infD
   let sumsOk := Range.checkSums defsI (fun n => (anns.get? n).getD []) true sums
   let chk : Std.HashMap String Bool := defs.foldl (fun m (n, ps, _) =>
     m.insert n ((sums.lookup n).isSome ||
-      (checkedFn sums ps none ((defs0.lookup n).getD default)).isSome)) {}
+      (checkedFn sums ps none ((infC.get? n).getD []) ((defs0.lookup n).getD default)).isSome))
+    {}
   pure <| (rc.zip rd).map fun ((n, c), (_, d)) =>
     { name := n, full := c.obls, ctx := d.obls, cls := (cls.get? n).getD 3,
       monadicCalls := (d.calls.filter fun (g, _) => cls.get? g == some 3).size,
@@ -1152,6 +1204,19 @@ def chkVerified : Bool :=
     ck [("f", loopIdx 17)] == [false] && ck [("a", addF false), ("b", addF true)] == [false, true]
     && ck [("h", hF), ("k", kF)] == [true, true]
 #guard chkVerified
+
+/-- `let x = 0; for i in 0..16 { a[x]; x = i }` with `a : [u8; 16]`, `x : usize`. -/
+def carriedF : TExpr := prm "a" a16 (.mk (.letBind "x" (n 0 us) (.mk (.forFold "i" (n 0 us)
+  (n 16 us) (.mk (.seq (ap "index" [v "a" a16, v "x" us] u8)
+    (.mk (.assign "x" (v "i" us)) .unit)) .unit)) .unit)) .unit)
+
+/-- The verified checker accepts `carriedF` with the inferred loop-head interval `[0, 15]` of
+    `x` as loop annotation; at the type range of `x` it refuses the index. -/
+def chkCarried : Bool :=
+  (classify [("c", carriedF)]).map (·.checked) == [true] &&
+    (Range.checkT (Range.stdSpec [] (annOfTypes carriedF) true) [("a", .arr (16, 16))]
+      carriedF).isNone
+#guard chkCarried
 
 end Examples
 
