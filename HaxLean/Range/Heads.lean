@@ -24,7 +24,7 @@ words takes the width of its first argument.
 `stdSpec sums` gives the transfer functions: exact interval arithmetic on the shared domain
 (`ivAddZ`, `ivSubZ`, `ivCorner`) checked against the range of the width, the divisor and
 shift-amount checks, index bounds against the least array length, `len` as the length
-interval, and a function of the crate through its summary `(pre, post)` in `sums`: a call is
+interval, the length of an array built by `repeat` or `array_lit`, and a function of the crate through its summary `(pre, post)` in `sums`: a call is
 accepted when its arguments lie in `pre`, with result in `post`.
 
 `stdSpec_sound` instantiates `Sound` for `rustGuard` and `stdSpec sums` under `HeadSem`,
@@ -236,6 +236,17 @@ def lenXfer (avs : List AV) : Option AV :=
   | [.arr l] => some (.num l)
   | _ => some .top
 
+/-- A total head: the length of `len`, the length of an array built by `repeat` or
+    `array_lit`, no information otherwise. -/
+def defaultXfer (f : String) (avs : List AV) : Option AV :=
+  if f == "len" then lenXfer avs
+  else if f == "repeat" then
+    match avs with
+    | [_, .num i] => some (.arr i)
+    | _ => some .top
+  else if f == "array_lit" then some (.arr (avs.length, avs.length))
+  else some .top
+
 /-- Each abstract value is included in the one at its position. -/
 def leList : List AV → List AV → Bool
   | [], [] => true
@@ -256,7 +267,7 @@ def stdXfer (sums : List (String × (List AV × AV))) (f : String) (avs : List A
   else
     match sums.lookup f with
     | some (pre, post) => if leList avs pre then some post else none
-    | none => if f == "len" then lenXfer avs else some .top
+    | none => defaultXfer f avs
 
 /-- The specification of the heads with the summaries `sums` and the loop annotation
     `ann`. -/
@@ -469,7 +480,8 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
     read, and the summaries of the crate's functions: values free of control flow, the
     truth of comparisons, the exact result of a checked operation whose guard holds, the
     remainder of a nonnegative dividend by a positive divisor, the length kept by an update,
-    the length returned by `len`, and each summary's postcondition on arguments in its
+    the length returned by `len`, the length of an array built by `repeat` or `array_lit`,
+    and each summary's postcondition on arguments in its
     precondition. -/
 structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Prop where
   deep : Builtins.DeepNoControlFlow bi
@@ -482,9 +494,74 @@ structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Pr
   rem : ∀ f x y v a b, (splitHead f).1 = "Rem" → bi f [x, y] = some v → x.toInt = some a →
     y.toInt = some b → 0 ≤ a → 0 < b → v.toInt = some (a % b)
   update : ∀ arr i u v, bi "array_update" [arr, i, u] = some v → v.arrayLen = arr.arrayLen
+  repeatLen : ∀ x y v n, bi "repeat" [x, y] = some v → y.toInt = some n →
+    ∃ k : Nat, v.arrayLen = some k ∧ (k : Int) = n
+  arrayLit : ∀ vs v, bi "array_lit" vs = some v → v.arrayLen = some vs.length
   len : ∀ arr v, bi "len" [arr] = some v → ∃ n, arr.arrayLen = some n ∧ v.toInt = some n
   sums : ∀ g pre post, sums.lookup g = some (pre, post) → ∀ vs v, MemList pre vs →
     bi g vs = some v → post.Mem v
+
+theorem memList_length {as : List AV} {vs : List Value} (h : MemList as vs) :
+    as.length = vs.length := by
+  induction as generalizing vs with
+  | nil => cases vs with
+    | nil => rfl
+    | cons _ _ => exact absurd h id
+  | cons a as ih => cases vs with
+    | nil => exact absurd h id
+    | cons v vs => simp [ih h.2]
+
+/-- The result of a total head lies in its transfer function's value. -/
+theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
+    (hH : HeadSem bi sums) {f : String} {avs : List AV} {a : AV} {vs : List Value} {v : Value}
+    (h : defaultXfer f avs = some a) (hm : MemList avs vs) (hb : bi f vs = some v) :
+    a.Mem v := by
+  unfold defaultXfer at h
+  by_cases hlen : (f == "len") = true
+  · simp only [hlen, ↓reduceIte] at h
+    have hf : f = "len" := by simpa using hlen
+    subst hf
+    unfold lenXfer at h
+    match avs, h, hm with
+    | [.arr l], h, hm =>
+      simp only [Option.some.injEq] at h
+      subst h
+      obtain ⟨x, rfl, ⟨n, hn, hnl⟩⟩ : ∃ x, vs = [x] ∧ (AV.arr l).Mem x := by
+        match vs, hm with
+        | [x], ⟨hx, _⟩ => exact ⟨x, rfl, hx⟩
+      obtain ⟨n', hn', hv⟩ := hH.len x v hb
+      rw [hn] at hn'
+      cases hn'
+      exact ⟨_, hv, hnl⟩
+    | [], h, _ | _ :: _ :: _, h, _ => simp only [Option.some.injEq] at h; subst h; trivial
+    | [.top], h, _ | [.num _], h, _ => simp only [Option.some.injEq] at h; subst h; trivial
+  simp only [hlen, Bool.false_eq_true, ↓reduceIte] at h
+  by_cases hrep : (f == "repeat") = true
+  · simp only [hrep, ↓reduceIte] at h
+    have hf : f = "repeat" := by simpa using hrep
+    subst hf
+    match avs, h, hm with
+    | [_, .num i], h, hm =>
+      simp only [Option.some.injEq] at h
+      subst h
+      obtain ⟨x, y, rfl, -, ⟨n, hn, hni⟩⟩ := memList_two hm
+      obtain ⟨k, hk, hkn⟩ := hH.repeatLen x y v n hb hn
+      exact ⟨k, hk, hkn ▸ hni⟩
+    | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ =>
+      simp only [Option.some.injEq] at h; subst h; trivial
+    | [_, .top], h, _ | [_, .arr _], h, _ =>
+      simp only [Option.some.injEq] at h; subst h; trivial
+  simp only [hrep, Bool.false_eq_true, ↓reduceIte] at h
+  by_cases hlit : (f == "array_lit") = true
+  · simp only [hlit, ↓reduceIte, Option.some.injEq] at h
+    have hf : f = "array_lit" := by simpa using hlit
+    subst hf h
+    refine ⟨vs.length, hH.arrayLit vs v hb, ?_⟩
+    rw [memList_length hm]
+    exact ⟨Int.le_refl _, Int.le_refl _⟩
+  · simp only [hlit, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
+    subst h
+    trivial
 
 /-- An accepted call's result lies in the transfer function's value. -/
 theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
@@ -628,27 +705,7 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
   cases hs : sums.lookup f with
   | none =>
     simp only [hs] at h
-    by_cases hlen : (f == "len") = true
-    · simp only [hlen, ↓reduceIte] at h
-      have hf : f = "len" := by simpa using hlen
-      subst hf
-      unfold lenXfer at h
-      match avs, h, hm with
-      | [.arr l], h, hm =>
-        simp only [Option.some.injEq] at h
-        subst h
-        obtain ⟨x, rfl, ⟨n, hn, hnl⟩⟩ : ∃ x, vs = [x] ∧ (AV.arr l).Mem x := by
-          match vs, hm with
-          | [x], ⟨hx, _⟩ => exact ⟨x, rfl, hx⟩
-        obtain ⟨n', hn', hv⟩ := hH.len x v hb
-        rw [hn] at hn'
-        cases hn'
-        exact ⟨_, hv, hnl⟩
-      | [], h, _ | _ :: _ :: _, h, _ => simp only [Option.some.injEq] at h; subst h; trivial
-      | [.top], h, _ | [.num _], h, _ => simp only [Option.some.injEq] at h; subst h; trivial
-    · simp only [hlen, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
-      subst h
-      trivial
+    exact defaultXfer_result hH h hm hb
   | some pp =>
     obtain ⟨pre, post⟩ := pp
     simp only [hs] at h

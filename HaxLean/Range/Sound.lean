@@ -548,6 +548,71 @@ theorem denoteForLoop'_run (bi : Builtins) (fuel : Nat) (x : String) (lo hi : In
   rename_i b u
   cases b <;> rfl
 
+
+/-- The projection continuation. -/
+def projK (i : Nat) (v : Value) (e : Env) : Outcome × Env :=
+  match v.projIdx i with
+  | some vi => (.val vi, e)
+  | none => (.err s!"projection index {i} out of range", e)
+
+theorem denote'_proj_cf (bi : Builtins) (fuel : Nat) (x : ImpExpr) (i : Nat) (env : Env) :
+    denote' bi fuel (.proj x i) env = cfBind (denote' bi fuel x env) (projK i) := by
+  conv => lhs; unfold denote'
+  dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
+  unfold cfBind projK
+  rcases denote' bi fuel x env with ⟨o, e⟩
+  cases o <;> try rfl
+  rename_i w; cases w <;> try rfl
+  all_goals
+    simp only [Value.isControlFlow, Bool.false_eq_true, ↓reduceIte]
+    split <;> rename_i hh <;> simp only [hh] <;> rfl
+
+theorem denote'_earlyReturn_cf (bi : Builtins) (fuel : Nat) (x : ImpExpr) (env : Env) :
+    denote' bi fuel (.earlyReturn x) env =
+      cfBind (denote' bi fuel x env) (fun v e => (.earlyRet v, e)) := by
+  conv => lhs; unfold denote'
+  dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
+  unfold cfBind
+  rcases denote' bi fuel x env with ⟨o, e⟩
+  cases o <;> try rfl
+  rename_i w; cases w <;> rfl
+
+/-- The continuation of `?`. -/
+def qmK (v : Value) (e : Env) : Outcome × Env :=
+  match v with
+  | .result true u => (.val u, e)
+  | .result false u => (.earlyRet (.result false u), e)
+  | _ => (.err "? operator on non-Result", e)
+
+theorem denote'_questionMark_cf (bi : Builtins) (fuel : Nat) (x : ImpExpr) (env : Env) :
+    denote' bi fuel (.questionMark x) env = cfBind (denote' bi fuel x env) qmK := by
+  conv => lhs; unfold denote'
+  dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
+  unfold cfBind qmK
+  rcases denote' bi fuel x env with ⟨o, e⟩
+  cases o <;> try rfl
+  rename_i w; cases w <;> try rfl
+  rename_i ok u; cases ok <;> rfl
+
+theorem denote'_tuple_run (bi : Builtins) (fuel : Nat) (xs : List ImpExpr) (env : Env) :
+    denote' bi fuel (.tuple xs) env =
+      match denoteArgs' bi fuel xs env with
+      | (some vs, e) => (.val (.tuple vs), e)
+      | (none, e) => (.err "non-value in tuple elements", e) := by
+  conv => lhs; unfold denote'
+  dsimp only [bind, Bind.bind, StateT.bind, pure, Pure.pure, StateT.pure, Id.run]
+  rcases denoteArgs' bi fuel xs env with ⟨r, e⟩
+  cases r <;> rfl
+
+theorem deepNoControlFlow_tuple_of {vs : List Value}
+    (h : ∀ v ∈ vs, v.deepNoControlFlow = true) : (Value.tuple vs).deepNoControlFlow = true := by
+  simp only [Value.deepNoControlFlow]
+  induction vs with
+  | nil => rfl
+  | cons v vs ih =>
+    simp only [Value.deepNoControlFlow_list_cons, Bool.and_eq_true]
+    exact ⟨h v (List.mem_cons_self), ih fun w hw => h w (List.mem_cons_of_mem _ hw)⟩
+
 /-! ## Atoms and refinement -/
 
 /-- The value of an atom in an environment. -/
@@ -780,6 +845,68 @@ theorem denoteForLoop'_sound {g : String → List Value → Bool} {bi : Builtins
         exact ih (lo + 1) hi e (by omega) hhi hSe hNe
     all_goals exact ⟨rfl, trivial⟩
 
+
+/-- A `while` loop whose condition, checked at `Γc` from the invariant `inv`, keeps the
+    invariant when it fails, and whose body, from the condition's refinement, keeps the
+    invariant, runs the same under the guarded table and keeps the invariant. -/
+theorem denoteWhile'_sound {g : String → List Value → Bool} {H : Spec} {bi : Builtins}
+    (hS : Sound g H bi) {c body : ImpExpr} {inv J Γc : AEnv} {ac : AV}
+    (hc : ∀ fuel env, Sat inv env → Env.NoControlFlow env →
+      denote' (guardBi g bi) fuel c env = denote' bi fuel c env ∧
+        Post J Γc ac (denote' bi fuel c env))
+    (hci : entails Γc inv = true)
+    (hb : ∀ fuel env, Sat (refineCond c true Γc) env → Env.NoControlFlow env →
+      denote' (guardBi g bi) fuel body env = denote' bi fuel body env ∧
+        Post inv inv .top (denote' bi fuel body env)) :
+    ∀ fuel env, Sat inv env → Env.NoControlFlow env →
+      denoteWhile' (guardBi g bi) fuel c body env = denoteWhile' bi fuel c body env ∧
+        Post J inv .top (denoteWhile' bi fuel c body env) := by
+  intro fuel
+  induction fuel with
+  | zero =>
+    intro env _ _
+    unfold denoteWhile'
+    simp only [↓reduceIte]
+    exact ⟨by trivial, trivial⟩
+  | succ k ih =>
+    intro env hS0 hN
+    rw [denoteWhile'_succ_run, denoteWhile'_succ_run]
+    obtain ⟨hceq, hcp⟩ := hc (k + 1) env hS0 hN
+    rw [hceq]
+    rcases hr : denote' bi (k + 1) c env with ⟨o, e1⟩
+    rw [hr] at hcp
+    cases o
+    case val w =>
+      cases w
+      case controlFlow bb u =>
+        obtain ⟨hN1, hdu, hJ⟩ := hcp
+        exact ⟨rfl, hN1, hdu, hJ⟩
+      case bool bb =>
+        obtain ⟨hN1, -, -, hS1⟩ := hcp.of_val rfl
+        cases bb
+        · exact ⟨rfl, post_val hN1 rfl trivial (hS1.entails hci)⟩
+        · have hR := refineCond_sound hS hr hS1
+          obtain ⟨hbeq, hbp⟩ := hb (k + 1) e1 hR hN1
+          simp only
+          rw [hbeq]
+          rcases hr2 : denote' bi (k + 1) body e1 with ⟨o2, e2⟩
+          rw [hr2] at hbp
+          cases o2
+          case val w2 =>
+            cases w2
+            case controlFlow b2 u2 =>
+              obtain ⟨hN2, hdu2, hJ2⟩ := hbp
+              simp only [Value.isControlFlow, ↓reduceIte] at hJ2
+              cases b2
+              · exact ih e2 hJ2 hN2
+              · exact ⟨rfl, post_val hN2 hdu2 trivial hJ2⟩
+            all_goals
+              obtain ⟨hN2, -, -, hS2⟩ := hbp.of_val rfl
+              exact ih e2 hS2 hN2
+          all_goals exact ⟨rfl, trivial⟩
+      all_goals exact ⟨rfl, trivial⟩
+    all_goals exact ⟨rfl, trivial⟩
+
 /-! ## The checker -/
 
 mutual
@@ -888,41 +1015,45 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
       checkArms_sound hS arms J Γ1 a Γ' h fuel v e hSe hNe hdv
   | .forFold x lo hi body, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hlo : check H J Γ lo with _ | ⟨al, Γ1⟩ <;> simp only [check, hlo, reduceCtorEq] at h
-    cases al with
-    | num il =>
-      rcases hhi : check H J Γ1 hi with _ | ⟨ah, Γ2⟩ <;> simp only [hhi, reduceCtorEq] at h
-      cases ah with
-      | num ih =>
-        dsimp only at h
-        generalize hI : loopInv H.ann x body Γ2 = inv at h
-        by_cases he1 : entails Γ2 inv = true <;> simp only [he1, ↓reduceIte, reduceCtorEq] at h
-        rcases hb : check H inv ((x, .num (il.1, ih.2 - 1)) :: inv) body with _ | ⟨ab, Γb⟩ <;>
-          simp only [hb, reduceCtorEq] at h
-        by_cases he2 : entails Γb inv = true <;>
-          simp only [he2, ↓reduceIte, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
-        obtain ⟨rfl, rfl⟩ := h
-        have ihlo := check_sound hS lo J Γ (.num il) Γ1 hlo fuel env hΓ hN
-        rw [denote'_forFold_cf, denote'_forFold_cf]
-        refine cfBind_step ihlo.1 ihlo.2 fun vlo e1 _ hN1 _ hm1 hS1 => ?_
-        unfold forK
-        have ihhi := check_sound hS hi J Γ1 (.num ih) Γ2 hhi fuel e1 hS1 hN1
-        refine cfBind_step ihhi.1 ihhi.2 fun vhi e2 _ hN2 _ hm2 hS2 => ?_
-        rcases hl : vlo.loopBound with _ | l
-        · exact ⟨by trivial, trivial⟩
-        rcases hh : vhi.loopBound with _ | hv
-        · exact ⟨by trivial, trivial⟩
-        obtain ⟨m, hm, hmi⟩ := hm1
-        obtain ⟨n, hn, hni⟩ := hm2
-        rw [Value.toInt_of_loopBound hl, Option.some.injEq] at hm
-        rw [Value.toInt_of_loopBound hh, Option.some.injEq] at hn
-        subst hm hn
-        refine denoteForLoop'_sound (c := (il.1, ih.2 - 1)) (fun fuel' k env' hk hinv hNk => ?_)
-          fuel l hv e2 hmi.1 (by have := hni.2; simp only; omega) (hS2.entails he1) hN2
-        obtain ⟨q1, q2⟩ := check_sound hS body inv _ ab Γb hb fuel' (Env.extend env' x (.int k))
-          (hinv.cons ⟨k, rfl, hk⟩) (hNk.extend rfl)
-        exact ⟨q1, q2.weaken (fun _ hs => hs.entails he2) (fun _ _ => trivial)⟩
-      | _ => simp only [reduceCtorEq] at h
-    | _ => simp only [reduceCtorEq] at h
+    rcases hhi : check H J Γ1 hi with _ | ⟨ah, Γ2⟩ <;> simp only [hhi, reduceCtorEq] at h
+    generalize hI : loopInv H.ann x body Γ2 = inv at h
+    by_cases he1 : entails Γ2 inv = true <;> simp only [he1, ↓reduceIte, reduceCtorEq] at h
+    rcases hb : check H inv ((x, ctrAV al ah) :: inv) body with _ | ⟨ab, Γb⟩ <;>
+      simp only [hb, reduceCtorEq] at h
+    by_cases he2 : entails Γb inv = true <;>
+      simp only [he2, ↓reduceIte, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    have ihlo := check_sound hS lo J Γ al Γ1 hlo fuel env hΓ hN
+    rw [denote'_forFold_cf, denote'_forFold_cf]
+    refine cfBind_step ihlo.1 ihlo.2 fun vlo e1 _ hN1 _ hm1 hS1 => ?_
+    unfold forK
+    have ihhi := check_sound hS hi J Γ1 ah Γ2 hhi fuel e1 hS1 hN1
+    refine cfBind_step ihhi.1 ihhi.2 fun vhi e2 _ hN2 _ hm2 hS2 => ?_
+    rcases hl : vlo.loopBound with _ | l
+    · exact ⟨rfl, trivial⟩
+    rcases hh : vhi.loopBound with _ | hv
+    · exact ⟨rfl, trivial⟩
+    refine denoteForLoop'_sound (c := (l, hv - 1)) (fun fuel' k env' hk hinv hNk => ?_)
+      fuel l hv e2 (Int.le_refl _) (by simp only; omega) (hS2.entails he1) hN2
+    have hctr : (ctrAV al ah).Mem (.int k) := by
+      cases al with
+      | num il =>
+        cases ah with
+        | num ih =>
+          obtain ⟨m, hm, hmi⟩ := hm1
+          obtain ⟨n, hn, hni⟩ := hm2
+          rw [Value.toInt_of_loopBound hl, Option.some.injEq] at hm
+          rw [Value.toInt_of_loopBound hh, Option.some.injEq] at hn
+          subst hm hn
+          obtain ⟨hk1, hk2⟩ := hk
+          obtain ⟨hm1', -⟩ := hmi
+          obtain ⟨-, hn2⟩ := hni
+          refine ⟨k, rfl, ?_, ?_⟩ <;> simp only at hk1 hk2 hm1' hn2 ⊢ <;> omega
+        | _ => trivial
+      | _ => trivial
+    obtain ⟨q1, q2⟩ := check_sound hS body inv _ ab Γb hb fuel' (Env.extend env' x (.int k))
+      (hinv.cons hctr) (hNk.extend rfl)
+    exact ⟨q1, q2.weaken (fun _ hs => hs.entails he2) (fun _ _ => trivial)⟩
   | .cfBreak y, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hy : check H J Γ y with _ | ⟨ay, Γ1⟩ <;> simp only [check, hy, reduceCtorEq] at h
     by_cases he : entails Γ1 J = true <;>
@@ -941,18 +1072,73 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
     rw [denote'_cfContinue_cf, denote'_cfContinue_cf]
     exact cfBind_step ihy.1 ihy.2 fun _ e _ hNe hdv _ hSe =>
       ⟨rfl, post_cf hNe hdv (hSe.entails he)⟩
+  | .whileFold c body, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
+    simp only [check] at h
+    generalize hI : loopInv H.ann "" body Γ = inv at h
+    by_cases he1 : entails Γ inv = true <;> simp only [he1, ↓reduceIte, reduceCtorEq] at h
+    rcases hc : check H J inv c with _ | ⟨ac, Γc⟩ <;> simp only [hc, reduceCtorEq] at h
+    by_cases he2 : entails Γc inv = true <;> simp only [he2, ↓reduceIte, reduceCtorEq] at h
+    rcases hb : check H inv (refineCond c true Γc) body with _ | ⟨ab, Γb⟩ <;>
+      simp only [hb, reduceCtorEq] at h
+    by_cases he3 : entails Γb inv = true <;>
+      simp only [he3, ↓reduceIte, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    rw [denote'_whileFold, denote'_whileFold]
+    exact denoteWhile'_sound hS
+      (fun fuel' env' hs hn => check_sound hS c J inv ac Γc hc fuel' env' hs hn) he2
+      (fun fuel' env' hs hn => by
+        obtain ⟨q1, q2⟩ := check_sound hS body inv _ ab Γb hb fuel' env' hs hn
+        exact ⟨q1, q2.weaken (fun _ hs' => hs'.entails he3) (fun _ _ => trivial)⟩)
+      fuel env (hΓ.entails he1) hN
+  | .tuple xs, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
+    rcases ha : checkArgs H J Γ xs with _ | ⟨avs, Γ1⟩ <;>
+      simp only [check, ha, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    obtain ⟨heq, hpost⟩ := checkArgs_sound hS xs J Γ avs Γ1 ha fuel env hΓ hN
+    rw [denote'_tuple_run, denote'_tuple_run, heq]
+    rcases hr : denoteArgs' bi fuel xs env with ⟨_ | vs, e⟩
+    · exact ⟨by trivial, trivial⟩
+    · obtain ⟨-, hdl, hSe, hNe⟩ := hpost vs e hr
+      exact ⟨by trivial, post_val hNe (deepNoControlFlow_tuple_of hdl) trivial hSe⟩
+  | .proj x i, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
+    rcases hx : check H J Γ x with _ | ⟨ax, Γ1⟩ <;>
+      simp only [check, hx, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    have ihx := check_sound hS x J Γ ax Γ1 hx fuel env hΓ hN
+    rw [denote'_proj_cf, denote'_proj_cf]
+    refine cfBind_step ihx.1 ihx.2 fun v e _ hNe hdv _ hSe => ?_
+    unfold projK
+    rcases hp : v.projIdx i with _ | vi
+    · exact ⟨rfl, trivial⟩
+    · exact ⟨rfl, post_val hNe (Value.deepNoControlFlow_projIdx hdv hp) trivial hSe⟩
+  | .earlyReturn x, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
+    rcases hx : check H J Γ x with _ | ⟨ax, Γ1⟩ <;>
+      simp only [check, hx, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    have ihx := check_sound hS x J Γ ax Γ1 hx fuel env hΓ hN
+    rw [denote'_earlyReturn_cf, denote'_earlyReturn_cf]
+    exact cfBind_step ihx.1 ihx.2 fun _ _ _ _ _ _ _ => ⟨rfl, trivial⟩
+  | .questionMark x, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
+    rcases hx : check H J Γ x with _ | ⟨ax, Γ1⟩ <;>
+      simp only [check, hx, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    have ihx := check_sound hS x J Γ ax Γ1 hx fuel env hΓ hN
+    rw [denote'_questionMark_cf, denote'_questionMark_cf]
+    refine cfBind_step ihx.1 ihx.2 fun v e hr hNe hdv _ hSe => ?_
+    clear hr
+    unfold qmK
+    rcases v with _ | _ | _ | _ | _ | _ | _ | _ | ⟨ok, u⟩ | _
+    all_goals try exact ⟨rfl, trivial⟩
+    cases ok
+    · exact ⟨rfl, trivial⟩
+    · exact ⟨rfl, post_val hNe (by simpa [Value.deepNoControlFlow] using hdv) trivial hSe⟩
   | .lam _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
-  | .tuple _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
-  | .proj _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .forLoop _ _ _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .forLoopRev _ _ _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .whileLoop _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .break_ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .continue_, _, _, _, _, h, _, _, _, _ => by simp [check] at h
-  | .earlyReturn _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
-  | .questionMark _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .forFoldRev _ _ _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
-  | .whileFold _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .forFoldReturn _ _ _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .forFoldRevReturn _ _ _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h
   | .whileFoldReturn _ _, _, _, _, _, h, _, _, _, _ => by simp [check] at h

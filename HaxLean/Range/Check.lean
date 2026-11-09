@@ -28,7 +28,8 @@ against a loop invariant, and reads a call of a function of the crate through it
 which is one more head of `Spec.xfer`. The loop invariant is a candidate (`loopInv`, from the
 annotation `Spec.ann` that an untrusted inference supplies): the checker verifies that the
 environment before the loop, after each iteration and at each `cfBreak`/`cfContinue` of the
-body lies in it.
+body lies in it. A `whileFold` is checked the same way, its condition refining the
+environment of the body.
 
 ## Soundness
 
@@ -300,6 +301,12 @@ def loopInv (ann : AEnv) (x : String) (body : ImpExpr) (Γ : AEnv) : AEnv :=
     | some a, some b => if b.le a then some (y, a) else none
     | _, _ => none
 
+/-- The abstract value of the counter of a loop over `[lo, hi)`: `[lo.1, hi.2 - 1]` when both
+    bounds have integer intervals. -/
+def ctrAV : AV → AV → AV
+  | .num il, .num ih => .num (il.1, ih.2 - 1)
+  | _, _ => .top
+
 /-! ## Patterns -/
 
 mutual
@@ -364,17 +371,45 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
     | none => none
   | Γ, .forFold x lo hi body =>
     match check H J Γ lo with
-    | some (.num il, Γ1) =>
+    | some (al, Γ1) =>
       match check H J Γ1 hi with
-      | some (.num ih, Γ2) =>
+      | some (ah, Γ2) =>
         let inv := loopInv H.ann x body Γ2
         if entails Γ2 inv then
-          match check H inv ((x, .num (il.1, ih.2 - 1)) :: inv) body with
+          match check H inv ((x, ctrAV al ah) :: inv) body with
           | some (_, Γb) => if entails Γb inv then some (.top, inv) else none
           | none => none
         else none
-      | _ => none
-    | _ => none
+      | none => none
+    | none => none
+  | Γ, .whileFold c body =>
+    let inv := loopInv H.ann "" body Γ
+    if entails Γ inv then
+      match check H J inv c with
+      | some (_, Γc) =>
+        if entails Γc inv then
+          match check H inv (refineCond c true Γc) body with
+          | some (_, Γb) => if entails Γb inv then some (.top, inv) else none
+          | none => none
+        else none
+      | none => none
+    else none
+  | Γ, .tuple es =>
+    match checkArgs H J Γ es with
+    | some (_, Γ1) => some (.top, Γ1)
+    | none => none
+  | Γ, .proj e _ =>
+    match check H J Γ e with
+    | some (_, Γ1) => some (.top, Γ1)
+    | none => none
+  | Γ, .earlyReturn e =>
+    match check H J Γ e with
+    | some (_, Γ1) => some (.top, Γ1)
+    | none => none
+  | Γ, .questionMark e =>
+    match check H J Γ e with
+    | some (_, Γ1) => some (.top, Γ1)
+    | none => none
   | Γ, .cfBreak e =>
     match check H J Γ e with
     | some (_, Γ1) => if entails Γ1 J then some (.top, Γ1) else none
