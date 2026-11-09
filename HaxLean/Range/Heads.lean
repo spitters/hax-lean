@@ -26,7 +26,10 @@ words takes the width of its first argument.
 shift-amount checks, index bounds against the least array length, `len` as the length
 interval, the length of an array built by `repeat` or `array_lit`, and a function of the
 crate through its summary `(pre, post)` in `sums`: a call is
-accepted when its arguments lie in `pre`, with result in `post`.
+accepted when its arguments lie in `pre`, with result in `post`. Its relational transfer
+function `stdXrel` accepts an index into an array, and an update of it, when the index has a
+nonnegative lower bound and a fact of the environment bounds it below the array's length
+(`idxRel`), whatever the length interval.
 
 `stdSpec_sound` instantiates `Sound` for `rustGuard` and `stdSpec sums` under `HeadSem`,
 which states what the builtin table computes at these heads and that the summaries hold.
@@ -39,14 +42,16 @@ by the table.
 
 * `splitHead`, `tagWidth`, `opWidth`, `rangeOf`: heads, tags and widths.
 * `rustGuard`: the panic guards.
-* `stdXfer`, `stdSpec`: the transfer functions.
+* `stdXfer`, `stdXrel`, `stdSpec`: the transfer functions.
 * `HeadSem`: the semantics of the heads that the transfer functions read.
 * `DefsSem`, `checkSums`: the crate's definitions read by the table, and the check of the
   summaries against their bodies.
 
 ## Main results
 
-* `stdXfer_guard`: an accepted call has its guard.
+* `stdXfer_guard`, `stdXrel_guard`: an accepted call has its guard.
+* `idxGuard_of_rel`: facts that bound a nonnegative index below an array's length prove the
+  guard of an index into it.
 * `stdSpec_sound`: `Sound rustGuard (stdSpec sums ann logic) bi` under `HeadSem bi sums`.
 * `checkT_rust_sound`: a checked typed literal never fails a Rust guard under `denote'`.
 * `headSem_of_checkSums`: summaries that `checkSums` accepts hold.
@@ -278,11 +283,37 @@ def stdXfer (sums : List (String × (List AV × AV))) (f : String) (avs : List A
     | some (pre, post) => if leList avs pre then some post else none
     | none => defaultXfer f avs
 
+/-- The lower bound of an integer abstract value. -/
+def AV.lo? : AV → Option Int
+  | .num i => some i.1
+  | .idx lo _ _ => some lo
+  | _ => none
+
+/-- The facts `rs` give `(1, 0, c)` with `0 ≤ c`: the argument at position 1 lies below the
+    length of the array at position 0. -/
+def idxRel (rs : List (Nat × Nat × Int)) : Bool :=
+  rs.any fun r => r.1 == 1 && r.2.1 == 0 && decide (0 ≤ r.2.2)
+
+/-- Element access with facts between the arguments: the index has a nonnegative lower bound
+    and a fact bounds it below the length of the array. An update keeps the length. -/
+def stdXrel (f : String) (avs : List AV) (rs : List (Nat × Nat × Int)) : Option AV :=
+  let (base, _) := splitHead f
+  if isArith base || isDivRem base || isShift base then none
+  else if !(idxRel rs && ((avs[1]?).bind AV.lo?).any (0 ≤ ·)) then none
+  else if isIndex f then (if avs.length == 2 then some .top else none)
+  else if f == "array_update" then
+    match avs with
+    | [a, _, _] => some (match a with
+      | .arr l => .arr l
+      | _ => .top)
+    | _ => none
+  else none
+
 /-- The specification of the heads with the summaries `sums`, the loop annotation `ann`, and
     the refinement by Boolean guards when `logic`. -/
 def stdSpec (sums : List (String × (List AV × AV))) (ann : AEnv := []) (logic : Bool := false) :
     Spec :=
-  { xfer := stdXfer sums, ann, logic }
+  { xfer := stdXfer sums, xrel := stdXrel, ann, logic }
 
 /-! ## Accepted calls have their guards -/
 
@@ -368,7 +399,7 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
           | _ => simp [opWidth]
         · simp [hle] at h
     | [.top, _], h, hm | [.arr _, _], h, hm | [.num _, .top], h, hm
-    | [.num _, .arr _], h, hm =>
+    | [.num _, .arr _], h, hm | [.idx _ _ _, _], h, hm | [.num _, .idx _ _ _], h, hm =>
       obtain ⟨x, y, rfl, -, -⟩ := memList_two hm
       cases tag with
       | some t =>
@@ -401,7 +432,7 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
       · simp [hc] at h
     | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ => simp at h
     | [.top, _], h, _ | [.arr _, _], h, _ | [.num _, .top], h, _
-    | [.num _, .arr _], h, _ => simp at h
+    | [.num _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.num _, .idx _ _ _], h, _ => simp at h
   simp only [hdiv, Bool.false_eq_true, ↓reduceIte] at h ⊢
   by_cases hsh : isShift base = true
   · simp only [hsh, ↓reduceIte] at h ⊢
@@ -436,7 +467,7 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
           | _ => simp [opWidth]
         · simp [hle] at h
     | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ => simp at h
-    | [_, .top], h, _ | [_, .arr _], h, _ => simp at h
+    | [_, .top], h, _ | [_, .arr _], h, _ | [_, .idx _ _ _], h, _ => simp at h
   simp only [hsh, Bool.false_eq_true, ↓reduceIte] at h ⊢
   by_cases hix : isIndex f = true
   · simp only [hix, ↓reduceIte] at h ⊢
@@ -454,9 +485,10 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
     | [], h, _ | [_], h, _ => simp at h
     | [.arr _, .num _, _], h, _ => simp at h
     | [.top, _], h, _ | [.num _, _], h, _ | [.arr _, .top], h, _
-    | [.arr _, .arr _], h, _ => simp at h
+    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _ => simp at h
     | [.top, _, _], h, _ | [.num _, _, _], h, _ | [.arr _, .top, _], h, _
-    | [.arr _, .arr _, _], h, _ => simp at h
+    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _ =>
+      simp at h
     | _ :: _ :: _ :: _ :: _, h, _ => simp at h
   simp only [hix, Bool.false_eq_true, ↓reduceIte] at h ⊢
   by_cases hup : (f == "array_update") = true
@@ -475,14 +507,110 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
     | [], h, _ | [_], h, _ => simp at h
     | [.arr _, .num _], h, _ => simp at h
     | [.top, _], h, _ | [.num _, _], h, _ | [.arr _, .top], h, _
-    | [.arr _, .arr _], h, _ => simp at h
+    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _ => simp at h
     | [.top, _, _], h, _ | [.num _, _, _], h, _ | [.arr _, .top, _], h, _
-    | [.arr _, .arr _, _], h, _ => simp at h
+    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _ =>
+      simp at h
     | _ :: _ :: _ :: _ :: _, h, _ => simp at h
   simp only [hup, Bool.false_eq_true, ↓reduceIte] at h ⊢
   by_cases hop : opaquePartial f = true
   · simp [hop] at h
   · simpa using hop
+
+theorem memList_length {as : List AV} {vs : List Value} (h : MemList as vs) :
+    as.length = vs.length := by
+  induction as generalizing vs with
+  | nil => cases vs with
+    | nil => rfl
+    | cons _ _ => exact absurd h id
+  | cons a as ih => cases vs with
+    | nil => exact absurd h id
+    | cons v vs => simp [ih h.2]
+
+/-- A value at a position of a list lies in the abstract value at that position. -/
+theorem memList_getElem? :
+    ∀ {avs : List AV} {vs : List Value} {i : Nat} {a : AV} {v : Value}, MemList avs vs →
+      avs[i]? = some a → vs[i]? = some v → a.Mem v
+  | [], _, _, _, _, _, ha, _ => by simp at ha
+  | _ :: _, [], _, _, _, hm, _, _ => absurd hm id
+  | b :: avs, w :: vs, 0, a, v, hm, ha, hv => by
+    simp only [List.getElem?_cons_zero, Option.some.injEq] at ha hv
+    subst ha hv
+    exact hm.1
+  | b :: avs, w :: vs, i + 1, a, v, hm, ha, hv => by
+    simp only [List.getElem?_cons_succ] at ha hv
+    exact memList_getElem? hm.2 ha hv
+
+theorem AV.lo?_le {a : AV} {lo : Int} {v : Value} (h : a.lo? = some lo) (hm : a.Mem v) :
+    ∃ k, v.toInt = some k ∧ lo ≤ k := by
+  cases a with
+  | num i =>
+    simp only [AV.lo?, Option.some.injEq] at h
+    subst h
+    obtain ⟨k, hk, hi⟩ := hm
+    exact ⟨k, hk, hi.1⟩
+  | idx lo' hi rs =>
+    simp only [AV.lo?, Option.some.injEq] at h
+    subst h
+    obtain ⟨k, hk, h1, -⟩ := hm
+    exact ⟨k, hk, h1⟩
+  | _ => simp [AV.lo?] at h
+
+/-- Facts that bound a nonnegative index below the length of an array prove the guard of an
+    index into it. -/
+theorem idxGuard_of_rel {avs : List AV} {rs : List (Nat × Nat × Int)} {vs : List Value}
+    (hm : MemList avs vs) (hr : RelArgs rs vs) (hi : idxRel rs = true)
+    (hlo : ((avs[1]?).bind AV.lo?).any (0 ≤ ·) = true) {arr idx : Value}
+    (hv0 : vs[0]? = some arr) (hv1 : vs[1]? = some idx) : idxGuard arr idx = true := by
+  obtain ⟨r, hr1, hr2⟩ := List.any_eq_true.1 hi
+  simp only [Bool.and_eq_true, beq_iff_eq, decide_eq_true_eq] at hr2
+  obtain ⟨⟨h1, h2⟩, h3⟩ := hr2
+  obtain ⟨k, n, hk, hn, hlt⟩ := hr r hr1
+  rw [h1, hv1, Option.bind_some] at hk
+  rw [h2, hv0, Option.bind_some] at hn
+  obtain ⟨lo, hlo1, hlo2⟩ := (Option.any_eq_true _ _).1 hlo
+  obtain ⟨a1, ha1, hlo1'⟩ := Option.bind_eq_some_iff.1 hlo1
+  obtain ⟨k', hk', hk'lo⟩ := AV.lo?_le hlo1' (memList_getElem? hm ha1 hv1)
+  rw [hk] at hk'
+  cases hk'
+  simp only [decide_eq_true_eq] at hlo2
+  simp only [idxGuard, hn, hk, Bool.and_eq_true, decide_eq_true_eq]
+  omega
+
+/-- A call accepted with facts has its Rust guard. -/
+theorem stdXrel_guard {f : String} {avs : List AV} {rs : List (Nat × Nat × Int)} {a : AV}
+    {vs : List Value} (h : stdXrel f avs rs = some a) (hm : MemList avs vs)
+    (hr : RelArgs rs vs) : rustGuard f vs = true := by
+  unfold stdXrel at h
+  unfold rustGuard
+  generalize splitHead f = p at h ⊢
+  obtain ⟨base, tag⟩ := p
+  dsimp only at h ⊢
+  rcases h1 : isArith base <;> rcases h2 : isDivRem base <;> rcases h3 : isShift base <;>
+    simp only [h1, h2, h3, Bool.or_true, Bool.or_false, ↓reduceIte,
+      reduceCtorEq, Bool.false_eq_true] at h ⊢
+  cases hok : (idxRel rs && ((avs[1]?).bind AV.lo?).any (0 ≤ ·))
+  · simp [hok] at h
+  simp only [hok, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+  simp only [Bool.and_eq_true] at hok
+  by_cases hix : isIndex f = true
+  · simp only [hix, ↓reduceIte] at h ⊢
+    have hl : avs.length = 2 := by
+      by_cases h2 : (avs.length == 2) = true
+      · simpa using h2
+      · simp [h2] at h
+    have hvl : vs.length = 2 := (memList_length hm).symm.trans hl
+    match vs, hvl with
+    | [x, y], _ => exact idxGuard_of_rel hm hr hok.1 hok.2 rfl rfl
+  simp only [hix, Bool.false_eq_true, ↓reduceIte] at h ⊢
+  by_cases hup : (f == "array_update") = true
+  · simp only [hup, ↓reduceIte] at h ⊢
+    match avs, h, hm with
+    | [_, _, _], _, hm =>
+      obtain ⟨x, y, z, rfl, -⟩ := memList_three hm
+      exact idxGuard_of_rel hm hr hok.1 hok.2 rfl rfl
+    | [], h, _ | [_], h, _ | [_, _], h, _ | _ :: _ :: _ :: _ :: _, h, _ => simp at h
+  · simp [hup] at h
 
 /-! ## Semantics of the heads -/
 
@@ -511,15 +639,46 @@ structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Pr
   sums : ∀ g pre post, sums.lookup g = some (pre, post) → ∀ vs v, MemList pre vs →
     (∀ w ∈ vs, w.deepNoControlFlow = true) → bi g vs = some v → post.Mem v
 
-theorem memList_length {as : List AV} {vs : List Value} (h : MemList as vs) :
-    as.length = vs.length := by
-  induction as generalizing vs with
-  | nil => cases vs with
-    | nil => rfl
-    | cons _ _ => exact absurd h id
-  | cons a as ih => cases vs with
-    | nil => exact absurd h id
-    | cons v vs => simp [ih h.2]
+/-- The result of a call accepted with facts lies in the relational transfer function's
+    value. -/
+theorem stdXrel_result {bi : Builtins} {sums : List (String × (List AV × AV))}
+    (hH : HeadSem bi sums) {f : String} {avs : List AV} {rs : List (Nat × Nat × Int)} {a : AV}
+    {vs : List Value} {v : Value} (h : stdXrel f avs rs = some a) (hm : MemList avs vs)
+    (hb : bi f vs = some v) : a.Mem v := by
+  unfold stdXrel at h
+  generalize splitHead f = p at h
+  obtain ⟨base, tag⟩ := p
+  dsimp only at h
+  by_cases hb0 : (isArith base || isDivRem base || isShift base) = true
+  · simp [hb0] at h
+  simp only [hb0, Bool.false_eq_true, ↓reduceIte] at h
+  cases hok : (idxRel rs && ((avs[1]?).bind AV.lo?).any (0 ≤ ·))
+  · simp [hok] at h
+  simp only [hok, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at h
+  by_cases hix : isIndex f = true
+  · simp only [hix, ↓reduceIte] at h
+    by_cases h2 : (avs.length == 2) = true
+    · simp only [h2, ↓reduceIte, Option.some.injEq] at h
+      subst h
+      trivial
+    · simp [h2] at h
+  simp only [hix, Bool.false_eq_true, ↓reduceIte] at h
+  by_cases hup : (f == "array_update") = true
+  · simp only [hup, ↓reduceIte] at h
+    have hf : f = "array_update" := by simpa using hup
+    subst hf
+    match avs, h, hm with
+    | [a0, _, _], h, hm =>
+      obtain ⟨x, y, z, rfl, hx, -, -⟩ := memList_three hm
+      simp only [Option.some.injEq] at h
+      subst h
+      cases a0 with
+      | arr l =>
+        obtain ⟨k, hk, hkl⟩ := hx
+        exact ⟨k, by rw [hH.update x y z v hb, hk], hkl⟩
+      | _ => trivial
+    | [], h, _ | [_], h, _ | [_, _], h, _ | _ :: _ :: _ :: _ :: _, h, _ => simp at h
+  · simp [hup] at h
 
 /-- The result of a total head lies in its transfer function's value. -/
 theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
@@ -544,7 +703,8 @@ theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × A
       cases hn'
       exact ⟨_, hv, hnl⟩
     | [], h, _ | _ :: _ :: _, h, _ => simp only [Option.some.injEq] at h; subst h; trivial
-    | [.top], h, _ | [.num _], h, _ => simp only [Option.some.injEq] at h; subst h; trivial
+    | [.top], h, _ | [.num _], h, _ | [.idx _ _ _], h, _ =>
+      simp only [Option.some.injEq] at h; subst h; trivial
   simp only [hlen, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hrep : (f == "repeat") = true
   · simp only [hrep, ↓reduceIte] at h
@@ -559,7 +719,7 @@ theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × A
       exact ⟨k, hk, hkn ▸ hni⟩
     | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ =>
       simp only [Option.some.injEq] at h; subst h; trivial
-    | [_, .top], h, _ | [_, .arr _], h, _ =>
+    | [_, .top], h, _ | [_, .arr _], h, _ | [_, .idx _ _ _], h, _ =>
       simp only [Option.some.injEq] at h; subst h; trivial
   simp only [hrep, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hlit : (f == "array_lit") = true
@@ -609,7 +769,7 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
           exact ⟨_, hv, hr⟩
         · simp [hle] at h
     | [.top, _], h, _ | [.arr _, _], h, _ | [.num _, .top], h, _
-    | [.num _, .arr _], h, _ =>
+    | [.num _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.num _, .idx _ _ _], h, _ =>
       cases tag with
       | some t =>
         rcases hw : tagWidth t with _ | w <;> simp [hw] at h
@@ -645,7 +805,7 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
       · simp [hc] at h
     | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ => simp at h
     | [.top, _], h, _ | [.arr _, _], h, _ | [.num _, .top], h, _
-    | [.num _, .arr _], h, _ => simp at h
+    | [.num _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.num _, .idx _ _ _], h, _ => simp at h
   simp only [hdiv, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hsh : isShift base = true
   · simp only [hsh, ↓reduceIte] at h
@@ -668,7 +828,7 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
           trivial
         · simp [hle] at h
     | [], h | [_], h | _ :: _ :: _ :: _, h => simp at h
-    | [_, .top], h | [_, .arr _], h => simp at h
+    | [_, .top], h | [_, .arr _], h | [_, .idx _ _ _], h => simp at h
   simp only [hsh, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hix : isIndex f = true
   · simp only [hix, ↓reduceIte] at h
@@ -683,9 +843,10 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
       · simp [hle] at h
     | [], h | [_], h => simp at h
     | [.arr _, .num _, _], h => simp at h
-    | [.top, _], h | [.num _, _], h | [.arr _, .top], h | [.arr _, .arr _], h => simp at h
+    | [.top, _], h | [.num _, _], h | [.arr _, .top], h | [.arr _, .arr _], h
+    | [.idx _ _ _, _], h | [.arr _, .idx _ _ _], h => simp at h
     | [.top, _, _], h | [.num _, _, _], h | [.arr _, .top, _], h
-    | [.arr _, .arr _, _], h => simp at h
+    | [.arr _, .arr _, _], h | [.idx _ _ _, _, _], h | [.arr _, .idx _ _ _, _], h => simp at h
     | _ :: _ :: _ :: _ :: _, h => simp at h
   simp only [hix, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hup : (f == "array_update") = true
@@ -705,9 +866,10 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
     | [], h, _ | [_], h, _ => simp at h
     | [.arr _, .num _], h, _ => simp at h
     | [.top, _], h, _ | [.num _, _], h, _ | [.arr _, .top], h, _
-    | [.arr _, .arr _], h, _ => simp at h
+    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _ => simp at h
     | [.top, _, _], h, _ | [.num _, _, _], h, _ | [.arr _, .top, _], h, _
-    | [.arr _, .arr _, _], h, _ => simp at h
+    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _ =>
+      simp at h
     | _ :: _ :: _ :: _ :: _, h, _ => simp at h
   simp only [hup, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hop : opaquePartial f = true
@@ -735,7 +897,10 @@ theorem stdSpec_sound {bi : Builtins} {sums : List (String × (List AV × AV))} 
   deep := hH.deep
   guard := fun _ _ _ _ h hm => stdXfer_guard h hm
   result := fun _ _ _ _ _ h hm hd hb => stdXfer_result hH h hm hd hb
+  relGuard := fun _ _ _ _ _ h hm hr => stdXrel_guard h hm hr
+  relResult := fun _ _ _ _ _ _ h hm _ _ hb => stdXrel_result hH h hm hb
   cmp := hH.cmp
+  len := hH.len
   logic := hL
 
 /-- A typed literal the checker accepts with the standard specification fails no Rust guard
@@ -764,16 +929,17 @@ def DefsSem (bi : Builtins) (defs : List (String × List String × ImpExpr)) : P
 
 /-- The check of a list of summaries against the bodies of `defs`: each summary
     `(g, (pre, post))` is checked with the summaries after it in the list, the body of `g`
-    accepted from its parameters at `pre` with a value included in `post` (loop annotation
-    `ann g`). A callee's summary comes after its callers'; a call of a function without a
-    summary in the rest, a recursive call among them, is read as an unknown head. -/
+    accepted from its parameters at `pre` without facts with a value included in `post`
+    (loop annotation `ann g`). A callee's summary comes after its callers'; a call of a
+    function without a summary in the rest, a recursive call among them, is read as an
+    unknown head. -/
 def checkSums (defs : List (String × List String × ImpExpr)) (ann : String → AEnv)
     (logic : Bool) : List (String × (List AV × AV)) → Bool
   | [] => true
   | (g, (pre, post)) :: rest => checkSums defs ann logic rest &&
     match defs.lookup g with
     | some (ps, body) =>
-      match check (stdSpec rest (ann g) logic) [] (ps.zip pre) body with
+      match check (stdSpec rest (ann g) logic) [] (ps.zip (pre.map AV.strip)) body with
       | some (a, _) => a.le post
       | none => false
     | none => false
@@ -792,7 +958,8 @@ theorem headSem_of_checkSums {bi : Builtins} {defs : List (String × List String
     have ih := headSem_of_checkSums hH hL hD rest hrest
     rcases hdef : defs.lookup g with _ | ⟨ps, body⟩
     · simp [hdef] at hg
-    rcases hck : check (stdSpec rest (ann g) logic) [] (ps.zip pre) body with _ | ⟨a, Γ'⟩
+    rcases hck : check (stdSpec rest (ann g) logic) [] (ps.zip (pre.map AV.strip)) body with
+      _ | ⟨a, Γ'⟩
     · simp [hdef, hck] at hg
     simp only [hdef, hck] at hg
     refine { ih with sums := fun h pre' post' hl vs v hm hd hb => ?_ }
