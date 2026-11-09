@@ -69,9 +69,9 @@ column `checked` of each function reports whether the verified checker
 `Hax.Range.checkT` (`HaxLean/Range/Check.lean`, sound by `Hax.Range.checkT_rust_sound`) accepts
 the function on the shared interval domain, from the candidates this analysis proposes
 (`checkedFn`): its parameters at the call-site precondition of round (B) or at their type
-ranges, the functions of the crate through summaries (their call-site precondition and their
-result value of round (B)), and the type ranges of the variables a loop writes as loop
-annotation (or none).
+ranges, the functions of the crate through summaries (their call-site precondition, and as
+postcondition the value a first pass of the checker gives them, which the second pass
+verifies), and the type ranges of the variables a loop writes as loop annotation (or none).
 
 ## Main definitions
 
@@ -81,7 +81,7 @@ annotation (or none).
 * `analyzeFn`: the analysis of one function under parameter intervals.
 * `classify`: the four rounds and the classes of a crate's functions.
 * `toRangeAV`, `typeAV`, `annOfTypes`, `checkedFn`: the candidates for the verified checker
-  and its verdict.
+  and its value.
 * `Hax.RangeProbe.run`: the command line `rangeprobe [--name N] PATH...`.
 -/
 
@@ -882,11 +882,11 @@ partial def annOfTypes : TExpr → Range.AEnv
   | .mk (.assign x r) _ => (x, typeAV r.ty) :: annOfTypes r
   | .mk k _ => (kids k).flatMap annOfTypes
 
-/-- Whether the verified checker accepts a definition with parameters `ps` at `pre` (their
+/-- The value the verified checker gives a definition with parameters `ps` at `pre` (their
     type ranges when absent) and the summaries `sums`, with the type ranges as loop
-    annotation or with none. -/
+    annotation or with none; `none` when it refuses the definition. -/
 def checkedFn (sums : List (String × (List Range.AV × Range.AV))) (ps : List (String × ImpType))
-    (pre : Option (List AV)) (e : TExpr) : Bool :=
+    (pre : Option (List AV)) (e : TExpr) : Option Range.AV :=
   let pv : List Range.AV := match pre with
     | some vs => if vs.length = ps.length then
         (ps.zip vs).map fun ((_, t), v) =>
@@ -897,8 +897,9 @@ def checkedFn (sums : List (String × (List Range.AV × Range.AV))) (ps : List (
       else ps.map fun (_, t) => typeAV t
     | none => ps.map fun (_, t) => typeAV t
   let Γ : Range.AEnv := (ps.zip pv).map fun ((x, _), a) => (x, a)
-  (Range.checkT (Range.stdSpec sums (annOfTypes e)) Γ e).isSome ||
-    (Range.checkT (Range.stdSpec sums []) Γ e).isSome
+  match Range.checkT (Range.stdSpec sums (annOfTypes e)) Γ e with
+  | some (a, _) => some a
+  | none => (Range.checkT (Range.stdSpec sums []) Γ e).map (·.1)
 
 /-- The class of each function and its analyses (C) and (D) (see the module docstring). -/
 structure FnRow where
@@ -973,12 +974,25 @@ def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
       if base.get? n != some true && cs.any (fun g => base.get? g == some true) then
         base := base.insert n true
         changed := true
-  -- The summaries for the verified checker: call-site precondition and result of (B).
-  let sums : List (String × (List Range.AV × Range.AV)) := rb.filterMap fun (n, r) =>
-    (pre.get? n).map fun vs => (n, (vs.map toRangeAV, toRangeAV r.ret))
-  let chk : Std.HashMap String Bool := defs.foldl (fun m (n, ps, _) =>
-    let e := (defs0.lookup n).getD default
-    m.insert n (checkedFn sums ps (pre.get? n) e)) {}
+  -- The verified checker, twice: first with no postcondition in the summaries, then with
+  -- the values of the first pass as postconditions. A function with a summary is checked
+  -- when its value lies in its postcondition, so that every summary the checker reads holds
+  -- of the function it summarises (its arguments are checked at each call site).
+  let run (sums : List (String × (List Range.AV × Range.AV))) : Std.HashMap String Range.AV :=
+    defs.foldl (fun m (n, ps, _) =>
+      match checkedFn sums ps (pre.get? n) ((defs0.lookup n).getD default) with
+      | some a => m.insert n a
+      | none => m) {}
+  let sums1 : List (String × (List Range.AV × Range.AV)) := defs.filterMap fun (n, _, _) =>
+    (pre.get? n).map fun vs => (n, (vs.map toRangeAV, Range.AV.top))
+  let res1 := run sums1
+  let sums2 := sums1.map fun (n, (p, _)) => (n, (p, (res1.get? n).getD .top))
+  let res2 := run sums2
+  let chk : Std.HashMap String Bool := defs.foldl (fun m (n, _, _) =>
+    m.insert n (match res2.get? n, sums2.lookup n with
+      | some a, some (_, post) => a.le post
+      | some _, none => true
+      | none, _ => false)) {}
   pure <| (rc.zip rd).map fun ((n, c), (_, d)) =>
     { name := n, full := c.obls, ctx := d.obls, cls := (cls.get? n).getD 3,
       monadicCalls := (d.calls.filter fun (g, _) => cls.get? g == some 3).size,
