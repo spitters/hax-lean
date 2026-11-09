@@ -22,6 +22,7 @@ public import HaxLean.TestCompile
 public import HaxLean.ImpType
 public import HaxLean.ScalarOp
 public import HaxLean.TExpr
+public import HaxLean.Range.Heads
 public import HaxLean.TFeatures
 public import HaxLean.TPhase.DropReferences
 public import HaxLean.TPhase.LocalMutation
