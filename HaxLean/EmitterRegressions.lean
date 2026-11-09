@@ -3858,11 +3858,14 @@ namespace SilentDropRefusals
 /-! ## Refusals of constructs the typed path would drop
 
 Two definitions with one emitted name are refused (`HaxAdapter.distinctDefNames`); a trait
-`impl` on a scalar self type is named by that type (`HaxAdapter.selfTyShortName?`). An
-indirect call, a call with a const generic argument, a function with a const generic
-parameter, a struct expression with default field values, a reference type of an unread
+`impl` on a scalar self type is named by that type (`HaxAdapter.selfTyShortName?`); two
+constants of one short name are qualified by their parents (`HaxAdapter.fnNameCollisions`).
+A const generic parameter of a function is its first explicit parameter, and a call of a
+free function passes its const generic arguments there. An indirect call, a call of
+another callee with a const generic argument, a const generic parameter the function does
+not declare, a struct expression with default field values, a reference type of an unread
 shape and an `unsafe` block are refused. After the pipeline, a fold accumulator bound
-nowhere (`freeFoldAccums`), a binding the canonicalization keeps because it is read
+nowhere that the first iteration may read (`freeFoldAccums`), a binding the canonicalization keeps because it is read
 (`Canonicalize.canonicalizeRefusals`) and a `validateExtraction` warning refuse their
 definition (`postPipelineRefusals`). An unknown option is recorded (`Options.unknownArgs`). -/
 
@@ -3938,6 +3941,99 @@ def twoImplsExport : Json :=
     ("param", Json.mkObj [("index", Json.num 0), ("name", Json.str "N")])])]))) with
   | .error e => e == "unsupported construct in `unknown_fn`: a const generic parameter"
   | .ok _ => false
+
+/-- The node of a read of the const generic parameter `n`. -/
+def constParamJ (n : String) : Json :=
+  nodeJ u32J (Json.mkObj [("ConstParam", Json.mkObj [
+    ("param", Json.mkObj [("index", Json.num 0), ("name", Json.str n)])])])
+
+/-- The const generic argument `n`, a `ConstRef`. -/
+def constRefArgJ (n : String) : Json :=
+  Json.mkObj [("Const", Json.mkObj [("contents", Json.mkObj [
+    ("ConstRef", Json.mkObj [("id", Json.mkObj [("index", Json.num 0), ("name", Json.str n)])])])])]
+
+/-- The literal `usize` const generic argument `k`. -/
+def constLitArgJ (k : Nat) : Json :=
+  Json.mkObj [("Const", Json.mkObj [("contents", Json.mkObj [("Literal", Json.mkObj [
+    ("Int", Json.mkObj [("Uint", Json.arr #[Json.str (toString k), Json.str "Usize"])])])])])]
+
+/-- A call of the free function `k::f` with the generic arguments `gas` on `x`. -/
+def constGenCallJ (gas : List Json) : Json :=
+  nodeJ u32J (Json.mkObj [("Call", Json.mkObj [
+    ("fun", nodeJ (tyJ (Json.str "Never")) (Json.mkObj [("GlobalName", Json.mkObj [
+      ("item", Json.mkObj [("value", Json.mkObj [
+        ("def_id", Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+          ("krate", Json.str "k"), ("kind", Json.str "Fn"),
+          ("path", Json.arr #[defIdSeg "ValueNs" "f"])])])]),
+        ("generic_args", Json.arr gas.toArray)])])])])),
+    ("args", Json.arr #[varJ u32J "x"])])])
+
+-- `f::<4>(x)` is `f 4 x`, and `f::<N>(x)` in a function generic over `N` is `f N x`.
+#guard tParse (constGenCallJ [constLitArgJ 4]) == some (.app "f" [.lit (.int 4), .var "x"])
+#guard tParse (constGenCallJ [constRefArgJ "N"]) == some (.app "f" [.var "N", .var "x"])
+
+/-- `fn f<const N: usize>(x: u32) -> u32 { N }`. -/
+def constGenFnJ : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Fn", Json.mkObj [
+    ("generics", Json.mkObj [("params", Json.arr #[Json.mkObj [
+      ("name", Json.mkObj [("Plain", Json.mkObj [("name", Json.str "N")])]),
+      ("kind", Json.mkObj [("Const", Json.mkObj [])])]])]),
+    ("def", Json.mkObj [
+      ("params", Json.arr #[Json.mkObj [("pat", bindPatJ "x"), ("ty", u32J)]]),
+      ("ret", u32J), ("body", constParamJ "N")])])])]
+
+-- The const generic parameter `N` is the first parameter, of type `usize`.
+#guard match parseHaxItemTExpr constGenFnJ with
+  | .ok (some (_, _, _, ti)) => ti.paramTypes.map (·.1) == ["N", "x"] &&
+      ti.paramTypes.head?.map (·.2) == some (.uint .wsize)
+  | _ => false
+-- `[u8; N]` is a slice of `u8`; `[u8; 4]` is an array of length 4.
+#guard parseHaxType (tyJ (Json.mkObj [("Array", Json.mkObj [("value", Json.mkObj [
+    ("generic_args", Json.arr #[Json.mkObj [("Type", tyJ (Json.mkObj [("Uint", Json.str "U8")]))],
+      constRefArgJ "N"])])])])) == .slice (.uint .w8)
+#guard parseHaxType (tyJ (Json.mkObj [("Array", Json.mkObj [("value", Json.mkObj [
+    ("generic_args", Json.arr #[Json.mkObj [("Type", tyJ (Json.mkObj [("Uint", Json.str "U8")]))],
+      constLitArgJ 4])])])])) == .array (.uint .w8) 4
+
+/-- `impl<const N: usize> Clone for u32 { fn clone() -> u32 { N } }`: an `impl` of a `core`
+    trait, whose method reads a const generic parameter of the `impl`. -/
+def constGenCloneImpl : Json :=
+  Json.mkObj [
+    ("owner_id", Json.mkObj [("contents", Json.mkObj [
+      ("id", Json.num 7), ("value", Json.mkObj [("is_local", Json.bool true)])])]),
+    ("kind", Json.mkObj [("Impl", Json.mkObj [
+      ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id", Json.mkObj [
+        ("contents", Json.mkObj [("value",
+          mkDefIdJson "core" [defIdSeg "TypeNs" "clone", defIdSeg "TypeNs" "Clone"])])])])]),
+      ("self_ty", Json.mkObj [("value", Json.mkObj [("Uint", Json.str "U32")])]),
+      ("items", Json.arr #[Json.mkObj [
+        ("ident", Json.arr #[Json.str "clone"]),
+        ("kind", Json.mkObj [("Fn", Json.mkObj [("def", Json.mkObj [
+          ("params", Json.arr #[]), ("ret", u32J), ("body", constParamJ "N")])])])]])])])]
+
+-- The method of an `impl` of a `core` trait contributes no definition and is not parsed.
+#guard match parseHaxFileWithTExpr (Json.arr #[constGenCloneImpl, fnJ ["x"] (varJ u32J "x")]) with
+  | .ok (_, _, _, proc) => proc.map (·.1) == ["unknown_fn"]
+  | .error _ => false
+
+/-- The top-level constant `k::m::K` (`segs` ending in `K`) with the body `x`. -/
+def constItemJ (segs : List (String × String)) : Json :=
+  Json.mkObj [("def_id", defIdJ "k" segs), ("kind", Json.mkObj [("Const", Json.arr #[
+    Json.arr #[Json.str ((segs.getLast?.map (·.2)).getD "")], Json.mkObj [], u32J,
+    varJ u32J "x"])])]
+
+/-- Two constants `K` of the modules `a` and `b`, and a function reading `a::K`. -/
+def collidingConstsExport : Json :=
+  Json.arr #[constItemJ [("TypeNs", "a"), ("ValueNs", "K")],
+    constItemJ [("TypeNs", "b"), ("ValueNs", "K")],
+    fnJ [] (VariantFnValue.globalNameJ (defIdJ "k" [("TypeNs", "a"), ("ValueNs", "K")]) u32J)]
+
+-- The two constants are `a_K` and `b_K`, and the read of `a::K` is `a_K`.
+#guard fnNameCollisions collidingConstsExport == ["K"]
+#guard match parseHaxFileWithTExpr collidingConstsExport with
+  | .ok (_, _, _, proc) => proc.map (·.1) == ["a_K", "b_K", "unknown_fn"] &&
+      (proc.lookup "unknown_fn").map (·.erase) == some (.var "a_K")
+  | .error _ => false
 -- A reference type that is not `[region, inner(, mutability)]`.
 #guard (bodyRefusal? none false (varJ (tyJ (Json.mkObj [("Ref", Json.mkObj [])])) "r")).isSome
 #guard (bodyRefusal? none false
@@ -3964,6 +4060,28 @@ def accFold : ImpExpr :=
 #guard freeFoldAccums [] (.letBind "acc" (.lit (.int 0)) accFold) == []
 #guard initMissingFoldAccums [] (.letBind "acc" (.lit (.int 0)) accFold) ==
   .letBind "acc" (.lit (.int 0)) accFold
+
+/-- `for i in 0..4 { let mut buf = new(); if c { buf.push(i) }; use(buf) }`: `buf` is
+    bound first in each iteration. -/
+def localBufFold : ImpExpr :=
+  .forFold "i" (.lit (.int 0)) (.lit (.int 4))
+    (.seq (.letBind "buf" (.app "new" []) .unitVal)
+      (.seq (.ifThenElse (.var "c")
+        (.letBind "buf" (.app "push" [.var "buf", .var "i"]) (.var "buf")) .unitVal)
+        (.app "use" [.var "buf"])))
+
+/-- `for i in 0..4 { if c { buf = i }; use(buf) }`: the first iteration may read `buf`
+    from before the fold. -/
+def condBufFold : ImpExpr :=
+  .forFold "i" (.lit (.int 0)) (.lit (.int 4))
+    (.seq (.ifThenElse (.var "c") (.letBind "buf" (.var "i") (.var "buf")) .unitVal)
+      (.app "use" [.var "buf"]))
+
+-- An accumulator bound before every read of the iteration is not listed; one written on a
+-- branch and read after it is.
+#guard freeFoldAccums [] localBufFold == []
+#guard freeFoldAccums [] condBufFold == ["buf"]
+#guard (postPipelineRefusals [("f", localBufFold)]).all (·.2.1 != "unbound-fold-accumulator")
 
 /-- `let r := cfContinue v; body`. -/
 def cfLet (body : ImpExpr) : ImpExpr := .letBind "r" (.cfContinue (.var "v")) body

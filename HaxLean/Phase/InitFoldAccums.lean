@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.AST
+public import HaxLean.FreeVars
 
 /-!
 # Post-pipeline pass: `initMissingFoldAccums`
@@ -23,11 +24,9 @@ either doesn't observe the pre-init value of `v`, or assigns to `v` before
 the first read. In practice this is always the case for accumulator names
 introduced by `localMutation` (they get rebound before any read inside
 the fold body). The condition is the responsibility of the caller; we
-don't state the conditional theorem here.
-
-Moved out of `PrettyPrint.lean` (TCB) into `Hax/Phase/` (verified core)
-on 2026-05-18 to reduce TCB by file convention; the conditional proof
-is a follow-up.
+don't state the conditional theorem here. `freeFoldAccums` lists the
+accumulators whose inserted `0` the first iteration may read; the pipeline
+refuses a definition with one (`postPipelineRefusals`).
 -/
 
 @[expose] public section
@@ -188,10 +187,34 @@ where
     | [] => []
     | (p, e) :: rest => (p, initMissingFoldAccums bound e) :: mapArms bound rest
 
-/-- The accumulators to which `initMissingFoldAccums bound` binds `0`: for each
-    fold, the names of `extractAccumNamesFromBody` of its body that are not bound
-    in the enclosing scope, with the scopes of `initMissingFoldAccums`. When the
-    list is empty, `initMissingFoldAccums bound e = e`. -/
+/-- Whether every evaluation of the statement `e` that falls through to its continuation
+    binds `x`: a `let x := v` does, a sequence does when one of its parts does, and an `if`
+    or a `match` does when every branch does. A `let` in statement position scopes over the
+    continuation of its `seq` (`collectBoundNamesT`). -/
+partial def bindsOnEveryPath (x : String) : ImpExpr → Bool
+  | .letBind n _ body => n == x || bindsOnEveryPath x body
+  | .seq a b => bindsOnEveryPath x a || bindsOnEveryPath x b
+  | .ifThenElse _ t e => bindsOnEveryPath x t && bindsOnEveryPath x e
+  | .match_ _ arms => !arms.isEmpty && arms.all (bindsOnEveryPath x ·.2)
+  | _ => false
+
+/-- Whether `e` may read `x` before binding it: an over-approximation of the liveness of
+    `x` at the entry of `e`. The value of `let n := v` is read before `n` is bound; the
+    continuation of a statement that binds `x` on every path (`bindsOnEveryPath`) does not
+    read the entry value of `x`; any other subterm reads `x` when `x` is free in it. -/
+partial def readsBeforeBind (x : String) : ImpExpr → Bool
+  | .letBind n v body => readsBeforeBind x v || (n != x && readsBeforeBind x body)
+  | .seq a b => readsBeforeBind x a || (!bindsOnEveryPath x a && readsBeforeBind x b)
+  | .ifThenElse c t e => readsBeforeBind x c || readsBeforeBind x t || readsBeforeBind x e
+  | .match_ s arms => readsBeforeBind x s || arms.any (readsBeforeBind x ·.2)
+  | e => (freeVars e).contains x
+
+/-- The fold accumulators bound nowhere: for each fold, the names of
+    `extractAccumNamesFromBody` of its body that are not bound in the enclosing scope (with
+    the scopes of `initMissingFoldAccums`) and that the body may read before binding them
+    (`readsBeforeBind`), so that the first iteration reads a value from before the fold. A
+    name the body binds before every read is local to the iteration, and the `0` that
+    `initMissingFoldAccums` binds to it is not read. -/
 partial def freeFoldAccums (bound : List String := []) : ImpExpr → List String
   | .letBind n v body => freeFoldAccums bound v ++ freeFoldAccums (n :: bound) body
   | .lam ps body => freeFoldAccums (ps ++ bound) body
@@ -199,7 +222,8 @@ partial def freeFoldAccums (bound : List String := []) : ImpExpr → List String
   | .forFold v lo hi body | .forFoldRev v lo hi body
   | .forFoldReturn v lo hi body | .forFoldRevReturn v lo hi body =>
     freeFoldAccums bound lo ++ freeFoldAccums bound hi ++ freeFoldAccums (v :: bound) body ++
-      (extractAccumNamesFromBody body).filter (!bound.contains ·)
+      (extractAccumNamesFromBody body).filter fun n =>
+        !bound.contains n && readsBeforeBind n body
   | .ifThenElse c t e =>
     freeFoldAccums bound c ++ freeFoldAccums bound t ++ freeFoldAccums bound e
   | .match_ s arms => freeFoldAccums bound s ++ arms.flatMap (freeFoldAccums bound ·.2)

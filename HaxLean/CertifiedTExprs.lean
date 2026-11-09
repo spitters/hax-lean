@@ -209,8 +209,9 @@ def allowedExtractionWarnings : List String := []
 
     * `dropped-loop-state`: a fold rebinds a variable read after it but not in its state
       (`droppedLoopState`);
-    * `unbound-fold-accumulator`: a fold accumulator bound nowhere, which
-      `initMissingFoldAccums` would bind to `0` (`freeFoldAccums`);
+    * `unbound-fold-accumulator`: a fold accumulator bound nowhere that the first
+      iteration may read, which `initMissingFoldAccums` would bind to `0`
+      (`freeFoldAccums`);
     * `canonicalize`: a binding that Pass D or Pass G of `Canonicalize.canonicalize`
       keeps because it is read (`Canonicalize.canonicalizeRefusals`);
     * `validate`: a `validateExtraction` warning outside `allowedExtractionWarnings`. -/

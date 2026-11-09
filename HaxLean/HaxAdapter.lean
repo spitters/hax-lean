@@ -1877,6 +1877,13 @@ partial def parseHaxType (j : Json) : ImpType :=
         | .ok tyJ => some (parseHaxType tyJ)
         | _ => none
       let len := genArgs.toList.findSome? extractConstLen
+      -- An array whose length is a const generic parameter (`[u8; N]`) has no
+      -- static length; it is read as a slice, which has the carrier of arrays.
+      let lenIsParam := genArgs.any fun ga =>
+        (ga.getObjVal? "Const" >>= (·.getObjVal? "contents") >>=
+          (·.getObjVal? "ConstRef")).toOption.isSome
+      if len.isNone && lenIsParam then .slice (elemType.getD .unknown)
+      else
       match elemType with
       | some et => .array et (len.getD 0)
       | none => .array .unknown (len.getD 0)
@@ -5140,6 +5147,52 @@ def callHasConstGenericArg (funJ : Json) : Bool :=
     (v.getObjValAs? (Array Json) "generic_args").toOption
   (gas.getD #[]).any fun ga => (ga.getObjVal? "Const").toOption.isSome
 
+/-- The names of the const generic parameters a hax JSON value mentions: the `name` of
+    each `ConstRef` and of the `param` of each `ConstParam`, `<unnamed>` for one without a
+    name. -/
+partial def haxConstParamNames : Json → List String
+  | .obj kvs => kvs.toList.flatMap fun (k, v) =>
+    if k == "ConstRef" then
+      [((v.getObjVal? "id" >>= (·.getObjValAs? String "name")).toOption).getD "<unnamed>"]
+    else if k == "ConstParam" then
+      [((v.getObjVal? "param" >>= (·.getObjValAs? String "name")).toOption).getD "<unnamed>"]
+    else haxConstParamNames v
+  | .arr xs => xs.toList.flatMap haxConstParamNames
+  | _ => []
+
+/-- The const generic parameters of the hax `Fn` item `j` with payload `fnData`, in
+    declaration order: the `Plain` names of the `params` of kind `Const` of its
+    `generics`, read under `kind.Fn` or on the item. -/
+def fnConstGenericParams (j fnData : Json) : List String :=
+  let gens := (fnData.getObjVal? "generics").toOption <|> (j.getObjVal? "generics").toOption
+  let ps := (gens.bind fun g => (g.getObjValAs? (Array Json) "params").toOption).getD #[]
+  ps.toList.filterMap fun p => do
+    let _ ← (p.getObjVal? "kind" >>= (·.getObjVal? "Const")).toOption
+    (p.getObjVal? "name" >>= (·.getObjVal? "Plain") >>= (·.getObjValAs? String "name")).toOption
+
+/-- The const generic arguments of a call whose callee `funJ` is a free function (a
+    `GlobalName` whose `def_id` has kind `Fn`), in order, each a literal `usize` or the
+    variable of a const generic parameter of the caller (`ConstRef`); the explicit
+    arguments the callee takes before its value parameters (`fnConstGenericParams`).
+    `none` when the callee is not a free function or an argument is neither form. -/
+def callConstGenericArgs? (funJ : Json) : Option (List TExpr) := do
+  let gn ← ((decoratedContents funJ).getObjVal? "GlobalName").toOption
+  let item ← (gn.getObjVal? "item").toOption
+  let v := (item.getObjVal? "value").toOption.getD item
+  let d ← globalNameDefId? gn
+  let inner := match d.getObjVal? "contents" with
+    | .ok c => (c.getObjVal? "value").toOption.getD c
+    | _ => d
+  guard ((inner.getObjValAs? String "kind").toOption == some "Fn")
+  let gas := ((v.getObjValAs? (Array Json) "generic_args").toOption).getD #[]
+  gas.toList.filterMap (fun ga => (ga.getObjVal? "Const").toOption) |>.mapM fun c =>
+    match extractConstLen c with
+    | some n => some (TExpr.mk (.lit (.int n)) (.uint .wsize))
+    | none => do
+      let r ← (c.getObjVal? "contents" >>= (·.getObjVal? "ConstRef")).toOption
+      let n ← (r.getObjVal? "id" >>= (·.getObjValAs? String "name")).toOption
+      pure (TExpr.mk (.var n) (.uint .wsize))
+
 /-- The names of the generic type parameters (`Param`, other than `_dyn`) a hax
     type mentions outside an associated-type projection (`Alias`). -/
 partial def haxTyParamNames : Json → List String
@@ -5371,7 +5424,7 @@ where
 
     else if let .ok data := j.getObjVal? "GlobalName" then
       let name := match data.getObjVal? "item" with
-        | .ok item => extractItemDefIdName item "global" [] implMap.localCrate
+        | .ok item => extractItemDefIdName item "global" implMap.collisions implMap.localCrate
         | _ => "global"
       -- A variant of an enum of the crate used as a function value is the
       -- eta-expansion of its head `E::V` (`variantCtorValue?`), the head of its
@@ -5480,10 +5533,16 @@ where
       -- of the crate takes its modulus-tagged head (`fieldTaggedHead?`).
       if let some h := fieldTaggedHead? funJ args.length implMap then
         return .app h args
-      -- A const generic argument of a callee outside `core`, `std` and `alloc`
-      -- (`f::<4>()`): the head names the callee without it.
-      if callHasConstGenericArg funJ && !builtinKrates.contains (callKrate funJ) then
-        throw s!"unsupported construct: a call of `{funName}` with a const generic argument"
+      -- The const generic arguments of a free function outside `core`, `std` and
+      -- `alloc` (`f::<4>(x)`) are its first explicit arguments (`f 4 x`), as the
+      -- definition takes them (`fnConstGenericParams`); any other callee with a const
+      -- generic argument is refused.
+      let args ← if callHasConstGenericArg funJ && !builtinKrates.contains (callKrate funJ)
+        then match callConstGenericArgs? funJ with
+          | some cs => pure (cs ++ args)
+          | none =>
+            throw s!"unsupported construct: a call of `{funName}` with a const generic argument"
+        else pure args
       -- A `Vec` passed through a `deref_mut` re-borrow is the `Vec` place
       -- itself (`tDerefMutArg`), so a write-back through the argument reaches
       -- its root variable.
@@ -5922,7 +5981,7 @@ where
 
     else if let .ok data := j.getObjVal? "NamedConst" then
       let name := match data.getObjVal? "item" with
-        | .ok item => extractItemDefIdName item "const" [] implMap.localCrate
+        | .ok item => extractItemDefIdName item "const" implMap.collisions implMap.localCrate
         | _ => "const"
       match coreIntLimit? data (extractNodeType _parentJ) with
       | some n => return .lit (.int n)
@@ -6697,10 +6756,14 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     let defLike : Json := match fnData.getObjVal? "def" with
       | .ok d => d
       | _ => fnData
-    let paramNames := match fnDefParams? defLike with
+    -- The const generic parameters are explicit `usize` parameters before the value
+    -- parameters, as in the hax engine; a call passes its const generic arguments
+    -- there (`callConstGenericArgs?`).
+    let constParams := fnConstGenericParams j fnData
+    let paramNames := constParams ++ match fnDefParams? defLike with
       | some params => extractParamNames params
       | none => []
-    let paramTypes := match fnDefParams? defLike with
+    let paramTypes := constParams.map (·, ImpType.uint .wsize) ++ match fnDefParams? defLike with
       | some params => extractParamTypes params
       | none => []
     let retType := match defLike.getObjVal? "ret" with
@@ -6714,8 +6777,10 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     if sigTys.any haxTyHasParam then
       throw (s!"unsupported construct in `{name}`: a generic type parameter in the " ++
         "signature outside the trait-to-class emission (`--emit-classes`)")
-    -- A const generic parameter: its value at a call site is not passed.
-    if sigTys.any haxMentionsConstParam || haxMentionsConstParam bodyJ then
+    -- A const generic parameter the function does not declare (one of an enclosing
+    -- `impl` or trait) is not a parameter of the definition.
+    if (sigTys.flatMap haxConstParamNames ++ haxConstParamNames bodyJ).any
+        (!constParams.contains ·) then
       throw s!"unsupported construct in `{name}`: a const generic parameter"
     if sigTys.any haxTyHasUnreadRef then
       throw (s!"unsupported construct in `{name}`: a reference type `Ref` of a shape the " ++
@@ -6762,9 +6827,16 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
     -- the bridge layer instead).
     if constData.toList.length < 4 then
       return none
-    let name := match constData.toList with
+    let shortName := match constData.toList with
       | (.arr ident) :: _ => extractFnName (.arr ident)
       | _ => "unknown_const"
+    -- A short name two parents define is qualified by the parent, by the rule of the
+    -- reads (`fnNameCollisions`).
+    let name := if implMap.collisions.contains shortName then
+        match j.getObjVal? "def_id" with
+        | .ok defId => extractDefIdName defId implMap.collisions
+        | _ => shortName
+      else shortName
     let body ← match constData.toList[3]? with
       | some bodyJ =>
         if let some msg := bodyRefusal? none false (thirBodyExpr bodyJ) then
@@ -6793,13 +6865,17 @@ partial def defIdPathNames (defId : Json) : List String :=
       | _ => none
   | _ => []
 
-/-- Collect `(fnShortName, parentModule)` for every `Fn` item, recursing into
-    `Mod` sub-items, for Bug-2 collision detection. -/
+/-- `(shortName, parent)` for every `Fn` item and every top-level `Const` item (the
+    four-element form), recursing into `Mod` sub-items; the parent is the module, or the
+    function of a constant declared in a function body. Read by `fnNameCollisions`. -/
 partial def collectFnNameParents (items : List Json) : List (String × String) :=
   items.foldl (init := []) fun acc item =>
     match item.getObjVal? "kind" with
     | .ok kind =>
-      if (kind.getObjVal? "Fn").toOption.isSome then
+      let isTopLevelConst := match kind.getObjVal? "Const" with
+        | .ok (Json.arr constData) => constData.size ≥ 4
+        | _ => false
+      if (kind.getObjVal? "Fn").toOption.isSome || isTopLevelConst then
         match item.getObjVal? "def_id" with
         | .ok defId =>
           match (defIdPathNames defId).reverse with
@@ -6851,8 +6927,9 @@ partial def localCrateOfExport (root : Json) : LocalCrate :=
   { krates := (pairs.map (·.1)).eraseDups.filter (· != ""),
     fnNames := (pairs.map (·.2)).eraseDups }
 
-/-- Function short names that collide across ≥2 distinct parent modules. Such
-    names are module-qualified at both def and call sites (Bug-2). -/
+/-- The short names of functions and constants that two distinct parents define
+    (`collectFnNameParents`). Such a name is qualified by its parent (`parent_name`,
+    `extractDefIdName`) at the definition and at every call and read. -/
 partial def fnNameCollisions (root : Json) : List String :=
   let items := match root with | .arr xs => xs.toList | _ => []
   let pairs := collectFnNameParents items
@@ -7835,6 +7912,14 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                 | some iid, .ok implItems =>
                   for implItem in implItems do
                     let m := itemName implItem
+                    -- A method of an `impl` without an entry of `traitImplMethods` (an
+                    -- `impl` of a `core` trait, a derived `Clone`) contributes no
+                    -- definition, and its body is not parsed.
+                    let isFnItem :=
+                      (implItem.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption.isSome
+                    unless !isFnItem || implMap.traitImplMethods.any
+                        (fun p => p.1 == iid && p.2.1 == m) do
+                      continue
                     let defName := ((implMap.traitImplMethods.find? fun p =>
                       p.1 == iid && p.2.1 == m).map (·.2.2)).getD m
                     let (r?, rf) ← tryItem implItem defName
