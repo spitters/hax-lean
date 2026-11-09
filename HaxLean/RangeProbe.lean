@@ -6,6 +6,8 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.CertifiedTExprs
+public import HaxLean.Range.Heads
+public meta import HaxLean.Range.Heads
 
 /-!
 # Interval inference over the typed extraction (`lake exe rangeprobe`)
@@ -60,6 +62,17 @@ and of class 3 otherwise; a function that calls a function of class 3 is of clas
 arguments of every call lie in the callee's `pre`, since every caller's analysis starts at
 its type ranges or at its own `pre`.
 
+## The verified checker
+
+The analysis above is untrusted: its intervals (`Itv`, `AV`) are a candidate generator. The
+column `checked` of each function reports whether the verified checker
+`Hax.Range.checkT` (`HaxLean/Range/Check.lean`, sound by `Hax.Range.checkT_rust_sound`) accepts
+the function on the shared interval domain, from the candidates this analysis proposes
+(`checkedFn`): its parameters at the call-site precondition of round (B) or at their type
+ranges, the functions of the crate through summaries (their call-site precondition and their
+result value of round (B)), and the type ranges of the variables a loop writes as loop
+annotation (or none).
+
 ## Main definitions
 
 * `Itv`, `AV`: the abstract domain.
@@ -67,6 +80,8 @@ its type ranges or at its own `pre`.
 * `ev`: the abstract evaluation of a `TExpr`, counting operations.
 * `analyzeFn`: the analysis of one function under parameter intervals.
 * `classify`: the four rounds and the classes of a crate's functions.
+* `toRangeAV`, `typeAV`, `annOfTypes`, `checkedFn`: the candidates for the verified checker
+  and its verdict.
 * `Hax.RangeProbe.run`: the command line `rangeprobe [--name N] PATH...`.
 -/
 
@@ -842,6 +857,49 @@ def analyzeFn (fns : Std.HashMap String (Option AV)) (ps : List (String × ImpTy
     | none => v
   { obls := s.obls, calls := s.calls, ret }
 
+/-! ## Candidates for the verified checker -/
+
+/-- An abstract value of this analysis as one of the verified checker: an interval with a
+    known end pair, an array-length interval, or no information. -/
+def toRangeAV : AV → Range.AV
+  | .num i => if i.lo ≤ -big || big ≤ i.hi || i.hi < i.lo then .top else .num (i.lo, i.hi)
+  | .arr l => if l.hi < l.lo then .top else .arr (l.lo, l.hi)
+  | _ => .top
+
+/-- The abstract value of a type: the range of an integer type, the length of an array type;
+    no information otherwise. -/
+def typeAV (ty : ImpType) : Range.AV :=
+  match intTy ty with
+  | some (b, s) => let r := wRange b s; .num (r.lo, r.hi)
+  | none =>
+    match staticLen ty with
+    | some n => .arr (n, n)
+    | none => .top
+
+/-- The type ranges of the variables a term binds or assigns, as a loop annotation. -/
+partial def annOfTypes : TExpr → Range.AEnv
+  | .mk (.letBind x v b) _ => (x, typeAV v.ty) :: annOfTypes v ++ annOfTypes b
+  | .mk (.assign x r) _ => (x, typeAV r.ty) :: annOfTypes r
+  | .mk k _ => (kids k).flatMap annOfTypes
+
+/-- Whether the verified checker accepts a definition with parameters `ps` at `pre` (their
+    type ranges when absent) and the summaries `sums`, with the type ranges as loop
+    annotation or with none. -/
+def checkedFn (sums : List (String × (List Range.AV × Range.AV))) (ps : List (String × ImpType))
+    (pre : Option (List AV)) (e : TExpr) : Bool :=
+  let pv : List Range.AV := match pre with
+    | some vs => if vs.length = ps.length then
+        (ps.zip vs).map fun ((_, t), v) =>
+          match toRangeAV v, typeAV t with
+          | .num a, .num b => .num (CatCrypt.Crypto.SecureCompilation.RangeDomain.ivMeet a b)
+          | a, .top => a
+          | _, b => b
+      else ps.map fun (_, t) => typeAV t
+    | none => ps.map fun (_, t) => typeAV t
+  let Γ : Range.AEnv := (ps.zip pv).map fun ((x, _), a) => (x, a)
+  (Range.checkT (Range.stdSpec sums (annOfTypes e)) Γ e).isSome ||
+    (Range.checkT (Range.stdSpec sums []) Γ e).isSome
+
 /-- The class of each function and its analyses (C) and (D) (see the module docstring). -/
 structure FnRow where
   /-- The function. -/
@@ -856,6 +914,8 @@ structure FnRow where
   monadicCalls : Nat
   /-- Whether the function has a counted operation or calls one that has (transitively). -/
   baseline : Bool
+  /-- Whether the verified checker accepts the function (`checkedFn`). -/
+  checked : Bool := false
   deriving Inhabited
 
 /-- The join of the argument values at the call sites of each function, of the arity of its
@@ -913,10 +973,16 @@ def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
       if base.get? n != some true && cs.any (fun g => base.get? g == some true) then
         base := base.insert n true
         changed := true
+  -- The summaries for the verified checker: call-site precondition and result of (B).
+  let sums : List (String × (List Range.AV × Range.AV)) := rb.filterMap fun (n, r) =>
+    (pre.get? n).map fun vs => (n, (vs.map toRangeAV, toRangeAV r.ret))
+  let chk : Std.HashMap String Bool := defs.foldl (fun m (n, ps, _) =>
+    let e := (defs0.lookup n).getD default
+    m.insert n (checkedFn sums ps (pre.get? n) e)) {}
   pure <| (rc.zip rd).map fun ((n, c), (_, d)) =>
     { name := n, full := c.obls, ctx := d.obls, cls := (cls.get? n).getD 3,
       monadicCalls := (d.calls.filter fun (g, _) => cls.get? g == some 3).size,
-      baseline := (base.get? n).getD false }
+      baseline := (base.get? n).getD false, checked := (chk.get? n).getD false }
 
 /-- The kinds of the unproved operations with their counts, as `kind=count,…`. -/
 def residual (os : Array (String × Bool)) : List (String × Nat) :=
@@ -927,11 +993,12 @@ def residual (os : Array (String × Bool)) : List (String × Nat) :=
       | none => (k, 1) :: acc) []
 
 /-- The TSV line of a function: name, operations, safe under the call-site precondition,
-    class, safe at type ranges, calls of class-3 functions, unproved kinds. -/
+    class, safe at type ranges, calls of class-3 functions, whether the verified checker
+    accepts it, unproved kinds. -/
 def rowLine (r : FnRow) : String :=
   let res := ",".intercalate ((residual r.ctx).map fun (k, c) => s!"{k}={c}")
   s!"{r.name}\t{r.full.size}\t{(r.ctx.filter (·.2)).size}\t{r.cls}\t" ++
-    s!"{(r.full.filter (·.2)).size}\t{r.monadicCalls}\t{res}"
+    s!"{(r.full.filter (·.2)).size}\t{r.monadicCalls}\t{if r.checked then 1 else 0}\t{res}"
 
 /-- The summary lines of a crate. -/
 def summaryLines (crate : String) (rows : List FnRow) : List String :=
@@ -944,7 +1011,8 @@ def summaryLines (crate : String) (rows : List FnRow) : List String :=
     s!"class2={count (·.cls == 2)}\tclass3={count (·.cls == 3)}\t" ++
     s!"baseline_monadic={count (·.baseline)}\tbaseline_to_pure=" ++
     s!"{count (fun r => r.baseline && r.cls != 3)}\tops={ops}\tsafe_full={safeFull}\t" ++
-    s!"safe={safeCtx}"] ++
+    s!"safe={safeCtx}\tchecked={count (·.checked)}\t" ++
+    s!"checked_with_ops={count (fun r => r.checked && !r.full.isEmpty)}"] ++
   ((res.toArray.qsort (fun a b => a.2 > b.2)).toList.map fun (k, c) =>
     s!"# {crate}\tresidual\t{k}\t{c}")
 
@@ -1013,6 +1081,16 @@ def chkWhile : Bool :=
     [(1, #[("index", true), ("add", true)])]
 #guard chkWhile
 
+/-- The verified checker accepts the guarded index, the counted loop over `0..16`, `x + 100`
+    under `x < 100`, and `h` under its call site in `k`; it refuses the loop over `0..17` and
+    `x + 1`. -/
+def chkVerified : Bool :=
+  let ck (ds : List (String × TExpr)) := (classify ds).map (·.checked)
+  ck [("g", guarded)] == [true] && ck [("f", loopIdx 16)] == [true] &&
+    ck [("f", loopIdx 17)] == [false] && ck [("a", addF false), ("b", addF true)] == [false, true]
+    && ck [("h", hF), ("k", kF)] == [true, true]
+#guard chkVerified
+
 end Examples
 
 /-! ## Command line -/
@@ -1031,7 +1109,7 @@ def run (args : List String) : IO UInt32 := do
   if paths.isEmpty then
     IO.eprintln "usage: rangeprobe [--name N] PATH..."
     return 1
-  IO.println "function\tops\tsafe\tclass\tsafe_full\tmonadic_calls\tresidual"
+  IO.println "function\tops\tsafe\tclass\tsafe_full\tmonadic_calls\tchecked\tresidual"
   for p in paths do
     let f ← exportOf p
     let crate := name.getD ((f.parent.bind (·.fileName)).getD f.toString)
