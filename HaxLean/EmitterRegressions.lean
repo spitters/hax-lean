@@ -4263,6 +4263,31 @@ def mulFnU64Checked : TExpr :=
 #guard ((toLeanCertifiedFileTyped [("f", mulFnU64)] "Test" [] [] []
     (emitMonadic := true)).splitOn "def f (a : Int) (b : Int) :=\nHax.mul a b\n").length == 2
 
+/-- The range candidates of `MonadicEmit.RangeExamples.input` at the printed literals. -/
+def rangeCandsHK (ts : List (String × TExpr)) : MonadicEmit.RangeInput :=
+  { MonadicEmit.RangeExamples.input with texprs := ts }
+
+/-- The file of `h` (an index, accepted under its call site) and `k` (a loop calling `h`,
+    accepted at the full type ranges), with or without the range candidates. -/
+def rangeFileHK (cands : Bool) : String :=
+  toLeanCertifiedFileTyped
+    [("h", MonadicEmit.RangeExamples.hF), ("k", MonadicEmit.RangeExamples.kF)] "Test"
+    (emitMonadic := true) (rangeCands := if cands then some rangeCandsHK else none)
+
+-- With the candidates, `k` is total and calls `h_pure`, `h` is monadic with its total
+-- surface `h_pure`, and the file carries `k_noPanic` and imports the range checker.
+#guard ((rangeFileHK true).splitOn "theorem k_noPanic ").length == 2
+#guard ((rangeFileHK true).splitOn "theorem h_noPanicOn ").length == 2
+#guard ((rangeFileHK true).splitOn "def h_pure (a : Array (Int)) (i : Int) :=\n").length == 2
+#guard ((rangeFileHK true).splitOn "import HaxLean.Range.Heads\n").length == 2
+#guard ((rangeFileHK true).splitOn "let _ := h_pure a j\n").length == 2
+-- Without them, the file is the `--emit-monadic` file of P3: no range text, `k` monadic.
+#guard rangeFileHK false == toLeanCertifiedFileTyped
+    [("h", MonadicEmit.RangeExamples.hF), ("k", MonadicEmit.RangeExamples.kF)] "Test"
+    (emitMonadic := true)
+#guard ((rangeFileHK false).splitOn "Range.").length == 1
+#guard ((rangeFileHK false).splitOn "_pure").length == 1
+
 end MonadicEmission
 
 /-! The bodies pinned in `MonadicEmission`, as definitions over `HaxLean.RuntimeM`. -/
