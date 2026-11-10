@@ -2008,7 +2008,15 @@ def depsHeadsDef (moduleName : String) (heads : List String) : String :=
     A-normal `do` form (`MonadicEmit.renderBody`), a monadic definition on a cycle of the
     call graph with `partial_fixpoint`, a class method of the closure with result type
     `RustM`, and a contract of a monadic function over its `ok` result; the file then
-    imports `HaxLean.RuntimeM`. With it off the output is unchanged. -/
+    imports `HaxLean.RuntimeM`. With it off the output is unchanged.
+    `rangeCands`, under `emitMonadic`, gives the candidates of the verified range checker
+    for the `TExpr` literals of the file (`MonadicEmit.RangeInput`); the checker's decision
+    (`MonadicEmit.rangePlan`) prints each function it accepts at the full type ranges of its
+    parameters total, prints beside each monadic function it accepts under the
+    precondition of its summary the total surface `f_pure`, which total callers call
+    (`MonadicEmit.pureCalls`), and adds the theorems of `MonadicEmit.rangeBlock`, the file
+    then importing `HaxLean.Range.Heads`. Members of a method group and generic functions
+    are not candidates. Without it the output is unchanged. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -2027,7 +2035,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (traitHeads : Bool := false)
     (keepDeclassify : Bool := false)
     (emitMonadic : Bool := false)
-    (facts : MonadicEmit.Facts := {}) : String :=
+    (facts : MonadicEmit.Facts := {})
+    (rangeCands : Option (List (String × TExpr) → MonadicEmit.RangeInput) := none) : String :=
   let prep := certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes
     classHooks nominalKrates
   let prep := if !keepDeclassify then prep
@@ -2087,9 +2096,24 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
           | some _ => acc.map fun (k, ds) =>
             if k == (inst.trait, item) then (k, ds ++ [d]) else (k, ds)
           | none => acc ++ [((inst.trait, item), [d])]) acc) []
+  -- The decision of the verified range checker on the literals, from the candidates.
+  let rangePlan? : Option MonadicEmit.RangePlan :=
+    if !emitMonadic then none
+    else rangeCands.map fun mk =>
+      let inp := mk texprs
+      MonadicEmit.rangePlan { inp with
+        crate := (defs.map (·.1) ++ inp.crate).eraseDups,
+        groups := inp.groups ++ methodGroups.map (fun ((_, m), ds) => m :: ds) ++
+          [classHooks.genericFns.map (·.name)] }
+  let facts := match rangePlan? with
+    | some p => p.facts facts
+    | none => facts
   let monadicFns : List String :=
     if !emitMonadic then []
     else MonadicEmit.effectClosure defs (methodGroups.map fun ((_, m), ds) => m :: ds) facts
+  -- The monadic functions whose total surface `f_pure` total callers call.
+  let pureFns : List String :=
+    if rangePlan?.isNone then [] else facts.pureCallees monadicFns
   let classHooks := if !emitMonadic then classHooks
     else { classHooks with
       monadicMethods := (methodGroups.filter fun ((_, m), _) => monadicFns.contains m).map (·.1) }
@@ -2303,7 +2327,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     else MonadicEmit.recursiveFns (defs.map fun (n, e) =>
         (n, ((collectAppCalls e).map (·.1) ++ collectFreeVars [n] e).filter definedNames.contains))
       monadicFns
-  let surfaceDefs : List (String × String) := defs.map fun (n, e) =>
+  let surfaceDefs : List (String × String) := defs.map fun (n, e0) =>
+    -- A total definition calls the total surface of a monadic function of `pureFns`.
+    let e := if pureFns.isEmpty || monadicFns.contains n then e0
+      else MonadicEmit.pureCalls pureFns e0
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
@@ -2317,6 +2344,15 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let surfaceDef := if !needsPartial && recursiveMonadic.contains n then
         surfaceDef ++ "partial_fixpoint\n"
       else surfaceDef
+    -- A monadic function of `pureFns` is followed by its total surface `f_pure`.
+    let surfaceDef := match pureFns.contains n, rawTdefs.find? (·.1 == n) with
+      | true, some (_, rawTe) =>
+        let pureDef := toLeanDefTyped (n ++ "_pure") rawTe (MonadicEmit.pureCalls pureFns e0)
+          (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
+          (boolNames := boolNames) (mutWriteRets := mutWriteRets)
+        let pureDef := if needsPartial then pureDef.replace "def " "partial def " else pureDef
+        surfaceDef ++ "\n" ++ pureDef
+      | _, _ => surfaceDef
     (n, s!"{surfaceDef}")
   -- The trait-to-class emission (`Hax.ClassEmit`) puts the generic structs and
   -- the classes before the preamble, and emits the definitions and instances
@@ -2341,6 +2377,15 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- Under `--emit-monadic` the file imports the guarded operations and names `RustM`.
   let monadicImport := if emitMonadic then "import HaxLean.RuntimeM\n" else ""
   let monadicOpen := if emitMonadic then "open Aeneas.Std (RustM)\n" else ""
+  -- The theorems of the range checker's decision; a `partial def` literal is opaque to
+  -- evaluation, so a file with partial literals has none.
+  let rangeText := match rangePlan? with
+    | some p => if needsPartial then "" else
+      let t := MonadicEmit.rangeBlock p
+      if t.isEmpty then "" else t ++ "\n\n"
+    | none => ""
+  let monadicImport := if rangeText.isEmpty then monadicImport
+    else monadicImport ++ "import HaxLean.Range.Heads\n"
   let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{monadicImport}{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{monadicOpen}{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{typeDeclBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
   let body := "\n".intercalate bodyParts
   let impExprs := "\n".intercalate (literalDefs.map fun (n, e) =>
@@ -2356,6 +2401,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     s!"{ds}\n"
   let exampleBlock := if texprs.isEmpty || needsPartial then "" else
     "\n".intercalate (texprs.map fun (n, _) => toLeanEraseExample n) ++ "\n\n"
+  -- The range theorems follow the literals they evaluate.
+  let exampleBlock := exampleBlock ++ rangeText
   let lowCTBlock :=
     if !emitLowCT then "" else
     let ds := "\n".intercalate (literalDefs.map fun (n, e) =>
