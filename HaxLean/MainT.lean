@@ -12,6 +12,7 @@ public import HaxLean.TPipeline
 public import HaxLean.InlineClosures
 public import HaxLean.ThreadMutations
 public import HaxLean.CertifiedTExprs
+public import HaxLean.RangeProbe
 public import HaxLean.Py.Emit
 
 /-!
@@ -338,7 +339,9 @@ def main (args : List String) : IO UInt32 := do
         (classHooks := classHooks) (contracts := contractPlan)
         (nominalKrates := opts.nominalKrates) (structTuples := opts.structTuples)
         (traitHeads := opts.traitHeads) (keepDeclassify := opts.keepDeclassify)
-        (emitMonadic := opts.emitMonadic) ++ secrecyDef
+        (emitMonadic := opts.emitMonadic)
+        (rangeCands := if opts.emitMonadic then some Hax.RangeProbe.rangeInput else none)
+        ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
     IO.println rendered

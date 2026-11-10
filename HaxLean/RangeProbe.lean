@@ -1038,8 +1038,12 @@ def callPre (defs : List (String × List (String × ImpType) × TExpr))
 /-- Whether every counted operation is proved safe. -/
 def allSafe (os : Array (String × Bool)) : Bool := os.all (·.2)
 
-/-- The four analyses of a crate's definitions and the class of each function. -/
-def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
+/-- The analyses of a crate's definitions (see the module docstring): the definitions with
+    their parameters, the call-site preconditions of round (A), and the analyses (C) and (D)
+    with the result values of round (B). -/
+def rounds (defs0 : List (String × TExpr)) :
+    List (String × List (String × ImpType) × TExpr) × Std.HashMap String (List AV) ×
+      List (String × FnResult) × List (String × FnResult) :=
   let defs := defs0.map fun (n, e) => let (ps, b) := stripParams e; (n, ps, b)
   let noSum : Std.HashMap String (Option AV) :=
     defs.foldl (fun m (n, _, _) => m.insert n none) {}
@@ -1053,6 +1057,29 @@ def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
   -- (C) and (D) with the result values of (B).
   let rc := defs.map fun (n, ps, b) => (n, analyzeFn sum ps b none)
   let rd := defs.map fun (n, ps, b) => (n, analyzeFn sum ps b (pre.get? n))
+  (defs, pre, rc, rd)
+
+/-- The candidates of the verified range checker for the literals `defs0`
+    (`MonadicEmit.RangeInput`): for each function, the parameters at their type ranges with
+    the loop annotation of `checkedWith` from the loop-head values of round (C), when the
+    checker accepts the function there; and the summaries of `verifiedSums` with their loop
+    annotations. `MonadicEmit.rangePlan` checks every candidate again. -/
+def rangeInput (defs0 : List (String × TExpr)) : MonadicEmit.RangeInput :=
+  let (defs, pre, rc, rd) := rounds defs0
+  let infC : Std.HashMap String AEnv := rc.foldl (fun m (n, r) => m.insert n r.anns) {}
+  let infD : Std.HashMap String AEnv := rd.foldl (fun m (n, r) => m.insert n r.anns) {}
+  let (sums, anns, _) := verifiedSums defs0 pre infD
+  let full := defs.filterMap fun (n, ps, _) =>
+    let Γ := paramEnvOf ps (paramAVs ps none)
+    (checkedWith sums ((infC.get? n).getD []) Γ ((defs0.lookup n).getD default)).map
+      fun (_, an) => (n, Γ, an)
+  { texprs := defs0, params := defs.map fun (n, ps, _) => (n, ps.map (·.1)),
+    crate := defs.map (·.1), full, sums,
+    sumAnns := sums.map fun (n, _) => (n, (anns.get? n).getD []) }
+
+/-- The four analyses of a crate's definitions and the class of each function. -/
+def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
+  let (defs, pre, rc, rd) := rounds defs0
   let own : Std.HashMap String Nat := (rc.zip rd).foldl (fun m ((n, c), (_, d)) =>
     m.insert n (if allSafe c.obls then 1 else if allSafe d.obls then 2 else 3)) {}
   let callees : Std.HashMap String (List String) := (rc.zip rd).foldl (fun m ((n, c), (_, d)) =>
@@ -1250,7 +1277,3 @@ def run (args : List String) : IO UInt32 := do
   return 0
 
 end Hax.RangeProbe
-
-/-- The entry point of `lake exe rangeprobe`. -/
-def main (args : List String) : IO UInt32 :=
-  Hax.RangeProbe.run args

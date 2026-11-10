@@ -33,7 +33,7 @@ lean_exe «certified-checks» where
 -- of them an interval analysis proves safe, and the function's class
 -- (`HaxLean/RangeProbe.lean`).
 lean_exe rangeprobe where
-  root := `HaxLean.RangeProbe
+  root := `HaxLean.RangeProbeMain
 
 -- API documentation (opt-in, dev only). Generate with:
 --   lake -R -Kenv=doc update && lake -R -Kenv=doc build HaxLean:docs
