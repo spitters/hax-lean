@@ -156,18 +156,24 @@ theorem Vec.push_spec {α : Type u} (v : Vec α) (x : α) (h : v.val.length < Us
   simp only [this, decide_true, Bool.or_true, ↓reduceDIte]
   exact (spec_ok _).2 (List.concat_eq_append ..)
 
-/-- Overwrites position `i` with `x`; a panic when `i ≥ v.len()`. Rust's `Vec::insert`
-shifts the tail instead; this model keeps the length. -/
+/-- Inserts `x` at position `i` and shifts the tail, as Rust's `Vec::insert`; a panic when
+`i > v.len()` or when the length would exceed `Usize.max`. -/
 def Vec.insert {α : Type u} (v: Vec α) (i: Usize) (x: α) : RustM (Vec α) :=
-  if i.val < v.length then
-    ok ⟨ v.val.set i x, by have := v.property; simp [*] ⟩
+  if hi : i.val ≤ v.length then
+    if h : v.length < Usize.max then
+      ok ⟨ v.val.insertIdx i.val x, by
+        have := List.length_insertIdx_of_le_length hi x
+        simp only [length] at h
+        omega ⟩
+    else
+      fail panic
   else
     fail panic
 
 theorem Vec.insert_spec {α : Type u} (v: Vec α) (i: Usize) (x: α)
-  (hbound : i.val < v.length) :
-  v.insert i x ⦃ nv => nv.val = v.val.set i x ⦄ := by
-  simp only [insert, hbound, ↓reduceIte]
+  (hbound : i.val ≤ v.length) (hsize : v.length < Usize.max) :
+  v.insert i x ⦃ nv => nv.val = v.val.insertIdx i.val x ⦄ := by
+  simp only [insert, hbound, hsize, ↓reduceDIte]
   exact (spec_ok _).2 rfl
 
 /-- Indexing: a panic when `i` is out of range. -/
