@@ -42,8 +42,11 @@ correctness).
 * `Hax.slice_toM`, `Hax.slice_fromM`, `Hax.slice_rangeM`, `Hax.slice_updateM`,
   `Hax.copy_from_sliceM`: slicing within bounds and copying between slices of equal length.
 * `Hax.unwrapM`, `Hax.expectM`, `Hax.assertM`, `Hax.assert_failedM`, `Hax.panicM`.
-* `Hax.foldRangeM`, `Hax.forFoldM`: the counted loops of `Hax.foldRange` and `Hax.forFold`
-  with a monadic body.
+* `Hax.foldRangeM`, `Hax.forFoldM`, `Hax.forFoldReturnM`: the counted loops of
+  `Hax.foldRange`, `Hax.forFold` and `Hax.forFoldReturn` with a monadic body.
+* `Hax.whileFoldM`, `Hax.whileFoldReturnM`: the `while` loops of `Hax.whileFold` and
+  `Hax.whileFoldReturn` in `RustM`, by `partial_fixpoint`; a run that does not stop is
+  `div`.
 * `rust_vc`: `vcgen … with finish`, falling back to `vcgen` followed by `grind`, `omega` or
   `bv_decide` on each verification condition.
 
@@ -634,6 +637,46 @@ theorem forFoldM_spec {m : Type → Type} [Monad m] {Pred EPred : Type} [Asserti
       | Break v => exact Triple.pure (ControlFlow.Break v) PartialOrder.rel_refl
       | Continue acc' => exact ih (i + 1) acc' (by omega) (by omega)
   exact key (hi - lo).toNat lo init (Int.le_refl lo) (by omega)
+
+/-- Monadic fold over `[lo, hi)` whose body may break out of the loop
+(`Break (Continue v)`) or return from the function (`Break (Break v)`); the monadic form of
+`Hax.forFoldReturn`. -/
+def forFoldReturnM {m : Type → Type} [Monad m] {α β γ : Type} (lo hi : Int) (init : α)
+    (f : Int → α → m (ControlFlow (ControlFlow β γ) α)) :
+    m (ControlFlow β (ControlFlow γ α)) :=
+  go (hi - lo).toNat lo init
+where
+  /-- `n` trips of the loop from the counter value `i`. -/
+  go : Nat → Int → α → m (ControlFlow β (ControlFlow γ α))
+    | 0, _, acc => pure (.Continue (.Continue acc))
+    | n + 1, i, acc => f i acc >>= fun r => match r with
+      | .Break (.Continue v) => pure (.Continue (.Break v))
+      | .Break (.Break v) => pure (.Break v)
+      | .Continue acc' => go n (i + 1) acc'
+
+/-- `while` loop in `RustM` with a monadic condition and body, the monadic form of
+`Hax.whileFold`: a run that does not stop is `div`. -/
+def whileFoldM {α β : Type} (init : α) (cond : α → RustM Bool)
+    (f : α → RustM (ControlFlow β α)) : RustM (ControlFlow β α) := do
+  if ← cond init then
+    match ← f init with
+    | .Break v => pure (.Break v)
+    | .Continue acc => whileFoldM acc cond f
+  else pure (.Continue init)
+partial_fixpoint
+
+/-- `while` loop in `RustM` whose body may break out of the loop or return from the
+function, the monadic form of `Hax.whileFoldReturn`: a run that does not stop is `div`. -/
+def whileFoldReturnM {α β γ : Type} (init : α) (cond : α → RustM Bool)
+    (f : α → RustM (ControlFlow (ControlFlow β γ) α)) :
+    RustM (ControlFlow β (ControlFlow γ α)) := do
+  if ← cond init then
+    match ← f init with
+    | .Break (.Continue v) => pure (.Continue (.Break v))
+    | .Break (.Break v) => pure (.Break v)
+    | .Continue acc => whileFoldReturnM acc cond f
+  else pure (.Continue (.Continue init))
+partial_fixpoint
 
 end Hax
 

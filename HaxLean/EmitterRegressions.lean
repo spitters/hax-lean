@@ -19,6 +19,9 @@ public meta import HaxLean.Phase.WrapMatchArms
 public import HaxLean.Phase.WrapMatchArms
 public meta import HaxLean.CertifiedTExprs
 public import HaxLean.CertifiedTExprs
+public meta import HaxLean.MonadicEmit
+public import HaxLean.MonadicEmit
+public import HaxLean.RuntimeM
 
 /-!
 # Emitter regressions
@@ -4119,5 +4122,290 @@ def assignLet (body : ImpExpr) : ImpExpr :=
 #guard (parseArgs ["--hax", "--emit-certified", "f.json"]).unknownArgs.isEmpty
 
 end SilentDropRefusals
+
+/-! ## Monadic emission
+
+The A-normal `do` rendering of `--emit-monadic` (`MonadicEmit.renderBody`), one pin per
+construct, and the effect closure. The rendered bodies follow in `MonadicOut` as
+definitions over `HaxLean.RuntimeM`, so that they elaborate. -/
+
+namespace MonadicEmission
+
+open MonadicEmit
+
+-- Checked arithmetic and indexing, a call of a monadic function, arguments left to right.
+#guard renderBody { monadic := ["g"] } (.letBind "x" (.app "index" [.var "a", .var "i"])
+    (.app "Add#64" [.var "x", .app "g" [.var "a"]])) ==
+  "  do\n    let x ← Hax.indexM a i\n    let _m0 ← g a\n    Hax.addM_w 64 x _m0"
+
+-- A partial operation in a branch is bound inside the branch.
+#guard renderBody { monadic := [] } (.ifThenElse (.app "Lt" [.var "i", .app "len" [.var "a"]])
+    (.app "index" [.var "a", .var "i"]) (.lit (.int 0))) ==
+  "  do\n    if Hax.lt i (Hax.array_len a) then\n      Hax.indexM a i\n    else\n      pure (0 : Int)"
+
+-- A counted loop with a monadic body.
+#guard renderBody { monadic := [] } (.letBind "acc" (.lit (.int 0))
+    (.seq (.forFold "j" (.lit (.int 0)) (.var "n") (.letBind "acc"
+      (.app "Add#32" [.var "acc", .app "index" [.var "a", .var "j"]]) (.var "acc"))) (.var "acc"))) ==
+  "  do\n    let acc := (0 : Int)\n    Hax.foldRangeM (0 : Int) n acc fun j acc => do\n      let _m0 ← Hax.indexM a j\n      Hax.addM_w 32 acc _m0"
+
+-- A reverse loop with a `break`: the forward counter, the reverse one computed from it.
+#guard renderBody { monadic := [] } (.letBind "acc" (.lit (.int 0))
+    (.seq (.forFoldRev "j" (.lit (.int 0)) (.var "n")
+      (.seq (.ifThenElse (.app "Gt" [.app "index" [.var "a", .var "j"], .lit (.int 9)])
+        (.cfBreak .unitVal) .unitVal)
+      (.letBind "acc" (.app "Add#32" [.var "acc", .lit (.int 1)]) (.var "acc")))) (.var "acc"))) ==
+  "  do\n    let acc := (0 : Int)\n    let _wf ← Hax.forFoldM (0 : Int) n acc fun _k acc => do\n      let j := (0 : Int) + n - 1 - _k\n      let _m0 ← Hax.indexM a j\n      if Hax.gt _m0 (9 : Int) then\n        pure (Hax.cfBreak acc)\n      else\n        let acc ← Hax.addM_w 32 acc (1 : Int)\n        pure (Hax.cfContinue acc)\n    pure _wf.merge"
+
+-- `map` with a monadic closure.
+#guard renderBody { monadic := ["g"] } (.app "map" [.var "xs", .lam ["x"] (.app "g" [.var "x"])]) ==
+  "  do\n    (xs).mapM (fun x => do\n        g x)"
+
+-- `unwrap` of a scrutinee, signed division.
+#guard renderBody { monadic := [] } (.match_ (.app "unwrap" [.var "o"])
+    [(.wildcard, .app "Div#i32" [.var "a", .var "b"])]) ==
+  "  do\n    let _m0 ← Hax.unwrapM o\n    match _m0 with\n    | _ =>\n      Hax.divM_iw 32 a b"
+
+-- A variable rebound in a monadic branch is returned by the branch and rebound.
+#guard renderBody { monadic := [] } (.letBind "y" (.lit (.int 0))
+    (.seq (.ifThenElse (.app "Lt" [.var "i", .lit (.int 3)])
+      (.letBind "y" (.app "index" [.var "a", .var "i"]) (.var "y")) .unitVal) (.var "y"))) ==
+  "  do\n    let y := (0 : Int)\n    let y ← do\n      if Hax.lt i (3 : Int) then\n        let y ← Hax.indexM a i\n        pure y\n      else\n        pure y\n    pure y"
+
+-- A `while` loop.
+#guard renderBody { monadic := [] } (.letBind "x" (.lit (.int 0))
+    (.seq (.whileFold (.app "Lt" [.var "x", .lit (.int 10)])
+      (.letBind "x" (.app "Add#64" [.var "x", .lit (.int 1)]) (.var "x"))) (.var "x"))) ==
+  "  do\n    let x := (0 : Int)\n    let _wf ← Hax.whileFoldM x (fun x => pure (Hax.lt x (10 : Int))) fun x => do\n      let x ← Hax.addM_w 64 x (1 : Int)\n      pure (Hax.cfContinue x)\n    pure _wf.merge"
+
+-- `assert!` as a statement.
+#guard renderBody { monadic := [] } (.seq (.app "assert" [.app "Lt" [.var "i", .lit (.int 3)]])
+    (.app "index" [.var "a", .var "i"])) ==
+  "  do\n    let _ ← Hax.assertM (Hax.lt i (3 : Int))\n    Hax.indexM a i"
+
+-- A tuple returned by a monadic call is destructured by the bind.
+#guard renderBody { monadic := ["g2"] } (.letBind "_tup" (.app "g2" [.var "a"])
+    (.letBind "p" (.proj (.var "_tup") 0) (.letBind "q" (.proj (.var "_tup") 1)
+      (.app "Add#64" [.var "p", .var "q"])))) ==
+  "  do\n    let (p, q) ← g2 a\n    Hax.addM_w 64 p q"
+
+-- A loop with an early return.
+#guard renderBody { monadic := [] } (.seq (.forFoldReturn "j" (.lit (.int 0)) (.var "n")
+    (.seq (.ifThenElse (.app "Gt" [.app "index" [.var "a", .var "j"], .lit (.int 9)])
+      (.cfBreak (.var "j")) .unitVal) .unitVal)) (.lit (.int (-1)))) ==
+  "  do\n    let _fr ← Hax.forFoldReturnM (0 : Int) n () fun j _acc => do\n      let _m0 ← Hax.indexM a j\n      if Hax.gt _m0 (9 : Int) then\n        pure (Hax.cfBreak (Hax.cfBreak j))\n      else\n        pure <|\n          Hax.cfContinue ()\n    match (show ControlFlow _ (ControlFlow Unit _) from _fr) with\n    | .Break _v => pure _v\n    | .Continue _ =>\n      pure (-1 : Int)"
+
+-- Mutual recursion: a call of the other function of the cycle is a bind.
+#guard renderBody { monadic := ["ev", "od"] } (.ifThenElse (.app "Eq" [.var "n", .lit (.int 0)])
+    (.lit (.bool true)) (.app "od" [.app "Sub#64" [.var "n", .lit (.int 1)]])) ==
+  "  do\n    if Hax.beq n (0 : Int) then\n      pure true\n    else\n      let _m0 ← Hax.subM_w 64 n (1 : Int)\n      od _m0"
+#guard recursiveFns [("ev", ["od"]), ("od", ["ev"]), ("p", ["q"]), ("q", [])] ["ev", "od", "p"] ==
+  ["ev", "od"]
+
+-- The effect closure: `f` indexes, `g` calls `f`; the untagged `Add` of `h` is total; the
+-- group `["n", "g"]` (a trait method and its `impl`) follows `g`.
+#guard effectClosure [("f", .app "index" [.var "a", .lit (.int 0)]), ("g", .app "f" [.var "a"]),
+    ("h", .app "Add" [.var "x", .var "y"]), ("k", .app "m" [.var "x"])]
+    [["m", "h"], ["n", "g"]] == ["f", "g", "n"]
+-- A function proved not to panic stays total, and so do its callers.
+#guard effectClosure [("f", .app "index" [.var "a", .lit (.int 0)]), ("g", .app "f" [.var "a"])]
+    [] { noPanic := ["f"] } == []
+
+-- A width tag selects the guarded operation; a field tag and an untagged operator are total.
+#guard (guardedHead? "Shl#i16" [.var "a", .var "b"]).map (·.1) == some "Hax.shlM_iw 16"
+#guard (guardedHead? "Rem#size" [.var "a", .var "b"]).map (·.1) == some "Hax.remM_w Hax.usizeBits"
+#guard (guardedHead? "Mul#p7" [.var "a", .var "b"]).isNone
+#guard (guardedHead? "Mul" [.var "a", .var "b"]).isNone
+#guard (guardedHead? "index" [.var "a", .var "RangeFull"]).isNone
+#guard (guardedHead? "index" [.var "a", .app "Range" [.var "l", .var "h"]]).map (·.1) ==
+  some "Hax.slice_rangeM"
+
+-- The option is parsed.
+#guard (parseArgs ["--hax", "--emit-certified", "--emit-monadic", "f.json"]).emitMonadic
+
+/-- `fn f(a: u64, b: u64) -> u64 { a * b }` with the checked `*` of `u64`. -/
+def mulFnU64Checked : TExpr :=
+  .mk (.letBind "a" (.mk (.var "a") (.uint .w64))
+    (.mk (.letBind "b" (.mk (.var "b") (.uint .w64))
+      (.mk (.app "Mul#64" [.mk (.var "a") (.uint .w64), .mk (.var "b") (.uint .w64)])
+        (.uint .w64))) (.uint .w64))) (.uint .w64)
+
+-- A constant of the effect closure is bound by `←` where it is read: in an argument of
+-- an arithmetic operation and in a loop bound. Its readers join the closure.
+#guard renderBody { monadic := ["K"] } (.letBind "acc" (.lit (.int 0))
+    (.seq (.forFold "j" (.lit (.int 0)) (.var "K")
+      (.letBind "acc" (.app "Div#size" [.var "acc", .var "K"]) (.var "acc"))) (.var "acc"))) ==
+  "  do\n    let acc := (0 : Int)\n    let _m0 ← K\n    Hax.foldRangeM (0 : Int) _m0 acc fun j acc => do\n      let _m1 ← K\n      Hax.divM_w Hax.usizeBits acc _m1"
+#guard renderBody { monadic := ["K"] } (.var "K") == "  do\n    K"
+#guard effectClosure [("K", .app "Add#size" [.var "A", .lit (.int 16)]),
+    ("f", .app "Div#size" [.var "K", .lit (.int 16)]), ("A", .lit (.int 3))] == ["K", "f"]
+
+-- In the file printer, the monadic function is a `do` block and the file imports the
+-- guarded operations; without the option the file does not.
+#guard ((toLeanCertifiedFileTyped [("f", mulFnU64Checked)] "Test" [] [] []
+    (emitMonadic := true)).splitOn
+      "def f (a : Int) (b : Int) :=\n  do\n    Hax.mulM_w 64 a b\n").length == 2
+#guard ((toLeanCertifiedFileTyped [("f", mulFnU64Checked)] "Test" [] [] []
+    (emitMonadic := true)).splitOn "import HaxLean.RuntimeM\n").length == 2
+#guard ((toLeanCertifiedFileTyped [("f", mulFnU64Checked)] "Test" [] [] []).splitOn
+    "HaxLean.RuntimeM").length == 1
+-- A function without a partial operation prints as without the option.
+#guard ((toLeanCertifiedFileTyped [("f", mulFnU64)] "Test" [] [] []
+    (emitMonadic := true)).splitOn "def f (a : Int) (b : Int) :=\nHax.mul a b\n").length == 2
+
+end MonadicEmission
+
+/-! The bodies pinned in `MonadicEmission`, as definitions over `HaxLean.RuntimeM`. -/
+
+namespace MonadicOut
+
+open Aeneas.Std (RustM)
+
+/-- A constant of the effect closure. -/
+def K :=
+  do
+    Hax.addM_w Hax.usizeBits (3 : Int) (16 : Int)
+
+/-- A closure constant read in a loop bound and in a division. -/
+def constUse :=
+  do
+    let acc := (0 : Int)
+    let _m0 ← K
+    Hax.foldRangeM (0 : Int) _m0 acc fun j acc => do
+      let _m1 ← K
+      Hax.divM_w Hax.usizeBits acc _m1
+
+/-- Callee of `checked`. -/
+def g (a : Array Int) :=
+  do
+    Hax.indexM a (0 : Int)
+
+/-- Callee of `destructure`. -/
+def g2 (a : Array Int) : RustM (Int × Int) :=
+  do
+    let x ← Hax.indexM a (0 : Int)
+    pure (x, x)
+
+/-- Checked arithmetic, indexing and a monadic call. -/
+def checked (a : Array Int) (i : Int) :=
+  do
+    let x ← Hax.indexM a i
+    let _m0 ← g a
+    Hax.addM_w 64 x _m0
+
+/-- A partial operation in a branch. -/
+def guardedIf (a : Array Int) (i : Int) :=
+  do
+    if Hax.lt i (Hax.array_len a) then
+      Hax.indexM a i
+    else
+      pure (0 : Int)
+
+/-- A counted loop. -/
+def sumLoop (a : Array Int) (n : Int) :=
+  do
+    let acc := (0 : Int)
+    Hax.foldRangeM (0 : Int) n acc fun j acc => do
+      let _m0 ← Hax.indexM a j
+      Hax.addM_w 32 acc _m0
+
+/-- A reverse loop with `break`. -/
+def revBreak (a : Array Int) (n : Int) :=
+  do
+    let acc := (0 : Int)
+    let _wf ← Hax.forFoldM (0 : Int) n acc fun _k acc => do
+      let j := (0 : Int) + n - 1 - _k
+      let _m0 ← Hax.indexM a j
+      if Hax.gt _m0 (9 : Int) then
+        pure (Hax.cfBreak acc)
+      else
+        let acc ← Hax.addM_w 32 acc (1 : Int)
+        pure (Hax.cfContinue acc)
+    pure _wf.merge
+
+/-- `map` with a monadic closure. -/
+def mapCall (xs : Array (Array Int)) :=
+  do
+    (xs).mapM (fun x => do
+        g x)
+
+/-- `unwrap` and signed division. -/
+def unwrapDiv (o : Option Int) (a b : Int) :=
+  do
+    let _m0 ← Hax.unwrapM o
+    match _m0 with
+    | _ =>
+      Hax.divM_iw 32 a b
+
+/-- A variable rebound in a monadic branch. -/
+def rebind (a : Array Int) (i : Int) :=
+  do
+    let y := (0 : Int)
+    let y ← do
+      if Hax.lt i (3 : Int) then
+        let y ← Hax.indexM a i
+        pure y
+      else
+        pure y
+    pure y
+
+/-- A `while` loop. -/
+def whileLoop :=
+  do
+    let x := (0 : Int)
+    let _wf ← Hax.whileFoldM x (fun x => pure (Hax.lt x (10 : Int))) fun x => do
+      let x ← Hax.addM_w 64 x (1 : Int)
+      pure (Hax.cfContinue x)
+    pure _wf.merge
+
+/-- `assert!` as a statement. -/
+def asserted (a : Array Int) (i : Int) :=
+  do
+    let _ ← Hax.assertM (Hax.lt i (3 : Int))
+    Hax.indexM a i
+
+/-- A destructured monadic call. -/
+def destructure (a : Array Int) :=
+  do
+    let (p, q) ← g2 a
+    Hax.addM_w 64 p q
+
+/-- A loop with an early return. -/
+def earlyReturn (a : Array Int) (n : Int) :=
+  do
+    let _fr ← Hax.forFoldReturnM (0 : Int) n () fun j _acc => do
+      let _m0 ← Hax.indexM a j
+      if Hax.gt _m0 (9 : Int) then
+        pure (Hax.cfBreak (Hax.cfBreak j))
+      else
+        pure <|
+          Hax.cfContinue ()
+    match (show ControlFlow _ (ControlFlow Unit _) from _fr) with
+    | .Break _v => pure _v
+    | .Continue _ =>
+      pure (-1 : Int)
+
+mutual
+/-- Mutual recursion, a fixpoint in the order of `RustM`. -/
+def ev (n : Int) :=
+  do
+    if Hax.beq n (0 : Int) then
+      pure true
+    else
+      let _m0 ← Hax.subM_w 64 n (1 : Int)
+      od _m0
+partial_fixpoint
+/-- The other function of the cycle. -/
+def od (n : Int) :=
+  do
+    if Hax.beq n (0 : Int) then
+      pure false
+    else
+      let _m0 ← Hax.subM_w 64 n (1 : Int)
+      ev _m0
+partial_fixpoint
+end
+
+end MonadicOut
 
 end Hax.EmitterRegressions

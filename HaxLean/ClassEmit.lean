@@ -504,6 +504,9 @@ structure ClassHooks where
   /-- The trait-level contract definitions and the `Contract` classes, rendered
       under a struct lookup; they follow the classes. -/
   contractText : (String → Option String) → String := fun _ => ""
+  /-- The methods, by trait and name, emitted with result type `RustM` (the effect
+      closure of `--emit-monadic`). -/
+  monadicMethods : List (String × String) := []
   deriving Inhabited
 
 /-- Whether the class mode is on. -/
@@ -583,7 +586,8 @@ where
     `ClassHooks.contractMethods` also carries a precondition field `m_pre` over
     its parameters and a postcondition field `m_post` over its parameters and
     result, and the class of a trait with such methods the invariant field
-    `T_inv : Self → Prop` (`selfInvField`). -/
+    `T_inv : Self → Prop` (`selfInvField`). A method of
+    `ClassHooks.monadicMethods` has result type `RustM` of its Rust result type. -/
 def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : String :=
   let known := h.traits.map (·.name)
   let classes := h.traits.map fun td =>
@@ -606,7 +610,10 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
       s!"  {sanitizeName c} : {ty.toLeanTypeStrSurface sl}"
     let methods := td.methods.map fun (m, ps, r) =>
       let binders := ps.map fun (p, ty) => s!" ({sanitizeName p} : {ty.toLeanTypeStrSurface sl})"
-      s!"  {sanitizeName m}{String.join binders} : {r.toLeanTypeStrSurface sl}"
+      let res := if h.monadicMethods.contains (td.name, m) then
+          s!"RustM ({r.toLeanTypeStrSurface sl})"
+        else r.toLeanTypeStrSurface sl
+      s!"  {sanitizeName m}{String.join binders} : {res}"
     let contractMs := ((h.contractMethods.find? (·.1 == td.name)).map (·.2)).getD []
     -- A trait with contract methods carries the invariant of the Rust self
     -- type of its instance (`selfInvField`), under which its `Contract`

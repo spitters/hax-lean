@@ -23,6 +23,7 @@ public import HaxLean.ClassEmit
 public import HaxLean.ContractEmit
 public import HaxLean.Secrecy
 public import HaxLean.StructTuple
+public import HaxLean.MonadicEmit
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -965,13 +966,17 @@ partial def markBoolTests (bools : List String) : ImpExpr → ImpExpr
 /-- Generate a Lean 4 definition using types from the raw TExpr for parameter
     annotations and a post-pipeline ImpExpr for the body rendering.
     `rawTe` has hax types preserved (for param annotations).
-    `pipelinedBody` is the post-pipeline ImpExpr (for rendering). -/
+    `pipelinedBody` is the post-pipeline ImpExpr (for rendering).
+    `monadic`, the monadic functions of the crate when this one is among them, renders
+    the body as a `RustM` `do` block (`MonadicEmit.renderBody`) and the return type,
+    when annotated, as `RustM` of it. -/
 def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
     (structLookup : String → Option String := fun _ => none)
     (structMeta : StructMeta := [])
     (allFnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (boolNames : List String := [])
-    (mutWriteRets : List (String × List String × Bool) := []) : String :=
+    (mutWriteRets : List (String × List String × Bool) := [])
+    (monadic : Option (List String) := none) : String :=
   let (tparams, rawBody) := extractTParams rawTe
   -- Use the pipelined body, but strip leading param bindings (same as extractParams on ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
@@ -1063,8 +1068,17 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   let body := Hax.stripFunctionTailCfBreak body
   let bools := boolVarNames rawTe
   let body := if bools.isEmpty then body else markBoolTests bools body
-  let bodyStr := toLean body 1 boolNames
-  s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
+  match monadic with
+  | none =>
+    let bodyStr := toLean body 1 boolNames
+    s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
+  | some cl =>
+    -- A monadic definition returns `RustM` of the surface return type; without a
+    -- return-type annotation, the `do` block's monad comes from its last element.
+    let retTyStr := if retTyStr.isEmpty then ""
+      else s!" : RustM ({(retTyStr.drop 3).toString})"
+    let bodyStr := MonadicEmit.renderBody { monadic := cl, boolNames } body
+    s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
 
 /-! ## Typed Struct New Expansion
 
@@ -1987,7 +2001,14 @@ def depsHeadsDef (moduleName : String) (heads : List String) : String :=
     `keepDeclassify` gives each declassification call of the `ImpExpr` and `TExpr`
     literals the head `declassify` (`tDeclassifyHeads` on the literal sources); every
     other part of the file is printed without it, and with it off the literals are
-    unchanged. -/
+    unchanged.
+    `emitMonadic` prints each function of the effect closure
+    (`MonadicEmit.effectClosure`, with the `impl`s of a trait method grouped with the
+    method and `facts` keeping proved functions total) as a definition in `RustM` in
+    A-normal `do` form (`MonadicEmit.renderBody`), a monadic definition on a cycle of the
+    call graph with `partial_fixpoint`, a class method of the closure with result type
+    `RustM`, and a contract of a monadic function over its `ok` result; the file then
+    imports `HaxLean.RuntimeM`. With it off the output is unchanged. -/
 def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (moduleName : String := "Generated")
     (structMeta : StructMeta := [])
@@ -2004,7 +2025,9 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (nominalKrates : List String := [])
     (structTuples : Bool := false)
     (traitHeads : Bool := false)
-    (keepDeclassify : Bool := false) : String :=
+    (keepDeclassify : Bool := false)
+    (emitMonadic : Bool := false)
+    (facts : MonadicEmit.Facts := {}) : String :=
   let prep := certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes
     classHooks nominalKrates
   let prep := if !keepDeclassify then prep
@@ -2049,6 +2072,27 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if newtypes.isEmpty then defs
     else defs.map fun (n, e) => (n, rewriteNewtypeCtors newtypes e)
   let defs := postPreamble defs
+  -- `--emit-monadic`: the effect closure. The method of a trait and the definitions of
+  -- its `impl`s share a type, so they form one group of the closure.
+  let methodGroups : List ((String × String) × List String) :=
+    classHooks.instances.foldl (fun (acc : List ((String × String) × List String))
+        (inst : ClassEmit.ImplInstance) =>
+      let methods : List String :=
+        match classHooks.traits.find? (fun (td : ClassEmit.TraitDef) => td.name == inst.trait) with
+        | some td => td.methods.map (fun (m, _, _) => m)
+        | none => []
+      inst.fields.foldl (fun acc (item, d) =>
+        if !methods.contains item then acc
+        else match acc.find? (·.1 == (inst.trait, item)) with
+          | some _ => acc.map fun (k, ds) =>
+            if k == (inst.trait, item) then (k, ds ++ [d]) else (k, ds)
+          | none => acc ++ [((inst.trait, item), [d])]) acc) []
+  let monadicFns : List String :=
+    if !emitMonadic then []
+    else MonadicEmit.effectClosure defs (methodGroups.map fun ((_, m), ds) => m :: ds) facts
+  let classHooks := if !emitMonadic then classHooks
+    else { classHooks with
+      monadicMethods := (methodGroups.filter fun ((_, m), _) => monadicFns.contains m).map (·.1) }
   -- Compute dependency names for post-processing
   let definedNames := defs.map (·.1)
   let structNames := structMeta.map (·.1)
@@ -2254,14 +2298,25 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if emitLowCT then
       "open CatCrypt.Crypto.Hax\nopen CatCrypt.Crypto.Jasmin.LowCT\n"
     else ""
+  let recursiveMonadic : List String :=
+    if monadicFns.isEmpty then []
+    else MonadicEmit.recursiveFns (defs.map fun (n, e) =>
+        (n, ((collectAppCalls e).map (·.1) ++ collectFreeVars [n] e).filter definedNames.contains))
+      monadicFns
   let surfaceDefs : List (String × String) := defs.map fun (n, e) =>
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
       | some (_, rawTe) => toLeanDefTyped n rawTe e (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes) (boolNames := boolNames) (mutWriteRets := mutWriteRets)
+          (monadic := if monadicFns.contains n then some monadicFns else none)
       | none => toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
     let surfaceDef := classHooks.addBinders n surfaceDef
     let surfaceDef := if needsPartial then surfaceDef.replace "def " "partial def " else surfaceDef
+    -- A monadic definition on a cycle of the call graph is a fixpoint in the order of
+    -- `RustM`.
+    let surfaceDef := if !needsPartial && recursiveMonadic.contains n then
+        surfaceDef ++ "partial_fixpoint\n"
+      else surfaceDef
     (n, s!"{surfaceDef}")
   -- The trait-to-class emission (`Hax.ClassEmit`) puts the generic structs and
   -- the classes before the preamble, and emits the definitions and instances
@@ -2283,7 +2338,10 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         else "\n".intercalate (classHooks.instances.map (classHooks.renderInstance structLookup))
           ++ "\n"
       (surfaceDefs.map (·.2), "mutual\n\n", "end\n\n" ++ insts)
-  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{typeDeclBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
+  -- Under `--emit-monadic` the file imports the guarded operations and names `RustM`.
+  let monadicImport := if emitMonadic then "import HaxLean.RuntimeM\n" else ""
+  let monadicOpen := if emitMonadic then "open Aeneas.Std (RustM)\n" else ""
+  let header := s!"/-\n  Auto-generated by haxpipeT --emit-certified (typed extraction pipeline)\n  Surface code + ImpExpr and TExpr literals for agreement proofs.\n-/\nimport HaxLean.Runtime\nimport HaxLean.AST\nimport HaxLean.TExpr\nimport HaxLean.Semantics\nimport HaxLean.Secrecy\n{monadicImport}{lowCTImports}\n{moduleDoc}\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace {moduleName}\n\nopen Hax\n{monadicOpen}{lowCTOpens}\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n{axiomsBlock}{unitStructBlock structMeta (classHooks.genericStructs.map (·.1))}{typeDeclBlock}{classPreamble}{preamble}\n{typeAliasBlock}{texprTyBlock}{mutualOpen}"
   let body := "\n".intercalate bodyParts
   let impExprs := "\n".intercalate (literalDefs.map fun (n, e) =>
     let impExprDef := toLeanImpExprDef n e
@@ -2313,7 +2371,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- budget with every other declaration of the crate.
   -- The contracts of `--emit-contracts` name the surface definitions and the
   -- instances, so they follow both.
-  let contractBlock := ContractEmit.renderPlan structLookup classHooks contracts
+  let contractBlock := ContractEmit.renderPlan structLookup classHooks contracts monadicFns
   let structTupleText := if !structTuples then ""
     else structTupleBlock tyName (structFieldTysOf structMeta) texprs needsPartial
   let depsHeadsText := if !traitHeads then ""

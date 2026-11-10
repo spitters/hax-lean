@@ -130,6 +130,11 @@ structure Options where
       a secret newtype) carries the head `declassify` with the value as its one
       argument (`Hax.tDeclassifyHeads`). -/
   keepDeclassify : Bool := false
+  /-- With `--emit-certified --hax`: print each function that reaches an operation that
+      panics in Rust, or calls such a function, in `RustM` with the guarded operations of
+      `HaxLean.RuntimeM` (`Hax.MonadicEmit`); every other function is printed as without
+      the flag. -/
+  emitMonadic : Bool := false
   /-- With `--emit-certified --hax`: a function the adapter refuses is reported on
       stderr with its name and construct and omitted, and so is every function that
       calls an omitted one; the rest of the crate is translated. Without the flag the
@@ -169,6 +174,7 @@ where
     | "--struct-tuples" :: rest, opts => go rest { opts with structTuples := true }
     | "--trait-heads" :: rest, opts => go rest { opts with traitHeads := true }
     | "--keep-declassify" :: rest, opts => go rest { opts with keepDeclassify := true }
+    | "--emit-monadic" :: rest, opts => go rest { opts with emitMonadic := true }
     | "--keep-going" :: rest, opts => go rest { opts with keepGoing := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest { opts with unknownArgs := opts.unknownArgs ++ [arg] }
@@ -218,6 +224,11 @@ OPTIONS:
                     literals, each declassification call (.declassify(),
                     .declassify_ref(), the method of a secret newtype)
                     carries the head declassify with one argument
+  --emit-monadic    With --emit-certified --hax: print each function that
+                    reaches a panicking operation (checked arithmetic,
+                    indexing, slicing, unwrap, assert), or calls such a
+                    function, in RustM with the guarded operations of
+                    HaxLean.RuntimeM; the other functions are unchanged
   --keep-going      With --emit-certified --hax: report each refused function
                     (REFUSED name: construct) and each function calling an
                     omitted one on stderr, omit them, and translate the rest

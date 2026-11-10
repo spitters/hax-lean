@@ -643,9 +643,11 @@ def renderPredDef (sl : String → Option String) (doc name extraBinders : Strin
   s!"/-- {doc} -/\ndef {name}{tb}{extraBinders}{bindersStr sl p.params} : Prop :=\n  {p.body}\n"
 
 /-- The definitions of a function contract: `f_requires`, `f_ensures` and the
-    statement `f_contract`. `generic` holds the binders of a generic function. -/
+    statement `f_contract`. `generic` holds the binders of a generic function. For a
+    function emitted in `RustM` (`monadic`), the statement is over its `ok` result: the
+    function returns `ok out` and `out` satisfies the postcondition. -/
 def renderFnContract (sl : String → Option String) (hooks : ClassHooks) (env : TyEnv)
-    (c : FnContract) : String :=
+    (c : FnContract) (monadic : Bool := false) : String :=
   let g := hooks.genericFns.find? (·.name == c.fn)
   let gb := match g with
     | some g =>
@@ -668,9 +670,11 @@ def renderFnContract (sl : String → Option String) (hooks : ClassHooks) (env :
       | none => ""
     let ens := appStr s!"{f}_ensures" c.ensArgs
     let outInv := conjAll (c.outInvs.map fun (x, ty) => tyInv env ty x)
-    let concl := match outInv with
-      | some p => s!"let out := {call}; ({ens} ∧ {p})"
-      | none => s!"let out := {call}; {ens}"
+    let post := match outInv with
+      | some p => s!"({ens} ∧ {p})"
+      | none => ens
+    let concl := if monadic then s!"∃ out, {call} = Aeneas.Std.RustM.ok out ∧ {post}"
+      else s!"let out := {call}; {post}"
     let binders := gb ++ bindersStr sl c.params
     let q := if binders.isEmpty then "" else s!"∀{binders}, "
     let inputs := if c.requires.isSome then s!"every input of its Rust types satisfying `{f}_requires`"
@@ -687,9 +691,12 @@ def renderLemma (sl : String → Option String) (env : TyEnv) (l : LemmaStmt) : 
     | none => ""
   s!"/-- The statement of the lemma `{l.name}`. -/\ndef {sanitizeName l.name}_stmt : Prop :=\n  {q}{hyp}{l.formula}\n"
 
-/-- The contracts of a plan, rendered after the definitions. -/
-def renderPlan (sl : String → Option String) (hooks : ClassHooks) (p : Plan) : String :=
-  let parts := p.fns.map (renderFnContract sl hooks p.env) ++ p.lemmas.map (renderLemma sl p.env)
+/-- The contracts of a plan, rendered after the definitions; the contract of a function
+    of `monadic` is stated over its `ok` result. -/
+def renderPlan (sl : String → Option String) (hooks : ClassHooks) (p : Plan)
+    (monadic : List String := []) : String :=
+  let parts := p.fns.map (fun c => renderFnContract sl hooks p.env c (monadic.contains c.fn))
+    ++ p.lemmas.map (renderLemma sl p.env)
   if parts.isEmpty then "" else "\n".intercalate parts ++ "\n"
 
 /-! ## Traits -/
