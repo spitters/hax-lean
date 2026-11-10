@@ -6,6 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.PrettyPrint -- deprecated_module: ignore
+public import HaxLean.Range.Heads
 
 /-!
 # Monadic emission of the effect closure
@@ -44,6 +45,12 @@ any other higher-order function is printed by `toLean`, with total operations.
 * `recursiveFns`: the monadic functions on a cycle of the call graph; they are emitted
   with `partial_fixpoint`.
 * `renderM`, `renderBody`: the A-normal `do` rendering.
+* `RangeInput`, `rangePlan`: the decision of the verified range checker (`Range.checkT`) on the
+  functions of a crate, which `Facts.total` and `Facts.specced` carry to `emissionOf`.
+* `pureCalls`: the calls of a total function to `specced` functions, through their total
+  surface `f_pure`.
+* `rangeBlock`: the theorems `f_noPanic` and `f_noPanicOn`, proved by
+  `Range.checkT_rust_sound_defs` and evaluation of the checker on `f_texpr`.
 -/
 
 @[expose] public section
@@ -149,15 +156,226 @@ inductive Emission where
 structure Facts where
   /-- Functions proved not to panic, with every function they call. -/
   noPanic : List String := []
+  /-- Functions the verified range checker accepts at the full type ranges of their
+      parameters, calling only such functions and functions of `specced` (`rangePlan`). -/
+  total : List String := []
+  /-- Functions the verified range checker accepts under the precondition of their summary,
+      calling only functions of `total` and `specced` (`rangePlan`). -/
+  specced : List String := []
   deriving Inhabited
 
 /-- The emission of the function `name` with body `body` when the functions `monadic` are
     monadic: monadic when the body has monadic content, unless `facts` proves that the
-    function does not panic. -/
+    function does not panic or the verified range checker accepts it at the full type ranges
+    of its parameters (`Facts.total`). -/
 def emissionOf (facts : Facts) (monadic : List String) (name : String) (body : ImpExpr) :
     Emission :=
-  if facts.noPanic.contains name then .pure
+  if facts.noPanic.contains name || facts.total.contains name then .pure
   else if hasEffect monadic body then .monadic else .pure
+
+/-! ## The decision of the verified range checker
+
+The range checker `Range.checkT` (`HaxLean/Range/Check.lean`) is sound for `denote'` with the
+Rust guards (`Range.checkT_rust_sound_defs`). Its candidates (parameter intervals, loop
+annotations and the summaries of the crate's functions) come from an untrusted inference
+(`HaxLean/RangeProbe.lean`); `rangePlan` runs the checker on each function's `TExpr` literal
+and keeps the functions it accepts, so that the theorems `rangeBlock` prints are proved by
+evaluating the checker on the same literals. Per function there are three outcomes: accepted
+at the full type ranges of its parameters (`RangePlan.total`, printed total with `f_noPanic`),
+accepted under the precondition of its summary (`RangePlan.specced`, printed in `RustM` beside
+the total surface `f_pure`, with `f_noPanicOn`), or neither (monadic). -/
+
+/-- The candidates of the range checker for the functions of a crate. -/
+structure RangeInput where
+  /-- The `TExpr` literal of each function (`f_texpr`). -/
+  texprs : List (String × TExpr)
+  /-- The parameters of each function, in order. -/
+  params : List (String × List String)
+  /-- The names of all functions and constants of the crate. -/
+  crate : List String
+  /-- For each function, the abstract values of its parameters at their full type ranges
+      and the loop annotation. -/
+  full : List (String × Range.AEnv × Range.AEnv) := []
+  /-- The summaries `(g, (pre, post))` of `Range.checkSums`, callers first. -/
+  sums : List (String × (List Range.AV × Range.AV)) := []
+  /-- The loop annotation of each summarised function's body. -/
+  sumAnns : List (String × Range.AEnv) := []
+  /-- The groups of definitions that share a type (`effectClosure`). -/
+  groups : List (List String) := []
+  deriving Inhabited
+
+/-- The functions the range checker accepts, each with the abstract environment of its
+    parameters and its loop annotation, and the input with its summaries kept only when
+    `Range.checkSums` accepts them. -/
+structure RangePlan where
+  /-- The candidates. -/
+  input : RangeInput
+  /-- Accepted at the full type ranges of the parameters. -/
+  total : List (String × Range.AEnv × Range.AEnv) := []
+  /-- Accepted under the precondition of the summary, and not in `total`. -/
+  specced : List (String × Range.AEnv × Range.AEnv) := []
+  deriving Inhabited
+
+/-- The definitions of `inp` as `Range.checkSums` reads them: name, parameters, erased body. -/
+def RangeInput.defs (inp : RangeInput) : List (String × List String × ImpExpr) :=
+  inp.texprs.map fun (n, t) => (n, (inp.params.lookup n).getD [], t.erase)
+
+/-- Whether the range checker accepts the literal `t` from `entry` with loop annotation `ann`
+    and the summaries `sums`, refining by Boolean guards. -/
+def rangeAccepts (sums : List (String × (List Range.AV × Range.AV))) (ann entry : Range.AEnv)
+    (t : TExpr) : Bool :=
+  (Range.checkT (Range.stdSpec sums ann true) entry t).isSome
+
+/-- The functions and constants of `crate` that `e` calls or names. -/
+def crateRefs (crate : List String) (e : ImpExpr) : List String :=
+  ((collectAppCalls e).map (·.1) ++ collectFreeVars [] e).eraseDups.filter crate.contains
+
+/-- The largest subset of `cands` whose members refer, among the functions of `crate`, only
+    to members: rounds removing a member that refers to a non-member, at most `fuel`. -/
+def closedSubset (refs : String → List String) (crate : List String) :
+    Nat → List String → List String
+  | 0, s => s
+  | fuel + 1, s =>
+    let s' := s.filter fun f => (refs f).all fun g => g == f || s.contains g || !crate.contains g
+    if s'.length == s.length then s else closedSubset refs crate fuel s'
+
+/-- The decision of the range checker on the functions of a crate. A function is a candidate
+    of `total` when the checker accepts its literal at its full type ranges, and of `specced`
+    when it has a summary and the checker accepts its literal from the parameters at the
+    summary's precondition; both checks read calls of summarised functions through the
+    summaries, so that their arguments lie in the preconditions. The summaries are dropped
+    when `Range.checkSums` refuses them. Members of a group are not candidates. The plan
+    keeps the largest set of candidates whose members refer to no other function of the
+    crate outside the set. -/
+def rangePlan (inp : RangeInput) : RangePlan :=
+  let annOf (n : String) : Range.AEnv := (inp.sumAnns.lookup n).getD []
+  let sums := if Range.checkSums inp.defs annOf true inp.sums then inp.sums else []
+  let inp := { inp with sums, sumAnns := if sums.isEmpty then [] else inp.sumAnns }
+  let grouped := inp.groups.flatten
+  let tot := inp.texprs.filterMap fun (n, t) =>
+    if grouped.contains n then none
+    else match inp.full.lookup n with
+      | some (entry, ann) => if rangeAccepts sums ann entry t then some (n, entry, ann) else none
+      | none => none
+  let spc := inp.texprs.filterMap fun (n, t) =>
+    if grouped.contains n || (tot.lookup n).isSome then none
+    else match sums.lookup n with
+      | some (pre, _) =>
+        let entry := ((inp.params.lookup n).getD []).zip pre
+        if pre.length == ((inp.params.lookup n).getD []).length &&
+            rangeAccepts sums (annOf n) entry t then some (n, entry, annOf n)
+        else none
+      | none => none
+  let refsOf : List (String × List String) :=
+    inp.texprs.map fun (n, t) => (n, crateRefs inp.crate t.erase)
+  let keep := closedSubset (fun f => (refsOf.lookup f).getD []) inp.crate
+    (inp.texprs.length + 1) (tot.map (·.1) ++ spc.map (·.1))
+  { input := inp, total := tot.filter (keep.contains ·.1),
+    specced := spc.filter (keep.contains ·.1) }
+
+/-- The facts of a range plan: its `total` and `specced` functions. -/
+def RangePlan.facts (p : RangePlan) (base : Facts := {}) : Facts :=
+  { base with total := p.total.map (·.1), specced := p.specced.map (·.1) }
+
+/-- The functions of `facts.specced` that are monadic in `monadic`: a total caller calls their
+    total surface `f_pure` (`pureCalls`). -/
+def Facts.pureCallees (facts : Facts) (monadic : List String) : List String :=
+  facts.specced.filter monadic.contains
+
+/-- `e` with each call of a function of `fs` replaced by a call of its total surface
+    `f_pure`. -/
+def pureCalls (fs : List String) (e : ImpExpr) : ImpExpr :=
+  fs.foldl (fun e g => rewriteAppName g (g ++ "_pure") e) e
+
+/-! ### Printing the range theorems -/
+
+/-- The literal of an abstract value. -/
+def avLit : Range.AV → String
+  | .top => ".top"
+  | .num (a, b) => s!".num ({a}, {b})"
+  | .arr (a, b) => s!".arr ({a}, {b})"
+  | .idx lo hi rs => s!".idx ({lo}) ({reprStr hi}) {reprStr rs}"
+
+/-- The literal of a list of abstract values. -/
+def avsLit (as : List Range.AV) : String := "[" ++ ", ".intercalate (as.map avLit) ++ "]"
+
+/-- The literal of an abstract environment. -/
+def aenvLit (Γ : Range.AEnv) : String :=
+  "[" ++ ", ".intercalate (Γ.map fun (x, a) => s!"({x.quote}, {avLit a})") ++ "]"
+
+/-- The name of a range declaration of the function `f`: `f_suffix`. -/
+def rangeName (f suffix : String) : String := sanitizeName (f ++ suffix)
+
+/-- The declarations of the crate that the range theorems share: the definitions as
+    `Range.checkSums` reads them (`rangeDefs`), the summaries (`rangeSums`), their loop
+    annotations (`rangeSumAnns`), and the theorem that `Range.checkSums` accepts them
+    (`rangeSums_ok`), proved by evaluation. -/
+def rangeHeader (inp : RangeInput) : String :=
+  let defLit := ",\n    ".intercalate (inp.texprs.map fun (n, _) =>
+    let ps := ", ".intercalate (((inp.params.lookup n).getD []).map String.quote)
+    s!"({n.quote}, [{ps}], {rangeName n "_texpr"}.erase)")
+  let sumLit := ",\n    ".intercalate (inp.sums.map fun (n, pre, post) =>
+    s!"({n.quote}, ({avsLit pre}, {avLit post}))")
+  let annLit := ",\n    ".intercalate (inp.sumAnns.map fun (n, a) => s!"({n.quote}, {aenvLit a})")
+  "\n".intercalate [
+    "/-- The definitions of the crate as the range checker reads them. -/",
+    "def rangeDefs : List (String × List String × Hax.ImpExpr) :=",
+    s!"  [{defLit}]",
+    "",
+    "/-- The summaries of the crate's functions, callers first. -/",
+    "def rangeSums : List (String × (List Hax.Range.AV × Hax.Range.AV)) :=",
+    s!"  [{sumLit}]",
+    "",
+    "/-- The loop annotations of the summarised bodies. -/",
+    "def rangeSumAnns : List (String × Hax.Range.AEnv) :=",
+    s!"  [{annLit}]",
+    "",
+    "/-- The summaries hold against the bodies of `rangeDefs`. -/",
+    "theorem rangeSums_ok :",
+    "    Hax.Range.checkSums rangeDefs (fun g => (rangeSumAnns.lookup g).getD []) true",
+    "      rangeSums = true := by",
+    "  native_decide"]
+
+/-- The theorem `f_noPanic` (`onPre = false`) or `f_noPanicOn` (`onPre = true`): from every
+    environment in the abstract environment `entry` of its parameters without control-flow
+    values, the run of `f_texpr` under `denote'` with the table that fails where a Rust guard
+    fails (`Range.guardBi Range.rustGuard`) is its run with the table, under the semantics
+    of the heads (`Range.HeadSem`, `Range.LogicSem`) and the reading of the crate's
+    definitions by the table (`Range.DefsSem`). Proved by `Range.checkT_rust_sound_defs` and
+    evaluation of the checker on `f_texpr`. -/
+def noPanicThm (f : String) (entry ann : Range.AEnv) (onPre : Bool) : String :=
+  let entryN := rangeName f "_rangeEntry"
+  let annN := rangeName f "_rangeAnn"
+  let te := rangeName f "_texpr"
+  let thm := rangeName f (if onPre then "_noPanicOn" else "_noPanic")
+  let at_ := if onPre then "the precondition of its summary" else "the full type ranges"
+  "\n".intercalate [
+    s!"/-- The parameters of `{f}` at {at_}. -/",
+    s!"def {entryN} : Hax.Range.AEnv := {aenvLit entry}",
+    "",
+    s!"/-- The loop annotation of `{f}`. -/",
+    s!"def {annN} : Hax.Range.AEnv := {aenvLit ann}",
+    "",
+    s!"/-- `{f}` fails no Rust guard of its operations from parameters at {at_}. -/",
+    s!"theorem {thm} {"{"}bi : Hax.Builtins} (hH : Hax.Range.HeadSem bi [])",
+    "    (hL : Hax.Range.LogicSem bi) (hD : Hax.Range.DefsSem bi rangeDefs) (fuel : Nat)",
+    s!"    {"{"}env : Hax.Env} (hΓ : Hax.Range.Sat {entryN} env)" ++
+      " (hN : Hax.Env.NoControlFlow env) :",
+    s!"    Hax.denote' (Hax.Range.guardBi Hax.Range.rustGuard bi) fuel {te}.erase env =",
+    s!"      Hax.denote' bi fuel {te}.erase env := by",
+    "  obtain ⟨⟨_, _⟩, h⟩ := Option.isSome_iff_exists.mp (show",
+    s!"    (Hax.Range.checkT (Hax.Range.stdSpec rangeSums {annN} true) {entryN}",
+    s!"      {te}).isSome = true by native_decide)",
+    "  exact (Hax.Range.checkT_rust_sound_defs hH (fun _ => hL) hD rangeSums_ok h fuel hΓ hN).1"]
+
+/-- The range declarations of a plan: `rangeHeader`, then `f_noPanic` for each function of
+    `total` and `f_noPanicOn` for each of `specced`; empty when the plan accepts no
+    function. -/
+def rangeBlock (p : RangePlan) : String :=
+  if p.total.isEmpty && p.specced.isEmpty then ""
+  else "\n\n".intercalate (rangeHeader p.input ::
+    p.total.map (fun (f, e, a) => noPanicThm f e a false) ++
+    p.specced.map (fun (f, e, a) => noPanicThm f e a true))
 
 /-- The monadic functions of the crate `defs`: the least set that contains every function
     whose `emissionOf` is monadic and, with one member of a group of `groups`, every
@@ -697,5 +915,67 @@ end
 /-- The body of a monadic definition: `do` and the `renderM` lines of `body`. -/
 def renderBody (cx : Ctx) (body : ImpExpr) : String :=
   s!"{indent 1}do\n{(renderM cx 2 body).run' 0}"
+
+/-! ## Checks of the range decision -/
+
+namespace RangeExamples
+
+/-- `[u8; 16]`. -/
+def a16 : ImpType := .array (.uint .w8) 16
+/-- A variable node. -/
+def v (x : String) (t : ImpType) : TExpr := .mk (.var x) t
+/-- A call node. -/
+def ap (f : String) (as : List TExpr) (t : ImpType) : TExpr := .mk (.app f as) t
+/-- A parameter binding `let x := x` in front of `b`. -/
+def prm (x : String) (t : ImpType) (b : TExpr) : TExpr := .mk (.letBind x (v x t) b) b.ty
+
+/-- `h(a, i) = a[i]`. -/
+def hF : TExpr := prm "a" a16 (prm "i" (.uint .wsize)
+  (ap "index" [v "a" a16, v "i" (.uint .wsize)] (.uint .w8)))
+/-- `k(a) = for j in 0..16 { h(a, j) }`. -/
+def kF : TExpr := prm "a" a16 (.mk (.forFold "j" (.mk (.lit (.int 0)) (.uint .wsize))
+  (.mk (.lit (.int 16)) (.uint .wsize))
+  (ap "h" [v "a" a16, v "j" (.uint .wsize)] (.uint .w8))) .unit)
+/-- `x + 1` on `x : u8`. -/
+def addF : TExpr := prm "x" (.uint .w8)
+  (ap "Add#8" [v "x" (.uint .w8), .mk (.lit (.int 1)) (.uint .w8)] (.uint .w8))
+/-- `m(a, i) = h(a, i)`, calling `h` outside its precondition. -/
+def mF : TExpr := prm "a" a16 (prm "i" (.uint .wsize)
+  (ap "h" [v "a" a16, v "i" (.uint .wsize)] (.uint .w8)))
+
+/-- The candidates for `h`, `k`, `add` and `m`: type ranges, and the summary of `h` at the
+    interval of its call site in `k`. -/
+def input : RangeInput where
+  texprs := [("h", hF), ("k", kF), ("add", addF), ("m", mF)]
+  params := [("h", ["a", "i"]), ("k", ["a"]), ("add", ["x"]), ("m", ["a", "i"])]
+  crate := ["h", "k", "add", "m"]
+  full := [("h", [("a", .arr (16, 16)), ("i", .num (0, 2 ^ 64 - 1))], []),
+    ("k", [("a", .arr (16, 16))], []), ("add", [("x", .num (0, 255))], []),
+    ("m", [("a", .arr (16, 16)), ("i", .num (0, 2 ^ 64 - 1))], [])]
+  sums := [("h", ([.arr (16, 16), .num (0, 15)], .top))]
+
+/-- Outcome 1 for `k`, which calls `h` inside its precondition; outcome 2 for `h`; outcome 3
+    for `x + 1` on `u8` and for `m`, which calls `h` at the full range of `i`. -/
+def chkPlan : Bool :=
+  let p := rangePlan input
+  p.total.map (·.1) == ["k"] && p.specced.map (·.1) == ["h"]
+
+/-- Under the plan's facts, `k` is printed total although it calls the monadic `h`, and calls
+    `h_pure`; `h`, `add` and `m` are monadic. -/
+def chkEmission : Bool :=
+  let facts := (rangePlan input).facts
+  let defs := input.texprs.map fun (n, t) => (n, t.erase)
+  let cl := effectClosure defs [] facts
+  cl == ["h", "add", "m"] && emissionOf facts cl "k" kF.erase == .pure &&
+    facts.pureCallees cl == ["h"] &&
+    (collectAppCalls (pureCalls (facts.pureCallees cl) kF.erase)).map (·.1) == ["h_pure"]
+
+/-- A plan whose summaries `Range.checkSums` refuses keeps none of them, and `h` is not
+    accepted. -/
+def chkBadSums : Bool :=
+  let p := rangePlan { input with sums := [("h", ([.arr (16, 16), .num (0, 16)], .top))] }
+  p.input.sums.isEmpty && p.specced.isEmpty && p.total.map (·.1) == []
+
+end RangeExamples
 
 end Hax.MonadicEmit

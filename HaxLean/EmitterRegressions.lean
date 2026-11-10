@@ -4123,6 +4123,16 @@ def assignLet (body : ImpExpr) : ImpExpr :=
 
 end SilentDropRefusals
 
+/-! ## The range decision of the monadic emission
+
+The three outcomes of `MonadicEmit.rangePlan` on the examples of
+`MonadicEmit.RangeExamples`: a function accepted at the full type ranges, one accepted under its
+summary, and the rest; and the refusal of summaries that `Range.checkSums` does not accept. -/
+
+#guard Hax.MonadicEmit.RangeExamples.chkPlan
+#guard Hax.MonadicEmit.RangeExamples.chkEmission
+#guard Hax.MonadicEmit.RangeExamples.chkBadSums
+
 /-! ## Monadic emission
 
 The A-normal `do` rendering of `--emit-monadic` (`MonadicEmit.renderBody`), one pin per
