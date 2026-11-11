@@ -138,7 +138,9 @@ Calls outside the write-back fragment are first brought into it
 builtin write (`copy_from_slice` into `okm[a..b]`) makes its function a write-back
 function too. The builtin and external tables are appended to the call-site rebind table
 only, not to `writeReturns`: `tReturnMutParams` rewrites a callee to return its written
-parameters, and these callees have no body in the export to rewrite. -/
+parameters, and these callees have no body in the export to rewrite. A call that passes
+`&mut` only to parameters its callee never writes (`mutReadOnlyTable`) is not a dropped
+call. -/
 def writebackOf (structFields : StructFieldNames) (newtypes : HaxAdapter.NewtypeMap)
     (fnTypes : List (String × HaxAdapter.FnTypeInfo)) (procTdefs : List (String × TExpr)) :
     Writeback :=
@@ -153,8 +155,10 @@ def writebackOf (structFields : StructFieldNames) (newtypes : HaxAdapter.Newtype
   let writers := mutWriteTable writeFns ++ builtinWriteTable ++ extWriters
   let tupWriters := mutWriteTupleTable writeFns ++ extTupWriters
   let writeReturns := mutWriteReturns writeFns
+  let readOnly := mutReadOnlyTable fnTypes structFields procTdefs writers tupWriters
+    (mutWriteCandidates fnTypes)
   let dropped := procTdefs.flatMap fun (n, te) =>
-    (tDroppedMutCalls fnTypes structFields writers tupWriters te).map fun d => (n, d)
+    (tDroppedMutCalls fnTypes structFields writers tupWriters te readOnly).map fun d => (n, d)
   { procTdefs, writeFns, writers, tupWriters, writeReturns, dropped }
 
 /-- The keep-going mode's omission of the write-back failures: each definition with a call
@@ -188,15 +192,16 @@ partial def omitDroppedWritebacks (structFields : StructFieldNames)
 /-- The definitions after the typed pipeline: each `&mut` write-back turned into an
     assignment (`tRebindMutCalls` at the call, `tReturnMutParams` at the definition; the
     call rewrite runs first, so a body whose own tail is a write-back call is an
-    assignment before `tReplaceTail` reaches it), `Fn::call` of let-bound closures
-    lowered (`tLowerClosureCalls`), mutations threaded across `if` joins (`tThreadMut`),
-    then `tPipelineFull` and `tUnqualifyFieldHeads`. -/
+    assignment before `tReplaceTail` reaches it; the assignments in the branches of a
+    `let`-bound `if` or `match` are threaded out of its join by `tThreadLetJoins`),
+    `Fn::call` of let-bound closures lowered (`tLowerClosureCalls`), mutations threaded
+    across `if` joins (`tThreadMut`), then `tPipelineFull` and `tUnqualifyFieldHeads`. -/
 def postPipeline (structFields : StructFieldNames) (newtypes : HaxAdapter.NewtypeMap)
     (w : Writeback) : List (String × TExpr) :=
   w.procTdefs.map fun (n, te) =>
     let ret := (w.writeReturns.lookup n).getD ([], false)
     let te := tReturnMutParams ret.1 ret.2 (tReturnMutParamsAtReturns ret.1 ret.2
-      (tRebindMutCalls structFields w.writers w.tupWriters te))
+      (tThreadLetJoins true (tRebindMutCalls structFields w.writers w.tupWriters te)))
     (n, tUnqualifyFieldHeads
       (tPipelineFull newtypes (tThreadMut true (tLowerClosureCalls [] te))))
 

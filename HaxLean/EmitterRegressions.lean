@@ -1721,6 +1721,167 @@ def takeField : TExpr :=
       w.2.map fun (_, te) => tAssignedVars (tRebindMutCalls ksFields [] w.1 te))) ==
   ([("Option_take", [0], true)], [[]], [["_wbfld0", "self"]])
 
+/-! ### User-defined callees with a `&mut` parameter beside a value result
+
+Bertie's key schedule passes `ks: &mut TLSkeyscheduler` to functions that
+return a `Result` (`derive_app_keys(…, ks)`, `&mut` at position 4). A callee
+that writes its `&mut` parameter is a tuple-form write-back function at any
+parameter position and with several `&mut` parameters; a callee that only
+reads it (`derive_aead_key_iv`) has nothing to write back
+(`mutReadOnlyTable`). An external callee with result `()` and two `&mut`
+arguments (`rng.fill_bytes(&mut buf)`) is a tuple-form entry without a value.
+A write-back call in a branch of a `let`-bound `if` (`let h = if … { k } else
+{ &no_psk(ks, ha) }`) is bound in the branch (`tHoistMutCalls`) and the
+written variable threaded out of the join (`tThreadLetJoins`). -/
+
+/-- The key schedule `KS`. -/
+def wbKsTy : ImpType := .adt "KS" []
+
+/-- `&mut KS`. -/
+def wbKsMut : ImpType := .ref wbKsTy true
+
+/-- The variable `n` at type `t`. -/
+def wbVar (n : String) (t : ImpType) : TExpr := .mk (.var n) t
+
+/-- `fn derive(h: i64, ks: &mut KS) -> i64`. -/
+def wbDeriveSig : FnTypeInfo := ⟨[("h", .int), ("ks", wbKsMut)], .int⟩
+
+/-- `*ks = upd(ks, h); h`. -/
+def wbDeriveBody : TExpr :=
+  .mk (.seq (.mk (.assign "ks" (.mk (.app "upd" [wbVar "ks" wbKsMut, wbVar "h" .int]) wbKsTy))
+    .unit) (wbVar "h" .int)) .int
+
+/-- `let r = derive(3, &mut ks); r`. -/
+def wbDeriveCaller : TExpr :=
+  .mk (.letBind "r" (.mk (.app "derive" [.mk (.lit (.int 3)) .int,
+    .mk (.borrow (wbVar "ks" wbKsTy)) wbKsMut]) .int) (wbVar "r" .int)) .int
+
+-- `derive` writes back its parameter at position 1 beside its value; the caller binds
+-- the pair, rebinds `ks` from component 1 and `r` from component 0.
+#guard mutWriteFns [] [("derive", wbDeriveSig)] [("derive", wbDeriveBody)] ==
+  [("derive", [1], ["ks"], true)]
+#guard (tRebindMutCalls [] [] [("derive", [1], true)] wbDeriveCaller).erase ==
+  .letBind "_wb" (.app "derive" [.lit (.int 3), .borrow (.var "ks")])
+    (.seq (.assign "ks" (.proj (.var "_wb") 1))
+      (.letBind "r" (.proj (.var "_wb") 0) (.var "r")))
+#guard tDroppedMutCalls [("derive", wbDeriveSig)] [] [] [("derive", [1], true)]
+  wbDeriveCaller == []
+
+/-- `&mut i64`. -/
+def wbIntMut : ImpType := .ref .int true
+
+/-- `fn swap2(a: &mut i64, b: &mut i64) -> i64`. -/
+def wbSwapSig : FnTypeInfo := ⟨[("a", wbIntMut), ("b", wbIntMut)], .int⟩
+
+/-- `*a = *b; *b = 0; 1`. -/
+def wbSwapBody : TExpr :=
+  .mk (.seq (.mk (.assign "a" (wbVar "b" .int)) .unit)
+    (.mk (.seq (.mk (.assign "b" (.mk (.lit (.int 0)) .int)) .unit)
+      (.mk (.lit (.int 1)) .int)) .int)) .int
+
+/-- `let r = swap2(&mut x, &mut y); r`. -/
+def wbSwapCaller : TExpr :=
+  .mk (.letBind "r" (.mk (.app "swap2" [.mk (.borrow (wbVar "x" .int)) wbIntMut,
+    .mk (.borrow (wbVar "y" .int)) wbIntMut]) .int) (wbVar "r" .int)) .int
+
+-- Both `&mut` parameters are written back beside the value: `x` from component 1,
+-- `y` from component 2.
+#guard mutWriteFns [] [("swap2", wbSwapSig)] [("swap2", wbSwapBody)] ==
+  [("swap2", [0, 1], ["a", "b"], true)]
+#guard (tRebindMutCalls [] [] [("swap2", [0, 1], true)] wbSwapCaller).erase ==
+  .letBind "_wb" (.app "swap2" [.borrow (.var "x"), .borrow (.var "y")])
+    (.seq (.assign "x" (.proj (.var "_wb") 1))
+      (.seq (.assign "y" (.proj (.var "_wb") 2))
+        (.letBind "r" (.proj (.var "_wb") 0) (.var "r"))))
+#guard tDroppedMutCalls [("swap2", wbSwapSig)] [] [] [("swap2", [0, 1], true)]
+  wbSwapCaller == []
+
+/-- `fn rd(h: i64, ks: &mut KS) -> i64 { get(&*ks, h) }`: `ks` is only read. -/
+def wbReadBody : TExpr :=
+  .mk (.letBind "ks" (wbVar "ks" wbKsMut)
+    (.mk (.app "get" [wbVar "ks" (.ref wbKsTy false), wbVar "h" .int]) .int)) .int
+
+/-- `let k2 = ks; get(&*k2, h)`: the reference moves into a local. -/
+def wbMoveBody : TExpr :=
+  .mk (.letBind "k2" (wbVar "ks" wbKsMut)
+    (.mk (.app "get" [wbVar "k2" (.ref wbKsTy false), wbVar "h" .int]) .int)) .int
+
+/-- `let r = rd(1, &mut ks); r`. -/
+def wbReadCaller : TExpr :=
+  .mk (.letBind "r" (.mk (.app "rd" [.mk (.lit (.int 1)) .int,
+    .mk (.borrow (wbVar "ks" wbKsTy)) wbKsMut]) .int) (wbVar "r" .int)) .int
+
+/-- `ch(h, ks) = rd(h, ks)`: passes `ks` on to the read-only parameter of `rd`. -/
+def wbChainBody : TExpr :=
+  .mk (.app "rd" [wbVar "h" .int, wbVar "ks" wbKsMut]) .int
+
+-- `rd` writes nothing back, and its parameter at position 1 is read-only; a moved
+-- reference is not. `ch` is read-only through `rd`, one round later. A call of `rd`
+-- is a dropped call only without the read-only table.
+#guard mutWriteFns [] [("rd", wbDeriveSig)] [("rd", wbReadBody)] == []
+#guard mutReadOnlyTable [("rd", wbDeriveSig)] [] [("rd", wbReadBody)] [] []
+  (mutWriteCandidates [("rd", wbDeriveSig)]) == [("rd", [1])]
+#guard mutReadOnlyTable [("rd", wbDeriveSig)] [] [("rd", wbMoveBody)] [] []
+  (mutWriteCandidates [("rd", wbDeriveSig)]) == []
+#guard mutReadOnlyTable [("rd", wbDeriveSig), ("ch", wbDeriveSig)] []
+  [("ch", wbChainBody), ("rd", wbReadBody)] [] []
+  (mutWriteCandidates [("rd", wbDeriveSig), ("ch", wbDeriveSig)]) == [("rd", [1]), ("ch", [1])]
+#guard tDroppedMutCalls [("rd", wbDeriveSig)] [] [] [] wbReadCaller == [("rd", [1])]
+#guard tDroppedMutCalls [("rd", wbDeriveSig)] [] [] [] wbReadCaller [("rd", [1])] == []
+
+/-- The generator type `Rng`. -/
+def wbRngTy : ImpType := .adt "Rng" []
+
+/-- `[u8; 32]`, as an array of integers. -/
+def wbBufTy : ImpType := .array .int 32
+
+/-- `rng.fill_bytes(&mut buf);` with `rng: &mut Rng`. -/
+def wbFillCall : TExpr :=
+  .mk (.seq (.mk (.app "fill_bytes" [wbVar "rng" (.ref wbRngTy true),
+    .mk (.borrow (wbVar "buf" wbBufTy)) (.ref wbBufTy true)]) .unit) (.mk .unitVal .unit)) .unit
+
+-- `fill_bytes` is a tuple-form entry of positions 0 and 1 without a value; the call
+-- rebinds `rng` and `buf` and has the type of the pair of their new values.
+#guard externalTupleWriteTable [("f", wbFillCall)] == [("fill_bytes", [0, 1], false)]
+#guard externalWriteTable [("f", wbFillCall)] == []
+#guard (let w := externalTupleWriteback [] [("f", wbFillCall)]
+    w.2.map fun (_, te) => ((tRebindMutCalls [] [] w.1 te).erase,
+      tDroppedMutCalls [] [] [] w.1 te)) ==
+  [(.letBind "_wb" (.app "fill_bytes" [.var "rng", .borrow (.var "buf")])
+      (.seq (.assign "rng" (.proj (.var "_wb") 0))
+        (.seq (.assign "buf" (.proj (.var "_wb") 1)) .unitVal)), [])]
+#guard match (externalTupleWriteback [] [("f", wbFillCall)]).2 with
+  | [(_, .mk (.seq (.mk (.app _ _) ty) _) _)] => ty == ImpType.tuple [wbRngTy, wbBufTy]
+  | _ => false
+
+/-- `fn np(ks: &mut KS) -> i64`. -/
+def wbNoPskSig : FnTypeInfo := ⟨[("ks", wbKsMut)], .int⟩
+
+/-- `let h = if c { k } else { &np(&mut ks) }; use(h, ks)`. -/
+def wbBranchCall : TExpr :=
+  .mk (.letBind "h" (.mk (.ifThenElse (wbVar "c" .bool) (wbVar "k" .int)
+      (.mk (.borrow (.mk (.app "np" [.mk (.borrow (wbVar "ks" wbKsTy)) wbKsMut]) .int))
+        (.ref .int false))) .int)
+    (.mk (.app "use" [wbVar "h" .int, wbVar "ks" wbKsTy]) .int)) .int
+
+-- The call in the branch is dropped as written and bound in its branch after the
+-- hoist; the rebound `ks` leaves the join in `_mtup` beside the value of `h`.
+#guard tDroppedMutCalls [("np", wbNoPskSig)] [] [] [("np", [0], true)] wbBranchCall ==
+  [("np", [0])]
+#guard tDroppedMutCalls [("np", wbNoPskSig)] [] [] [("np", [0], true)]
+  (tHoistMutCalls [("np", wbNoPskSig)] wbBranchCall) == []
+#guard (tThreadLetJoins true (tRebindMutCalls [] [] [("np", [0], true)]
+    (tHoistMutCalls [("np", wbNoPskSig)] wbBranchCall))).erase ==
+  .letBind "_mtup"
+    (.ifThenElse (.var "c") (.tuple [.var "k", .var "ks"])
+      (.letBind "_wb" (.app "np" [.borrow (.var "ks")])
+        (.seq (.assign "ks" (.proj (.var "_wb") 1))
+          (.letBind "_mutcall" (.proj (.var "_wb") 0)
+            (.tuple [.borrow (.var "_mutcall"), .var "ks"])))))
+    (.letBind "h" (.proj (.var "_mtup") 0)
+      (.letBind "ks" (.proj (.var "_mtup") 1)
+        (.app "use" [.var "h", .var "ks"])))
+
 /-- `update(&mut a[i], x)`: an element place, which no write-back covers. -/
 def elemExtWrite : TExpr :=
   let hTy : ImpType := .adt "Hasher" []
@@ -4017,6 +4178,35 @@ def constGenCloneImpl : Json :=
 -- The method of an `impl` of a `core` trait contributes no definition and is not parsed.
 #guard match parseHaxFileWithTExpr (Json.arr #[constGenCloneImpl, fnJ ["x"] (varJ u32J "x")]) with
   | .ok (_, _, _, proc) => proc.map (·.1) == ["unknown_fn"]
+  | .error _ => false
+
+/-- `impl IndexMut<usize> for u32 { fn index_mut(..) -> u32 { N } }`: an `impl` of the
+    `core` trait `IndexMut` whose method the parse would refuse (Bertie's
+    `impl IndexMut for Bytes` returns `&mut self.0[i]`). -/
+def indexMutImplJ : Json :=
+  Json.mkObj [
+    ("owner_id", Json.mkObj [("contents", Json.mkObj [
+      ("id", Json.num 8), ("value", Json.mkObj [("is_local", Json.bool true)])])]),
+    ("kind", Json.mkObj [("Impl", Json.mkObj [
+      ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id", Json.mkObj [
+        ("contents", Json.mkObj [("value", mkDefIdJson "core"
+          [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "index",
+           defIdSeg "TypeNs" "IndexMut"])])])])]),
+      ("self_ty", Json.mkObj [("value", Json.mkObj [("Uint", Json.str "U32")])]),
+      ("items", Json.arr #[Json.mkObj [
+        ("ident", Json.arr #[Json.str "index_mut"]),
+        ("kind", Json.mkObj [("Fn", Json.mkObj [("def", Json.mkObj [
+          ("params", Json.arr #[]), ("ret", u32J), ("body", constParamJ "N")])])])]])])])]
+
+-- The `index_mut` method of a `core` `IndexMut` impl is neither a definition nor a
+-- refusal under the keep-going mode, so a function next to it, here one calling
+-- `core::ops::IndexMut::index_mut`, is kept and not omitted as a caller of a refused
+-- `index_mut`.
+#guard match HaxAdapter.parseHaxFileWithTExprReport (Json.arr #[indexMutImplJ,
+    fnJ ["x"] (callJ u32J "core" [("TypeNs", "ops"), ("TypeNs", "index"),
+      ("TypeNs", "IndexMut"), ("ValueNs", "index_mut")] [varJ u32J "x", varJ u32J "x"])])
+    (keepGoing := true) with
+  | .ok ((_, _, _, proc), refused) => proc.map (·.1) == ["unknown_fn"] && refused.isEmpty
   | .error _ => false
 
 /-- The top-level constant `k::m::K` (`segs` ending in `K`) with the body `x`. -/

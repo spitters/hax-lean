@@ -985,11 +985,80 @@ where
 /-- The calls in a function body that pass a `&mut` argument and that
     `tRebindMutCalls` leaves as plain calls. The body is not itself a `let`
     value, an assignment's right-hand side or the head of a `seq`, so the scan
-    starts outside every tuple-form call site. -/
+    starts outside every tuple-form call site. The positions the table `ro`
+    lists for a callee (`mutReadOnlyTable`: `&mut` parameters its body never
+    writes) are left out of a call's positions, and a call left with none is
+    not reported: it writes nothing back. -/
 def tDroppedMutCalls (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
     (writers : List (String × Nat)) (tup : List (String × List Nat × Bool))
-    (e : TExpr) : List (String × List Nat) :=
-  tDroppedMutCallsAt sigs sf writers tup false e
+    (e : TExpr) (ro : List (String × List Nat) := []) : List (String × List Nat) :=
+  (tDroppedMutCallsAt sigs sf writers tup false e).filterMap fun (f, ps) =>
+    let ps' := ps.filter fun p => !((ro.lookup f).getD []).contains p
+    if ps'.isEmpty then none else some (f, ps')
+
+/-- Whether the variable `p` occurs in `e` only as a call argument, possibly
+    under `&`, `*` and ascriptions (`tMutArgRoot`): never bound by a `let`,
+    assigned from, put into a tuple, returned or matched on as a whole. A
+    `&mut` parameter used so is passed on to callees and read through
+    projections only, so a write to it is an assignment or a call through
+    `&mut` that `tDroppedMutCalls` sees. The binding `let p := p` of a
+    parameter at the head of a body is not a use. -/
+partial def tVarOnlyAsArg (p : String) : TExpr → Bool
+  | .mk (.var n) _ => n != p
+  | .mk (.letBind n v b) _ =>
+    (n == p && tMutArgRoot v == some p || tVarOnlyAsArg p v) && tVarOnlyAsArg p b
+  | .mk (.app _ args) _ => args.all fun a => tMutArgRoot a == some p || tVarOnlyAsArg p a
+  | e => (tChildren e).all (tVarOnlyAsArg p)
+
+/-- One round of `mutReadOnlyTable` from the read-only table `ro`: for each
+    candidate of `cands` whose body in `defs` has no call through `&mut` outside
+    the write-back rewrite under `writers`, `tup` and `ro`, the parameters the
+    body, with its calls rebound, does not assign and uses only as call
+    arguments (`tVarOnlyAsArg`). -/
+def mutReadOnlyStep (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
+    (defs : List (String × TExpr)) (writers : List (String × Nat))
+    (tup : List (String × List Nat × Bool))
+    (cands : List (String × List Nat × List String × Bool))
+    (ro : List (String × List Nat)) : List (String × List Nat) :=
+  cands.filterMap fun c =>
+    match defs.lookup c.1 with
+    | none => none
+    | some body =>
+      if !(tDroppedMutCalls sigs sf writers tup body ro).isEmpty then none
+      else
+        let assigned := tAssignedVars (tRebindMutCalls sf writers tup body)
+        let ps := (c.2.1.zip c.2.2.1).filterMap fun (i, v) =>
+          if assigned.contains v || !tVarOnlyAsArg v body then none else some i
+        if ps.isEmpty then none else some (c.1, ps)
+
+/-- Iterate `mutReadOnlyStep` from `ro` until it is stationary or `fuel` runs
+    out. -/
+def mutReadOnlyIter (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
+    (defs : List (String × TExpr)) (writers : List (String × Nat))
+    (tup : List (String × List Nat × Bool))
+    (cands : List (String × List Nat × List String × Bool)) :
+    Nat → List (String × List Nat) → List (String × List Nat)
+  | 0, ro => ro
+  | fuel + 1, ro =>
+    let next := mutReadOnlyStep sigs sf defs writers tup cands ro
+    if next == ro then ro else mutReadOnlyIter sigs sf defs writers tup cands fuel next
+
+/-- The read-only `&mut` parameters of the candidates `cands` with a body in
+    `defs`, as `(function, positions)`. Rust lets a parameter be declared `&mut`
+    and only read (`derive_aead_key_iv(…, ks: &mut TLSkeyscheduler)` of Bertie
+    reads `ks`), so a call passing it has no effect to write back. A parameter
+    is read-only when its function's body has no call through `&mut` outside
+    the write-back rewrite, does not assign it once its calls are rebound under
+    `writers` and `tup`, and uses it only as a call argument; a call passing it
+    on to a read-only parameter of another function is no such call, so the
+    table is `mutReadOnlyStep` iterated from `[]`. Each round that is not the
+    fixpoint admits a further function, so `cands.length + 1` rounds reach
+    it. -/
+def mutReadOnlyTable (sigs : List (String × FnTypeInfo)) (sf : StructFieldNames)
+    (defs : List (String × TExpr)) (writers : List (String × Nat))
+    (tup : List (String × List Nat × Bool))
+    (cands : List (String × List Nat × List String × Bool)) : List (String × List Nat) :=
+  mutReadOnlyIter sigs sf defs writers tup cands (cands.length + 1) []
 
 /-- Strip the erase-deleted `.ann` type-ascription marker. Used so that the
     `if`-statement detection in `tThreadMut` looks through `.ann` and thus
@@ -1096,6 +1165,77 @@ where
     | [] => []
     | (p, e) :: rest => (p, tThreadMut active e) :: mapA active rest
 
+/-- The names bound by a `let` anywhere in `e`. -/
+partial def tLetBoundVars (e : TExpr) : List String :=
+  let here := match e with
+    | .mk (.letBind n _ _) _ => [n]
+    | _ => []
+  here ++ (tChildren e).flatMap tLetBoundVars
+
+/-- Thread the variables that the branches of a `let`-bound `if` or `match`
+    assign out of the join, as `tThreadMut` does for a statement `if`:
+
+        let x := (if c then T else E); rest
+      ↦ let _mtup := (if c then T' else E');
+        let x := _mtup.0; let v₁ := _mtup.1; …; let vₙ := _mtup.n; rest
+
+    where `{v₁,…,vₙ}` are the variables assigned in some branch, bound by no
+    `let` inside the branches and used in `rest`, and `T'`, `E'` end in
+    `(t, v₁, …, vₙ)` for their tail value `t`
+    (`tTupleTail`). A write-back call in a branch tail
+    (`let h := if let Some(k) = o { k } else { f(&mut ks) }`) is such an
+    assignment once `tRebindMutCalls` has bound it. A `let` whose branches
+    `tTupleTail` does not reach is kept. `active` is `tThreadMut`'s: inside a
+    loop or fold body the join is threaded only when the continuation holds a
+    loop. -/
+partial def tThreadLetJoins (active : Bool) : TExpr → TExpr
+  | .mk (.letBind n v rest) ty =>
+    let v' := tThreadLetJoins active v
+    let rest' := tThreadLetJoins active rest
+    let asg : Option (List String) := match tStripAnn v' with
+      | .mk (.ifThenElse _ t f) _ => some (tAssignedVars t ++ tAssignedVars f)
+      | .mk (.match_ _ arms) _ => some (tAssignedVars.goA arms)
+      | _ => none
+    let kept : TExpr := .mk (.letBind n v' rest') ty
+    match asg with
+    | none => kept
+    | some asg =>
+      let used := tVarRefs rest'
+      let inner := tLetBoundVars v'
+      let m := asg.eraseDups.filter fun x => used.contains x && x != n && !inner.contains x
+      if (!active && !tContainsLoop rest') || m.isEmpty then kept
+      else
+        match tTupleTail m (tStripAnn v') with
+        | some joined =>
+          .mk (.letBind "_mtup" joined
+            (tDestructure (n :: m) (.mk (.var "_mtup") .unknown) rest')) ty
+        | none => kept
+  | .mk (.forLoop x lo hi b) ty =>
+    .mk (.forLoop x (tThreadLetJoins active lo) (tThreadLetJoins active hi)
+      (tThreadLetJoins false b)) ty
+  | .mk (.forLoopRev x lo hi b) ty =>
+    .mk (.forLoopRev x (tThreadLetJoins active lo) (tThreadLetJoins active hi)
+      (tThreadLetJoins false b)) ty
+  | .mk (.forFold x lo hi b) ty =>
+    .mk (.forFold x (tThreadLetJoins active lo) (tThreadLetJoins active hi)
+      (tThreadLetJoins false b)) ty
+  | .mk (.forFoldRev x lo hi b) ty =>
+    .mk (.forFoldRev x (tThreadLetJoins active lo) (tThreadLetJoins active hi)
+      (tThreadLetJoins false b)) ty
+  | .mk (.forFoldReturn x lo hi b) ty =>
+    .mk (.forFoldReturn x (tThreadLetJoins active lo) (tThreadLetJoins active hi)
+      (tThreadLetJoins false b)) ty
+  | .mk (.forFoldRevReturn x lo hi b) ty =>
+    .mk (.forFoldRevReturn x (tThreadLetJoins active lo) (tThreadLetJoins active hi)
+      (tThreadLetJoins false b)) ty
+  | .mk (.whileLoop c b) ty =>
+    .mk (.whileLoop (tThreadLetJoins active c) (tThreadLetJoins false b)) ty
+  | .mk (.whileFold c b) ty =>
+    .mk (.whileFold (tThreadLetJoins active c) (tThreadLetJoins false b)) ty
+  | .mk (.whileFoldReturn c b) ty =>
+    .mk (.whileFoldReturn (tThreadLetJoins active c) (tThreadLetJoins false b)) ty
+  | e => tMapChildren (tThreadLetJoins active) e
+
 /-! ### Normalisations that bring a `&mut` call into the write-back fragment
 
 Each pass below rewrites a call the write-back rewrite leaves alone into a form
@@ -1195,6 +1335,12 @@ def tLiftGuard (sigs : List (String × FnTypeInfo)) (prev : List TExpr)
         && (tCallsIn p).all fun c =>
           tPlaceHead c.1 || (tMutParamPositions sigs c.1 ++ tMutArgPositions c.2.1).isEmpty
 
+/-- `f` applied to the tail of the `let` chain `e`, each `let` of the chain
+    retyped to `ty`, the type of `f`'s result. -/
+def tMapLetTail (f : TExpr → TExpr) (ty : ImpType) : TExpr → TExpr
+  | .mk (.letBind n v b) _ => .mk (.letBind n v (tMapLetTail f ty b)) ty
+  | e => f e
+
 /-- `let n₁ := c₁; …; let nₖ := cₖ; e` for `binds = [(n₁, c₁), …, (nₖ, cₖ)]`. -/
 def tWrapLets (binds : List (String × TExpr)) (e : TExpr) : TExpr :=
   binds.foldr (fun b acc => .mk (.letBind b.1 b.2 acc) acc.ty) e
@@ -1266,7 +1412,8 @@ def tLiftStmt (sigs : List (String × FnTypeInfo)) (e : TExpr) :
 /-- Bind by a `let` every `tValueMutCall` that is the stored value of an
     element or field write, or the tail value of a block (the body of a `let`,
     the second part of a `seq`, a branch of an `if` or a `match` in tail
-    position, or the whole expression). A `let` value, an assignment's
+    position or bound by a `let`, or the whole expression); a borrow `&call`
+    of such a call in tail position borrows the bound value. A `let` value, an assignment's
     right-hand side and the head of a `seq` are left as they are: they are
     tuple-form call sites already. In each of these statement positions and at
     a `match` in tail position, a `tValueMutCall` in an argument position of
@@ -1288,11 +1435,23 @@ where
           else s.2)
       else e'
     | .mk (.letBind n v b) ty =>
-      let s := tLiftStmt sigs (go false v)
+      -- The branches of an `if` or a `match` bound by a `let` are blocks whose
+      -- values are the bound value: their tails are tail positions.
+      let v' := match v with
+        | .mk (.ifThenElse c t f) vty => .mk (.ifThenElse (go false c) (go true t) (go true f)) vty
+        | .mk (.match_ s arms) vty =>
+          .mk (.match_ (go false s) (arms.map fun pe => (pe.1, go true pe.2))) vty
+        | _ => go false v
+      let s := tLiftStmt sigs v'
       tWrapLets s.1 (.mk (.letBind n s.2 (go tail b)) ty)
     | .mk (.seq a b) ty =>
       let s := tLiftStmt sigs (go false a)
       tWrapLets s.1 (.mk (.seq s.2 (go tail b)) ty)
+    | .mk (.borrow c@(.mk (.app f args) cty)) ty =>
+      -- `&call` in tail position: the call is bound first and its value borrowed.
+      if tail && tValueMutCall sigs f args cty then
+        tMapLetTail (fun r => .mk (.borrow r) ty) ty (go true c)
+      else .mk (.borrow (go false c)) ty
     | .mk (.ifThenElse c t f) ty => .mk (.ifThenElse (go false c) (go tail t) (go tail f)) ty
     | .mk (.match_ s arms) ty =>
       let e' : TExpr := .mk (.match_ (go false s) (arms.map fun pe => (pe.1, go tail pe.2))) ty
@@ -1425,40 +1584,47 @@ partial def tUnqualifyFieldHeads : TExpr → TExpr
     else .mk (.app pf args') ty
   | e => tMapChildren tUnqualifyFieldHeads e
 
-/-! ### External callees with a value result
+/-! ### External callees with a value result or several `&mut` arguments
 
 A callee without a definition in the export whose result carries a value and
 that writes through its `&mut` arguments (`HashMap::insert`, `Option::take`) is
 a tuple-form write-back function: the runtime models it as returning the pair of
 its Rust result and the new value of the written place, `(t, v)`, and a call
 site in `let`, assignment or statement position binds that pair to `_wb`
-(`tTupleBind`). A field place `&mut root.f` in write-back position is first read
+(`tTupleBind`). A callee with result `()` and several `&mut` arguments
+(`RngCore::fill_bytes(&mut self, dest: &mut [u8])`, `Vec::append(&mut self,
+other: &mut Vec<T>)`) is one too, returning the tuple `(v₁, …, v_k)` of the new
+values of its places. A field place `&mut root.f` in write-back position is first read
 into a local `_wbfld<p>`, which the call writes back, and `root` is then
 rebound to its field update with that local (`tLocalizeFieldWritebacks`), so
 the tuple-form rewrite, which writes plain variables only, covers it. -/
 
-/-- The tuple-form write-back entries `(f, positions, true)` of the callees of
-    `defs` that have no definition among `defs` (not a place head, not in
+/-- The tuple-form write-back entries `(f, positions, hasResult)` of the callees
+    of `defs` that have no definition among `defs` (not a place head, not in
     `builtinWriteTable`): a callee every call of which passes its `&mut`
     arguments at the same positions, each a variable (`tMutArgRoot`) or a field
-    of a variable (`tMutArgField`), and has a result type other than `()` and
-    `.unknown`. A callee with a `()` result is `externalWriteTable`'s. -/
+    of a variable (`tMutArgField`), and has a result type other than `.unknown`
+    that is not `()` (`hasResult`), or is `()` with at least two `&mut`
+    arguments. A callee with a `()` result and one `&mut` argument is
+    `externalWriteTable`'s. -/
 def externalTupleWriteTable (defs : List (String × TExpr)) :
     List (String × List Nat × Bool) :=
   let calls := (defs.flatMap fun d => tCallsIn d.2).filter fun c =>
     (defs.lookup c.1).isNone && !tPlaceHead c.1 && c.1 != ".0"
       && (builtinWriteTable.lookup c.1).isNone && !(tMutArgPositions c.2.1).isEmpty
   let placeOk : TExpr → Bool := fun a => (tMutArgRoot a).isSome || (tMutArgField a).isSome
-  let shape : String × List TExpr × ImpType → Option (List Nat) := fun c =>
+  let shape : String × List TExpr × ImpType → Option (List Nat × Bool) := fun c =>
+    let ps := tMutArgPositions c.2.1
+    let hasRes := match c.2.2 with | .unit => false | _ => true
     match c.2.2 with
-    | .unit | .unknown => none
+    | .unknown => none
     | _ =>
-      let ps := tMutArgPositions c.2.1
-      if ps.all fun p => (c.2.1[p]?).any placeOk then some ps else none
+      if !hasRes && ps.length < 2 then none
+      else if ps.all fun p => (c.2.1[p]?).any placeOk then some (ps, hasRes) else none
   let heads := (calls.map (·.1)).eraseDups
   heads.filterMap fun f =>
     match (calls.filter (·.1 == f)).map shape with
-    | some ps :: rest => if rest.all (· == some ps) then some (f, ps, true) else none
+    | some s :: rest => if rest.all (· == some s) then some (f, s.1, s.2) else none
     | _ => none
 
 /-- The local a field place at argument position `p` is read into. -/

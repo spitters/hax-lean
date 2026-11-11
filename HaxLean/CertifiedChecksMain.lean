@@ -81,7 +81,7 @@ def passRows (input : String) : Except String (List (String × List String)) := 
   let wrapStatus : List (String × String) := w.procTdefs.map fun (n, te) =>
     let ret := (w.writeReturns.lookup n).getD ([], false)
     let te := tReturnMutParams ret.1 ret.2 (tReturnMutParamsAtReturns ret.1 ret.2
-      (tRebindMutCalls structFields w.writers w.tupWriters te))
+      (tThreadLetJoins true (tRebindMutCalls structFields w.writers w.tupWriters te)))
     let p := tPipeline (tThreadMut true (tLowerClosureCalls [] te))
     (n, status p.erase (tWrapMatchArmsCF p).erase)
   let procTdefs := postPipeline structFields newtypes w
