@@ -6365,6 +6365,49 @@ partial def scrutIsInclusiveRange : TExpr → Bool
     | _ => false
   | _ => false
 
+/-! ### Loop invariants
+
+`hax_lib::loop_invariant!(|i| φ)` in a `for` loop is, in the export, the first
+statement of the loop body: a call of `hax_lib::_internal_loop_invariant` on the
+closure `|i| φ`. In a `while` loop, `hax_lib::loop_invariant!(φ)` is a call of
+`hax_lib::_internal_while_loop_invariant` on `Prop::from(φ)`. Each becomes the
+statement `if false then hax_lib::loop_invariant(φ) else ()` (`tInvStmt`, whose
+erasure is `Hax.Range.invStmt φ`), which never runs; the range checker reads `φ`
+from it as the candidate invariant of the loop (`Hax.Range.bodyInv?`). -/
+
+/-- The head of the statement carrying a loop invariant; the head
+    `Hax.Range.loopInvHead` of the range checker. -/
+def loopInvariantHead : String := "hax_lib::loop_invariant"
+
+/-- The statement carrying the loop invariant `φ`: a branch under the literal
+    condition `false`. -/
+def tInvStmt (φ : TExpr) : TExpr :=
+  .mk (.ifThenElse (.mk (.lit (.bool false)) .bool)
+    (.mk (.app loopInvariantHead [φ]) .bool) (.mk .unitVal .unit)) .unit
+
+/-- Whether a call head is `hax_lib::_internal_loop_invariant`. -/
+def isForInvariantHead (f : String) : Bool :=
+  f == "_internal_loop_invariant" || f.endsWith "::_internal_loop_invariant"
+
+/-- Whether a call head is `hax_lib::_internal_while_loop_invariant`. -/
+def isWhileInvariantHead (f : String) : Bool :=
+  f == "_internal_while_loop_invariant" ||
+    f.endsWith "::_internal_while_loop_invariant"
+
+/-- The body of a `for` loop with counter `v` whose first statement calls
+    `_internal_loop_invariant` on the closure `|p| φ`, with that statement
+    replaced by `tInvStmt` of `φ` read at the counter: `φ` itself when `p` is `v`,
+    `let p := v; φ` otherwise. Any other body is unchanged. -/
+def tLoopInvBody (v : String) (e : TExpr) : TExpr :=
+  match e with
+  | .mk (.seq (.mk (.app f [.mk (.lam [p] φ) _]) _) rest) ty =>
+    if isForInvariantHead f then
+      let φ' := if p == v then φ
+        else .mk (.letBind p (.mk (.var v) .unknown) φ) φ.ty
+      .mk (.seq (tInvStmt φ') rest) ty
+    else e
+  | _ => e
+
 /-- Reconstruct for-loops in a TExpr, preserving type annotations.
     Walks the TExpr tree directly, using untyped helpers (`tryExtractIterator`,
     `tryExtractNextMatch`) only on erased sub-expressions for pattern recognition.
@@ -6383,7 +6426,7 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
         let body' := extractNextMatchBodyT innerBody _iterVar
         match body' with
         | some bodyTE =>
-          let bodyRec := reconstructForLoopsTExpr bodyTE
+          let bodyRec := tLoopInvBody loopVar (reconstructForLoopsTExpr bodyTE)
           -- lo and hi come from the scrut pattern; extract from erased and lift
           match tryExtractIterator scrut.erase with
           | some (.range loImp hiImp _reversed _inclusive) =>
@@ -6412,7 +6455,7 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
       | some (loopVar, _bodyImp) =>
         match extractNextMatchBodyT innerBody _iterVar with
         | some bodyTE =>
-          let bodyRec := reconstructForLoopsTExpr bodyTE
+          let bodyRec := tLoopInvBody loopVar (reconstructForLoopsTExpr bodyTE)
           -- The collection is the argument inside into_iter in scrut
           let collTE := extractCollectionTExpr scrut
           let idxVar := "_ci"
@@ -6453,7 +6496,12 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
     .mk (.letBind n (reconstructForLoopsTExpr v) (reconstructForLoopsTExpr b)) ty
   | .mk (.lam ps b) ty => .mk (.lam ps (reconstructForLoopsTExpr b)) ty
   | .mk (.app f args) ty =>
-    .mk (.app f (args.map reconstructForLoopsTExpr)) ty
+    match args with
+    | [.mk (.app g [φ]) _] =>
+      if isWhileInvariantHead f && (g == "from" || g.endsWith "::from") then
+        tInvStmt (reconstructForLoopsTExpr φ)
+      else .mk (.app f (args.map reconstructForLoopsTExpr)) ty
+    | _ => .mk (.app f (args.map reconstructForLoopsTExpr)) ty
   | .mk (.tuple es) ty =>
     .mk (.tuple (es.map reconstructForLoopsTExpr)) ty
   | .mk (.proj e i) ty =>

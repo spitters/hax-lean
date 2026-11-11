@@ -961,6 +961,82 @@ partial def markBoolTests (bools : List String) : ImpExpr → ImpExpr
   | .typeAscription e s => .typeAscription (markBoolTests bools e) s
   | e => e
 
+/-! ## Loop invariants of the source
+
+A `hax_lib::loop_invariant!` of the source is the statement `Range.invStmt φ` at the head of
+a loop body, which never runs. The rendered body omits it (`stripInvStmts`); beside a
+monadic function, the invariant of each counted forward loop is a definition
+`f_loopInv_k : Int → α → Prop` over the counter and the accumulators of the loop
+(`loopInvDefs`), the invariant argument of `Hax.foldRangeM_spec` in
+`rust_vc [Hax.foldRangeM_spec lo hi init body f_loopInv_k]`. -/
+
+/-- Whether a statement is `Range.invStmt φ`. -/
+def isInvStmt : ImpExpr → Bool
+  | .ifThenElse (.lit (.bool false)) (.app f [_]) .unitVal => f == Range.loopInvHead
+  | _ => false
+
+/-- The term without its statements `Range.invStmt φ`. -/
+partial def stripInvStmts : ImpExpr → ImpExpr
+  | .seq a b => if isInvStmt a then stripInvStmts b else .seq (stripInvStmts a) (stripInvStmts b)
+  | .letBind n v b => .letBind n (stripInvStmts v) (stripInvStmts b)
+  | .lam ps b => .lam ps (stripInvStmts b)
+  | .app f as => .app f (as.map stripInvStmts)
+  | .tuple es => .tuple (es.map stripInvStmts)
+  | .proj e i => .proj (stripInvStmts e) i
+  | .ifThenElse c t e => .ifThenElse (stripInvStmts c) (stripInvStmts t) (stripInvStmts e)
+  | .match_ s arms => .match_ (stripInvStmts s) (arms.map fun (p, b) => (p, stripInvStmts b))
+  | .borrow e => .borrow (stripInvStmts e)
+  | .deref e => .deref (stripInvStmts e)
+  | .assign n r => .assign n (stripInvStmts r)
+  | .forLoop v lo hi b => .forLoop v (stripInvStmts lo) (stripInvStmts hi) (stripInvStmts b)
+  | .forLoopRev v lo hi b => .forLoopRev v (stripInvStmts lo) (stripInvStmts hi) (stripInvStmts b)
+  | .whileLoop c b => .whileLoop (stripInvStmts c) (stripInvStmts b)
+  | .break_ (some e) => .break_ (some (stripInvStmts e))
+  | .earlyReturn e => .earlyReturn (stripInvStmts e)
+  | .questionMark e => .questionMark (stripInvStmts e)
+  | .forFold v lo hi b => .forFold v (stripInvStmts lo) (stripInvStmts hi) (stripInvStmts b)
+  | .forFoldRev v lo hi b => .forFoldRev v (stripInvStmts lo) (stripInvStmts hi) (stripInvStmts b)
+  | .whileFold c b => .whileFold (stripInvStmts c) (stripInvStmts b)
+  | .forFoldReturn v lo hi b =>
+    .forFoldReturn v (stripInvStmts lo) (stripInvStmts hi) (stripInvStmts b)
+  | .forFoldRevReturn v lo hi b =>
+    .forFoldRevReturn v (stripInvStmts lo) (stripInvStmts hi) (stripInvStmts b)
+  | .whileFoldReturn c b => .whileFoldReturn (stripInvStmts c) (stripInvStmts b)
+  | .cfBreak e => .cfBreak (stripInvStmts e)
+  | .cfContinue e => .cfContinue (stripInvStmts e)
+  | .cfBreakContinue e => .cfBreakContinue (stripInvStmts e)
+  | .typeAscription e s => .typeAscription (stripInvStmts e) s
+  | e => e
+
+/-- The invariants of the counted forward loops (`forFold`) of a term, in pre-order: the
+    counter, the accumulators (`extractAccumulators`) and the invariant (`Range.bodyInv?`). -/
+partial def loopInvariants (e : ImpExpr) : List (String × List String × ImpExpr) :=
+  let here := match e with
+    | .forFold v _ _ b =>
+      match Range.bodyInv? b with
+      | some φ => [(v, extractAccumulators b, φ)]
+      | none => []
+    | _ => []
+  here ++ (MonadicEmit.kids e).flatMap loopInvariants
+
+/-- The definitions `f_loopInv_k`, one for each invariant of `invs` (`loopInvariants`): a
+    predicate on the counter and the accumulators of the loop, the invariant read as `= true`,
+    with the parameters of `f` (`tparams`) that the invariant reads. -/
+def loopInvDefs (name : String) (tparams : List (String × ImpType))
+    (structLookup : String → Option String) (boolNames : List String)
+    (invs : List (String × List String × ImpExpr)) : String :=
+  String.join (invs.zipIdx.map fun ((v, accs, φ), k) =>
+    let fvs := collectFreeVars [] φ
+    let ps := tparams.filter fun (p, _) => fvs.contains p && p != v && !accs.contains p
+    let pStr := String.join (ps.map fun (p, ty) =>
+      let sn := sanitizeName p
+      if ty.isUnknown then s!" {sn}" else s!" ({sn} : {ty.toLeanTypeStrSurface structLookup})")
+    let accS := if accs.isEmpty then "(_acc : Unit)" else (accStrings accs).2
+    let thm := MonadicEmit.rangeName name s!"_loopInv_{k}"
+    s!"/-- The loop invariant {k} of `{name}`, from `hax_lib::loop_invariant!`. -/\n" ++
+      s!"def {thm}{pStr} :=\n  fun ({sanitizeName v} : Int) {accS} => " ++
+      s!"({toLean φ 0 boolNames}) = true\n")
+
 /-! ## Typed Definition Generator -/
 
 /-- Generate a Lean 4 definition using types from the raw TExpr for parameter
@@ -1068,6 +1144,8 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   let body := Hax.stripFunctionTailCfBreak body
   let bools := boolVarNames rawTe
   let body := if bools.isEmpty then body else markBoolTests bools body
+  let invs := loopInvariants body
+  let body := stripInvStmts body
   match monadic with
   | none =>
     let bodyStr := toLean body 1 boolNames
@@ -1078,7 +1156,8 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
     let retTyStr := if retTyStr.isEmpty then ""
       else s!" : RustM ({(retTyStr.drop 3).toString})"
     let bodyStr := MonadicEmit.renderBody { monadic := cl, boolNames } body
-    s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
+    s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n" ++
+      loopInvDefs name tparams structLookup boolNames invs
 
 /-! ## Typed Struct New Expansion
 

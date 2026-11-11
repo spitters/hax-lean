@@ -37,10 +37,14 @@ The checker refines an interval by the guard of an `if` whose condition compares
 and through negations, conjunctions that hold and disjunctions that fail; it drops the
 variables a `match` arm binds, checks a counted loop (`forFold`) against a loop invariant,
 and reads a call of a function of the crate through its summary, which is one more head of
-`Spec.xfer`. The loop invariant is a candidate (`loopInv`, from the annotation `Spec.ann`
-that an untrusted inference supplies): the checker verifies that the environment before the
-loop, after each iteration and at each `cfBreak`/`cfContinue` of the body lies in it. A
-`whileFold` is checked the same way, its condition refining the environment of the body.
+`Spec.xfer`. The loop invariant is a candidate (`loopInv`): first the bounds that the
+invariant stated in the body gives the variables the body writes (`bodyInv?`, `invAnn`; a
+`hax_lib::loop_invariant!` of the source, carried by the statement `invStmt`), then the
+annotation `Spec.ann` that an untrusted inference supplies. The checker verifies that the
+environment before the loop, after each iteration and at each `cfBreak`/`cfContinue` of the
+body lies in it. A `whileFold` is checked the same way, its condition refining the
+environment of the body. The branch of an `if` under the literal condition `false` is not
+checked, as it never runs.
 
 ## Soundness
 
@@ -63,6 +67,8 @@ environment in the final abstract environment (`Post`).
 * `refineAtoms`, `refineLen`, `condOk`, `refineCond`: the refinement of an environment by a
   guard.
 * `argRels`: the facts between the arguments of a call.
+* `invStmt`, `bodyInv?`, `invAnn`, `loopAnn`: the loop invariant a body states and the
+  candidate values it gives.
 * `check`, `checkArgs`, `checkArms`: the checker.
 * `Sound`: the hypotheses relating a specification to a builtin table.
 
@@ -691,6 +697,72 @@ def loopInv (ann : AEnv) (x : String) (body : ImpExpr) (Γ : AEnv) : AEnv :=
     | some a, some b => if b.le a then some (y, a) else none
     | _, _ => none
 
+/-! ## Loop invariants of the source -/
+
+/-- The head of the statement that carries a loop invariant of the source
+    (`hax_lib::loop_invariant!`) in a loop body. -/
+def loopInvHead : String := "hax_lib::loop_invariant"
+
+/-- The statement carrying the loop invariant `φ`: a branch under the literal condition
+    `false`, so that it never runs and its run leaves the environment. -/
+def invStmt (φ : ImpExpr) : ImpExpr :=
+  .ifThenElse (.lit (.bool false)) (.app loopInvHead [φ]) .unitVal
+
+/-- Whether a term is the literal `false`. -/
+def isFalseLit : ImpExpr → Bool
+  | .lit (.bool false) => true
+  | _ => false
+
+/-- The loop invariant a loop body states: the first `invStmt` along the spine of its
+    statements and `let`s. -/
+def bodyInv? : ImpExpr → Option ImpExpr
+  | .seq (.ifThenElse (.lit (.bool false)) (.app f [φ]) .unitVal) b =>
+    if f == loopInvHead then some φ else bodyInv? b
+  | .seq _ b => bodyInv? b
+  | .letBind _ _ b => bodyInv? b
+  | _ => none
+
+/-- The bounds `(lower, upper)` the condition `φ` gives the variable `y` when it holds, read
+    in `Γ`: from each comparison of `y` with an atom of integer interval, through
+    conjunctions. -/
+def invBounds (Γ : AEnv) (y : String) : ImpExpr → Option Int × Option Int
+  | .app op [l, r] =>
+    if isAnd op then
+      let (l1, h1) := invBounds Γ y l
+      let (l2, h2) := invBounds Γ y r
+      (l1 <|> l2, h1 <|> h2)
+    else
+      match cmpOf op with
+      | some (strict, swapped) =>
+        let (a, b) := if swapped then (r, l) else (l, r)
+        let d : Int := if strict then 1 else 0
+        let upper := match a with
+          | .var x => if x == y then (atomAV Γ b >>= AV.num?).map fun i => i.2 - d else none
+          | _ => none
+        let lower := match b with
+          | .var x => if x == y then (atomAV Γ a >>= AV.num?).map fun i => i.1 + d else none
+          | _ => none
+        (lower, upper)
+      | none => (none, none)
+  | _ => (none, none)
+
+/-- The candidate abstract values that the loop invariant `φ` gives the variables `ys`, read
+    in `Γ`: an integer interval with the bounds `φ` states, and the bound of the value in `Γ`
+    on a side `φ` does not bound. -/
+def invAnn (Γ : AEnv) (φ : ImpExpr) (ys : List String) : AEnv :=
+  ys.filterMap fun y =>
+    match Γ.get y, invBounds Γ y φ with
+    | .num i, (lo, hi) =>
+      if lo.isNone && hi.isNone then none else some (y, .num (lo.getD i.1, hi.getD i.2))
+    | _, _ => none
+
+/-- The loop annotation of a loop with body `body` entered in `Γ`: the candidates of the
+    invariant the body states (`bodyInv?`, `invAnn`) before those of `ann`. -/
+def loopAnn (ann Γ : AEnv) (body : ImpExpr) : AEnv :=
+  match bodyInv? body with
+  | some φ => invAnn Γ φ (writes body) ++ ann
+  | none => ann
+
 /-- The abstract value of the counter of a loop over `[lo, hi)`: `[lo.1, hi.2 - 1]` when both
     bounds have integer intervals. -/
 def ctrAV : AV → AV → AV
@@ -766,7 +838,8 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
   | Γ, .ifThenElse c t e =>
     match check H J Γ c with
     | some (_, Γ1) =>
-      match check H J (refineCond H.logic c true Γ1) t,
+      match (if isFalseLit c then some (.top, Γ1)
+          else check H J (refineCond H.logic c true Γ1) t),
           check H J (refineCond H.logic c false Γ1) e with
       | some (at', Γt), some (ae, Γe) => some (at'.join ae, AEnv.join Γt Γe)
       | _, _ => none
@@ -780,7 +853,7 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
     | some (al, Γ1) =>
       match check H J Γ1 hi with
       | some (ah, Γ2) =>
-        let inv := loopInv H.ann x body Γ2
+        let inv := loopInv (loopAnn H.ann ((x, ctrAV al ah) :: Γ2) body) x body Γ2
         if entails Γ2 inv then
           match check H inv ((x, ctrAVLen x hi body al ah) :: AEnv.kill x inv) body with
           | some (_, Γb) => if entails Γb inv then some (.top, inv) else none
@@ -789,7 +862,7 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
       | none => none
     | none => none
   | Γ, .whileFold c body =>
-    let inv := loopInv H.ann "" body Γ
+    let inv := loopInv (loopAnn H.ann Γ body) "" body Γ
     if entails Γ inv then
       match check H J inv c with
       | some (_, Γc) =>

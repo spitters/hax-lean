@@ -499,6 +499,17 @@ theorem denote'_ifThenElse_cf (bi : Builtins) (fuel : Nat) (c t e : ImpExpr) (en
   rename_i w; cases w <;> try rfl
   rename_i b; cases b <;> rfl
 
+/-- The literal `false` runs to the value `false`. -/
+theorem isFalseLit_run {bi : Builtins} {fuel : Nat} {c : ImpExpr} {env e : Env} {w : Value}
+    (hf : isFalseLit c = true) (hr : denote' bi fuel c env = (.val w, e)) :
+    w = .bool false := by
+  match c, hf with
+  | .lit (.bool false), _ =>
+    simp only [denote', Value.ofLit] at hr
+    change (Outcome.val (Value.bool false), env) = (Outcome.val w, e) at hr
+    simp only [Prod.mk.injEq, Outcome.val.injEq] at hr
+    exact hr.1.symm
+
 theorem denote'_match_cf (bi : Builtins) (fuel : Nat) (s : ImpExpr)
     (arms : List (ImpPat × ImpExpr)) (env : Env) :
     denote' bi fuel (.match_ s arms) env =
@@ -1624,7 +1635,8 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
     · exact ⟨by trivial, post_val hNe (hS.deep f vs w hb hdl) (hres w hb) hSe⟩
   | .ifThenElse c t el, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hc : check H J Γ c with _ | ⟨ac, Γ1⟩ <;> simp only [check, hc, reduceCtorEq] at h
-    rcases ht : check H J (refineCond H.logic c true Γ1) t with _ | ⟨at', Γt⟩ <;>
+    rcases ht : (if isFalseLit c then some (.top, Γ1)
+        else check H J (refineCond H.logic c true Γ1) t) with _ | ⟨at', Γt⟩ <;>
       rcases he : check H J (refineCond H.logic c false Γ1) el with _ | ⟨ae, Γe⟩ <;>
       simp only [ht, he, reduceCtorEq, Option.some.injEq, Prod.mk.injEq] at h
     obtain ⟨rfl, rfl⟩ := h
@@ -1637,8 +1649,11 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
       cases bb
       · obtain ⟨h1, h2⟩ := check_sound hS el J _ ae Γe he fuel e hR hNe
         exact ⟨h1, h2.weaken (fun _ hs => hs.join_right) (fun _ hm => hm.join_right)⟩
-      · obtain ⟨h1, h2⟩ := check_sound hS t J _ at' Γt ht fuel e hR hNe
-        exact ⟨h1, h2.weaken (fun _ hs => hs.join_left) (fun _ hm => hm.join_left)⟩
+      · by_cases hf : isFalseLit c = true
+        · exact absurd (isFalseLit_run hf hr) (by simp)
+        · simp only [hf, Bool.false_eq_true, ↓reduceIte] at ht
+          obtain ⟨h1, h2⟩ := check_sound hS t J _ at' Γt ht fuel e hR hNe
+          exact ⟨h1, h2.weaken (fun _ hs => hs.join_left) (fun _ hm => hm.join_left)⟩
     all_goals exact ⟨by trivial, trivial⟩
   | .match_ s arms, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hs : check H J Γ s with _ | ⟨as, Γ1⟩ <;> simp only [check, hs, reduceCtorEq] at h
@@ -1649,7 +1664,7 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
   | .forFold x lo hi body, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hlo : check H J Γ lo with _ | ⟨al, Γ1⟩ <;> simp only [check, hlo, reduceCtorEq] at h
     rcases hhi : check H J Γ1 hi with _ | ⟨ah, Γ2⟩ <;> simp only [hhi, reduceCtorEq] at h
-    generalize hI : loopInv H.ann x body Γ2 = inv at h
+    generalize hI : loopInv (loopAnn H.ann ((x, ctrAV al ah) :: Γ2) body) x body Γ2 = inv at h
     by_cases he1 : entails Γ2 inv = true <;> simp only [he1, ↓reduceIte, reduceCtorEq] at h
     rcases hb : check H inv ((x, ctrAVLen x hi body al ah) :: AEnv.kill x inv) body with
       _ | ⟨ab, Γb⟩ <;> simp only [hb, reduceCtorEq] at h
@@ -1700,7 +1715,7 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
       ⟨rfl, post_cf hNe hdv (hSe.entails he)⟩
   | .whileFold c body, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     simp only [check] at h
-    generalize hI : loopInv H.ann "" body Γ = inv at h
+    generalize hI : loopInv (loopAnn H.ann Γ body) "" body Γ = inv at h
     by_cases he1 : entails Γ inv = true <;> simp only [he1, ↓reduceIte, reduceCtorEq] at h
     rcases hc : check H J inv c with _ | ⟨ac, Γc⟩ <;> simp only [hc, reduceCtorEq] at h
     by_cases he2 : entails Γc inv = true <;> simp only [he2, ↓reduceIte, reduceCtorEq] at h
