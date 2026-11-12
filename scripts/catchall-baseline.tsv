@@ -194,7 +194,6 @@ HaxLean/HaxAdapter.lean	haxMentionsConstParam	fallback false	1
 HaxLean/HaxAdapter.lean	haxTyHasParam	fallback false	1
 HaxLean/HaxAdapter.lean	haxTyHasUnreadRef	fallback false	1
 HaxLean/HaxAdapter.lean	haxTyParamNames	fallback []	2
-HaxLean/HaxAdapter.lean	impAppHeads	fallback []	1
 HaxLean/HaxAdapter.lean	impPatIrrefutable	fallback false	1
 HaxLean/HaxAdapter.lean	implAssocTypes	fallback none	2
 HaxLean/HaxAdapter.lean	implAssocTypes	getD []).eraseDups	1
@@ -421,3 +420,5 @@ HaxLean/HaxAdapter.lean	unOpName	fallback "unop"	1
 HaxLean/HaxAdapter.lean	unreadFields	fallback []	1
 HaxLean/HaxAdapter.lean	validateExtraction	fallback []	2
 HaxLean/HaxAdapter.lean	variantCtorValue?	getD .unknown	1
+HaxLean/HaxAdapter.lean	inherentImplsOf	getD [] (toOption.toList)	2
+HaxLean/HaxAdapter.lean	parseHaxItemTExpr	getD [] (toOption.toList)	1

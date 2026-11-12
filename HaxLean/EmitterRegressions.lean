@@ -3998,6 +3998,49 @@ def keepGoingExport : Json :=
   | .error _ => false
 #guard (parseHaxFileWithTExpr keepGoingExport).toOption.isNone
 
+/-- An export of `bad` reading a value of a type parameter, and of `g bad = bad`, whose
+    parameter has the name of `bad`. -/
+def paramShadowExport : Json :=
+  Json.arr #[fnItemWithParams "bad" #[boolParamJson "a"] (haxVarRefT (paramTyJ "C") "a"),
+    fnItemWithParams "g" #[boolParamJson "bad"] (haxVarRef "bad")]
+
+-- `bad` is refused; `g` reads its parameter `bad`, calls nothing omitted, and is kept.
+#guard match parseHaxFileWithTExprReport paramShadowExport (keepGoing := true) with
+  | .ok ((_, _, raw, _), refused) => raw.map (·.1) == ["g"] && refused.map (·.1) == ["bad"]
+  | .error _ => false
+-- The global names of a definition: its parameter `x` and its `let`-bound `z` are not.
+#guard impDefRefs [] (.letBind "x" (.var "x")
+    (.letBind "z" (.var "c") (.app "f" [.var "x", .var "y", .var "z"]))) == ["c", "f", "y"]
+
+/-- `#[hax_lib::opaque]`, the attribute hax exports as `_hax::json("\"Erased\"")`. -/
+def erasedAttrJ : Json :=
+  Json.mkObj [("Unparsed", Json.mkObj [("path", Json.str "_hax::json"),
+    ("args", Json.mkObj [("Delimited", Json.mkObj [
+      ("tokens", Json.str "\"\\\"Erased\\\"\"")])])])]
+
+/-- An export of `enc a` under `#[hax_lib::opaque]`, whose body reads a value of a type
+    parameter, and of `g x y = enc x y`. -/
+def opaqueExport : Json :=
+  Json.arr #[Json.mkObj [
+      ("attributes", Json.mkObj [("attributes", Json.arr #[erasedAttrJ])]),
+      ("def_id", resolvedDefId [defIdSeg "ValueNs" "enc"]),
+      ("kind", Json.mkObj [("Fn", Json.mkObj [
+        ("ident", Json.arr #[Json.str "enc"]),
+        ("def", Json.mkObj [("params", Json.arr #[boolParamJson "a"]),
+          ("body", Json.mkObj [("expr", haxVarRefT (paramTyJ "C") "a"),
+            ("params", Json.arr #[boolParamJson "a"])])])])])],
+    fnItemWithParams "g" #[boolParamJson "x", boolParamJson "y"] (callTwoJson "enc")]
+
+#guard itemIsHaxOpaque (Json.mkObj [("attributes", Json.arr #[erasedAttrJ])])
+#guard !itemIsHaxOpaque (fnItemWithParams "g" #[] (haxVarRef "x"))
+-- `enc` has no definition and its body is not parsed; `g` calls the `Deps` field `enc`.
+#guard match parseHaxFileWithTExpr opaqueExport with
+  | .ok (_, fnTypes, raw, proc) =>
+    raw.map (·.1) == ["g"] &&
+      ((toLeanCertifiedFileTyped raw "Test" [] fnTypes proc).splitOn
+        "class TestDeps where\n  enc ").length == 2
+  | .error _ => false
+
 /-- A `&mut` reference to a `u32` variable `n`. -/
 def mutRefT (n : String) : TExpr := .mk (.var n) (.ref (.uint .w32) true)
 
@@ -4065,17 +4108,41 @@ def inherentImpl (arg : Json) (p : String) : Json :=
         ("params", Json.arr #[Json.mkObj [("pat", bindPatJ p), ("ty", u32J)]]),
         ("ret", u32J), ("body", varJ u32J p)])])])]])])])]
 
-/-- `impl S<u32> { fn m(x) }` and `impl S<bool> { fn m(y) }`, both emitted as `S_m`. -/
+/-- `impl S<u32> { fn m(x) }` and `impl S<bool> { fn m(y) }`, emitted as `S_u32_m` and
+    `S_bool_m`. -/
 def twoImplsExport : Json :=
   Json.arr #[inherentImpl u32J "x", inherentImpl (tyJ (Json.str "Bool")) "y"]
 
--- The two definitions of `S_m` are refused; under the keep-going mode the name is omitted.
+#guard inherentMethodCollisions twoImplsExport == [("S", "m")]
 #guard match parseHaxFileWithTExpr twoImplsExport with
+  | .ok (_, _, raw, _) => raw.map (·.1) == ["S_u32_m", "S_bool_m"]
+  | .error _ => false
+
+/-- `impl S<u32> { fn m(x) }` twice, both emitted as `S_m`. -/
+def sameArgImplsExport : Json :=
+  Json.arr #[inherentImpl u32J "x", inherentImpl u32J "y"]
+
+-- The two definitions of `S_m` are refused; under the keep-going mode the name is omitted.
+#guard match parseHaxFileWithTExpr sameArgImplsExport with
   | .error e => e.startsWith "unsupported construct: two definitions have the emitted name `S_m`"
   | .ok _ => false
-#guard match parseHaxFileWithTExprReport twoImplsExport (keepGoing := true) with
+#guard match parseHaxFileWithTExprReport sameArgImplsExport (keepGoing := true) with
   | .ok _ => false
   | .error e => e == "no functions or constants found in hax export"
+
+/-- The callee `read` of a method call, a method of the `impl` with interning id `iid`. -/
+def implMethodFunJ (iid : Nat) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("GlobalName", Json.mkObj [("item", Json.mkObj [
+    ("value", Json.mkObj [("def_id", Json.mkObj [("contents", Json.mkObj [
+      ("value", Json.mkObj [("parent", Json.mkObj [("contents", Json.mkObj [
+        ("id", Json.num iid),
+        ("value", Json.mkObj [("kind", Json.mkObj [("Impl", Json.mkObj [])])])])])])])])])])
+    ])])]
+
+-- A call of `read` of `impl S<ClientState<_>>` takes the name of its definition.
+#guard disambiguateMethodCallWithImplMap (implMethodFunJ 1) "read"
+  { impls := [(1, "S"), (2, "S")], implArgHeads := [(1, "ClientState"), (2, "ServerState")],
+    inherentCollisions := [("S", "read")] } == "S_ClientState_read"
 -- One item listed twice (one source, one body) is one definition.
 #guard
   let d : String × Unit × TExpr × Unit := ("f", (), .mk (.var "x") .int, ())

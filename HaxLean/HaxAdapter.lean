@@ -459,6 +459,13 @@ inductive FieldImplRepr where
     minimal churn. -/
 structure ImplSelfTypeMap where
   impls : List (Nat × String) := []
+  /-- The interning id of each inherent `impl` of `impls` whose self type has a type
+      argument, with the short name of its first one (`inherentImplArgHead?`). -/
+  implArgHeads : List (Nat × String) := []
+  /-- The pairs `(self type, method)` that several inherent `impl`s of one self type
+      define, at pairwise distinct type-argument heads (`inherentMethodCollisions`).
+      Such a method is named `<SelfType>_<Head>_<method>` (`inherentMethodPrefix`). -/
+  inherentCollisions : List (String × String) := []
   collisions : List String := []
   /-- Struct name → field names in declaration order, for lowering a write
       through a struct-field place (`self.buf = v`) to a functional
@@ -971,6 +978,15 @@ partial def findImplAncestorId (defIdJ : Json) (depth : Nat := 8) : Option Nat :
 /-- Look up an Impl-DefId-id in the map. -/
 def lookupImplSelfType (id : Nat) (m : ImplSelfTypeMap) : Option String :=
   m.impls.find? (·.1 == id) |>.map (·.2)
+
+/-- The prefix of the emitted name of the method `m` of an inherent `impl` of the self
+    type `sn` whose first type argument has the head `head?`: `<sn>_<head>` when
+    `(sn, m)` is in `colls` (`inherentMethodCollisions`), `sn` otherwise. -/
+def inherentMethodPrefix (sn : String) (head? : Option String) (m : String)
+    (colls : List (String × String)) : String :=
+  match head? with
+  | some h => if colls.contains (sn, m) then s!"{sn}_{h}" else sn
+  | none => sn
 
 /-- The `impl` block and method name a hax trait-method `Call` resolves to.
 
@@ -1622,7 +1638,11 @@ def disambiguateMethodCallWithImplMap
                     match findImplAncestorId parentJ with
                     | some implId =>
                       match lookupImplSelfType implId implMap with
-                      | some tyName => s!"{tyName}_{baseName}"
+                      | some tyName =>
+                        let head? := (implMap.implArgHeads.find? (·.1 == implId)).map (·.2)
+                        let pfx := inherentMethodPrefix tyName head? baseName
+                          implMap.inherentCollisions
+                        s!"{pfx}_{baseName}"
                       | none => baseName
                     | none => baseName
                 | _ => baseName
@@ -5195,24 +5215,35 @@ def tMatchArms (scrut : TExpr) (ty : ImpType) (tmp : String) (arms : List TArm) 
     let m ← tGuardedMatch sv ty arms
     return tWrapTryLets bs (TExpr.mk (.letBind tmp s m) ty)
 
-/-- The heads of the calls of an expression and the variables it reads. -/
-partial def impAppHeads : ImpExpr → List String
-  | .var n => [n]
-  | .app f args => f :: args.flatMap impAppHeads
-  | .letBind _ v b => impAppHeads v ++ impAppHeads b
-  | .lam _ b => impAppHeads b
-  | .tuple es => es.flatMap impAppHeads
+/-- The global names an expression refers to: the heads of its calls and the variables
+    it reads, each outside the scope of every binder of it, `bound` being the names in
+    scope: the names bound by a `let`, a `fun`, a `match` arm's pattern or a loop. -/
+partial def impFreeRefs (bound : List String) : ImpExpr → List String
+  | .var n => if bound.contains n then [] else [n]
+  | .app f args =>
+    (if bound.contains f then [] else [f]) ++ args.flatMap (impFreeRefs bound)
+  | .letBind n v b => impFreeRefs bound v ++ impFreeRefs (n :: bound) b
+  | .lam ps b => impFreeRefs (ps ++ bound) b
+  | .tuple es => es.flatMap (impFreeRefs bound)
   | .proj e _ | .borrow e | .deref e | .earlyReturn e | .questionMark e
   | .cfBreak e | .cfContinue e | .cfBreakContinue e | .typeAscription e _
-  | .assign _ e | .break_ (some e) => impAppHeads e
-  | .ifThenElse c t e => impAppHeads c ++ impAppHeads t ++ impAppHeads e
-  | .match_ s arms => impAppHeads s ++ arms.flatMap fun (_, b) => impAppHeads b
+  | .assign _ e | .break_ (some e) => impFreeRefs bound e
+  | .ifThenElse c t e => impFreeRefs bound c ++ impFreeRefs bound t ++ impFreeRefs bound e
+  | .match_ s arms =>
+    impFreeRefs bound s ++ arms.flatMap fun (p, b) => impFreeRefs (patLocalBinders p ++ bound) b
   | .seq a b | .whileLoop a b | .whileFold a b | .whileFoldReturn a b =>
-    impAppHeads a ++ impAppHeads b
-  | .forLoop _ lo hi b | .forLoopRev _ lo hi b | .forFold _ lo hi b
-  | .forFoldRev _ lo hi b | .forFoldReturn _ lo hi b | .forFoldRevReturn _ lo hi b =>
-    impAppHeads lo ++ impAppHeads hi ++ impAppHeads b
-  | _ => []
+    impFreeRefs bound a ++ impFreeRefs bound b
+  | .forLoop v lo hi b | .forLoopRev v lo hi b | .forFold v lo hi b
+  | .forFoldRev v lo hi b | .forFoldReturn v lo hi b | .forFoldRevReturn v lo hi b =>
+    impFreeRefs bound lo ++ impFreeRefs bound hi ++ impFreeRefs (v :: bound) b
+  | .lit _ | .unitVal | .continue_ | .break_ none => []
+
+/-- The global names a definition refers to (`impFreeRefs`), its parameters bound: a
+    parsed definition binds each parameter `p` by a leading `let p := p`. -/
+partial def impDefRefs (bound : List String) : ImpExpr → List String
+  | .letBind p (.var q) b => if p == q then impDefRefs (p :: bound) b
+    else impFreeRefs bound (.letBind p (.var q) b)
+  | e => impFreeRefs bound e
 
 /-- The krate and the last path segment of the ADT a hax type names. -/
 def adtKrateLeaf? (tyJ : Json) : Option (String × String) := do
@@ -6997,13 +7028,15 @@ def tDropParamRebinds (ps : List String) : TExpr → TExpr
 /-- The keep-going mode's omission of callers: the definitions of `parsed` that
     call or read a definition named in `refused`, directly or through other
     such definitions, are removed and added to `refused` with the name of the
-    omitted definition they call. -/
+    omitted definition they call. A call or read is one of the global names of
+    the definition (`impDefRefs`), so a parameter or local variable named like an
+    omitted definition is not one. -/
 partial def omitCallersOfRefused {α β γ : Type}
     (parsed : List (String × α × TExpr × β)) (refused : List (String × γ))
     (callerNote : String → γ) : List (String × α × TExpr × β) × List (String × γ) :=
   let omitted := refused.map (·.1)
   let hit := parsed.findSome? fun (n, _, proc, _) =>
-    ((impAppHeads proc.erase).find? omitted.contains).map (n, ·)
+    ((impDefRefs [] proc.erase).find? omitted.contains).map (n, ·)
   match hit with
   | none => (parsed, refused)
   | some (n, f) =>
@@ -7262,6 +7295,78 @@ def selfTyShortName? (stVal : Json) : Option String :=
       | _ => none
     ((stVal.getObjVal? "Adt").toOption.bind extractAdtShortName) <|> scalar "Uint" <|>
       scalar "Int"
+
+/-- The short name (`selfTyShortName?`) of the first type argument of the self type of
+    the inherent `impl` payload `impl` that has one: `ClientState` for
+    `impl BertieStream<ClientState<S>>`. -/
+def inherentImplArgHead? (impl : Json) : Option String := do
+  let selfTy ← (impl.getObjVal? "self_ty").toOption
+  let stVal ← (selfTy.getObjVal? "value").toOption
+  let adt ← (stVal.getObjVal? "Adt").toOption
+  (extractGenericArgs adt).toList.findSome? fun ga => do
+    let tyJ ← (ga.getObjVal? "Type").toOption
+    let k ← (tyJ.getObjVal? "value").toOption <|> (tyJ.getObjVal? "kind").toOption <|> some tyJ
+    selfTyShortName? k
+
+/-- The inherent `impl` blocks among the top-level items of `j` whose self type is an
+    ADT, as `(interning id, self-type short name, first type-argument head, method
+    names)`, the method names being the identifiers of the `Fn` items. -/
+def inherentImplsOf (j : Json) : List (Option Nat × String × Option String × List String) :=
+  let items := (j.getArr?).toOption.toList.flatMap (·.toList)
+  items.filterMap fun it => do
+    let impl ← (it.getObjVal? "kind" >>= (·.getObjVal? "Impl")).toOption
+    guard ((impl.getObjVal? "of_trait").toOption == some .null)
+    let stVal ← (impl.getObjVal? "self_ty" >>= (·.getObjVal? "value")).toOption
+    let sn ← (stVal.getObjVal? "Adt").toOption.bind extractAdtShortName
+    let iid := (it.getObjVal? "owner_id" >>= (·.getObjVal? "contents") >>=
+      (·.getObjValAs? Nat "id")).toOption
+    let implItems := (impl.getObjValAs? (Array Json) "items").toOption.toList.flatMap (·.toList)
+    let ms := implItems.filterMap fun ii => do
+      guard (ii.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption.isSome
+      (ii.getObjVal? "ident").toOption.map extractFnName
+    pure (iid, sn, inherentImplArgHead? impl, ms)
+
+/-- The pairs `(self type, method)` that two or more inherent `impl`s of one self type
+    define (`inherentImplsOf`), each with a first type argument, their heads pairwise
+    distinct: the methods of `impl BertieStream<ClientState<S>>` and
+    `impl BertieStream<ServerState<S>>` of one name. Each such method is named
+    `<SelfType>_<Head>_<method>` (`inherentMethodPrefix`); two `impl`s at one head keep
+    one emitted name, which `distinctDefNames` refuses. -/
+def inherentMethodCollisions (j : Json) : List (String × String) :=
+  let impls := inherentImplsOf j
+  let pairs := (impls.flatMap fun (_, sn, _, ms) => ms.map (sn, ·)).eraseDups
+  pairs.filter fun (sn, m) =>
+    let heads := (impls.filter fun (_, sn', _, ms) => sn' == sn && ms.contains m).map
+      (·.2.2.1)
+    heads.length ≥ 2 && heads.all Option.isSome && heads.eraseDups.length == heads.length
+
+/-- The interning id of each inherent `impl` of `inherentImplsOf` with a first type
+    argument, and the head of that argument. -/
+def inherentImplArgHeads (j : Json) : List (Nat × String) :=
+  (inherentImplsOf j).filterMap fun (iid, _, h, _) => do pure (← iid, ← h)
+
+/-- Whether the item `it` carries `#[hax_lib::opaque]`, which hax exports as the
+    attribute `_hax::json("\"Erased\"")` among the item's own attributes. -/
+def itemIsHaxOpaque (it : Json) : Bool :=
+  let attrsJ := (it.getObjVal? "attributes").toOption
+  let attrs : List Json :=
+    ((attrsJ.bind (·.getArr?.toOption)) <|>
+      (attrsJ.bind (·.getObjValAs? (Array Json) "attributes" |>.toOption))).toList.flatMap
+      (·.toList)
+  attrs.any fun a => Option.isSome do
+    let u ← (a.getObjVal? "Unparsed").toOption
+    guard ((u.getObjValAs? String "path").toOption == some "_hax::json")
+    let toks ← (u.getObjVal? "args" >>= (·.getObjVal? "Delimited") >>=
+      (·.getObjValAs? String "tokens")).toOption
+    let payload ← (Json.parse toks).toOption
+    let s ← payload.getStr?.toOption
+    guard ((Json.parse s).toOption == some (.str "Erased"))
+
+/-- Whether the item `it` is a function carrying `#[hax_lib::opaque]`
+    (`itemIsHaxOpaque`). Its body is not parsed and it has no definition; a call of it
+    calls the field of its name of the generated `Deps` class, typed by the call. -/
+def fnItemIsHaxOpaque (it : Json) : Bool :=
+  (it.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption.isSome && itemIsHaxOpaque it
 
 /-- The methods every trait `impl` block of the extracted crate defines, as
     `(impl interning id, trait short name, self-type short name, method name)`,
@@ -8094,7 +8199,13 @@ def distinctDefNames {α β : Type} (parsed : List (String × α × TExpr × β)
     definition name and refusal in the second component, and so is every
     definition that calls or reads an omitted one (`omitCallersOfRefused`);
     otherwise the first refusal is the error of the parse. Two definitions with
-    one emitted name are refused (`distinctDefNames`). -/
+    one emitted name are refused (`distinctDefNames`); a method several inherent
+    `impl`s of one self type define at distinct type arguments is named by the head
+    of the argument (`inherentMethodCollisions`).
+
+    A function under `#[hax_lib::opaque]` (`fnItemIsHaxOpaque`) contributes no
+    definition and its body is not parsed: its calls call the field of its name of
+    the generated `Deps` class. -/
 partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
     (nominalKrates : List String := []) (keepGoing : Bool := false) :
@@ -8109,6 +8220,7 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
   -- assignment arms lower struct-field writes to `struct_update` assignments.
   let implMap : ImplSelfTypeMap :=
     { impls := buildImplSelfTypeMap j, collisions := fnNameCollisions j,
+      implArgHeads := inherentImplArgHeads j, inherentCollisions := inherentMethodCollisions j,
       structFields := structFields, localCrate := localCrateOfExport j,
       traitImplMethods := if resolveTraitImpls then buildTraitImplMethodMap j else []
       traitImplConsts := if traitImplConsts then buildTraitImplConstMap j else []
@@ -8144,6 +8256,9 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
     let mut srcs : List String := []
     let mut refused : List (String × String) := []
     for item in items do
+      -- A function under `#[hax_lib::opaque]` has no definition; its calls call the
+      -- `Deps` field of its name (`fnItemIsHaxOpaque`).
+      if fnItemIsHaxOpaque item then continue
       let rk ← checkItem item (itemName item)
       unless rk.isEmpty do
         refused := refused ++ rk
@@ -8200,18 +8315,25 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                   let stVal ← (selfTy.getObjVal? "value").toOption
                   let adt ← (stVal.getObjVal? "Adt").toOption
                   extractAdtShortName adt
+                -- A method several inherent `impl`s of the self type define takes the
+                -- head of the self type's type argument (`inherentMethodPrefix`).
+                let pfx (sn m : String) : String :=
+                  inherentMethodPrefix sn (inherentImplArgHead? impl) m
+                    implMap.inherentCollisions
                 match selfName, impl.getObjValAs? (Array Json) "items" with
                 | some sn, .ok implItems =>
                   for implItem in implItems do
-                    let rk ← checkItem implItem s!"{sn}_{itemName implItem}"
+                    if fnItemIsHaxOpaque implItem then continue
+                    let iName := itemName implItem
+                    let rk ← checkItem implItem s!"{pfx sn iName}_{iName}"
                     unless rk.isEmpty do
                       refused := refused ++ rk
                       continue
-                    let (r?, rf) ← tryItem implItem s!"{sn}_{itemName implItem}"
+                    let (r?, rf) ← tryItem implItem s!"{pfx sn iName}_{iName}"
                     refused := refused ++ rf
                     match r? with
                     | some (mName, raw, proc, ti) =>
-                      result := result ++ [(s!"{sn}_{mName}", raw, proc, ti)]
+                      result := result ++ [(s!"{pfx sn mName}_{mName}", raw, proc, ti)]
                       srcs := srcs ++ [itemSourceDesc implItem
                         s!"{itemSourceDesc item s!"impl of {sn}"}::{mName}"]
                     | none => pure ()
@@ -8224,6 +8346,7 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                 match implId, impl.getObjValAs? (Array Json) "items" with
                 | some iid, .ok implItems =>
                   for implItem in implItems do
+                    if fnItemIsHaxOpaque implItem then continue
                     let m := itemName implItem
                     let rk ← checkItem implItem m
                     unless rk.isEmpty do

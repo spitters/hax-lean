@@ -37,6 +37,7 @@ WHERE_FN = re.compile(r"^  ([A-Za-z_][\w'?!]*)\s*(?:\(|\{|\[|:)")
 MISS_ARM = re.compile(r"\|\s*(?:_|\.error\s+_\w*|none)\s*=>\s*(.*)$")
 ELSE_VAL = re.compile(r"^\s*else\s+(.*)$")
 GETD = re.compile(r"\.getD\s+(\(\s*[^()]*(?:\([^()]*\)[^()]*)*\)|\S+)")
+TOLIST_DEFAULT = re.compile(r"\.toOption\)?\.toList\b")
 
 VALUE = re.compile(
     r"^(?:(?:pure|return)\s+)?\(?\s*(?:"
@@ -137,6 +138,9 @@ def rows():
                     counts[(rel, fn, r)] += 1
             for g in GETD.finditer(line):
                 counts[(rel, fn, "getD " + re.sub(r"\s+", " ", g.group(1)))] += 1
+            # A failed read turned into an empty list is a default as well.
+            for _ in TOLIST_DEFAULT.finditer(line):
+                counts[(rel, fn, "getD [] (toOption.toList)")] += 1
     return counts
 
 
