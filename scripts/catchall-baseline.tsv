@@ -1,0 +1,423 @@
+# file	function	reason	count (scripts/catchall-ratchet.sh; shrink only)
+HaxLean/CertifiedTExprs.lean	postPipeline	getD ([], false)	1
+HaxLean/ClassEmit.lean	ClassHooks.orderBody	fallback ""	1
+HaxLean/ClassEmit.lean	ClassHooks.orderBody	fallback []	1
+HaxLean/ClassEmit.lean	ClassHooks.orderBody	fallback none	1
+HaxLean/ClassEmit.lean	ClassHooks.renderClasses	getD []	1
+HaxLean/ClassEmit.lean	ClassHooks.renderInstance	fallback []	1
+HaxLean/ClassEmit.lean	ClassHooks.traitHasBeq	fallback false	1
+HaxLean/ClassEmit.lean	addTraitItem	fallback "unknown_fn"	1
+HaxLean/ClassEmit.lean	addTraitItem	getD []	1
+HaxLean/ClassEmit.lean	addTraitItem	getD false	1
+HaxLean/ClassEmit.lean	allItems	fallback []	4
+HaxLean/ClassEmit.lean	allItems	getD []	1
+HaxLean/ClassEmit.lean	genericImplMethods	fallback false	1
+HaxLean/ClassEmit.lean	genericImplMethods	getD .null	2
+HaxLean/ClassEmit.lean	genericImplMethods	getD .null)	1
+HaxLean/ClassEmit.lean	genericImplMethods	getD []	1
+HaxLean/ClassEmit.lean	genericStructs	getD .null)	2
+HaxLean/ClassEmit.lean	hasPartialEqClause	fallback false	1
+HaxLean/ClassEmit.lean	implInstances	fallback .unknown	1
+HaxLean/ClassEmit.lean	implInstances	getD .null	1
+HaxLean/ClassEmit.lean	localBoundItems	fallback none	1
+HaxLean/ClassEmit.lean	localTraitsOfClauses	fallback []	1
+HaxLean/ClassEmit.lean	parseTraitDefs	fallback ""	1
+HaxLean/ClassEmit.lean	parseTraitDefs	fallback []	1
+HaxLean/ClassEmit.lean	parseTraitDefs	getD .null)	1
+HaxLean/ClassEmit.lean	parseTraitDefs	getD []	1
+HaxLean/ClassEmit.lean	parseTraitDefs	getD false	1
+HaxLean/ClassEmit.lean	traitFnSig	fallback .unit	2
+HaxLean/ClassEmit.lean	traitFnSig	fallback []	2
+HaxLean/ClassEmit.lean	traitFnSig	getD .null	1
+HaxLean/ClassEmit.lean	typeParamBounds	fallback []	1
+HaxLean/ClassEmit.lean	typeParamNames	fallback []	1
+HaxLean/ContractEmit.lean	build	fallback []	2
+HaxLean/ContractEmit.lean	build	fallback none	1
+HaxLean/ContractEmit.lean	build	fallback pure ()	1
+HaxLean/ContractEmit.lean	build	fallback pure none	3
+HaxLean/ContractEmit.lean	build	getD ([], false)	1
+HaxLean/ContractEmit.lean	build	getD .null)	1
+HaxLean/ContractEmit.lean	build	getD []	1
+HaxLean/ContractEmit.lean	build	getD [])	1
+HaxLean/ContractEmit.lean	expandParams	fallback .unknown	1
+HaxLean/ContractEmit.lean	expandParams	fallback .wildcard	1
+HaxLean/ContractEmit.lean	fnItemName	fallback "unknown_fn"	2
+HaxLean/ContractEmit.lean	fnParts	getD .null	2
+HaxLean/ContractEmit.lean	fnParts	getD fnData	1
+HaxLean/ContractEmit.lean	instanceContractFields	fallback "fun _ => True"	1
+HaxLean/ContractEmit.lean	instanceContractFields	getD false	1
+HaxLean/ContractEmit.lean	instanceContractFields	getD {	1
+HaxLean/ContractEmit.lean	isHaxProp	fallback false	1
+HaxLean/ContractEmit.lean	isPrimInt	fallback false	1
+HaxLean/ContractEmit.lean	isUnitTy	fallback false	1
+HaxLean/ContractEmit.lean	itemPayloads	fallback []	2
+HaxLean/ContractEmit.lean	kindTag	fallback "expression form"	1
+HaxLean/ContractEmit.lean	methodContracts	fallback "unknown_fn"	1
+HaxLean/ContractEmit.lean	patName	fallback "_"	1
+HaxLean/ContractEmit.lean	payloadLateSkip	fallback false	2
+HaxLean/ContractEmit.lean	predArgs	getD false	1
+HaxLean/ContractEmit.lean	predRefs	fallback []	2
+HaxLean/ContractEmit.lean	referencedNames	fallback []	5
+HaxLean/ContractEmit.lean	referencedNames	getD .null))	1
+HaxLean/ContractEmit.lean	renderExpr.renderApp	fallback false	1
+HaxLean/ContractEmit.lean	renderFnContract	fallback ""	4
+HaxLean/ContractEmit.lean	renderFnContract	fallback "every input of its Rust types"	1
+HaxLean/ContractEmit.lean	renderFnContract	getD ""	1
+HaxLean/ContractEmit.lean	renderLemma	fallback ""	1
+HaxLean/ContractEmit.lean	renderTraitContract	getD {	1
+HaxLean/ContractEmit.lean	rewriteIntLits.findStr	fallback none	2
+HaxLean/ContractEmit.lean	traitItemOwners	fallback []	1
+HaxLean/ContractEmit.lean	tyInv	fallback none	2
+HaxLean/HaxAdapter.lean	binOpName	fallback "binop"	1
+HaxLean/HaxAdapter.lean	bodyRefusal?	fallback false	1
+HaxLean/HaxAdapter.lean	bodyRefusal?	fallback none	5
+HaxLean/HaxAdapter.lean	bodyRefusal?	getD ""	1
+HaxLean/HaxAdapter.lean	bodyRefusal?	getD "")	1
+HaxLean/HaxAdapter.lean	bodyRefusal?	getD #[]	1
+HaxLean/HaxAdapter.lean	bodyRefusal?	getD .null	2
+HaxLean/HaxAdapter.lean	bodyRefusal?	getD .null)	2
+HaxLean/HaxAdapter.lean	boundTraitMethodCall?	fallback none	1
+HaxLean/HaxAdapter.lean	buildImplSelfTypeMap	fallback []	1
+HaxLean/HaxAdapter.lean	buildImplSelfTypeMap	fallback false	1
+HaxLean/HaxAdapter.lean	buildImplSelfTypeMap	fallback none	9
+HaxLean/HaxAdapter.lean	buildNewtypeMap	fallback ""	2
+HaxLean/HaxAdapter.lean	buildNewtypeMap	fallback []	5
+HaxLean/HaxAdapter.lean	byRefMut	fallback false	1
+HaxLean/HaxAdapter.lean	callConstGenericArgs?	getD #[]	1
+HaxLean/HaxAdapter.lean	callConstGenericArgs?	getD c	1
+HaxLean/HaxAdapter.lean	callConstGenericArgs?	getD item	1
+HaxLean/HaxAdapter.lean	callHasConstGenericArg	getD #[]).any	1
+HaxLean/HaxAdapter.lean	callHasConstGenericArg	getD item	1
+HaxLean/HaxAdapter.lean	callKrate	getD ""	1
+HaxLean/HaxAdapter.lean	classItemRef?	fallback none	1
+HaxLean/HaxAdapter.lean	classifyFieldType	fallback "array"	2
+HaxLean/HaxAdapter.lean	closureParamPatBinds	fallback false	1
+HaxLean/HaxAdapter.lean	closureParams?	fallback none	2
+HaxLean/HaxAdapter.lean	closureSentinelArg?	fallback false	1
+HaxLean/HaxAdapter.lean	closureSentinelArg?	fallback none	2
+HaxLean/HaxAdapter.lean	closureSentinelArg?	fallback none)	1
+HaxLean/HaxAdapter.lean	closureWritesCapture	fallback false	1
+HaxLean/HaxAdapter.lean	closureWritesCapture	fallback false)	1
+HaxLean/HaxAdapter.lean	closureWritesCapture	getD #[]	1
+HaxLean/HaxAdapter.lean	closureWritesCapture	getD .null)	1
+HaxLean/HaxAdapter.lean	collectCallReturnTypes	fallback .null)	1
+HaxLean/HaxAdapter.lean	collectCallReturnTypes	fallback .unknown	1
+HaxLean/HaxAdapter.lean	collectCallReturnTypes	fallback []	4
+HaxLean/HaxAdapter.lean	collectCallReturnTypes	getD []	1
+HaxLean/HaxAdapter.lean	collectCallSignatures	fallback .null	1
+HaxLean/HaxAdapter.lean	collectCallSignatures	fallback .unknown	2
+HaxLean/HaxAdapter.lean	collectCallSignatures	fallback []	5
+HaxLean/HaxAdapter.lean	collectCallSignatures	getD []	1
+HaxLean/HaxAdapter.lean	collectFnNameParents	fallback false	1
+HaxLean/HaxAdapter.lean	collectItemKrateNames	fallback false	1
+HaxLean/HaxAdapter.lean	collectLocalTraitImplMethods	fallback []	7
+HaxLean/HaxAdapter.lean	collectLocalTraitImplMethods	fallback false	1
+HaxLean/HaxAdapter.lean	collectLocalTraitImplMethods	fallback none	3
+HaxLean/HaxAdapter.lean	collectLocalTraitImplMethods	getD tn	1
+HaxLean/HaxAdapter.lean	collectVarRefTypes	fallback "unknown"	3
+HaxLean/HaxAdapter.lean	collectVarRefTypes	fallback .unknown	2
+HaxLean/HaxAdapter.lean	collectVarRefTypes	fallback []	1
+HaxLean/HaxAdapter.lean	collectVarRefTypes	getD []	1
+HaxLean/HaxAdapter.lean	constLimbs	fallback none	2
+HaxLean/HaxAdapter.lean	constLimbs	getD n)	1
+HaxLean/HaxAdapter.lean	coreIntLimit?	getD c	1
+HaxLean/HaxAdapter.lean	declaredParamSig	fallback .unknown	1
+HaxLean/HaxAdapter.lean	defIdIndex?	fallback none	1
+HaxLean/HaxAdapter.lean	defIdKrate	getD ""	1
+HaxLean/HaxAdapter.lean	defIdLeafName	fallback none	3
+HaxLean/HaxAdapter.lean	defIdPathNames	fallback []	1
+HaxLean/HaxAdapter.lean	defIdPathNames	fallback none	1
+HaxLean/HaxAdapter.lean	disambiguateUserMethodName	getD ""	1
+HaxLean/HaxAdapter.lean	divergesByPanic	fallback false	4
+HaxLean/HaxAdapter.lean	divergesByPanic	getD #[]).toList.any	1
+HaxLean/HaxAdapter.lean	divergesByPanic	getD .null)	2
+HaxLean/HaxAdapter.lean	elemPatVar	fallback none	1
+HaxLean/HaxAdapter.lean	exportConstBodies	fallback none	2
+HaxLean/HaxAdapter.lean	exportItems	fallback []	4
+HaxLean/HaxAdapter.lean	extractAdtPathName	fallback none	3
+HaxLean/HaxAdapter.lean	extractAdtShortName	fallback none	3
+HaxLean/HaxAdapter.lean	extractCallName	fallback "indirect_call"	1
+HaxLean/HaxAdapter.lean	extractCallName	fallback "unknown_fn"	2
+HaxLean/HaxAdapter.lean	extractCallRetTypesItem	fallback []	4
+HaxLean/HaxAdapter.lean	extractCallReturnTypesFromFile	fallback []	1
+HaxLean/HaxAdapter.lean	extractCallSignaturesFromFile	fallback []	4
+HaxLean/HaxAdapter.lean	extractCallSigsItem	fallback []	5
+HaxLean/HaxAdapter.lean	extractConstLen	fallback none	4
+HaxLean/HaxAdapter.lean	extractDefIdName	fallback "unknown"	2
+HaxLean/HaxAdapter.lean	extractDefIdName	fallback false	1
+HaxLean/HaxAdapter.lean	extractDefIdName	fallback none	2
+HaxLean/HaxAdapter.lean	extractDefIdName	getD ""	2
+HaxLean/HaxAdapter.lean	extractDefIdName	getD (names.length - 2)	1
+HaxLean/HaxAdapter.lean	extractExprType	fallback .unknown	1
+HaxLean/HaxAdapter.lean	extractFnName	fallback "unknown_fn"	2
+HaxLean/HaxAdapter.lean	extractGenericArgs	fallback #[]	1
+HaxLean/HaxAdapter.lean	extractLValueName	fallback "_assign"	1
+HaxLean/HaxAdapter.lean	extractLocalIdentName	fallback "unknown"	1
+HaxLean/HaxAdapter.lean	extractNodeType	fallback .unknown	1
+HaxLean/HaxAdapter.lean	extractParamNames	fallback none	4
+HaxLean/HaxAdapter.lean	extractParamTypes	fallback .unknown	1
+HaxLean/HaxAdapter.lean	extractParamTypes	fallback none	3
+HaxLean/HaxAdapter.lean	extractVarRefTypesFromFile	fallback []	3
+HaxLean/HaxAdapter.lean	extractVarRefTypesItem	fallback []	5
+HaxLean/HaxAdapter.lean	fieldBoundParams	fallback []	1
+HaxLean/HaxAdapter.lean	fieldConstLit?	fallback none	1
+HaxLean/HaxAdapter.lean	fieldGenericBadRef?	fallback false)	1
+HaxLean/HaxAdapter.lean	fieldGenericBadRef?	fallback none	1
+HaxLean/HaxAdapter.lean	fieldImplEntry?	fallback none	1
+HaxLean/HaxAdapter.lean	fieldImplItems	getD #[]	1
+HaxLean/HaxAdapter.lean	fieldImplRepr?	fallback none	1
+HaxLean/HaxAdapter.lean	fieldOneOk	fallback false	1
+HaxLean/HaxAdapter.lean	fieldReprLimbs?	fallback none	1
+HaxLean/HaxAdapter.lean	fieldReprOf	getD .canon	1
+HaxLean/HaxAdapter.lean	fieldTagReprChars?	fallback none	4
+HaxLean/HaxAdapter.lean	findImplAncestorId	fallback false	1
+HaxLean/HaxAdapter.lean	findImplAncestorId	fallback none	4
+HaxLean/HaxAdapter.lean	firstObjKey	fallback none	1
+HaxLean/HaxAdapter.lean	floatEarlyExitArgs	fallback false	1
+HaxLean/HaxAdapter.lean	fnConstGenericParams	getD #[]	1
+HaxLean/HaxAdapter.lean	fnDefParamNames	fallback []	1
+HaxLean/HaxAdapter.lean	fnDefParams?	fallback none	1
+HaxLean/HaxAdapter.lean	fnNameCollisions	fallback []	1
+HaxLean/HaxAdapter.lean	fnTypeSig?	getD sig	1
+HaxLean/HaxAdapter.lean	fnTypeSig?	getD ty	1
+HaxLean/HaxAdapter.lean	forIterAdmitted	fallback false	2
+HaxLean/HaxAdapter.lean	forIterAdmitted	getD .null	1
+HaxLean/HaxAdapter.lean	forIterAdmitted	getD .null)	1
+HaxLean/HaxAdapter.lean	forLoopRefusal?	fallback "this iterator"	1
+HaxLean/HaxAdapter.lean	haxConstParamNames	fallback []	1
+HaxLean/HaxAdapter.lean	haxConstParamNames	getD "<unnamed>"]	2
+HaxLean/HaxAdapter.lean	haxFnItemName	fallback "unknown_fn"	1
+HaxLean/HaxAdapter.lean	haxItemKey	getD .null,	1
+HaxLean/HaxAdapter.lean	haxItemKey	getD .null]).compress	1
+HaxLean/HaxAdapter.lean	haxLocalRefNames	fallback []	3
+HaxLean/HaxAdapter.lean	haxMentionsConstParam	fallback false	1
+HaxLean/HaxAdapter.lean	haxTyHasParam	fallback false	1
+HaxLean/HaxAdapter.lean	haxTyHasUnreadRef	fallback false	1
+HaxLean/HaxAdapter.lean	haxTyParamNames	fallback []	2
+HaxLean/HaxAdapter.lean	impAppHeads	fallback []	1
+HaxLean/HaxAdapter.lean	impPatIrrefutable	fallback false	1
+HaxLean/HaxAdapter.lean	implAssocTypes	fallback none	2
+HaxLean/HaxAdapter.lean	implAssocTypes	getD []).eraseDups	1
+HaxLean/HaxAdapter.lean	implConstLimbs?	fallback none	1
+HaxLean/HaxAdapter.lean	implFnTakesSelf	fallback false	1
+HaxLean/HaxAdapter.lean	implFnTakesSelf	getD fnData	1
+HaxLean/HaxAdapter.lean	intTypeTag?	fallback none	1
+HaxLean/HaxAdapter.lean	isAtomicArg	fallback false	1
+HaxLean/HaxAdapter.lean	isCoreRangeTy	fallback false	1
+HaxLean/HaxAdapter.lean	isDefault	fallback false	1
+HaxLean/HaxAdapter.lean	isEarlyExitMatch	fallback false	1
+HaxLean/HaxAdapter.lean	isFieldNewtypeTy	fallback false	1
+HaxLean/HaxAdapter.lean	isMutVecRef	fallback false	1
+HaxLean/HaxAdapter.lean	isSeqImpType	fallback false	1
+HaxLean/HaxAdapter.lean	itemRefusal?	fallback none	1
+HaxLean/HaxAdapter.lean	itemSourceDesc	fallback "?"	2
+HaxLean/HaxAdapter.lean	itemSourceDesc	getD ""	1
+HaxLean/HaxAdapter.lean	itemSourceDesc	getD c	1
+HaxLean/HaxAdapter.lean	iterMutRoot	fallback none	1
+HaxLean/HaxAdapter.lean	lastPathSegment	getD n	1
+HaxLean/HaxAdapter.lean	localBoundTraitSelf	getD tv	1
+HaxLean/HaxAdapter.lean	localBoundTraitSelf	getD ty	1
+HaxLean/HaxAdapter.lean	localCrateOfExport	fallback []	1
+HaxLean/HaxAdapter.lean	localFnParamSigs	fallback []	3
+HaxLean/HaxAdapter.lean	lowerStructPats	getD ""	1
+HaxLean/HaxAdapter.lean	lowerStructPats	getD #[]	2
+HaxLean/HaxAdapter.lean	lowerStructPats	getD .null	4
+HaxLean/HaxAdapter.lean	modSubItems	fallback #[]	4
+HaxLean/HaxAdapter.lean	objKey?	fallback none	2
+HaxLean/HaxAdapter.lean	orAlternatives	getD ""	1
+HaxLean/HaxAdapter.lean	orAlternatives	getD #[]	2
+HaxLean/HaxAdapter.lean	orAlternatives	getD .null	3
+HaxLean/HaxAdapter.lean	parseAdtExpr	fallback "Adt"	2
+HaxLean/HaxAdapter.lean	parseAdtExpr	fallback pure .unitVal	1
+HaxLean/HaxAdapter.lean	parseAdtExpr	fallback pure []	1
+HaxLean/HaxAdapter.lean	parseArm	fallback .wildcard	1
+HaxLean/HaxAdapter.lean	parseArm	fallback pure .unitVal	1
+HaxLean/HaxAdapter.lean	parseEnumDefs	fallback ""	2
+HaxLean/HaxAdapter.lean	parseEnumDefs	fallback []	2
+HaxLean/HaxAdapter.lean	parseEnumDefs	fallback none	4
+HaxLean/HaxAdapter.lean	parseEnumDefsFromJson	fallback []	1
+HaxLean/HaxAdapter.lean	parseEnumVariantPayload	fallback []	4
+HaxLean/HaxAdapter.lean	parseEnumVariantPayload	fallback none	2
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "_assign"	2
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "binop"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "const"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "const_ref"	2
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "field"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "global"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "logical_op"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "op"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "static"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "todo"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "unknown_fn"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "unknown_upvar"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "unknown_var"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback "unop"	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback .unknown	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback .wildcard	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback 0	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback pure ()	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback pure (.lit (.int 0))	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback pure .unitVal	3
+HaxLean/HaxAdapter.lean	parseExprKind	fallback pure []	1
+HaxLean/HaxAdapter.lean	parseExprKind	fallback pure none	1
+HaxLean/HaxAdapter.lean	parseHaxFileWithTExprReport	fallback ""	1
+HaxLean/HaxAdapter.lean	parseHaxFileWithTExprReport	fallback false	1
+HaxLean/HaxAdapter.lean	parseHaxFileWithTExprReport	fallback pure ()	9
+HaxLean/HaxAdapter.lean	parseHaxFileWithTExprReport	getD "unknown_item")	1
+HaxLean/HaxAdapter.lean	parseHaxFileWithTExprReport	getD m	1
+HaxLean/HaxAdapter.lean	parseHaxFileWithTypes	fallback pure ()	5
+HaxLean/HaxAdapter.lean	parseHaxItem	fallback "unknown_const"	1
+HaxLean/HaxAdapter.lean	parseHaxItem	fallback "unknown_fn"	1
+HaxLean/HaxAdapter.lean	parseHaxItem	fallback []	2
+HaxLean/HaxAdapter.lean	parseHaxItem	fallback return none	1
+HaxLean/HaxAdapter.lean	parseHaxItemTExpr	fallback "unknown_const"	1
+HaxLean/HaxAdapter.lean	parseHaxItemTExpr	fallback .unknown	3
+HaxLean/HaxAdapter.lean	parseHaxItemTExpr	fallback []	2
+HaxLean/HaxAdapter.lean	parseHaxItemTExpr	fallback return none	1
+HaxLean/HaxAdapter.lean	parseHaxItemTExpr	getD #[]).toList.filterMap	1
+HaxLean/HaxAdapter.lean	parseHaxItemWithTypes	fallback "unknown_const"	1
+HaxLean/HaxAdapter.lean	parseHaxItemWithTypes	fallback "unknown_fn"	1
+HaxLean/HaxAdapter.lean	parseHaxItemWithTypes	fallback .unknown	2
+HaxLean/HaxAdapter.lean	parseHaxItemWithTypes	fallback []	2
+HaxLean/HaxAdapter.lean	parseHaxItemWithTypes	fallback none	1
+HaxLean/HaxAdapter.lean	parseHaxItemWithTypes	fallback return none	1
+HaxLean/HaxAdapter.lean	parseHaxPat	fallback "Variant"	1
+HaxLean/HaxAdapter.lean	parseHaxPat	fallback .wildcard	9
+HaxLean/HaxAdapter.lean	parseHaxPat	fallback []	1
+HaxLean/HaxAdapter.lean	parseHaxPat	fallback none	1
+HaxLean/HaxAdapter.lean	parseHaxPat.parseConstantPat	fallback .wildcard	2
+HaxLean/HaxAdapter.lean	parseHaxPat.parseLitPat	fallback .wildcard	6
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTAdtExpr	fallback "Adt"	2
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTAdtExpr	fallback []	2
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTAdtExpr	fallback none	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTAdtExpr	fallback pure (TExpr.mk .unitVal .unit)	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTAdtExpr	getD k	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTArm	fallback false	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTArm	fallback pure (TExpr.mk .unitVal .unit)	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTArm	fallback pure none	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTArm	getD (Json.str "Wild")	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTArm	getD .null))	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "_assign"	2
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "binop"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "const"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "const_ref"	2
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "field"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "global"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "logical_op"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "op"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "static"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "todo"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "unknown_upvar"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "unknown_var"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback "unop"	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback 0	2
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback false	4
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback none	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback pure ()	2
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback pure (TExpr.mk .unitVal .unit)	4
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback pure .wildcard	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	fallback pure none	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	getD #[]	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	getD 0	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTExprKind	getD funName'	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTLiteral	fallback .int 0	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTLiteral	fallback .unit	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTLiteral	fallback 0	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTLiteral	fallback false	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTLiteral	fallback none	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTLiteral	getD 0	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmt	fallback 0	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmt	fallback pure ()	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmt	fallback pure (TExpr.mk .unitVal .unit)	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmt	fallback pure .wildcard	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmt	fallback return TExpr.mk .unitVal .unit	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmt	getD 0	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmtsSeq	fallback false	1
+HaxLean/HaxAdapter.lean	parseHaxTExpr.parseTStmtsSeq	getD .null).getObjVal?	1
+HaxLean/HaxAdapter.lean	parseHaxType	fallback ""	1
+HaxLean/HaxAdapter.lean	parseHaxType	fallback .unknown	3
+HaxLean/HaxAdapter.lean	parseHaxType	fallback none	4
+HaxLean/HaxAdapter.lean	parseHaxType	getD .unknown)	1
+HaxLean/HaxAdapter.lean	parseHaxType	getD 0)	2
+HaxLean/HaxAdapter.lean	parseImplConstTExpr	fallback return none	1
+HaxLean/HaxAdapter.lean	parseLiteral	fallback ""	1
+HaxLean/HaxAdapter.lean	parseLiteral	fallback .lit (.int 0)	1
+HaxLean/HaxAdapter.lean	parseLiteral	fallback 0	2
+HaxLean/HaxAdapter.lean	parseLiteral	fallback false	1
+HaxLean/HaxAdapter.lean	parseLiteral	fallback none	1
+HaxLean/HaxAdapter.lean	parseLiteral	fallback none)	1
+HaxLean/HaxAdapter.lean	parseLiteral	getD 0	2
+HaxLean/HaxAdapter.lean	parseStmt	fallback .wildcard	1
+HaxLean/HaxAdapter.lean	parseStmt	fallback pure .unitVal	1
+HaxLean/HaxAdapter.lean	parseStmt	fallback return .unitVal	3
+HaxLean/HaxAdapter.lean	parseStructDefs	fallback ""	4
+HaxLean/HaxAdapter.lean	parseStructDefs	fallback "array"	2
+HaxLean/HaxAdapter.lean	parseStructDefs	fallback []	2
+HaxLean/HaxAdapter.lean	parseStructDefs	fallback none	5
+HaxLean/HaxAdapter.lean	parseStructDefsFromJson	fallback []	1
+HaxLean/HaxAdapter.lean	parseTupleStructInner	fallback none	5
+HaxLean/HaxAdapter.lean	parseTypeAliasDefs	fallback ""	2
+HaxLean/HaxAdapter.lean	parseTypeAliasDefs	fallback []	2
+HaxLean/HaxAdapter.lean	parseTypeAliasDefs	fallback none	1
+HaxLean/HaxAdapter.lean	parseTypeAliasDefsFromJson	fallback []	1
+HaxLean/HaxAdapter.lean	patBinderIds	fallback []	2
+HaxLean/HaxAdapter.lean	patBinderTys	fallback []	2
+HaxLean/HaxAdapter.lean	patIrrefutable	fallback false	3
+HaxLean/HaxAdapter.lean	patIrrefutable	getD "")	1
+HaxLean/HaxAdapter.lean	patLocalBinders	fallback []	1
+HaxLean/HaxAdapter.lean	patRefusal?	fallback none	6
+HaxLean/HaxAdapter.lean	patRefusal?	getD "")).toOption.getD	1
+HaxLean/HaxAdapter.lean	patRefusal?	getD .null	2
+HaxLean/HaxAdapter.lean	placeOutline	fallback "<expr>"	1
+HaxLean/HaxAdapter.lean	placeRootIsUpvar	fallback false	1
+HaxLean/HaxAdapter.lean	positionsLoop	fallback "_ci"	1
+HaxLean/HaxAdapter.lean	readMatch	fallback none	1
+HaxLean/HaxAdapter.lean	readMatch	getD .unknown)).bind	1
+HaxLean/HaxAdapter.lean	reconstructForLoopsTExpr.extractNextMatchBodyT	fallback false	3
+HaxLean/HaxAdapter.lean	reconstructForLoopsTExpr.extractNextMatchBodyT	fallback none	2
+HaxLean/HaxAdapter.lean	reconstructForLoopsTExpr.findSubTExprDeep	fallback none	1
+HaxLean/HaxAdapter.lean	refusedKinds	fallback []	1
+HaxLean/HaxAdapter.lean	renameBlockLocals	fallback []	1
+HaxLean/HaxAdapter.lean	renameBlockLocals	getD #[]	1
+HaxLean/HaxAdapter.lean	renamePatBinders	getD .null	1
+HaxLean/HaxAdapter.lean	resolveAssocFieldType	getD tyJ	1
+HaxLean/HaxAdapter.lean	resolveAssocType?	fallback none	1
+HaxLean/HaxAdapter.lean	resultErrTy?	fallback none	1
+HaxLean/HaxAdapter.lean	returnValueTy?	fallback none	3
+HaxLean/HaxAdapter.lean	scrutIsInclusiveRange	fallback false	2
+HaxLean/HaxAdapter.lean	selfTyShortName?	fallback none	1
+HaxLean/HaxAdapter.lean	seqElemTy	fallback .unknown	1
+HaxLean/HaxAdapter.lean	specializeFieldItem	fallback []	1
+HaxLean/HaxAdapter.lean	specializeFieldItem	getD ""	1
+HaxLean/HaxAdapter.lean	tClosureBinders	fallback pure ()	1
+HaxLean/HaxAdapter.lean	tClosureBinders	getD #[]	1
+HaxLean/HaxAdapter.lean	tElemFieldPlaceAssign	fallback none	3
+HaxLean/HaxAdapter.lean	tFieldPlaceAssign	fallback none	5
+HaxLean/HaxAdapter.lean	tFieldProjPlace	fallback none	3
+HaxLean/HaxAdapter.lean	tFloatEarlyExitArgs	fallback false	1
+HaxLean/HaxAdapter.lean	tIsEarlyExitMatch	fallback false	1
+HaxLean/HaxAdapter.lean	tPlaceAssign	fallback none	2
+HaxLean/HaxAdapter.lean	tPositionsLoop	fallback "_ci"	1
+HaxLean/HaxAdapter.lean	tReadMatch	fallback none	1
+HaxLean/HaxAdapter.lean	tReadMatch	getD (.match_ s arms)	1
+HaxLean/HaxAdapter.lean	tReadMatch	getD (.match_ scrut arms)	1
+HaxLean/HaxAdapter.lean	tReadMatch	getD .unknown	1
+HaxLean/HaxAdapter.lean	tSeqPlaceRead	fallback none	1
+HaxLean/HaxAdapter.lean	tSliceSwap	fallback none	1
+HaxLean/HaxAdapter.lean	tTryMatch?	fallback none	1
+HaxLean/HaxAdapter.lean	tTryMatch?	getD .unknown)	2
+HaxLean/HaxAdapter.lean	tUnboundLocals	fallback []	1
+HaxLean/HaxAdapter.lean	tryExtractIterator	fallback none	6
+HaxLean/HaxAdapter.lean	tryExtractNextMatch	fallback none	1
+HaxLean/HaxAdapter.lean	tryExtractNextMatchPat	fallback false	3
+HaxLean/HaxAdapter.lean	tryExtractNextMatchPat	fallback none	2
+HaxLean/HaxAdapter.lean	tryExtractPositions	fallback none	3
+HaxLean/HaxAdapter.lean	tryExtractRange	fallback none	2
+HaxLean/HaxAdapter.lean	tryMatch?	fallback none	1
+HaxLean/HaxAdapter.lean	tryOperandOf?	fallback none	2
+HaxLean/HaxAdapter.lean	tupleComponentTy	fallback .unknown	1
+HaxLean/HaxAdapter.lean	tupleComponentTy	getD i	1
+HaxLean/HaxAdapter.lean	unOpName	fallback "unop"	1
+HaxLean/HaxAdapter.lean	unreadFields	fallback []	1
+HaxLean/HaxAdapter.lean	validateExtraction	fallback []	2
+HaxLean/HaxAdapter.lean	variantCtorValue?	getD .unknown	1

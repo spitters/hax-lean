@@ -4564,6 +4564,232 @@ def tClosureBinders (cdata : Json) : Except String (List String × List (String 
     | .error _ => pure ()
   return (names, binds)
 
+/-! ## The fields each arm of the typed parse reads
+
+A node of a hax frontend export is a serde enum value: an object with one key, the
+node's kind, whose value is an object of fields (`{"Call": {"fun": …, "args": …}}`),
+or a string for a kind without fields (`"Wild"`). The typed parse has one arm per kind
+it translates: `parseTExprKind`, `parseTStmt`, `parseTArm`, `parseTAdtExpr`, the
+pattern check `patRefusal?` and the item loop of `parseHaxFileWithTExprReport`.
+
+For each class of node and each kind, `ConsumedFields.consumed` lists the fields the arm
+reads (in the arm itself or in the body checks `bodyRefusal?` and
+`closureWritesCapture`) and `ConsumedFields.irrelevant` the fields that do not change
+the value of the node (scopes, lint levels, user type annotations, the type of a call's
+callee); every field named `span` or ending in `_span` is irrelevant.
+`ConsumedFields.fieldRefusal?` refuses a node whose kind has no arm, and a node with a
+field outside both lists whose value is not a default (`null`, `[]`, `false`, `"None"`).
+`ConsumedFields.refusedKinds` are the kinds whose arm refuses every node with a message
+of its own; the check leaves them to the arm. -/
+
+namespace ConsumedFields
+
+/-- The classes of hax nodes the typed parse reads with one arm per kind. -/
+inductive NodeClass where
+  /-- An `ExprKind`, the `contents` of a `Decorated` expression (`parseTExprKind`). -/
+  | expr
+  /-- A `StmtKind`, the `kind` of a block statement (`parseTStmt`). -/
+  | stmt
+  /-- A match arm (`parseTArm`); its one kind is `Arm`. -/
+  | arm
+  /-- An `AdtExpr`, the payload of the expression kind `Adt` (`parseTAdtExpr`);
+      its one kind is `AdtExpr`. -/
+  | adtExpr
+  /-- A `PatKind`, the `contents` of a `Decorated` pattern (`patRefusal?`). -/
+  | pat
+  /-- An `ItemKind`, the `kind` of an item or of an `impl` item (the item loop). -/
+  | item
+  deriving BEq, Repr, Inhabited
+
+/-- The name of a node class in a refusal message. -/
+def NodeClass.name : NodeClass → String
+  | .expr => "expression"
+  | .stmt => "statement"
+  | .arm => "match arm"
+  | .adtExpr => "struct expression"
+  | .pat => "pattern"
+  | .item => "item"
+
+/-- The kinds of class `c` that have an arm in the typed parse. -/
+def kinds : NodeClass → List String
+  | .expr => ["VarRef", "UpvarRef", "GlobalName", "Literal", "If", "Call", "Let", "Block",
+      "Match", "Tuple", "Array", "Assign", "AssignOp", "Borrow", "Deref", "Loop", "Break",
+      "Continue", "Return", "Binary", "LogicalOp", "Unary", "Field", "TupleField", "Index",
+      "Cast", "Use", "NeverToAny", "Box", "Adt", "Closure", "Repeat", "PlaceTypeAscription",
+      "ValueTypeAscription", "PointerCoercion", "NamedConst", "ConstParam", "ConstRef",
+      "StaticRef", "Yield", "Todo"]
+  | .stmt => ["Expr", "Let"]
+  | .arm => ["Arm"]
+  | .adtExpr => ["AdtExpr"]
+  | .pat => ["Wild", "Missing", "Never", "Binding", "Deref", "AscribeUserType", "Tuple",
+      "Variant", "Constant", "Or"]
+  | .item => ["Fn", "Const", "Static", "Type", "Mod", "Impl", "Struct", "Enum", "TyAlias",
+      "Trait", "Use", "ExternCrate", "Macro"]
+
+/-- The kinds of class `c` whose arm refuses every node with a message of its own. -/
+def refusedKinds : NodeClass → List String
+  | .expr => ["RawBorrow", "ConstBlock"]
+  | .pat => ["Range", "Slice", "Array", "ExpandedConstant", "InlineConstant", "DerefPattern"]
+  | _ => []
+
+/-- The fields of a node of class `c` and kind `k` that its arm reads. -/
+def consumed : NodeClass → String → List String
+  | .expr, "VarRef" => ["id"]
+  | .expr, "UpvarRef" => ["var_hir_id"]
+  | .expr, "GlobalName" => ["item"]
+  -- `lit` and `neg` of a literal expression; the variants of a constant literal.
+  | .expr, "Literal" => ["lit", "neg", "Bool", "Int", "Byte", "ByteStr", "Str"]
+  | .expr, "If" => ["cond", "then", "else_opt"]
+  | .expr, "Call" => ["fun", "args"]
+  | .expr, "Let" => ["expr", "pat"]
+  | .expr, "Block" => ["stmts", "expr", "safety_mode"]
+  | .expr, "Match" => ["scrutinee", "arms"]
+  | .expr, "Tuple" => ["fields"]
+  | .expr, "Array" => ["fields"]
+  | .expr, "Assign" => ["lhs", "rhs"]
+  | .expr, "AssignOp" => ["op", "lhs", "rhs"]
+  | .expr, "Borrow" => ["borrow_kind", "arg"]
+  | .expr, "Deref" => ["arg"]
+  | .expr, "Loop" => ["body"]
+  | .expr, "Break" => ["label", "value"]
+  | .expr, "Continue" => ["label"]
+  | .expr, "Return" => ["value"]
+  | .expr, "Binary" => ["op", "lhs", "rhs"]
+  | .expr, "LogicalOp" => ["op", "lhs", "rhs"]
+  | .expr, "Unary" => ["op", "arg"]
+  | .expr, "Field" => ["field", "lhs"]
+  | .expr, "TupleField" => ["field", "lhs"]
+  | .expr, "Index" => ["lhs", "index"]
+  | .expr, "Cast" => ["source"]
+  | .expr, "Use" => ["source"]
+  | .expr, "NeverToAny" => ["source"]
+  | .expr, "Box" => ["value"]
+  -- The payload of `Adt` is an `AdtExpr`; the lists are those of `.adtExpr`.
+  | .expr, "Adt" => ["info", "fields", "base"]
+  | .expr, "Closure" => ["params", "body", "upvars"]
+  | .expr, "Repeat" => ["value", "count"]
+  | .expr, "PlaceTypeAscription" => ["source"]
+  | .expr, "ValueTypeAscription" => ["source"]
+  | .expr, "PointerCoercion" => ["source"]
+  | .expr, "NamedConst" => ["item"]
+  | .expr, "ConstParam" => ["param"]
+  | .expr, "ConstRef" => ["id"]
+  | .expr, "StaticRef" => ["def_id"]
+  | .expr, "Yield" => ["value"]
+  | .stmt, "Expr" => ["expr"]
+  | .stmt, "Let" => ["pattern", "initializer", "else_block"]
+  | .arm, "Arm" => ["pattern", "guard", "body"]
+  | .adtExpr, "AdtExpr" => ["info", "fields", "base"]
+  | .pat, "Binding" => ["mode", "var", "subpattern"]
+  | .pat, "Deref" => ["subpattern"]
+  | .pat, "AscribeUserType" => ["subpattern"]
+  | .pat, "Tuple" => ["subpatterns"]
+  | .pat, "Variant" => ["info", "subpatterns"]
+  | .pat, "Constant" => ["value"]
+  | .pat, "Or" => ["pats"]
+  -- A top-level function `{ident, generics, def}`, and its `def` or an `impl` method
+  -- `{params, ret, body}`.
+  | .item, "Fn" => ["ident", "generics", "def", "params", "ret", "body"]
+  | .item, "Impl" => ["generics", "of_trait", "self_ty", "items"]
+  | .item, "Type" => ["ty"]
+  | _, _ => []
+
+/-- The fields of a node of class `c` and kind `k` that do not change its value. -/
+def irrelevant : NodeClass → String → List String
+  | .expr, "UpvarRef" => ["closure_def_id"]
+  | .expr, "GlobalName" => ["constructor"]
+  | .expr, "If" => ["if_then_scope"]
+  | .expr, "Call" => ["ty", "from_hir_call"]
+  -- A break targeting the block is checked by the label of the `Break`.
+  | .expr, "Block" => ["targeted_by_break", "region_scope"]
+  | .expr, "Adt" => ["user_ty", "repr"]
+  | .expr, "Closure" => ["movability"]
+  | .expr, "PlaceTypeAscription" => ["user_ty"]
+  | .expr, "ValueTypeAscription" => ["user_ty"]
+  -- Arrays and slices have one carrier.
+  | .expr, "PointerCoercion" => ["cast"]
+  | .expr, "NamedConst" => ["user_ty"]
+  | .expr, "ConstParam" => ["def_id"]
+  | .expr, "StaticRef" => ["alloc_id", "ty"]
+  | .stmt, "Expr" => ["scope"]
+  | .stmt, "Let" => ["remainder_scope", "init_scope", "lint_level", "attributes"]
+  | .arm, "Arm" => ["lint_level", "scope", "attributes", "hir_id"]
+  | .adtExpr, "AdtExpr" => ["user_ty", "repr"]
+  | .pat, "Binding" => ["ty", "is_primary"]
+  | .pat, "AscribeUserType" => ["ascription"]
+  | .pat, "Variant" => ["item"]
+  | .item, "Fn" => ["header"]
+  | .item, "Impl" => ["safety", "parent_bounds"]
+  | .item, "Type" => ["parent_bounds"]
+  | _, _ => []
+
+/-- Whether the field name `f` is a source span, irrelevant to every node. -/
+def isSpanField (f : String) : Bool :=
+  f == "span" || f.endsWith "_span"
+
+/-- Whether `v` is a default value of an absent field: `null`, `[]`, `false` or `"None"`. -/
+def isDefault : Json → Bool
+  | .null => true
+  | .arr xs => xs.isEmpty
+  | .bool b => !b
+  | .str s => s == "None"
+  | _ => false
+
+/-- The fields of the object `data` outside `consumed c k` and `irrelevant c k` whose
+    value is not a default (`isDefault`), in the order of the object. -/
+def unreadFields (c : NodeClass) (k : String) (data : Json) : List String :=
+  match data with
+  | .obj kvs => kvs.toList.filterMap fun (f, v) =>
+      if (consumed c k).contains f || (irrelevant c k).contains f || isSpanField f
+          || isDefault v then none
+      else some f
+  | _ => []
+
+/-- The check at the entry of the arm of class `c` for a node of kind `k` with payload
+    `data`: a refusal when `k` has no arm, or when `data` has a field no list declares
+    whose value is not a default (`unreadFields`); `none` otherwise, and for the kinds
+    whose arm refuses on its own (`refusedKinds`). -/
+def fieldRefusal? (c : NodeClass) (k : String) (data : Json) : Option String :=
+  if (refusedKinds c).contains k then none
+  else if !(kinds c).contains k then
+    some s!"unsupported construct: the {c.name} kind `{k}` has no arm in the typed parse"
+  else match unreadFields c k data with
+    | f :: _ =>
+      some (s!"unsupported construct: the field `{f}` of the {c.name} kind `{k}` is " ++
+        "not read by the typed parse")
+    | [] => none
+
+/-- `fieldRefusal?` of a serde enum node `node` of class `c`: a string is a kind without
+    fields, an object of one key is the kind and its payload. Any other node is
+    refused. -/
+def nodeRefusal? (c : NodeClass) (node : Json) : Option String :=
+  match node with
+  | .str k => fieldRefusal? c k .null
+  | .obj kvs =>
+    match kvs.toList with
+    | [(k, v)] => fieldRefusal? c k v
+    | _ => some s!"unsupported construct: a {c.name} node that is not one kind"
+  | _ => some s!"unsupported construct: a {c.name} node that is not one kind"
+
+/-- `nodeRefusal?` of the `kind` of an item or `impl` item `it`, and, for a top-level
+    function, of its `def` under the kind `Fn`. A `static mut` is refused: the arm of
+    `Static` translates an immutable static as a constant. -/
+def itemRefusal? (it : Json) : Option String :=
+  match it.getObjVal? "kind" with
+  | .ok k =>
+    (match k.getObjVal? "Static" with
+      | .ok (.arr xs) =>
+        if xs[0]? == some (.bool false) then none
+        else some "unsupported construct: a `static mut` (a write to it is not translated)"
+      | _ => none) <|>
+    nodeRefusal? .item k <|>
+      match (k.getObjVal? "Fn" >>= (·.getObjVal? "def")) with
+      | .ok d@(.obj _) => fieldRefusal? .item "Fn" d
+      | _ => none
+  | .error _ => some "unsupported construct: an item without a kind"
+
+end ConsumedFields
+
 /-! ## Refused constructs of the typed parse
 
 The functions below find the constructs of a hax THIR body that the typed parse
@@ -4601,6 +4827,8 @@ def byRefMut (byRef : Json) : Bool :=
     does not read. `none` when every subpattern is translated. -/
 partial def patRefusal? (j : Json) : Option String :=
   let k := decoratedContents j
+  -- A field no arm reads is refused (`ConsumedFields`).
+  ConsumedFields.nodeRefusal? .pat k <|>
   match k with
   | .str "Wild" | .str "Missing" | .str "Never" => none
   | .str s => some s!"unsupported construct: the pattern kind `{s}`"
@@ -5396,6 +5624,8 @@ partial def divergesByPanic (fns : List String) (j : Json) : Bool :=
 partial def parseHaxTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) : Except String TExpr := do
   let ty := extractNodeType j
   let contents ← j.getObjVal? "contents"
+  -- A kind without an arm, or a field no arm reads, is refused (`ConsumedFields`).
+  if let some msg := ConsumedFields.nodeRefusal? .expr contents then throw msg
   let kind ← parseTExprKind contents j
   return TExpr.mk kind ty
 where
@@ -5476,6 +5706,7 @@ where
       -- condition and is refused by the `Let` case.
       -- An or-pattern is one arm per alternative (`orAlternativesChecked`).
       if let .ok letD := (decoratedContents (← data.getObjVal? "cond")).getObjVal? "Let" then
+        if let some msg := ConsumedFields.fieldRefusal? .expr "Let" letD then throw msg
         let alts ← orAlternativesChecked (← letD.getObjVal? "pat")
         let scrut ← parseHaxTExpr (← letD.getObjVal? "expr") implMap
         let thn ← parseHaxTExpr (← data.getObjVal? "then") implMap
@@ -6057,6 +6288,8 @@ where
   /-- Parse a hax Stmt into TExpr. -/
   parseTStmt (j : Json) : Except String TExpr := do
     let kind ← j.getObjVal? "kind"
+    -- A statement kind without an arm, or a field no arm reads, is refused.
+    if let some msg := ConsumedFields.nodeRefusal? .stmt kind then throw msg
     if let .ok data := kind.getObjVal? "Expr" then
       match data.getObjVal? "expr" with
       | .ok e =>
@@ -6150,6 +6383,8 @@ where
       names. A boolean guard is translated; an `if let` guard is refused by the
       `Let` case. -/
   parseTArm (j : Json) (tag : String) : Except String (List TArm) := do
+    -- A field of the arm no list declares is refused (`ConsumedFields`).
+    if let some msg := ConsumedFields.fieldRefusal? .arm "Arm" j then throw msg
     let guarded := match j.getObjVal? "guard" with
       | .ok .null | .error _ => false
       | .ok _ => true
@@ -6184,6 +6419,7 @@ where
       let before ← (stmts.take i).mapM parseTStmt
       let cont ← parseTStmtsSeq (stmts.drop (i + 1)) tail
       let data ← ((stmts[i]?.getD .null).getObjVal? "kind") >>= (·.getObjVal? "Let")
+      if let some msg := ConsumedFields.fieldRefusal? .stmt "Let" data then throw msg
       let alts ← orAlternativesChecked (← data.getObjVal? "pattern")
       let init ← parseHaxTExpr (← data.getObjVal? "initializer") implMap
       let els ← parseHaxTExpr
@@ -6199,6 +6435,7 @@ where
 
   /-- Parse a hax AdtExpr into TExprKind. -/
   parseTAdtExpr (j : Json) : Except String TExprKind := do
+    if let some msg := ConsumedFields.fieldRefusal? .adtExpr "AdtExpr" j then throw msg
     -- The head is the variant DefId's short name. For a struct construction
     -- the variant DefId is the struct's own DefId, so the head is the bare
     -- struct constructor def (`Sha256`); a core constructor keeps its bare
@@ -6891,6 +7128,18 @@ partial def parseHaxItemTExpr (j : Json) (implMap : ImplSelfTypeMap := {}) :
           throw s!"{msg} (in `{name}`)"
         parseHaxTExpr (thirBodyExpr bodyJ) implMap
       | none => throw s!"Const item '{name}' missing body"
+    let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
+    return some (name, body, processed, ⟨[], .unknown⟩)
+  else if let .ok (.arr #[.bool false, ident, _, bodyJ]) := kind.getObjVal? "Static" then
+    -- An immutable `static X: T = body` is the constant `X`, the name its reads
+    -- (`StaticRef`) take; a `static mut` is refused (`ConsumedFields.itemRefusal?`).
+    let name := match j.getObjVal? "def_id" with
+      | .ok defId => extractDefIdName defId [] implMap.localCrate
+      | _ => extractFnName ident
+    let bodyJ := thirBodyExpr bodyJ
+    if let some msg := bodyRefusal? none false bodyJ then
+      throw s!"{msg} (in `{name}`)"
+    let body ← parseHaxTExpr bodyJ implMap
     let processed := normalizeAssignOpsTExpr (reconstructForLoopsTExpr body)
     return some (name, body, processed, ⟨[], .unknown⟩)
   else return none
@@ -7877,7 +8126,15 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
   let itemName (it : Json) : String :=
     match (it.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption with
     | some fd => haxFnItemName it fd implMap.collisions
-    | none => ((it.getObjVal? "ident").toOption.map extractFnName).getD "unknown_item"
+    | none => ((it.getObjVal? "ident").toOption.map extractFnName).getD
+        (((it.getObjVal? "def_id").toOption.map
+          (extractDefIdName · [] implMap.localCrate)).getD "unknown_item")
+  -- An item kind without an arm, or a field no arm reads, refuses the item
+  -- (`ConsumedFields.itemRefusal?`); under `keepGoing` the item is omitted.
+  let checkItem (it : Json) (nm : String) : Except String (List (String × String)) :=
+    match ConsumedFields.itemRefusal? it with
+    | some msg => if keepGoing then .ok [(nm, msg)] else .error s!"{msg} (in `{nm}`)"
+    | none => .ok []
   -- Each definition is listed with its source (`itemSourceDesc`), so that two
   -- definitions of one name are refused naming both (`distinctDefNames`).
   let rec parseItemsTExpr (items : List Json) :
@@ -7887,6 +8144,10 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
     let mut srcs : List String := []
     let mut refused : List (String × String) := []
     for item in items do
+      let rk ← checkItem item (itemName item)
+      unless rk.isEmpty do
+        refused := refused ++ rk
+        continue
       let (r?, rf) ← tryItem item (itemName item)
       refused := refused ++ rf
       match r? with
@@ -7942,6 +8203,10 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                 match selfName, impl.getObjValAs? (Array Json) "items" with
                 | some sn, .ok implItems =>
                   for implItem in implItems do
+                    let rk ← checkItem implItem s!"{sn}_{itemName implItem}"
+                    unless rk.isEmpty do
+                      refused := refused ++ rk
+                      continue
                     let (r?, rf) ← tryItem implItem s!"{sn}_{itemName implItem}"
                     refused := refused ++ rf
                     match r? with
@@ -7960,6 +8225,10 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                 | some iid, .ok implItems =>
                   for implItem in implItems do
                     let m := itemName implItem
+                    let rk ← checkItem implItem m
+                    unless rk.isEmpty do
+                      refused := refused ++ rk
+                      continue
                     -- A method of an `impl` without an entry of `traitImplMethods` (an
                     -- `impl` of a `core` trait, a derived `Clone`) contributes no
                     -- definition, and its body is not parsed.

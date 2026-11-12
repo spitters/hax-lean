@@ -4633,4 +4633,198 @@ end
 
 end MonadicOut
 
+namespace ConsumedFieldsGate
+
+/-! The consumed-fields gate of the typed parse (`HaxAdapter.ConsumedFields`). A field of a
+witness node is read when removing it changes `observe`, the body refusal and the erased
+typed parse of the node; over the witnesses of an expression kind, the fields read are the
+kind's `consumed` list and the fields not read its `irrelevant` list. A field no list
+declares refuses the node, naming kind and field, and so does a kind without an arm. -/
+
+open Lean Hax.HaxAdapter Hax.HaxAdapter.ConsumedFields
+
+/-- The expression node of kind `k` with the fields `fs`, of type `bool`. -/
+def node (k : String) (fs : List (String × Json)) : Json :=
+  Json.mkObj [("ty", Json.str "Bool"), ("contents", Json.mkObj [(k, Json.mkObj fs)])]
+
+/-- A read of the local variable `n`. -/
+def var (n : String) : Json :=
+  node "VarRef" [("id", Json.mkObj [("name", Json.str n), ("id", toJson (0 : Nat))])]
+
+/-- The `DefId` of `krate` with the path segments `segs`, each `(namespace, name)`. -/
+def defId (krate : String) (segs : List (String × String)) : Json :=
+  Json.mkObj [("krate", Json.str krate), ("path", Json.arr (segs.map fun (ns, n) =>
+    Json.mkObj [("data", Json.mkObj [(ns, Json.str n)]),
+      ("disambiguator", toJson (0 : Nat))]).toArray)]
+
+/-- A non-default value of an irrelevant field. -/
+def other : Json := Json.mkObj [("id", toJson (1 : Nat))]
+
+/-- The binding pattern of the variable `n`. -/
+def bindPat (n : String) : Json :=
+  Json.mkObj [("ty", Json.str "Bool"), ("contents", Json.mkObj [("Binding", Json.mkObj [
+    ("mode", Json.mkObj [("by_ref", Json.str "No"), ("mutability", Json.str "Not")]),
+    ("var", Json.mkObj [("name", Json.str n), ("id", toJson (1 : Nat))]),
+    ("subpattern", Json.null), ("ty", Json.str "Bool"), ("is_primary", Json.bool true)])])]
+
+/-- The fields of the payload of kind `k` of the node `j`. -/
+def entries (j : Json) (k : String) : List (String × Json) :=
+  match j.getObjVal? "contents" >>= (·.getObjVal? k) with
+  | .ok (.obj kvs) => kvs.toList
+  | _ => []
+
+/-- The node `j` without the field `f` of its payload of kind `k`. -/
+def drop (j : Json) (k f : String) : Json :=
+  j.setObjVal! "contents" (Json.mkObj [(k, Json.mkObj ((entries j k).filter (·.1 != f)))])
+
+/-- The body refusal and the erased typed parse of `j`. -/
+def observe (j : Json) : Option String × Option ImpExpr :=
+  (bodyRefusal? none false j, (parseHaxTExpr j).toOption.map (·.erase))
+
+/-- Whether removing the field `f` from one of the witnesses `ws` of kind `k` changes it. -/
+def reads (k : String) (ws : List Json) (f : String) : Bool :=
+  ws.any fun w => (entries w k).any (·.1 == f) && observe (drop w k f) != observe w
+
+/-- Whether the lists `a` and `b` have the same elements. -/
+def sameSet (a b : List String) : Bool := a.all b.contains && b.all a.contains
+
+/-- Whether, over the witnesses `ws` of the expression kind `k`, the fields read are
+    `consumed .expr k` and the fields not read are `irrelevant .expr k`. -/
+def readsExactly (k : String) (ws : List Json) : Bool :=
+  let fs := ((ws.flatMap fun w => (entries w k).map (·.1)).eraseDups).filter (!isSpanField ·)
+  sameSet (fs.filter (reads k ws)) (consumed .expr k) &&
+    sameSet (fs.filter (!reads k ws ·)) (irrelevant .expr k)
+
+/-- The witnesses of the expression kinds, each field of each kind given a value whose
+    removal shows whether the parse reads it. -/
+def witnesses : List (String × List Json) :=
+  let item (n : String) := Json.mkObj [("def_id", defId "k" [("ValueNs", n)])]
+  let lit (fs : List (String × Json)) := node "Literal" fs
+  [("VarRef", [var "x"]),
+   ("UpvarRef", [node "UpvarRef" [("var_hir_id", Json.mkObj [("name", Json.str "u")]),
+      ("closure_def_id", defId "k" [("ValueNs", "f")])]]),
+   ("GlobalName", [node "GlobalName" [("item", item "g"), ("constructor", other)]]),
+   ("Literal", [lit [("lit", Json.mkObj [("node", Json.mkObj [("Int",
+        Json.arr #[Json.str "5", Json.str "Unsuffixed"])])]), ("neg", Json.bool true)],
+      lit [("Int", Json.arr #[Json.str "6", Json.str "Unsuffixed"])],
+      lit [("Bool", Json.bool true)], lit [("Byte", toJson (7 : Nat))],
+      lit [("ByteStr", Json.arr #[Json.arr #[toJson (1 : Nat)], Json.str "Cooked"])],
+      lit [("Str", Json.str "s")]]),
+   ("If", [node "If" [("cond", var "c"), ("then", var "a"), ("else_opt", var "b"),
+      ("if_then_scope", other)]]),
+   ("Call", [node "Call" [("fun", node "GlobalName" [("item", item "f")]),
+      ("args", Json.arr #[var "x"]), ("ty", Json.str "Bool"),
+      ("from_hir_call", Json.bool true)]]),
+   ("Let", [node "Let" [("expr", var "x"), ("pat", bindPat "y")]]),
+   ("Block", [node "Block" [("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj [("Expr",
+        Json.mkObj [("expr", var "x"), ("scope", other)])])]]),
+      ("expr", var "y"), ("safety_mode", Json.str "Safe"), ("region_scope", other),
+      ("targeted_by_break", Json.bool true)],
+      node "Block" [("expr", var "y"), ("safety_mode", Json.str "ExplicitUnsafe")]]),
+   ("Match", [node "Match" [("scrutinee", var "s"), ("arms", Json.arr #[Json.mkObj [
+      ("pattern", bindPat "z"), ("guard", Json.null), ("body", var "z"),
+      ("lint_level", other), ("scope", other)]])]]),
+   ("Tuple", [node "Tuple" [("fields", Json.arr #[var "a", var "b"])]]),
+   ("Array", [node "Array" [("fields", Json.arr #[var "a"])]]),
+   ("Assign", [node "Assign" [("lhs", var "x"), ("rhs", var "y")]]),
+   ("AssignOp", [node "AssignOp" [("op", Json.str "Add"), ("lhs", var "x"),
+      ("rhs", var "y")]]),
+   ("Borrow", [node "Borrow" [("arg", var "x"), ("borrow_kind", Json.str "Shared")],
+      node "Borrow" [("arg", var "x"),
+        ("borrow_kind", Json.mkObj [("Mut", Json.mkObj [("kind", Json.str "Default")])])]]),
+   ("Deref", [node "Deref" [("arg", var "x")]]),
+   ("Loop", [node "Loop" [("body", var "x")]]),
+   ("Return", [node "Return" [("value", var "x")]]),
+   ("Binary", [node "Binary" [("op", Json.str "Add"), ("lhs", var "x"), ("rhs", var "y")]]),
+   ("LogicalOp", [node "LogicalOp" [("op", Json.str "And"), ("lhs", var "x"),
+      ("rhs", var "y")]]),
+   ("Unary", [node "Unary" [("op", Json.str "Not"), ("arg", var "x")]]),
+   ("Field", [node "Field" [("field", defId "k" [("TypeNs", "S"), ("ValueNs", "g")]),
+      ("lhs", var "s")]]),
+   ("TupleField", [node "TupleField" [("field", toJson (1 : Nat)), ("lhs", var "p")]]),
+   ("Index", [node "Index" [("lhs", var "a"), ("index", var "i")]]),
+   ("Cast", [node "Cast" [("source", var "x")]]),
+   ("Use", [node "Use" [("source", var "x")]]),
+   ("NeverToAny", [node "NeverToAny" [("source", var "x")]]),
+   ("Box", [node "Box" [("value", var "x")]]),
+   ("Adt", [node "Adt" [("info", Json.mkObj [("variant", defId "k" [("TypeNs", "S")])]),
+      ("fields", Json.arr #[Json.mkObj [("field", defId "k" [("TypeNs", "S"),
+        ("ValueNs", "a")]), ("value", var "x")]]),
+      ("user_ty", other), ("repr", Json.str "Struct")],
+      node "Adt" [("info", Json.mkObj [("variant", defId "k" [("TypeNs", "S")])]),
+      ("base", Json.mkObj [("DefaultFields", Json.arr #[Json.str "Bool"])])]]),
+   ("Repeat", [node "Repeat" [("value", var "x"), ("count", var "n")]]),
+   ("PlaceTypeAscription", [node "PlaceTypeAscription" [("source", var "x"),
+      ("user_ty", other)]]),
+   ("ValueTypeAscription", [node "ValueTypeAscription" [("source", var "x"),
+      ("user_ty", other)]]),
+   ("PointerCoercion", [node "PointerCoercion" [("source", var "x"),
+      ("cast", Json.str "Unsize")]]),
+   ("NamedConst", [node "NamedConst" [("item", item "C"), ("user_ty", other)]]),
+   ("ConstParam", [node "ConstParam" [("param", Json.mkObj [("name", Json.str "N"),
+      ("index", toJson (0 : Nat))]), ("def_id", defId "k" [("TypeNs", "N")])]]),
+   ("ConstRef", [node "ConstRef" [("id", Json.mkObj [("name", Json.str "N")])]]),
+   ("StaticRef", [node "StaticRef" [("def_id", defId "k" [("ValueNs", "S")]),
+      ("alloc_id", toJson (3 : Nat)), ("ty", Json.str "Bool")]]),
+   ("Yield", [node "Yield" [("value", var "x")]])]
+
+/-- The witnessed kinds whose reads differ from their declaration (expected empty). -/
+def misread : List String :=
+  (witnesses.filter fun (k, ws) => !readsExactly k ws).map (·.1)
+
+#guard misread == []
+
+/-- Whether the parse of `j` is refused with a message containing each of `subs`. -/
+def refusedWith (j : Json) (subs : List String) : Bool :=
+  match parseHaxTExpr j with
+  | .error m => subs.all fun s => (m.splitOn s).length > 1
+  | .ok _ => false
+
+/-- The checks of the gate by name: undeclared fields and kinds without an arm refuse,
+    default values do not, and the declared lists of each kind are disjoint. -/
+def gateChecks : List (String × Bool) :=
+  let one := toJson (1 : Nat)
+  [("every expression kind refuses an undeclared field, naming kind and field",
+      (kinds .expr).all fun k => refusedWith (node k [("zz_unread", one)]) [k, "zz_unread"]),
+   ("a default value of an undeclared field is admitted",
+      !refusedWith (node "Deref" [("arg", var "x"), ("zz_unread", Json.null)]) []),
+   ("an expression kind without an arm is refused",
+      ["ZstLiteral", "InlineAsm", "OffsetOf"].all fun k =>
+        refusedWith (node k []) [k, "has no arm"]),
+   ("the consumed and irrelevant lists are disjoint",
+      [NodeClass.expr, .stmt, .arm, .adtExpr, .pat, .item].all fun c =>
+        (kinds c).all fun k => (consumed c k).all (!(irrelevant c k).contains ·)),
+   ("a statement with an undeclared field",
+      refusedWith (node "Block" [("stmts", Json.arr #[Json.mkObj [("kind", Json.mkObj
+        [("Let", Json.mkObj [("pattern", bindPat "y"), ("initializer", var "x"),
+          ("zz_unread", one)])])]]), ("expr", var "y")]) ["Let", "zz_unread"]),
+   ("a match arm with an undeclared field",
+      refusedWith (node "Match" [("scrutinee", var "s"), ("arms", Json.arr #[Json.mkObj [
+        ("pattern", bindPat "z"), ("body", var "z"), ("zz_unread", one)]])])
+        ["Arm", "zz_unread"]),
+   ("a struct expression with an undeclared field",
+      refusedWith (node "Adt" [("info", Json.mkObj [("variant", defId "k" [("TypeNs", "S")])]),
+        ("zz_unread", one)]) ["Adt", "zz_unread"]),
+   ("a pattern with an undeclared field",
+      (patRefusal? (Json.mkObj [("contents", Json.mkObj [("Binding", Json.mkObj [
+        ("var", Json.mkObj [("name", Json.str "y")]), ("zz_unread", one)])])])).isSome),
+   ("an item kind without an arm",
+      (itemRefusal? (Json.mkObj [("kind", Json.mkObj [("Union", Json.arr #[])])])).isSome),
+   ("a static mut",
+      (itemRefusal? (Json.mkObj [("kind", Json.mkObj [("Static",
+        Json.arr #[Json.bool true])])])).isSome),
+   ("an immutable static has an arm",
+      (itemRefusal? (Json.mkObj [("kind", Json.mkObj [("Static",
+        Json.arr #[Json.bool false])])])).isNone),
+   ("an undeclared field of a function's def",
+      (itemRefusal? (Json.mkObj [("kind", Json.mkObj [("Fn", Json.mkObj [
+        ("def", Json.mkObj [("body", Json.null), ("zz_unread", one)])])])])).isSome)]
+
+/-- The names of the failing checks (expected empty). -/
+def failedChecks : List String := (gateChecks.filter (!·.2)).map (·.1)
+
+#guard failedChecks == []
+
+end ConsumedFieldsGate
+
 end Hax.EmitterRegressions
