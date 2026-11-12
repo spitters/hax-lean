@@ -79,6 +79,8 @@ round (B) as precondition when its body checks there with the summaries already 
 the value of that check as postcondition; the list passes `Hax.Range.checkSums`, so the
 summaries hold by `Hax.Range.headSem_of_checkSums`. A function with a summary counts as
 checked at its precondition, every other function when its body checks at its type ranges.
+The column `refusal` gives, for a function the checker refuses, the first obligation it
+refuses at its type ranges (`Hax.Range.refusalT`).
 
 ## Main definitions
 
@@ -1015,6 +1017,9 @@ structure FnRow where
   checked : Bool := false
   /-- Whether the function has a summary that `Range.checkSums` verifies. -/
   summarised : Bool := false
+  /-- The first obligation the verified checker refuses at the parameters' type ranges
+      (`Range.refusalT`), empty for a checked function. -/
+  refusal : String := ""
   deriving Inhabited
 
 /-- The join of the argument values at the call sites of each function, of the arity of its
@@ -1111,11 +1116,24 @@ def classify (defs0 : List (String × TExpr)) : List FnRow := Id.run do
     m.insert n ((sums.lookup n).isSome ||
       (checkedFn sums ps none ((infC.get? n).getD []) ((defs0.lookup n).getD default)).isSome))
     {}
+  -- The first refused obligation of each function the checker refuses, with the loop
+  -- annotation that `checkedWith` tries first.
+  let why (n : String) : String :=
+    if (chk.get? n).getD false then ""
+    else match defs.find? (·.1 == n) with
+      | some (_, ps, _) =>
+        let e := (defs0.lookup n).getD default
+        let inf := (infC.get? n).getD []
+        let an := if inf.isEmpty then annOfTypes e else annOfLoops inf e
+        let Γ := paramEnvOf ps (paramAVs ps none)
+        (((Range.refusalT (Range.stdSpec sums an true) Γ e).getD "").replace "\n" " "
+          |>.replace "\t" " ").take 160 |>.toString
+      | none => ""
   pure <| (rc.zip rd).map fun ((n, c), (_, d)) =>
     { name := n, full := c.obls, ctx := d.obls, cls := (cls.get? n).getD 3,
       monadicCalls := (d.calls.filter fun (g, _) => cls.get? g == some 3).size,
       baseline := (base.get? n).getD false, checked := sumsOk && (chk.get? n).getD false,
-      summarised := (sums.lookup n).isSome }
+      summarised := (sums.lookup n).isSome, refusal := why n }
 
 /-- The kinds of the unproved operations with their counts, as `kind=count,…`. -/
 def residual (os : Array (String × Bool)) : List (String × Nat) :=
@@ -1127,11 +1145,12 @@ def residual (os : Array (String × Bool)) : List (String × Nat) :=
 
 /-- The TSV line of a function: name, operations, safe under the call-site precondition,
     class, safe at type ranges, calls of class-3 functions, whether the verified checker
-    accepts it, unproved kinds. -/
+    accepts it, unproved kinds, the checker's first refused obligation. -/
 def rowLine (r : FnRow) : String :=
   let res := ",".intercalate ((residual r.ctx).map fun (k, c) => s!"{k}={c}")
   s!"{r.name}\t{r.full.size}\t{(r.ctx.filter (·.2)).size}\t{r.cls}\t" ++
-    s!"{(r.full.filter (·.2)).size}\t{r.monadicCalls}\t{if r.checked then 1 else 0}\t{res}"
+    s!"{(r.full.filter (·.2)).size}\t{r.monadicCalls}\t{if r.checked then 1 else 0}\t{res}" ++
+    s!"\t{r.refusal}"
 
 /-- The summary lines of a crate. -/
 def summaryLines (crate : String) (rows : List FnRow) : List String :=
@@ -1263,7 +1282,7 @@ def run (args : List String) : IO UInt32 := do
   if paths.isEmpty then
     IO.eprintln "usage: rangeprobe [--name N] PATH..."
     return 1
-  IO.println "function\tops\tsafe\tclass\tsafe_full\tmonadic_calls\tchecked\tresidual"
+  IO.println "function\tops\tsafe\tclass\tsafe_full\tmonadic_calls\tchecked\tresidual\trefusal"
   for p in paths do
     let f ← exportOf p
     let crate := name.getD ((f.parent.bind (·.fileName)).getD f.toString)
