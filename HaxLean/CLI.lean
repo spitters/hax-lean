@@ -135,6 +135,10 @@ structure Options where
       `HaxLean.RuntimeM` (`Hax.MonadicEmit`); every other function is printed as without
       the flag. -/
   emitMonadic : Bool := false
+  /-- With `--emit-certified --hax --emit-monadic`: the module name of the extraction; the
+      run prints, in place of the extraction, its companion module with the theorems
+      `f_reading` of the monadic functions (`Hax.ReadingEmit.readingFile`). -/
+  emitReading : Option String := none
   /-- With `--emit-certified --hax`: a function the adapter refuses is reported on
       stderr with its name and construct and omitted, and so is every function that
       calls an omitted one; the rest of the crate is translated. Without the flag the
@@ -175,6 +179,7 @@ where
     | "--trait-heads" :: rest, opts => go rest { opts with traitHeads := true }
     | "--keep-declassify" :: rest, opts => go rest { opts with keepDeclassify := true }
     | "--emit-monadic" :: rest, opts => go rest { opts with emitMonadic := true }
+    | "--emit-reading" :: m :: rest, opts => go rest { opts with emitReading := some m }
     | "--keep-going" :: rest, opts => go rest { opts with keepGoing := true }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest { opts with unknownArgs := opts.unknownArgs ++ [arg] }
@@ -229,6 +234,12 @@ OPTIONS:
                     indexing, slicing, unwrap, assert), or calls such a
                     function, in RustM with the guarded operations of
                     HaxLean.RuntimeM; the other functions are unchanged
+  --emit-reading MOD
+                    With --emit-monadic: print, in place of the extraction
+                    module MOD, its companion module with a theorem
+                    f_reading per monadic function, relating it to the
+                    toRustMSB reading of f_impExpr (imports MOD and
+                    HaxAscent.RustSemantics.ReadingTac of catcrypt-compiler)
   --keep-going      With --emit-certified --hax: report each refused function
                     (REFUSED name: construct) and each function calling an
                     omitted one on stderr, omit them, and translate the rest

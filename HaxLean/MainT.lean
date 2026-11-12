@@ -341,6 +341,7 @@ def main (args : List String) : IO UInt32 := do
         (traitHeads := opts.traitHeads) (keepDeclassify := opts.keepDeclassify)
         (emitMonadic := opts.emitMonadic)
         (rangeCands := if opts.emitMonadic then some Hax.RangeProbe.rangeInput else none)
+        (emitReading := if opts.emitMonadic then opts.emitReading else none)
         ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t

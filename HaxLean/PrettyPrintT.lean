@@ -24,6 +24,7 @@ public import HaxLean.ContractEmit
 public import HaxLean.Secrecy
 public import HaxLean.StructTuple
 public import HaxLean.MonadicEmit
+public import HaxLean.ReadingEmit
 
 /-!
 # Typed Pretty-Printer for TExpr
@@ -2115,7 +2116,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     (keepDeclassify : Bool := false)
     (emitMonadic : Bool := false)
     (facts : MonadicEmit.Facts := {})
-    (rangeCands : Option (List (String × TExpr) → MonadicEmit.RangeInput) := none) : String :=
+    (rangeCands : Option (List (String × TExpr) → MonadicEmit.RangeInput) := none)
+    (emitReading : Option String := none) : String :=
   let prep := certifiedPrep rawTdefs moduleName structMeta fnTypes procTdefs newtypes
     classHooks nominalKrates
   let prep := if !keepDeclassify then prep
@@ -2190,6 +2192,17 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let monadicFns : List String :=
     if !emitMonadic then []
     else MonadicEmit.effectClosure defs (methodGroups.map fun ((_, m), ds) => m :: ds) facts
+  -- `--emit-reading MOD`: the companion module of the theorems `f_reading` of the monadic
+  -- functions (`ReadingEmit.readingFile`), printed in place of the file.
+  let readingText? : Option String := emitReading.map fun extMod =>
+    let fns := monadicFns.filterMap fun n =>
+      (literalDefs.find? (·.1 == n)).map fun (_, body) =>
+        let params? := (rawTdefs.find? (·.1 == n)).bind fun (_, rawTe) =>
+          let ps := (extractTParams rawTe).1
+          if ps.any (·.2.isUnknown) then none
+          else some (ps.map fun (p, ty) => (sanitizeName p, ty.toLeanTypeStrSurface structLookup))
+        (n, params?, body)
+    ReadingEmit.readingFile extMod moduleName (defs.map (·.1)) fns
   -- The monadic functions whose total surface `f_pure` total callers call.
   let pureFns : List String :=
     if rangePlan?.isNone then [] else facts.pureCallees monadicFns
@@ -2504,6 +2517,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     else depsHeadsDef moduleName (literalDepsHeads nominalKrates depNames literalDefs)
   let footer :=
     s!"\n{mutualClose}{contractBlock}{impExprs}\n{lowCTBlock}{texprBlock}{exampleBlock}{structTupleText}{depsHeadsText}end  -- noncomputable section\n\nend {moduleName}\n"
-  fixDepReferences (header ++ body ++ footer) depNames
+  match readingText? with
+  | some t => t
+  | none => fixDepReferences (header ++ body ++ footer) depNames
 
 end Hax
