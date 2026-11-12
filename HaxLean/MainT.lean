@@ -345,6 +345,8 @@ def main (args : List String) : IO UInt32 := do
         ++ secrecyDef
     IO.eprintln s!"INFO output-bytes={rendered.length}"
     let _ ← phaseTick "render" t
+    if opts.emitMonadic && opts.emitReading.isSome then
+      for l in Hax.ReadingEmit.readingReport rendered do IO.eprintln l
     IO.println rendered
     let _ ← phaseTick "total" t0
     return 0

@@ -239,7 +239,10 @@ OPTIONS:
                     module MOD, its companion module with a theorem
                     f_reading per monadic function, relating it to the
                     toRustMSB reading of f_impExpr (imports MOD and
-                    HaxAscent.RustSemantics.ReadingTac of catcrypt-compiler)
+                    HaxAscent.RustSemantics.ReadingTac of catcrypt-compiler);
+                    stderr gets one line reading-refused<TAB>f<TAB>construct
+                    per function without a theorem, then a line
+                    'reading: N emitted, M refused'
   --keep-going      With --emit-certified --hax: report each refused function
                     (REFUSED name: construct) and each function calling an
                     omitted one on stderr, omit them, and translate the rest
