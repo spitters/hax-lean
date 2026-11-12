@@ -295,6 +295,7 @@ def avLit : Range.AV → String
   | .num (a, b) => s!".num ({a}, {b})"
   | .arr (a, b) => s!".arr ({a}, {b})"
   | .idx lo hi rs => s!".idx ({lo}) ({reprStr hi}) {reprStr rs}"
+  | .rng (a, b) (c, d) => s!".rng ({a}, {b}) ({c}, {d})"
 
 /-- The literal of a list of abstract values. -/
 def avsLit (as : List Range.AV) : String := "[" ++ ", ".intercalate (as.map avLit) ++ "]"

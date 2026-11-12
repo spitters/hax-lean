@@ -30,7 +30,9 @@ A relational fact `(s, c)` of an index variable `x` (`AV.idx`) says `x + c < len
 interval. A fact is set by a guard `x < len s` or `x ≤ len s` (`refineLen`) and on the counter
 of a counted loop over `[lo, len s)` whose body binds no `s` (`ctrAVLen`); it is kept through
 joins that both sides have (`AV.join`), and dropped when its array variable is bound
-(`AEnv.kill`, `AEnv.drop`).
+(`AEnv.kill`, `AEnv.drop`). A variable bound to `y + k` for an integer literal `k` takes each
+fact `(s, c)` of `y` as `(s, c - k)` (`shiftRels`, `bindAV`). A range `start..end` has the
+abstract value `AV.rng` of its two bounds.
 
 The checker refines an interval by the guard of an `if` whose condition compares two atoms
 (`refineCond`), and, when the specification sets `Spec.logic`, by an equality of two atoms
@@ -69,8 +71,11 @@ environment in the final abstract environment (`Post`).
 * `argRels`: the facts between the arguments of a call.
 * `invStmt`, `bodyInv?`, `invAnn`, `loopAnn`: the loop invariant a body states and the
   candidate values it gives.
+* `isAddHead`, `shiftRels`, `AV.addRels`, `bindAV`: the facts of a variable bound to the
+  addition of a constant.
 * `check`, `checkArgs`, `checkArms`: the checker.
 * `Sound`: the hypotheses relating a specification to a builtin table.
+* `refusal`, `refusalT`: the first obligation the checker refuses, as a diagnostic.
 
 ## Main results
 
@@ -90,13 +95,15 @@ open CatCrypt.Crypto.SecureCompilation.RangeDomain
 /-! ## Abstract values -/
 
 /-- An abstract value: no information, an integer interval, the length interval of an array,
-    or an index: an integer at least `lo`, at most `hi` when given, with the facts `rs`, each
-    `(s, c)` meaning that the integer plus `c` lies below the length of the array `s`. -/
+    an index: an integer at least `lo`, at most `hi` when given, with the facts `rs`, each
+    `(s, c)` meaning that the integer plus `c` lies below the length of the array `s`, or a
+    range `start..end` with its bounds in the intervals `lo` and `hi`. -/
 inductive AV where
   | top
   | num (i : Iv)
   | arr (len : Iv)
   | idx (lo : Int) (hi : Option Int) (rs : List (String × Int))
+  | rng (lo hi : Iv)
   deriving Inhabited, BEq, Repr
 
 /-- An optional upper bound below another, `none` being no bound. -/
@@ -128,12 +135,14 @@ namespace AV
 /-- The values an abstract value describes: every value for `top`; an integer, unsigned or
     signed word whose integer lies in `i` for `num i`; an array or tuple whose length lies in
     `l` for `arr l`; an integer, unsigned or signed word whose integer lies between the bounds
-    for `idx`, whose facts `RelIn` reads. -/
+    for `idx`, whose facts `RelIn` reads; a pair of integers in `lo` and `hi` for `rng`. -/
 def Mem : AV → Value → Prop
   | .top, _ => True
   | .num i, v => ∃ n, v.toInt = some n ∧ i.Has n
   | .arr l, v => ∃ n, v.arrayLen = some n ∧ l.Has (n : Int)
   | .idx lo hi _, v => ∃ n, v.toInt = some n ∧ lo ≤ n ∧ ∀ h, hi = some h → n ≤ h
+  | .rng lo hi, v => ∃ x y, v = .tuple [x, y] ∧ (∃ m, x.toInt = some m ∧ lo.Has m) ∧
+      ∃ n, y.toInt = some n ∧ hi.Has n
 
 /-- The facts of an abstract value: those of an index, none otherwise. -/
 def rels : AV → List (String × Int)
@@ -157,12 +166,14 @@ def le : AV → AV → Bool
   | .idx a ha ra, .idx b hb rb => decide (b ≤ a) && hiLe ha hb && relsLe rb ra
   | .idx a (some h) _, .num b => ivLe (a, h) b
   | .num a, .idx b hb [] => decide (b ≤ a.1) && hiLe (some a.2) hb
+  | .rng a b, .rng c d => ivLe a c && ivLe b d
   | _, _ => false
 
 /-- An abstract value above both. -/
 def join : AV → AV → AV
   | .num a, .num b => .num (ivHull a b)
   | .arr a, .arr b => .arr (ivHull a b)
+  | .rng a b, .rng c d => .rng (ivHull a c) (ivHull b d)
   | .idx a ha ra, .idx b hb rb => .idx (min a b) (hiJoin ha hb) (relsJoin ra rb)
   | .idx a (some h) _, .num b => .num (ivHull (a, h) b)
   | .num a, .idx b (some h) _ => .num (ivHull a (b, h))
@@ -232,6 +243,13 @@ theorem Mem.le {a b : AV} {v : Value} (h : a.Mem v) (hab : a.le b = true) : b.Me
         simp only [hiLe, decide_eq_true_eq] at hab
         omega
     | _ => simp [AV.le] at hab
+  | rng c d =>
+    cases a with
+    | rng a b =>
+      obtain ⟨x, y, rfl, ⟨m, hm, ha⟩, n, hn, hb⟩ := h
+      simp only [AV.le, Bool.and_eq_true] at hab
+      exact ⟨x, y, rfl, ⟨m, hm, ha.le hab.1⟩, n, hn, hb.le hab.2⟩
+    | _ => simp [AV.le] at hab
 
 theorem Mem.join_left {a b : AV} {v : Value} (h : a.Mem v) : (a.join b).Mem v := by
   cases a <;> cases b <;> simp only [join] <;> try trivial
@@ -254,6 +272,8 @@ theorem Mem.join_left {a b : AV} {v : Value} (h : a.Mem v) : (a.join b).Mem v :=
     subst hh
     have := h2 _ rfl
     omega
+  · obtain ⟨x, y, rfl, ⟨m, hm, ha⟩, n, hn, hb⟩ := h
+    exact ⟨x, y, rfl, ⟨m, hm, ha.hull_left⟩, n, hn, hb.hull_left⟩
 
 theorem Mem.join_right {a b : AV} {v : Value} (h : b.Mem v) : (a.join b).Mem v := by
   cases a <;> cases b <;> simp only [join] <;> try trivial
@@ -276,6 +296,8 @@ theorem Mem.join_right {a b : AV} {v : Value} (h : b.Mem v) : (a.join b).Mem v :
     subst hh
     have := h2 _ rfl
     omega
+  · obtain ⟨x, y, rfl, ⟨m, hm, ha⟩, n, hn, hb⟩ := h
+    exact ⟨x, y, rfl, ⟨m, hm, ha.hull_right⟩, n, hn, hb.hull_right⟩
 
 theorem Mem.strip {a : AV} {v : Value} (h : a.Mem v) : a.strip.Mem v := by
   cases a with
@@ -348,7 +370,9 @@ theorem RelIn.join_left {a b : AV} {env : Env} {v : Value} (h : a.RelIn env v) :
   | .top, _ | .arr _, .top | .arr _, .num _ | .arr _, .arr _ | .arr _, .idx _ _ _
   | .num _, .top | .num _, .arr _ | .num _, .num _
   | .num _, .idx _ none _ | .num _, .idx _ (some _) _ | .idx _ _ _, .top
-  | .idx _ _ _, .arr _ | .idx _ none _, .num _ | .idx _ (some _) _, .num _ =>
+  | .idx _ _ _, .arr _ | .idx _ none _, .num _ | .idx _ (some _) _, .num _
+  | .rng _ _, .top | .rng _ _, .num _ | .rng _ _, .arr _ | .rng _ _, .idx _ _ _
+  | .rng _ _, .rng _ _ | .arr _, .rng _ _ | .num _, .rng _ _ | .idx _ _ _, .rng _ _ =>
     simp [join, rels] at hp
 
 theorem RelIn.join_right {a b : AV} {env : Env} {v : Value} (h : b.RelIn env v) :
@@ -363,7 +387,9 @@ theorem RelIn.join_right {a b : AV} {env : Env} {v : Value} (h : b.RelIn env v) 
   | .top, _ | .arr _, .top | .arr _, .num _ | .arr _, .arr _ | .arr _, .idx _ _ _
   | .num _, .top | .num _, .arr _ | .num _, .num _
   | .num _, .idx _ none _ | .num _, .idx _ (some _) _ | .idx _ _ _, .top
-  | .idx _ _ _, .arr _ | .idx _ none _, .num _ | .idx _ (some _) _, .num _ =>
+  | .idx _ _ _, .arr _ | .idx _ none _, .num _ | .idx _ (some _) _, .num _
+  | .rng _ _, .top | .rng _ _, .num _ | .rng _ _, .arr _ | .rng _ _, .idx _ _ _
+  | .rng _ _, .rng _ _ | .arr _, .rng _ _ | .num _, .rng _ _ | .idx _ _ _, .rng _ _ =>
     simp [join, rels] at hp
 
 end AV
@@ -429,6 +455,30 @@ def AEnv.drop (xs : List String) (Γ : AEnv) : AEnv :=
 /-- `Γ` without the facts on the array `x`, for a binding of `x`. -/
 def AEnv.kill (x : String) (Γ : AEnv) : AEnv :=
   Γ.map fun p => (p.1, p.2.forget [x])
+
+/-! ## Facts through the addition of a constant -/
+
+/-- An addition head: the base `Add`, with any tag. -/
+def isAddHead (f : String) : Bool := (f.splitOn "#").head? == some "Add"
+
+/-- The facts that the value of `v`, bound to `x`, inherits: for `v = y + k` with an integer
+    literal `k`, each fact `(s, c)` of `y` in `Γ` on an array `s` other than `x` gives
+    `(s, c - k)`, as `y + c < len s` is `(y + k) + (c - k) < len s`. -/
+def shiftRels (Γ : AEnv) (x : String) : ImpExpr → List (String × Int)
+  | .app f [.var y, .lit l] =>
+    match isAddHead f, (Value.ofLit l).toInt with
+    | true, some k => ((Γ.get y).rels.filter fun p => p.1 != x).map fun p => (p.1, p.2 - k)
+    | _, _ => []
+  | _ => []
+
+/-- The abstract value `a` with the facts `ps` (`AV.addRel`). -/
+def AV.addRels (ps : List (String × Int)) (a : AV) : AV := ps.foldr AV.addRel a
+
+/-- The abstract environment after binding `x` to the value of `v` of abstract value `a`, from
+    `Γ`: `a` without its facts, with the facts `v` gives (`shiftRels`), before `Γ` without the
+    facts on the array `x`. -/
+def bindAV (Γ : AEnv) (x : String) (v : ImpExpr) (a : AV) : AEnv :=
+  (x, a.strip.addRels (shiftRels Γ x v)) :: AEnv.kill x Γ
 
 /-! ## The guarded builtin table -/
 
@@ -512,8 +562,9 @@ structure LogicSem (bi : Builtins) : Prop where
     values free of control flow, an accepted call has its guard and, on arguments free of
     control flow, its result in the transfer function's value (for `xrel`, on arguments that
     satisfy the facts), a comparison head answers with the truth of its relation, `len`
-    answers with the length of an array, and the Boolean heads are read as `LogicSem` when the
-    specification refines by them. -/
+    answers with the length of an array, an addition head whose guard holds answers with the
+    sum of the integers, and the Boolean heads are read as `LogicSem` when the specification
+    refines by them. -/
 structure Sound (g : String → List Value → Bool) (H : Spec) (bi : Builtins) : Prop where
   deep : Builtins.DeepNoControlFlow bi
   guard : ∀ f avs a vs, H.xfer f avs = some a → MemList avs vs → g f vs = true
@@ -527,6 +578,8 @@ structure Sound (g : String → List Value → Bool) (H : Spec) (bi : Builtins) 
     bi op [vl, vr] = some (.bool b) → vl.toInt = some m → vr.toInt = some n →
     (b = true ↔ cmpRel strict swapped m n)
   len : ∀ arr v, bi "len" [arr] = some v → ∃ n, arr.arrayLen = some n ∧ v.toInt = some n
+  add : ∀ f x y v m n, isAddHead f = true → g f [x, y] = true → bi f [x, y] = some v →
+    x.toInt = some m → y.toInt = some n → v.toInt = some (m + n)
   logic : H.logic = true → LogicSem bi
 
 /-! ## Refinement by a guard -/
@@ -815,7 +868,7 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
   | Γ, .unitVal => some (.top, Γ)
   | Γ, .letBind x v b =>
     match check H J Γ v with
-    | some (a, Γ1) => check H J ((x, a.strip) :: AEnv.kill x Γ1) b
+    | some (a, Γ1) => check H J (bindAV Γ1 x v a) b
     | none => none
   | Γ, .seq a b =>
     match check H J Γ a with
@@ -823,7 +876,7 @@ def check (H : Spec) (J : AEnv) : AEnv → ImpExpr → Option (AV × AEnv)
     | none => none
   | Γ, .assign x r =>
     match check H J Γ r with
-    | some (a, Γ1) => some (.top, (x, a.strip) :: AEnv.kill x Γ1)
+    | some (a, Γ1) => some (.top, bindAV Γ1 x r a)
     | none => none
   | Γ, .typeAscription e _ => check H J Γ e
   | Γ, .borrow e => check H J Γ e
@@ -925,5 +978,94 @@ end
 /-- The checker on a typed term, through its erasure. -/
 def checkT (H : Spec) (Γ : AEnv) (e : TExpr) : Option (AV × AEnv) :=
   check H [] Γ e.erase
+
+/-! ## Refusal reasons -/
+
+mutual
+
+/-- The first obligation the checker refuses in `e` from `Γ` under the loop invariant `J`,
+    following the environments of `check`: a call whose transfer functions refuse the abstract
+    values of its arguments, an environment outside a loop invariant at the loop's entry,
+    after an iteration or at a `cfBreak`/`cfContinue`, or a node outside the checked class;
+    `none` when `check` accepts `e`. A diagnostic: no soundness result reads it. -/
+partial def refusal (H : Spec) (J Γ : AEnv) (e : ImpExpr) : Option String :=
+  if (check H J Γ e).isSome then none else
+  match e with
+  | .letBind x v b =>
+    match check H J Γ v with
+    | some (a, Γ1) => refusal H J (bindAV Γ1 x v a) b
+    | none => refusal H J Γ v
+  | .seq a b =>
+    match check H J Γ a with
+    | some (_, Γ1) => refusal H J Γ1 b
+    | none => refusal H J Γ a
+  | .assign _ r | .typeAscription r _ | .borrow r | .deref r | .proj r _ | .earlyReturn r
+  | .questionMark r => refusal H J Γ r
+  | .app f args =>
+    match refusalArgs H J Γ args with
+    | .inl r => some r
+    | .inr avs => some s!"call {f} on {reprStr avs}"
+  | .tuple es =>
+    match refusalArgs H J Γ es with
+    | .inl r => some r
+    | .inr _ => some "tuple"
+  | .ifThenElse c t el =>
+    match check H J Γ c with
+    | none => refusal H J Γ c
+    | some (_, Γ1) =>
+      (if isFalseLit c then none else refusal H J (refineCond H.logic c true Γ1) t) <|>
+        refusal H J (refineCond H.logic c false Γ1) el
+  | .match_ s arms =>
+    match check H J Γ s with
+    | none => refusal H J Γ s
+    | some (_, Γ1) => arms.findSome? fun (p, b) => refusal H J (AEnv.drop (patVars p) Γ1) b
+  | .forFold x lo hi body =>
+    match check H J Γ lo with
+    | none => refusal H J Γ lo
+    | some (al, Γ1) =>
+      match check H J Γ1 hi with
+      | none => refusal H J Γ1 hi
+      | some (ah, Γ2) =>
+        let inv := loopInv (loopAnn H.ann ((x, ctrAV al ah) :: Γ2) body) x body Γ2
+        let Γ0 := (x, ctrAVLen x hi body al ah) :: AEnv.kill x inv
+        if !entails Γ2 inv then some s!"loop {x}: entry outside the invariant {reprStr inv}"
+        else match check H inv Γ0 body with
+          | none => refusal H inv Γ0 body
+          | some (_, Γb) =>
+            some s!"loop {x}: iteration leaves the invariant {reprStr inv} at {reprStr Γb}"
+  | .whileFold c body =>
+    let inv := loopInv (loopAnn H.ann Γ body) "" body Γ
+    if !entails Γ inv then some s!"while: entry outside the invariant {reprStr inv}"
+    else match check H J inv c with
+      | none => refusal H J inv c
+      | some (_, Γc) =>
+        if !entails Γc inv then some s!"while: condition leaves the invariant {reprStr inv}"
+        else match check H inv (refineCond H.logic c true Γc) body with
+          | none => refusal H inv (refineCond H.logic c true Γc) body
+          | some (_, Γb) =>
+            some s!"while: iteration leaves the invariant {reprStr inv} at {reprStr Γb}"
+  | .cfBreak r | .cfContinue r =>
+    match check H J Γ r with
+    | none => refusal H J Γ r
+    | some (_, Γ1) => some s!"break or continue outside the invariant {reprStr J} at {reprStr Γ1}"
+  | _ => some "node outside the checked class"
+
+/-- The first refusal among call arguments evaluated left to right, or their abstract
+    values. -/
+partial def refusalArgs (H : Spec) (J Γ : AEnv) : List ImpExpr → String ⊕ List AV
+  | [] => .inr []
+  | e :: es =>
+    match check H J Γ e with
+    | some (a, Γ1) =>
+      match refusalArgs H J Γ1 es with
+      | .inl r => .inl r
+      | .inr as => .inr (a :: as)
+    | none => .inl ((refusal H J Γ e).getD "argument")
+
+end
+
+/-- The first refusal of the checker on a typed term, through its erasure. -/
+def refusalT (H : Spec) (Γ : AEnv) (e : TExpr) : Option String :=
+  refusal H [] Γ e.erase
 
 end Hax.Range

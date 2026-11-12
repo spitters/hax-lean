@@ -13,10 +13,12 @@ public import HaxLean.Range.Sound
 `rustGuard f vs` is the condition under which the Rust operation of the head `f` does not
 panic on the arguments `vs`: the guards of `HaxLean/RuntimeM.lean` on the integers the
 values denote (checked `+ - *` in the range of the width, a nonzero divisor and, signed,
-not `MIN / -1`, a shift amount in `[0, w)`, an index in `[0, n)` of an array of length `n`).
-A head named by an operation that panics in other ways (`unwrap`, `expect`, `panic`,
-`assert`, slicing and copying between slices) has guard `false`: the checker never accepts
-it. Every other head has guard `true`. The width of an operation is that of its tag
+not `MIN / -1`, a shift amount in `[0, w)`, an index in `[0, n)` of an array of length `n`,
+and for an index by a range `start..end`, the value `(start, end)` of `Range`,
+`0 ≤ start ≤ end ≤ n`: `sliceGuard`). A head named by an operation that panics in other ways
+(`unwrap`, `expect`, `panic`, `assert`, the slicing heads `slice_to`, `slice_from`,
+`slice_range`, `slice_update` and copying between slices) has guard `false`: the checker
+never accepts it. Every other head has guard `true`. The width of an operation is that of its tag
 (`Add#32`, `Mul#i64`, `Sub#size`); a tag that names no machine width (a field tag) and an
 untagged operation on unbounded integers (`Value.int`) do not panic; an untagged operation on
 words takes the width of its first argument.
@@ -24,8 +26,10 @@ words takes the width of its first argument.
 `stdSpec sums` gives the transfer functions: exact interval arithmetic on the shared domain
 (`ivAddZ`, `ivSubZ`, `ivCorner`) checked against the range of the width, the divisor and
 shift-amount checks, index bounds against the least array length, `len` as the length
-interval, the length of an array built by `repeat` or `array_lit`, and a function of the
-crate through its summary `(pre, post)` in `sums`: a call is
+interval, the length of an array built by `repeat` or `array_lit`, a range `Range a b` as
+`AV.rng` of the bounds' intervals, the slice of an array by such a range (`sliceXfer`,
+accepted when the intervals prove `sliceGuard`, with the slice's length interval), and a
+function of the crate through its summary `(pre, post)` in `sums`: a call is
 accepted when its arguments lie in `pre`, with result in `post`. Its relational transfer
 function `stdXrel` accepts an index into an array, and an update of it, when the index has a
 nonnegative lower bound and a fact of the environment bounds it below the array's length
@@ -148,6 +152,16 @@ def idxGuard (arr idx : Value) : Bool :=
   | some n, some k => decide (0 ≤ k) && decide (k < (n : Int))
   | _, _ => false
 
+/-- The guard of slicing an array by a range `start..end`, the value `(start, end)`:
+    `0 ≤ start ≤ end ≤ n` for an array of length `n`. -/
+def sliceGuard (arr r : Value) : Bool :=
+  match arr.arrayLen, r with
+  | some n, .tuple [x, y] =>
+    match x.toInt, y.toInt with
+    | some a, some b => decide (0 ≤ a) && decide (a ≤ b) && decide (b ≤ (n : Int))
+    | _, _ => false
+  | _, _ => false
+
 /-- The condition under which the Rust operation of the head `f` does not panic on `vs`
     (the guards of `HaxLean/RuntimeM.lean`). -/
 def rustGuard (f : String) (vs : List Value) : Bool :=
@@ -181,7 +195,7 @@ def rustGuard (f : String) (vs : List Value) : Bool :=
     | some _, _ => false
   else if isIndex f then
     match vs with
-    | [arr, idx] => idxGuard arr idx
+    | [arr, idx] => idxGuard arr idx || sliceGuard arr idx
     | _ => false
   else if f == "array_update" then
     match vs with
@@ -244,6 +258,23 @@ def idxXfer (update : Bool) (avs : List AV) : Option AV :=
   | [.arr l, .num i, _] => if update && ivLe i (0, l.1 - 1) then some (.arr l) else none
   | _ => none
 
+/-- A call that slices: `index` or `index_mut` on an array and a range. -/
+def isSlice (f : String) (avs : List AV) : Bool :=
+  (f == "index" || f == "index_mut") && match avs with
+    | [_, .rng _ _] => true
+    | _ => false
+
+/-- Slicing an array of length in `l` by a range with bounds in `a` and `b`: accepted when
+    `0 ≤ a.1`, `a.2 ≤ b.1` and `b.2 ≤ l.1`; the slice has a length in
+    `[b.1 - a.2, b.2 - a.1]`. -/
+def sliceXfer (avs : List AV) : Option AV :=
+  match avs with
+  | [.arr l, .rng a b] =>
+    if decide (0 ≤ a.1) && decide (a.2 ≤ b.1) && decide (b.2 ≤ l.1) then
+      some (.arr (b.1 - a.2, b.2 - a.1))
+    else none
+  | _ => none
+
 /-- `len` of an array: its length interval. -/
 def lenXfer (avs : List AV) : Option AV :=
   match avs with
@@ -259,6 +290,10 @@ def defaultXfer (f : String) (avs : List AV) : Option AV :=
     | [_, .num i] => some (.arr i)
     | _ => some .top
   else if f == "array_lit" then some (.arr (avs.length, avs.length))
+  else if f == "Range" then
+    match avs with
+    | [.num a, .num b] => some (.rng a b)
+    | _ => some .top
   else some .top
 
 /-- Each abstract value is included in the one at its position. -/
@@ -275,6 +310,7 @@ def stdXfer (sums : List (String × (List AV × AV))) (f : String) (avs : List A
   if isArith base then arithXfer base tag avs
   else if isDivRem base then divXfer base avs
   else if isShift base then shiftXfer tag avs
+  else if isSlice f avs then sliceXfer avs
   else if isIndex f then idxXfer false avs
   else if f == "array_update" then idxXfer true avs
   else if opaquePartial f then none
@@ -362,6 +398,21 @@ theorem has_rangeOf_small {bits : Nat} {s : Bool} (hb : 8 ≤ bits) {n : Int}
 theorem toInt_some_of_mem_num {i : Iv} {v : Value} (h : (AV.num i).Mem v) :
     ∃ n, v.toInt = some n ∧ i.Has n := h
 
+/-- An addition head has the base `Add`. -/
+theorem splitHead_fst_of_isAddHead {f : String} (h : isAddHead f = true) :
+    (splitHead f).1 = "Add" := by
+  unfold isAddHead at h
+  unfold splitHead
+  rcases hs : f.splitOn "#" with _ | ⟨b, _ | ⟨t, _⟩⟩ <;> simp_all
+
+/-- A slicing call is an element-access head. -/
+theorem isIndex_of_isSlice {f : String} {avs : List AV} (h : isSlice f avs = true) :
+    isIndex f = true := by
+  unfold isSlice at h
+  unfold isIndex
+  simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq] at h ⊢
+  rcases h.1 with h | h <;> simp [h]
+
 /-- An accepted call has its Rust guard. -/
 theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {avs : List AV}
     {a : AV} {vs : List Value} (h : stdXfer sums f avs = some a) (hm : MemList avs vs) :
@@ -399,7 +450,8 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
           | _ => simp [opWidth]
         · simp [hle] at h
     | [.top, _], h, hm | [.arr _, _], h, hm | [.num _, .top], h, hm
-    | [.num _, .arr _], h, hm | [.idx _ _ _, _], h, hm | [.num _, .idx _ _ _], h, hm =>
+    | [.num _, .arr _], h, hm | [.idx _ _ _, _], h, hm | [.num _, .idx _ _ _], h, hm
+    | [.rng _ _, _], h, hm | [.num _, .rng _ _], h, hm =>
       obtain ⟨x, y, rfl, -, -⟩ := memList_two hm
       cases tag with
       | some t =>
@@ -469,6 +521,22 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
     | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ => simp at h
     | [_, .top], h, _ | [_, .arr _], h, _ | [_, .idx _ _ _], h, _ => simp at h
   simp only [hsh, Bool.false_eq_true, ↓reduceIte] at h ⊢
+  by_cases hsl : isSlice f avs = true
+  · simp only [hsl, ↓reduceIte, isIndex_of_isSlice hsl] at h ⊢
+    unfold sliceXfer at h
+    split at h
+    · rename_i l a b
+      obtain ⟨x, r, rfl, ⟨n, hn, hnl⟩, ⟨y1, y2, rfl, ⟨m1, hm1, ha⟩, m2, hm2, hb⟩⟩ :=
+        memList_two hm
+      by_cases hc : (decide (0 ≤ a.1) && decide (a.2 ≤ b.1) && decide (b.2 ≤ l.1)) = true
+      · simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+        simp only [Iv.Has] at ha hb hnl
+        refine Bool.or_eq_true_iff.2 (Or.inr ?_)
+        simp only [sliceGuard, hn, hm1, hm2, Bool.and_eq_true, decide_eq_true_eq]
+        omega
+      · simp [hc] at h
+    · simp at h
+  simp only [hsl, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hix : isIndex f = true
   · simp only [hix, ↓reduceIte] at h ⊢
     unfold idxXfer at h
@@ -479,15 +547,18 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
       by_cases hle : ivLe i (0, l.1 - 1) = true
       · have := hni.le hle
         simp only [Iv.Has] at this hkl
+        refine Bool.or_eq_true_iff.2 (Or.inl ?_)
         simp only [idxGuard, hk, hn, Bool.and_eq_true, decide_eq_true_eq]
         omega
       · simp [hle] at h
     | [], h, _ | [_], h, _ => simp at h
     | [.arr _, .num _, _], h, _ => simp at h
     | [.top, _], h, _ | [.num _, _], h, _ | [.arr _, .top], h, _
-    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _ => simp at h
+    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _
+    | [.rng _ _, _], h, _ | [.arr _, .rng _ _], h, _ => simp at h
     | [.top, _, _], h, _ | [.num _, _, _], h, _ | [.arr _, .top, _], h, _
-    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _ =>
+    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _
+    | [.rng _ _, _, _], h, _ | [.arr _, .rng _ _, _], h, _ =>
       simp at h
     | _ :: _ :: _ :: _ :: _, h, _ => simp at h
   simp only [hix, Bool.false_eq_true, ↓reduceIte] at h ⊢
@@ -507,9 +578,11 @@ theorem stdXfer_guard {sums : List (String × (List AV × AV))} {f : String} {av
     | [], h, _ | [_], h, _ => simp at h
     | [.arr _, .num _], h, _ => simp at h
     | [.top, _], h, _ | [.num _, _], h, _ | [.arr _, .top], h, _
-    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _ => simp at h
+    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _
+    | [.rng _ _, _], h, _ | [.arr _, .rng _ _], h, _ => simp at h
     | [.top, _, _], h, _ | [.num _, _, _], h, _ | [.arr _, .top, _], h, _
-    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _ =>
+    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _
+    | [.rng _ _, _, _], h, _ | [.arr _, .rng _ _, _], h, _ =>
       simp at h
     | _ :: _ :: _ :: _ :: _, h, _ => simp at h
   simp only [hup, Bool.false_eq_true, ↓reduceIte] at h ⊢
@@ -601,7 +674,8 @@ theorem stdXrel_guard {f : String} {avs : List AV} {rs : List (Nat × Nat × Int
       · simp [h2] at h
     have hvl : vs.length = 2 := (memList_length hm).symm.trans hl
     match vs, hvl with
-    | [x, y], _ => exact idxGuard_of_rel hm hr hok.1 hok.2 rfl rfl
+    | [x, y], _ =>
+      exact Bool.or_eq_true_iff.2 (Or.inl (idxGuard_of_rel hm hr hok.1 hok.2 rfl rfl))
   simp only [hix, Bool.false_eq_true, ↓reduceIte] at h ⊢
   by_cases hup : (f == "array_update") = true
   · simp only [hup, ↓reduceIte] at h ⊢
@@ -619,7 +693,8 @@ theorem stdXrel_guard {f : String} {avs : List AV} {rs : List (Nat × Nat × Int
     truth of comparisons, the exact result of a checked operation whose guard holds, the
     remainder of a nonnegative dividend by a positive divisor, the length kept by an update,
     the length returned by `len`, the length of an array built by `repeat` or `array_lit`,
-    and each summary's postcondition on arguments in its precondition that are free of
+    the pair `(start, end)` built by `Range`, the length `end - start` of a slice by such a
+    pair, and each summary's postcondition on arguments in its precondition that are free of
     control flow. -/
 structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Prop where
   deep : Builtins.DeepNoControlFlow bi
@@ -636,6 +711,10 @@ structure HeadSem (bi : Builtins) (sums : List (String × (List AV × AV))) : Pr
     ∃ k : Nat, v.arrayLen = some k ∧ (k : Int) = n
   arrayLit : ∀ vs v, bi "array_lit" vs = some v → v.arrayLen = some vs.length
   len : ∀ arr v, bi "len" [arr] = some v → ∃ n, arr.arrayLen = some n ∧ v.toInt = some n
+  range : ∀ x y r, bi "Range" [x, y] = some r → r = .tuple [x, y]
+  slice : ∀ f arr x y v a b, (f == "index" || f == "index_mut") = true →
+    bi f [arr, .tuple [x, y]] = some v → x.toInt = some a → y.toInt = some b → a ≤ b →
+    ∃ k : Nat, v.arrayLen = some k ∧ (k : Int) = b - a
   sums : ∀ g pre post, sums.lookup g = some (pre, post) → ∀ vs v, MemList pre vs →
     (∀ w ∈ vs, w.deepNoControlFlow = true) → bi g vs = some v → post.Mem v
 
@@ -703,7 +782,7 @@ theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × A
       cases hn'
       exact ⟨_, hv, hnl⟩
     | [], h, _ | _ :: _ :: _, h, _ => simp only [Option.some.injEq] at h; subst h; trivial
-    | [.top], h, _ | [.num _], h, _ | [.idx _ _ _], h, _ =>
+    | [.top], h, _ | [.num _], h, _ | [.idx _ _ _], h, _ | [.rng _ _], h, _ =>
       simp only [Option.some.injEq] at h; subst h; trivial
   simp only [hlen, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hrep : (f == "repeat") = true
@@ -719,7 +798,7 @@ theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × A
       exact ⟨k, hk, hkn ▸ hni⟩
     | [], h, _ | [_], h, _ | _ :: _ :: _ :: _, h, _ =>
       simp only [Option.some.injEq] at h; subst h; trivial
-    | [_, .top], h, _ | [_, .arr _], h, _ | [_, .idx _ _ _], h, _ =>
+    | [_, .top], h, _ | [_, .arr _], h, _ | [_, .idx _ _ _], h, _ | [_, .rng _ _], h, _ =>
       simp only [Option.some.injEq] at h; subst h; trivial
   simp only [hrep, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hlit : (f == "array_lit") = true
@@ -729,7 +808,21 @@ theorem defaultXfer_result {bi : Builtins} {sums : List (String × (List AV × A
     refine ⟨vs.length, hH.arrayLit vs v hb, ?_⟩
     rw [memList_length hm]
     exact ⟨Int.le_refl _, Int.le_refl _⟩
-  · simp only [hlit, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
+  simp only [hlit, Bool.false_eq_true, ↓reduceIte] at h
+  by_cases hrng : (f == "Range") = true
+  · simp only [hrng, ↓reduceIte] at h
+    have hf : f = "Range" := by simpa using hrng
+    subst hf
+    split at h
+    · rename_i ia ib
+      simp only [Option.some.injEq] at h
+      subst h
+      obtain ⟨x, y, rfl, hx, hy⟩ := memList_two hm
+      exact ⟨x, y, hH.range x y v hb, hx, hy⟩
+    · simp only [Option.some.injEq] at h
+      subst h
+      trivial
+  · simp only [hrng, Bool.false_eq_true, ↓reduceIte, Option.some.injEq] at h
     subst h
     trivial
 
@@ -769,7 +862,8 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
           exact ⟨_, hv, hr⟩
         · simp [hle] at h
     | [.top, _], h, _ | [.arr _, _], h, _ | [.num _, .top], h, _
-    | [.num _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.num _, .idx _ _ _], h, _ =>
+    | [.num _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.num _, .idx _ _ _], h, _
+    | [.rng _ _, _], h, _ | [.num _, .rng _ _], h, _ =>
       cases tag with
       | some t =>
         rcases hw : tagWidth t with _ | w <;> simp [hw] at h
@@ -830,6 +924,26 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
     | [], h | [_], h | _ :: _ :: _ :: _, h => simp at h
     | [_, .top], h | [_, .arr _], h | [_, .idx _ _ _], h => simp at h
   simp only [hsh, Bool.false_eq_true, ↓reduceIte] at h
+  by_cases hsl : isSlice f avs = true
+  · simp only [hsl, ↓reduceIte] at h
+    have hfi : (f == "index" || f == "index_mut") = true := by
+      unfold isSlice at hsl
+      simp only [Bool.and_eq_true] at hsl
+      exact hsl.1
+    unfold sliceXfer at h
+    split at h
+    · rename_i l a b
+      obtain ⟨x, r, rfl, -, ⟨y1, y2, rfl, ⟨m1, hm1, ha⟩, m2, hm2, hb'⟩⟩ := memList_two hm
+      by_cases hc : (decide (0 ≤ a.1) && decide (a.2 ≤ b.1) && decide (b.2 ≤ l.1)) = true
+      · simp only [hc, ↓reduceIte, Option.some.injEq] at h
+        subst h
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hc
+        simp only [Iv.Has] at ha hb'
+        obtain ⟨k, hk, hkv⟩ := hH.slice f x y1 y2 v m1 m2 hfi hb hm1 hm2 (by omega)
+        exact ⟨k, hk, by constructor <;> dsimp only <;> omega⟩
+      · simp [hc] at h
+    · simp at h
+  simp only [hsl, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hix : isIndex f = true
   · simp only [hix, ↓reduceIte] at h
     unfold idxXfer at h
@@ -844,9 +958,11 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
     | [], h | [_], h => simp at h
     | [.arr _, .num _, _], h => simp at h
     | [.top, _], h | [.num _, _], h | [.arr _, .top], h | [.arr _, .arr _], h
-    | [.idx _ _ _, _], h | [.arr _, .idx _ _ _], h => simp at h
+    | [.idx _ _ _, _], h | [.arr _, .idx _ _ _], h | [.rng _ _, _], h | [.arr _, .rng _ _], h =>
+      simp at h
     | [.top, _, _], h | [.num _, _, _], h | [.arr _, .top, _], h
-    | [.arr _, .arr _, _], h | [.idx _ _ _, _, _], h | [.arr _, .idx _ _ _, _], h => simp at h
+    | [.arr _, .arr _, _], h | [.idx _ _ _, _, _], h | [.arr _, .idx _ _ _, _], h
+    | [.rng _ _, _, _], h | [.arr _, .rng _ _, _], h => simp at h
     | _ :: _ :: _ :: _ :: _, h => simp at h
   simp only [hix, Bool.false_eq_true, ↓reduceIte] at h
   by_cases hup : (f == "array_update") = true
@@ -866,9 +982,11 @@ theorem stdXfer_result {bi : Builtins} {sums : List (String × (List AV × AV))}
     | [], h, _ | [_], h, _ => simp at h
     | [.arr _, .num _], h, _ => simp at h
     | [.top, _], h, _ | [.num _, _], h, _ | [.arr _, .top], h, _
-    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _ => simp at h
+    | [.arr _, .arr _], h, _ | [.idx _ _ _, _], h, _ | [.arr _, .idx _ _ _], h, _
+    | [.rng _ _, _], h, _ | [.arr _, .rng _ _], h, _ => simp at h
     | [.top, _, _], h, _ | [.num _, _, _], h, _ | [.arr _, .top, _], h, _
-    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _ =>
+    | [.arr _, .arr _, _], h, _ | [.idx _ _ _, _, _], h, _ | [.arr _, .idx _ _ _, _], h, _
+    | [.rng _ _, _, _], h, _ | [.arr _, .rng _ _, _], h, _ =>
       simp at h
     | _ :: _ :: _ :: _ :: _, h, _ => simp at h
   simp only [hup, Bool.false_eq_true, ↓reduceIte] at h
@@ -901,6 +1019,10 @@ theorem stdSpec_sound {bi : Builtins} {sums : List (String × (List AV × AV))} 
   relResult := fun _ _ _ _ _ _ h hm _ _ hb => stdXrel_result hH h hm hb
   cmp := hH.cmp
   len := hH.len
+  add := fun f x y v m n hf hg hb hx hy => by
+    have hs := splitHead_fst_of_isAddHead hf
+    have := hH.arith f x y v m n (by rw [hs]; rfl) hg hb hx hy
+    rwa [hs] at this
   logic := hL
 
 /-- A typed literal the checker accepts with the standard specification fails no Rust guard

@@ -24,8 +24,10 @@ a variable drops the facts on it (`Sat.cons`), a guard comparing a variable with
 an array sets one (`addLen_sound`), a counted loop over `[lo, len s)` whose body binds no `s`
 keeps `s` across its iterations (`denote'_keep`, from the frame of
 `HaxLean/Phase/InlineLocalClosures.lean`), so its counter lies below the length of `s`
-(`ctrAVLen_sat`), and the facts between the arguments of a call read in place hold of their
-values (`relArgs_of_argRels`).
+(`ctrAVLen_sat`), the facts between the arguments of a call read in place hold of their
+values (`relArgs_of_argRels`), and a variable bound to `y + k` for an integer literal `k`
+has the facts of `y` shifted by `k`, as the addition head answers with the sum under its
+guard (`shiftRels_sound`, `Sat.bindAV`).
 
 ## Main definitions
 
@@ -42,6 +44,7 @@ values (`relArgs_of_argRels`).
   soundness of the refinement by a guard.
 * `denote'_keep`: a body that binds no `s` keeps the value of `s`.
 * `relArgs_of_argRels`: the facts between arguments read in place hold of their values.
+* `AV.addRels_sat`, `shiftRels_sound`, `Sat.bindAV`: a binding keeps the facts it inherits.
 * `denoteForLoop'_sound`: a loop body that keeps the invariant gives a loop that keeps it.
 * `check_sound`, `checkArgs_sound`, `checkArms_sound`: soundness of the checker.
 * `checkT_sound`: soundness for a `TExpr` literal through `TExpr.erase`.
@@ -854,6 +857,7 @@ theorem refineUpper_sound {Γ0 Γ : AEnv} {env : Env} {A B : ImpExpr} {d : Int}
         | none => simp only [hiMin, Option.some.injEq] at hh; omega
         | some a => simp only [hiMin, Option.some.injEq] at hh; have := hm2 a rfl; omega
       | _ => exact h
+    · cases ab <;> exact h
   | _ => exact h
 
 theorem refineLower_sound {Γ0 Γ : AEnv} {env : Env} {A B : ImpExpr} {d : Int}
@@ -888,6 +892,7 @@ theorem refineLower_sound {Γ0 Γ : AEnv} {env : Env} {A B : ImpExpr} {d : Int}
         have := hmi.1
         exact h.cons_of_get hyv ⟨n, hn, by omega, hn2⟩ hr
       | _ => exact h
+    · cases aa <;> exact h
   | _ => exact h
 
 /-- The refinement by `A < B` (`strict`) or `A ≤ B` is sound. -/
@@ -1107,6 +1112,64 @@ theorem AV.addRel_sat {a : AV} {env : Env} {v : Value} {p : String × Int} (hm :
     · exact ⟨n, hn, hp n hn⟩
     · exact hr q hq
   | _ => exact ⟨hm, hr⟩
+
+/-- An abstract value with facts that hold of its value keeps its meaning. -/
+theorem AV.addRels_sat {a : AV} {env : Env} {v : Value} :
+    ∀ {ps : List (String × Int)}, a.Mem v → a.RelIn env v →
+      (∀ p ∈ ps, ∀ m, v.toInt = some m → AV.LenGt env m p) →
+      (a.addRels ps).Mem v ∧ (a.addRels ps).RelIn env v
+  | [], hm, hr, _ => ⟨hm, hr⟩
+  | p :: ps, hm, hr, hp => by
+    obtain ⟨hm', hr'⟩ := AV.addRels_sat (ps := ps) hm hr
+      fun q hq => hp q (List.mem_cons_of_mem _ hq)
+    exact AV.addRel_sat hm' hr' (hp p List.mem_cons_self)
+
+/-- The facts `shiftRels Γ x v` hold of the value `w` that `v` returns under the guarded
+    table in the environment `e` it leaves, which lies in `Γ`, once `x` is bound to `w`. -/
+theorem shiftRels_sound {g : String → List Value → Bool} {H : Spec} {bi : Builtins}
+    (hS : Sound g H bi) {Γ : AEnv} {env e : Env} {x : String} {v : ImpExpr} {w : Value}
+    {fuel : Nat} (hΓ : Sat Γ e) (hrun : denote' (guardBi g bi) fuel v env = (.val w, e)) :
+    ∀ p ∈ shiftRels Γ x v, ∀ m, w.toInt = some m → AV.LenGt (Env.extend e x w) m p := by
+  intro p hp m hm
+  revert hrun
+  unfold shiftRels at hp
+  split at hp
+  · rename_i f y l
+    intro hrun
+    split at hp
+    · rename_i k hf hk
+      obtain ⟨q, hq, rfl⟩ := List.mem_map.1 hp
+      obtain ⟨hq, hqx⟩ := List.mem_filter.1 hq
+      obtain ⟨vl, vr, e1, hl, hr, hb⟩ := denote'_app2_val hrun
+      obtain ⟨rfl, hvl⟩ := denote'_atom (by rfl) hl
+      obtain ⟨rfl, hvr⟩ := denote'_atom (by rfl) hr
+      have hy := hvl vl rfl
+      simp only [atomVal] at hy
+      have hlit : Value.ofLit l = vr := by simpa [atomVal] using hvr vr rfl
+      subst hlit
+      have hg : g f [vl, Value.ofLit l] = true := by
+        unfold guardBi at hb; split at hb <;> simp_all
+      have hb' : bi f [vl, Value.ofLit l] = some w := by
+        unfold guardBi at hb; simpa [hg] using hb
+      obtain ⟨k', hk', w', n, hw', hn, hlt⟩ := hΓ.getRel hy q hq
+      have hw := hS.add f vl _ w k' k hf hg hb' hk' hk
+      rw [hm] at hw
+      cases hw
+      have hne : q.1 ≠ x := by simpa using hqx
+      exact ⟨w', n, by rw [Env.extend_other _ _ _ _ hne]; exact hw', hn, by simp only; omega⟩
+    · simp at hp
+  · simp at hp
+
+/-- Binding `x` to the value `w` that `v` returns under the guarded table, from an environment
+    in `Γ`, gives an environment in `bindAV Γ x v a` when `w` lies in `a`. -/
+theorem Sat.bindAV {g : String → List Value → Bool} {H : Spec} {bi : Builtins}
+    (hS : Sound g H bi) {Γ : AEnv} {env e : Env} {x : String} {v : ImpExpr} {a : AV}
+    {w : Value} {fuel : Nat} (hΓ : Sat Γ e) (hm : a.Mem w)
+    (hrun : denote' (guardBi g bi) fuel v env = (.val w, e)) :
+    Sat (bindAV Γ x v a) (Env.extend e x w) := by
+  obtain ⟨h1, h2⟩ := AV.addRels_sat (ps := shiftRels Γ x v) hm.strip (AV.RelIn.strip _ _ _)
+    (shiftRels_sound hS hΓ hrun)
+  exact hΓ.cons h1 h2
 
 /-- Adding the fact `A < len s` (`strict`) or `A ≤ len s` is sound when it holds. -/
 theorem addLen_sound {bi : Builtins}
@@ -1578,8 +1641,8 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
     rcases hv : check H J Γ v with _ | ⟨av, Γ1⟩ <;> simp only [check, hv, reduceCtorEq] at h
     have ihv := check_sound hS v J Γ av Γ1 hv fuel env hΓ hN
     rw [denote'_letBind_cf, denote'_letBind_cf]
-    exact cfBind_step ihv.1 ihv.2 fun w e _ hNe hdw hmw hSe =>
-      check_sound hS b J _ a Γ' h fuel _ (hSe.cons hmw.strip (AV.RelIn.strip _ _ _))
+    exact cfBind_step ihv.1 ihv.2 fun w e hr hNe hdw hmw hSe =>
+      check_sound hS b J _ a Γ' h fuel _ (hSe.bindAV hS hmw (ihv.1.trans hr))
         (hNe.extend hdw)
   | .seq x y, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     rcases hx : check H J Γ x with _ | ⟨ax, Γ1⟩ <;> simp only [check, hx, reduceCtorEq] at h
@@ -1593,8 +1656,8 @@ theorem check_sound {g : String → List Value → Bool} {H : Spec} {bi : Builti
     obtain ⟨rfl, rfl⟩ := h
     have ihr := check_sound hS r J Γ ar Γ1 hr fuel env hΓ hN
     rw [denote'_assign_cf, denote'_assign_cf]
-    exact cfBind_step ihr.1 ihr.2 fun w e _ hNe hdw hmw hSe =>
-      ⟨rfl, post_val (hNe.extend hdw) rfl trivial (hSe.cons hmw.strip (AV.RelIn.strip _ _ _))⟩
+    exact cfBind_step ihr.1 ihr.2 fun w e hr hNe hdw hmw hSe =>
+      ⟨rfl, post_val (hNe.extend hdw) rfl trivial (hSe.bindAV hS hmw (ihr.1.trans hr))⟩
   | .typeAscription x s, J, Γ, a, Γ', h, fuel, env, hΓ, hN => by
     simp only [check] at h
     rw [Total.denote'_typeAscription_run, Total.denote'_typeAscription_run]
