@@ -270,8 +270,12 @@ def main (args : List String) : IO UInt32 := do
     let erased := postPipelineTdefs.map fun (n, te) => (n, te.erase)
     -- The refusals after the pipeline (`postPipelineRefusals`): a fold rebinding a
     -- variable outside its state, an unbound fold accumulator, a binding the
-    -- canonicalization keeps, a `validateExtraction` warning.
-    let postRefusals := postPipelineRefusals erased
+    -- canonicalization keeps, a `validateExtraction` warning; under `--emit-classes`,
+    -- a call of a static trait method whose self type is not determined
+    -- (`ClassEmit.ClassHooks.staticCallRefusals`).
+    let postRefusals := postPipelineRefusals erased ++
+      (classHooks.staticCallRefusals.filter fun (n, _) => erased.any (·.1 == n)).map
+        fun (n, m) => (n, "static-trait-call", m)
     for (n, k, m) in postRefusals do
       IO.eprintln s!"ERROR {k}: in `{n}`, {m}"
     let droppedState := postRefusals.filter (·.2.1 == "dropped-loop-state")

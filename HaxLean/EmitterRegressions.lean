@@ -833,6 +833,67 @@ def classItemReadDef : TExpr :=
 #guard ((toLeanDefTyped "f" classItemReadDef classItemReadDef.erase).splitOn "clsitem").length == 1
 #guard ((toLean (.app (HaxAdapter.classItemHead "PolyRing" "N" "R") [])).splitOn "clsitem").length == 1
 
+/-! ## A static trait method called through a trait bound
+
+`trait KdfDeps { fn mac(key: &[u8], msg: &[u8]) -> Vec<u8>; }` and
+`fn kdf<D: KdfDeps>(ck: &[u8]) -> Vec<u8> { D::mac(ck, ck) }`. The class field
+`mac` does not mention `Self`, so its projection takes `Self` explicitly and the
+call names it, `(KdfDeps.mac (Self := D)) ck ck`. -/
+
+/-- The class of `trait KdfDeps`, as `ClassHooks.renderClasses` prints it. -/
+class KdfDeps (Self : Type) where
+  /-- The associated function `mac`, without a `self` receiver. -/
+  mac (key : Array Int) (msg : Array Int) : Array Int
+
+/-- The definition of `kdf` as the class mode prints it, with the call of the
+    static method `mac` at the self type `D`. -/
+def kdfStaticCall {D : Type} [Inhabited D] [KdfDeps D] (ck : Array Int) : Array Int :=
+  (KdfDeps.mac (Self := D)) ck ck
+
+/-- The plan for `KdfDeps` and `kdf`: `kdf` reads `mac` through its bound at `D`. -/
+def kdfHooks : ClassEmit.ClassHooks :=
+  { traits := [
+      { name := "KdfDeps", krate := "k",
+        methods := [("mac", [("key", .slice .int), ("msg", .slice .int)], .slice .int)] },
+      { name := "Ring2", krate := "k",
+        methods := [("add", [("self", .typeVar "Self")], .typeVar "Self")] }]
+    exports := [("KdfDeps", ["mac"]), ("Ring2", ["add"])]
+    genericFns := [
+      { name := "kdf", typeParams := ["D"], bounds := [("KdfDeps", "D")],
+        boundItems := [("KdfDeps", "mac", some "D"), ("Ring2", "add", some "D")] },
+      { name := "kdf2", typeParams := ["D", "E"], bounds := [("KdfDeps", "D")],
+        boundItems := [("KdfDeps", "mac", some "D"), ("KdfDeps", "mac", some "E")] }] }
+
+-- `mac` is static and `add` takes `self`; only the call of `mac` gets a class head,
+-- and a call at two self types is refused.
+#guard kdfHooks.isStaticMethod "KdfDeps" "mac" && !kdfHooks.isStaticMethod "Ring2" "add"
+#guard match kdfHooks.staticCallHeads "kdf" with
+  | .ok hs => hs == [("mac", HaxAdapter.classItemHead "KdfDeps" "mac" "D")] | .error _ => false
+#guard match kdfHooks.staticCallHeads "kdf2" with
+  | .ok _ => false | .error _ => true
+#guard kdfHooks.staticCallRefusals.map (·.1) == ["kdf2"]
+#guard ((toLean (.app (HaxAdapter.classItemHead "KdfDeps" "mac" "D")
+  [.var "ck", .var "ck"])).splitOn "(KdfDeps.mac (Self := D)) ck ck").length == 2
+
+/-- The callee `ItemRef` of `D::mac` in `kdf`, as `keepTypeParams` leaves it: an
+    `in_trait` whose `LocalBound` atom has the trait reference `KdfDeps<D>`. -/
+def kdfMacItemRefJson : Lean.Json :=
+  let seg (k v : String) : Lean.Json :=
+    Lean.Json.mkObj [("data", Lean.Json.mkObj [(k, .str v)])]
+  let defId (path : Array Lean.Json) : Lean.Json := Lean.Json.mkObj [("contents",
+    Lean.Json.mkObj [("value", Lean.Json.mkObj [("krate", "k"), ("path", Lean.Json.arr path)])])]
+  Lean.Json.mkObj [("def_id", defId #[seg "TypeNs" "KdfDeps", seg "ValueNs" "mac"]),
+    ("in_trait", Lean.Json.mkObj [
+      ("trait", Lean.Json.mkObj [("value", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+        ("def_id", defId #[seg "TypeNs" "KdfDeps"]),
+        ("generic_args", Lean.Json.arr #[Lean.Json.mkObj [("Type", Lean.Json.mkObj [
+          ("value", Lean.Json.mkObj [("TypeVar", "D")])])]])])])]),
+      ("impl", Lean.Json.mkObj [("LocalBound", Lean.Json.mkObj [])])])]
+
+-- The self type of the call is the first generic argument of the trait reference.
+#guard (ClassEmit.localBoundSelfItems kdfMacItemRefJson).toList ==
+  [("KdfDeps", "mac", some "D")]
+
 /-! ## A `&mut self` setter writing an element of a `Vec` field
 
 `fn set(&mut self, i: usize, val: u64) { self.cells[i] = val; }` on

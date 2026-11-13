@@ -2420,6 +2420,15 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         (n, ((collectAppCalls e).map (·.1) ++ collectFreeVars [n] e).filter definedNames.contains))
       monadicFns
   let surfaceDefs : List (String × String) := defs.map fun (n, e0) =>
+    -- A call of a static trait method names its class and self type
+    -- (`ClassHooks.staticCallHeads`); a refused function keeps its calls, and
+    -- `ClassHooks.staticCallRefusals` reports it.
+    let staticHeads := match classHooks.staticCallHeads n with
+      | .ok hs => hs
+      | .error _ => []
+    let e0 := staticHeads.foldl (fun x (m, hd) => rewriteAppName m hd x) e0
+    let monadicFns := monadicFns ++
+      (staticHeads.filter (monadicFns.contains ·.1)).map (·.2)
     -- A total definition calls the total surface of a monadic function of `pureFns`.
     let e := if pureFns.isEmpty || monadicFns.contains n then e0
       else MonadicEmit.pureCalls pureFns e0

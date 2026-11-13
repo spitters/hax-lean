@@ -305,6 +305,9 @@ structure GenericFn where
   /-- The type parameters with a `PartialEq` or `Eq` bound of their own, which
       are bound with a `BEq` instance. -/
   beqParams : List String := []
+  /-- The trait items the function reads through a trait bound, as
+      `(trait, item, self type)` (`localBoundSelfItems`). -/
+  boundItems : List (String × String × Option String) := []
   deriving Inhabited
 
 /-- The type-parameter names of a hax `generics` node, by
@@ -341,6 +344,34 @@ def typeParamBounds (traits : List String) (generics : Json) : List (String × S
     some (tn, p)
   | _ => []
 
+/-- The trait items a node of an export rewritten by `keepTypeParams` reads
+    through a trait bound, as `(trait, item, self type)`: every node carrying an
+    `in_trait` whose `impl` atom is `LocalBound`, outside the traits of `core`,
+    `alloc` and `std`. The self type is the first generic argument of the
+    `in_trait` trait reference when it is a type variable
+    (`HaxAdapter.localBoundTraitSelf`), and `none` otherwise. -/
+partial def localBoundSelfItems (j : Json)
+    (acc : Array (String × String × Option String) := #[]) :
+    Array (String × String × Option String) :=
+  match j with
+  | .arr xs => xs.foldl (fun a x => localBoundSelfItems x a) acc
+  | .obj t =>
+    let here : Option (String × String × Option String) := do
+      let it ← (j.getObjVal? "in_trait").toOption
+      let impl ← (it.getObjVal? "impl").toOption
+      let _ ← (impl.getObjVal? "LocalBound").toOption
+      let defId ← (j.getObjVal? "def_id").toOption
+      guard (!builtinKrates.contains (defIdKrate defId))
+      let item :: trait :: _ := (defIdPathNames defId).reverse | none
+      let selfTy := HaxAdapter.localBoundTraitSelf
+        (Json.mkObj [("item", Json.mkObj [("value", j)])])
+      pure (trait, item, selfTy.map (·.2))
+    let acc := match here with
+      | some p => if acc.contains p then acc else acc.push p
+      | none => acc
+    t.toList.foldl (fun a (_, v) => localBoundSelfItems v a) acc
+  | _ => acc
+
 /-- The generic top-level functions of an export rewritten by
     `keepTypeParams`, one per name. -/
 def genericFns (traits : List String) (j : Json) : List GenericFn :=
@@ -353,7 +384,7 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     guard (!ps.isEmpty)
     let beqParams := ((typeParamBounds ["PartialEq", "Eq"] g).map (·.2)).eraseDups
     some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
-           beqParams }
+           beqParams, boundItems := (localBoundSelfItems f).toList }
   fs.foldl (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
 
 /-- The generic methods of the `impl` blocks of an export rewritten by
@@ -397,7 +428,8 @@ def genericImplMethods (traits : List String) (j : Json) : List GenericFn :=
       let eqB := typeParamBounds ["PartialEq", "Eq"] ig ++ typeParamBounds ["PartialEq", "Eq"] mg
       some { name, typeParams := ps,
              bounds := (typeParamBounds traits ig ++ typeParamBounds traits mg).eraseDups,
-             beqParams := (eqB.map (·.2)).eraseDups : GenericFn })) : Option _).getD []
+             beqParams := (eqB.map (·.2)).eraseDups,
+             boundItems := (localBoundSelfItems ii).toList : GenericFn })) : Option _).getD []
 
 /-- The generic structs of an export, with their type-parameter names. A
     struct item is `Struct: [ident, generics, …]`. -/
@@ -566,6 +598,58 @@ partial def ClassHooks.traitHasBeq (h : ClassHooks) (t : String) : Bool :=
   match h.traits.find? (·.name == t) with
   | some td => td.beq || td.supers.any (h.traitHasBeq ·)
   | none => false
+
+/-- The type variables of a type read from an export rewritten by
+    `keepTypeParams`. -/
+partial def typeVarNames : ImpType → List String
+  | .typeVar n => [n]
+  | .tuple es | .adt _ es => es.flatMap typeVarNames
+  | .option a | .ref a _ | .slice a | .array a _ => typeVarNames a
+  | .result a b | .controlFlow a b => typeVarNames a ++ typeVarNames b
+  | .fn ps r => ps.flatMap typeVarNames ++ typeVarNames r
+  | .bool | .int | .uint _ | .sint _ | .unit | .str | .unknown => []
+
+/-- The type variables through which a field of the class of the trait `t`
+    mentions its `Self` type: `Self` and the associated types of the trait and
+    of its supertraits, which `keepTypeParams` renders as type variables. -/
+partial def ClassHooks.selfTypeNames (h : ClassHooks) (t : String) : List String :=
+  "Self" :: (h.traits.filter (·.name == t)).flatMap fun td =>
+    td.assocTypes.map (·.1) ++ td.supers.flatMap (h.selfTypeNames ·)
+
+/-- Whether the method `m` of the trait `t` is a class field whose type does not
+    mention `Self` (`selfTypeNames`), as a Rust associated function without a
+    `self` receiver whose signature names neither `Self` nor an associated type.
+    The projection of such a field takes `Self` as an explicit argument. -/
+def ClassHooks.isStaticMethod (h : ClassHooks) (t m : String) : Bool :=
+  let selfNames := h.selfTypeNames t
+  (h.traits.filter (·.name == t)).any fun td =>
+    td.methods.any fun (n, ps, r) =>
+      n == m && !((r :: ps.map (·.2)).flatMap typeVarNames).any selfNames.contains
+
+/-- The call heads of the static trait methods (`isStaticMethod`) that the
+    generic function `fn` calls through a trait bound, as `(method, head)`. The
+    head `HaxAdapter.classItemHead t m S` names the class `t` and the self type
+    `S` of the calls (`GenericFn.boundItems`), and the renderer prints it as
+    `(t.m (Self := S))`. An error names a static method that `fn` calls at a self
+    type other than a type variable, at two self types, or through two traits. -/
+def ClassHooks.staticCallHeads (h : ClassHooks) (fn : String) :
+    Except String (List (String × String)) :=
+  let calls := ((h.genericFns.filter (·.name == fn)).flatMap (·.boundItems)).filter
+    fun (t, m, _) => h.isStaticMethod t m
+  (calls.map (·.2.1)).eraseDups.mapM fun m =>
+    let sites := ((calls.filter (·.2.1 == m)).map fun (t, _, s) => (t, s)).eraseDups
+    if let [(t, some s)] := sites then .ok (m, HaxAdapter.classItemHead t m s)
+    else .error (s!"`{fn}` calls the trait method `{m}`, whose class field does not " ++
+      s!"mention `Self`, at the (trait, self type) pairs {sites}; the call names its " ++
+      "instance only at one trait and one type-variable self type")
+
+/-- The refusals of `staticCallHeads` over the generic functions, as
+    `(function, reason)`. -/
+def ClassHooks.staticCallRefusals (h : ClassHooks) : List (String × String) :=
+  h.genericFns.filterMap fun g =>
+    match h.staticCallHeads g.name with
+    | .error msg => some (g.name, msg)
+    | .ok _ => none
 
 /-- The name of the class field of a trait with contract methods that holds the
     invariant of the Rust self type of an instance: `T_inv`. -/
