@@ -162,6 +162,7 @@ HaxLean/
 ├── FreeVars.lean                    # free-variable analysis
 ├── Semantics.lean / SemanticsCF.lean# fuel-bounded big-step (with / without CF)
 ├── Runtime.lean / RuntimeCorrectness.lean  # width-aware builtins + proofs
+├── FoldRange.lean                   # reasoning lemmas for Hax.foldRange
 ├── Json/                            # verified RFC 8259 JSON parser
 │   ├── Lexer.lean
 │   ├── Parser.lean

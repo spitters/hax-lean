@@ -1,6 +1,7 @@
 module
 
 public import HaxLean.AST
+public import HaxLean.FoldRange
 public import HaxLean.Value
 public import HaxLean.Features
 public import HaxLean.FreeVars
