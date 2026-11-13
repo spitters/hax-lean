@@ -180,6 +180,14 @@ def extractTParams : TExpr → List (String × ImpType) × TExpr
     else ([], .mk (.letBind n (.mk (.var v) ty) body) outerTy)
   | e => ([], e)
 
+/-- The type variables of the parameter and result types of the definition `g`
+    of `rawTdefs` (`ClassEmit.typeVarNames`). A type parameter of `g` outside them
+    is determined at a call only by a trait bound. -/
+def sigTypeVars (rawTdefs : List (String × TExpr)) (g : String) : List String :=
+  (rawTdefs.filter (·.1 == g)).flatMap fun (_, te) =>
+    let (ps, body) := extractTParams te
+    (body.ty :: ps.map (·.2)).flatMap ClassEmit.typeVarNames
+
 /-! ## Typed Deps Class Generation -/
 
 /-- Best-effort merge of two ImpTypes: prefer non-unknown.
@@ -2427,11 +2435,23 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       | .ok hs => hs
       | .error _ => []
     let e0 := staticHeads.foldl (fun x (m, hd) => rewriteAppName m hd x) e0
+    -- A call of a generic function of the crate names the type arguments the
+    -- callee's signature does not determine (`ClassHooks.typeArgCallHeads`), also
+    -- at its total surface `g_pure`; a refused function keeps its calls, and
+    -- `ClassHooks.typeArgCallRefusals` reports it.
+    let typeArgHeads := match classHooks.typeArgCallHeads structLookup
+        (sigTypeVars rawTdefs) n with
+      | .ok hs => hs
+      | .error _ => []
+    let typeArgRewrite (x : ImpExpr) : ImpExpr := typeArgHeads.foldl (fun x (g, hd) =>
+      rewriteAppName (g ++ "_pure")
+        (hd.replace s!"::tyargs::{g}::" s!"::tyargs::{g}_pure::")
+        (rewriteAppName g hd x)) x
     let monadicFns := monadicFns ++
-      (staticHeads.filter (monadicFns.contains ·.1)).map (·.2)
+      ((staticHeads ++ typeArgHeads).filter (monadicFns.contains ·.1)).map (·.2)
     -- A total definition calls the total surface of a monadic function of `pureFns`.
-    let e := if pureFns.isEmpty || monadicFns.contains n then e0
-      else MonadicEmit.pureCalls pureFns e0
+    let e := typeArgRewrite (if pureFns.isEmpty || monadicFns.contains n then e0
+      else MonadicEmit.pureCalls pureFns e0)
     let fnTi := fnTypes.find? (·.1 == n) |>.map (·.2)
     -- Use rawTdefs for parameter type annotations, defs (post-pipeline ImpExpr) for body
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
@@ -2448,7 +2468,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     -- A monadic function of `pureFns` is followed by its total surface `f_pure`.
     let surfaceDef := match pureFns.contains n, rawTdefs.find? (·.1 == n) with
       | true, some (_, rawTe) =>
-        let pureDef := toLeanDefTyped (n ++ "_pure") rawTe (MonadicEmit.pureCalls pureFns e0)
+        let pureDef := toLeanDefTyped (n ++ "_pure") rawTe
+          (typeArgRewrite (MonadicEmit.pureCalls pureFns e0))
           (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
           (boolNames := boolNames) (mutWriteRets := mutWriteRets)
         let pureDef := if needsPartial then pureDef.replace "def " "partial def " else pureDef

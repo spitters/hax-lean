@@ -272,10 +272,13 @@ def main (args : List String) : IO UInt32 := do
     -- variable outside its state, an unbound fold accumulator, a binding the
     -- canonicalization keeps, a `validateExtraction` warning; under `--emit-classes`,
     -- a call of a static trait method whose self type is not determined
-    -- (`ClassEmit.ClassHooks.staticCallRefusals`).
+    -- (`ClassEmit.ClassHooks.staticCallRefusals`), and a call of a generic function
+    -- whose type arguments are not determined (`ClassEmit.ClassHooks.typeArgCallRefusals`).
     let postRefusals := postPipelineRefusals erased ++
       (classHooks.staticCallRefusals.filter fun (n, _) => erased.any (·.1 == n)).map
-        fun (n, m) => (n, "static-trait-call", m)
+        (fun (n, m) => (n, "static-trait-call", m)) ++
+      ((classHooks.typeArgCallRefusals (sigTypeVars rawTdefs)).filter fun (n, _) =>
+        erased.any (·.1 == n)).map fun (n, m) => (n, "generic-call-type-args", m)
     for (n, k, m) in postRefusals do
       IO.eprintln s!"ERROR {k}: in `{n}`, {m}"
     let droppedState := postRefusals.filter (·.2.1 == "dropped-loop-state")

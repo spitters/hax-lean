@@ -894,6 +894,103 @@ def kdfMacItemRefJson : Lean.Json :=
 #guard (ClassEmit.localBoundSelfItems kdfMacItemRefJson).toList ==
   [("KdfDeps", "mac", some "D")]
 
+/-! ## A generic function whose type parameter occurs only in its bound
+
+`fn kdf_rk<D: KdfDeps>(rk: &[u8]) -> Vec<u8>` called as `kdf_rk::<D>(sk)`. No
+parameter or result type of `kdf_rk` mentions `D`, so the call names it,
+`(kdf_rk (D := D)) sk`; a type parameter that the signature mentions stays
+implicit. -/
+
+/-- A generic function whose type parameter occurs only in its class bound. -/
+def kdfRkDemo {D : Type} [Inhabited D] [KdfDeps D] (rk : Array Int) : Array Int :=
+  (KdfDeps.mac (Self := D)) rk rk
+
+/-- A caller of `kdfRkDemo` naming its type argument, as the class mode prints it. -/
+def kdfRkCaller {D : Type} [Inhabited D] [KdfDeps D] (sk : Array Int) : Array Int :=
+  (kdfRkDemo (D := D)) sk
+
+/-- The plan of `kdfHooks` with the generic functions `kdf_rk<D>` and `poly<F>`,
+    called from `init` at `D` and from `twice` at `D` and at `E`. -/
+def rkHooks : ClassEmit.ClassHooks :=
+  { kdfHooks with
+    genericFns := kdfHooks.genericFns ++ [
+      { name := "kdf_rk", typeParams := ["D"], bounds := [("KdfDeps", "D")] },
+      { name := "poly", typeParams := ["F"], bounds := [] }]
+    typeArgCalls := [
+      ("init", [("kdf_rk", [.typeVar "D"]), ("poly", [.typeVar "D"])]),
+      ("twice", [("kdf_rk", [.typeVar "D"]), ("kdf_rk", [.typeVar "E"])])] }
+
+/-- The type variables of the signatures of `kdf_rk` (none) and `poly` (`F`). -/
+def rkSigVars (g : String) : List String := if g == "poly" then ["F"] else []
+
+-- Only the type parameter the signature leaves out is named; a callee called at
+-- two lists of type arguments is refused.
+#guard match rkHooks.typeArgCallHeads (fun _ => none) rkSigVars "init" with
+  | .ok hs => hs == [("kdf_rk", typeArgsHead "kdf_rk" [("D", "D")])] | .error _ => false
+#guard match rkHooks.typeArgCallHeads (fun _ => none) rkSigVars "twice" with
+  | .ok _ => false | .error _ => true
+#guard (rkHooks.typeArgCallRefusals rkSigVars).map (·.1) == ["twice"]
+#guard ((toLean (.app (typeArgsHead "kdf_rk" [("D", "D")]) [.var "sk"])).splitOn
+  "(kdf_rk (D := D)) sk").length == 2
+
+-- The signature's type variables are read off the typed literal.
+#guard sigTypeVars [("g", .mk (.letBind "x" (.mk (.var "x") (.typeVar "F"))
+  (.mk (.var "x") (.slice .int))) (.slice .int))] "g" == ["F"]
+
+/-- The callee `ItemRef` of `kdf_rk::<D>`, as `keepTypeParams` leaves it. -/
+def kdfRkItemRefJson : Lean.Json :=
+  Lean.Json.mkObj [
+    ("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("krate", "k"), ("path", Lean.Json.arr #[Lean.Json.mkObj [("data",
+        Lean.Json.mkObj [("ValueNs", "kdf_rk")])]])])])]),
+    ("generic_args", Lean.Json.arr #[Lean.Json.mkObj [("Type", Lean.Json.mkObj [
+      ("value", Lean.Json.mkObj [("TypeVar", "D")])])]]),
+    ("in_trait", .null)]
+
+#guard (ClassEmit.typeArgCallsOf kdfRkItemRefJson).toList == [("kdf_rk", [.typeVar "D"])]
+
+/-! ## A Rust parameter named by a Lean keyword -/
+
+#guard sanitizeName "until" == "«until»" && sanitizeName "from" == "«from»"
+
+/-- A binder named `until`, escaped as `sanitizeName` prints it. -/
+def untilBinderDemo («until» : Int) : Int := «until»
+
+/-! ## A trait method with a `&mut self` receiver
+
+`fn event(&mut self, tag: u32)`: the write-back of the crate's definitions returns
+the updated receiver, so the class field has the result type `Self`. -/
+
+#guard ClassEmit.writeBackResult [("self", .ref (.typeVar "Self") true), ("tag", .int)] .unit
+  == .typeVar "Self"
+#guard ClassEmit.writeBackResult [("x", .int)] .int == .int
+#guard ClassEmit.writeBackResult [("a", .ref .int true), ("b", .ref .bool true)] .str
+  == .tuple [.str, .int, .bool]
+
+/-- The plan of `trait GhostDemo { fn event(&mut self, tag: u32); }`. -/
+def ghostHooks : ClassEmit.ClassHooks :=
+  { traits := [
+      { name := "GhostDemo", krate := "k",
+        methods := [("event", [("self", .ref (.typeVar "Self") true), ("tag", .int)], .unit)] }] }
+
+#guard ((ghostHooks.renderClasses (fun _ => none)).splitOn
+  "event (self : Self) (tag : Int) : Self").length == 2
+
+/-- The class of `trait GhostDemo`, as `ClassHooks.renderClasses` prints it. -/
+class GhostDemo (Self : Type) where
+  /-- The method `event(&mut self, tag)`, returning the updated receiver. -/
+  event (self : Self) (tag : Int) : Self
+
+/-- A function threading a ghost state through one arm of a match, as the class
+    mode prints it: both arms return the ghost at its type `G`. -/
+def ghostDemoSend {G : Type} [GhostDemo G] (ghost : G) (o : Option Int) :
+    (Int × Option Int) × G :=
+  match o with
+  | some n =>
+    let ghost := GhostDemo.event ghost n
+    ((n, none), ghost)
+  | none => ((0, none), ghost)
+
 /-! ## A `&mut self` setter writing an element of a `Vec` field
 
 `fn set(&mut self, i: usize, val: u64) { self.cells[i] = val; }` on

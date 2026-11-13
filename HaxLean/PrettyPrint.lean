@@ -76,12 +76,33 @@ def sanitizeName (n : String) : String :=
     | "macro" | "syntax" | "tactic" | "notation" | "scoped"
     | "deriving" | "extends" | "abbrev" | "opaque" | "at" | "initialize"
     | "seal" | "unseal" | "omit" | "include" | "example" | "universe"
+    | "until" | "unless" | "from" | "using" | "calc" | "suffices" | "nomatch" | "nofun"
+    | "mut"
     | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "mod" | "not" | "or" | "and"
     | "Or" | "And" | "Not" | "True" | "False" | "Eq" | "Ne" | "Nat" | "Int"
     | "Bool" | "String" | "Array" | "List" | "Option" | "IO" | "Monad"
     | "Pure" | "Bind" | "Functor" | "Unit" | "Prod" | "Sum" | "Fin"
     | "Empty" | "Decidable" | "Inhabited" | "Nonempty" => s!"«{n}»"
     | _ => n
+
+/-- The head `::tyargs::f::P₁::X₁::…` of a call of the function `f` with its type
+    parameters `Pᵢ` given explicitly as the types `Xᵢ` (rendered Lean types).
+    `renderQualifiedCtor` and `runtimeName` print it as `(f (P₁ := X₁) …)`. -/
+def typeArgsHead (f : String) (args : List (String × String)) : String :=
+  "::tyargs::" ++ "::".intercalate (f :: args.flatMap fun (p, x) => [p, x])
+
+/-- The named arguments ` (P := X)` of the parameter-type pairs `[P, X, …]` of a
+    `typeArgsHead`. -/
+def typeArgBinders : List String → String
+  | p :: x :: rest => s!" ({sanitizeName p} := {x})" ++ typeArgBinders rest
+  | _ => ""
+
+/-- The Lean term `(f (P := X) …)` of a `typeArgsHead`, or `none` for any other
+    head. -/
+def typeArgsRef? (f : String) : Option String :=
+  match f.splitOn "::" with
+  | "" :: "tyargs" :: g :: rest => some s!"({sanitizeName g}{typeArgBinders rest})"
+  | _ => none
 
 /-- The runtime function of a call of the prime-field method `op` under the tag
     `p<modulus>` (the head `<op>#p<modulus>`, `HaxAdapter.fieldTagHead`):
@@ -279,7 +300,7 @@ def runtimeName (f : String) : String :=
   | "cast" => "Hax.castVal"
   -- Width-annotated variants (from HaxAdapter, e.g. wrapping_add#32)
   -- or everything else: sanitize and pass through
-  | f => (HaxAdapter.classItemRef? f).getD (widthAwareRuntime f)
+  | f => (HaxAdapter.classItemRef? f <|> typeArgsRef? f).getD (widthAwareRuntime f)
 
 /-- Render a resolved struct-field update — field `i` of an `n`-field
     tuple-encoded struct — as the `Hax.struct_update_fst`/`_snd` composition
@@ -305,7 +326,10 @@ def renderStructUpdate (i n : Nat) (sStr vStr : String) : String :=
 def renderQualifiedCtor (f : String) : String :=
   match HaxAdapter.classItemRef? f with
   | some s => s
-  | none => ".".intercalate ((f.splitOn "::").map sanitizeName)
+  | none =>
+    match typeArgsRef? f with
+    | some s => s
+    | none => ".".intercalate ((f.splitOn "::").map sanitizeName)
 
 /-- Format an integer literal with a type annotation when the type is known. -/
 def litIntTyped (n : Int) (ty : ImpType) : String :=

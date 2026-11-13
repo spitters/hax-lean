@@ -308,6 +308,9 @@ structure GenericFn where
   /-- The trait items the function reads through a trait bound, as
       `(trait, item, self type)` (`localBoundSelfItems`). -/
   boundItems : List (String × String × Option String) := []
+  /-- The references the function makes with type arguments, as `(callee, type
+      arguments)` (`typeArgCallsOf`). -/
+  typeCalls : List (String × List ImpType) := []
   deriving Inhabited
 
 /-- The type-parameter names of a hax `generics` node, by
@@ -372,6 +375,31 @@ partial def localBoundSelfItems (j : Json)
     t.toList.foldl (fun a (_, v) => localBoundSelfItems v a) acc
   | _ => acc
 
+/-- The references with type arguments in a node of an export rewritten by
+    `keepTypeParams`, as `(callee, type arguments)`: every node with a `def_id`,
+    a `null` `in_trait` and a `generic_args` list with a `Type` entry, named by the
+    leaf of its `def_id`, with the `Type` entries in order
+    (`HaxAdapter.parseHaxType`). A call `g::<D>(…)` of a generic function of the
+    crate is such a reference. -/
+partial def typeArgCallsOf (j : Json) (acc : Array (String × List ImpType) := #[]) :
+    Array (String × List ImpType) :=
+  match j with
+  | .arr xs => xs.foldl (fun a x => typeArgCallsOf x a) acc
+  | .obj t =>
+    let here : Option (String × List ImpType) := do
+      let defId ← (j.getObjVal? "def_id").toOption
+      let args ← (j.getObjValAs? (Array Json) "generic_args").toOption
+      guard ((j.getObjVal? "in_trait").toOption == some Json.null)
+      let tys := args.toList.filterMap fun a => (a.getObjVal? "Type").toOption.map parseHaxType
+      guard (!tys.isEmpty)
+      let f ← defIdLeafName defId
+      pure (f, tys)
+    let acc := match here with
+      | some p => if acc.any (fun q => q.1 == p.1 && q.2 == p.2) then acc else acc.push p
+      | none => acc
+    t.toList.foldl (fun a (_, v) => typeArgCallsOf v a) acc
+  | _ => acc
+
 /-- The generic top-level functions of an export rewritten by
     `keepTypeParams`, one per name. -/
 def genericFns (traits : List String) (j : Json) : List GenericFn :=
@@ -384,7 +412,8 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     guard (!ps.isEmpty)
     let beqParams := ((typeParamBounds ["PartialEq", "Eq"] g).map (·.2)).eraseDups
     some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
-           beqParams, boundItems := (localBoundSelfItems f).toList }
+           beqParams, boundItems := (localBoundSelfItems f).toList,
+           typeCalls := (typeArgCallsOf f).toList }
   fs.foldl (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
 
 /-- The generic methods of the `impl` blocks of an export rewritten by
@@ -429,7 +458,8 @@ def genericImplMethods (traits : List String) (j : Json) : List GenericFn :=
       some { name, typeParams := ps,
              bounds := (typeParamBounds traits ig ++ typeParamBounds traits mg).eraseDups,
              beqParams := (eqB.map (·.2)).eraseDups,
-             boundItems := (localBoundSelfItems ii).toList : GenericFn })) : Option _).getD []
+             boundItems := (localBoundSelfItems ii).toList,
+             typeCalls := (typeArgCallsOf ii).toList : GenericFn })) : Option _).getD []
 
 /-- The generic structs of an export, with their type-parameter names. A
     struct item is `Struct: [ident, generics, …]`. -/
@@ -539,6 +569,9 @@ structure ClassHooks where
   /-- The methods, by trait and name, emitted with result type `RustM` (the effect
       closure of `--emit-monadic`). -/
   monadicMethods : List (String × String) := []
+  /-- Per function of the crate, its references with type arguments to the
+      generic top-level functions of the crate (`typeArgCallsOf`). -/
+  typeArgCalls : List (String × List (String × List ImpType)) := []
   deriving Inhabited
 
 /-- Whether the class mode is on. -/
@@ -559,11 +592,25 @@ def plan (traitExport crate : Json) : ClassHooks :=
   let exports := names.filterMap fun t =>
     let items := (used.filter (·.2 == t)).map (·.1)
     if items.isEmpty then none else some (t, items)
+  let topFns := genericFns names crate
+  let gfns := (topFns ++ genericImplMethods names crate).foldl
+    (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
+  let callees := topFns.map (·.name)
+  -- Every top-level function, generic or not, and every generic method.
+  let fnCalls := (allItems crate).filterMap fun it => do
+    let k ← (it.getObjVal? "kind").toOption
+    let f ← (k.getObjVal? "Fn").toOption
+    let ident ← (f.getObjVal? "ident").toOption
+    pure (extractFnName ident, (typeArgCallsOf f).toList)
+  let callers := (fnCalls ++ gfns.map fun g => (g.name, g.typeCalls)).foldl
+    (fun acc c => if acc.any (·.1 == c.1) then acc else acc ++ [c]) []
   { traits, exports
-    genericFns := (genericFns names crate ++ genericImplMethods names crate).foldl
-      (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
+    genericFns := gfns
     genericStructs := genericStructs crate
-    instances := implInstances names crate }
+    instances := implInstances names crate
+    typeArgCalls := callers.filterMap fun (n, cs) =>
+      let cs := cs.filter (callees.contains ·.1)
+      if cs.isEmpty then none else some (n, cs) }
 
 /-! ## Rendering -/
 
@@ -651,6 +698,62 @@ def ClassHooks.staticCallRefusals (h : ClassHooks) : List (String × String) :=
     | .error msg => some (g.name, msg)
     | .ok _ => none
 
+/-- The call heads of the generic functions of the crate that the function `fn`
+    calls with type arguments (`typeArgCalls`), as `(callee, head)`. A callee `g`
+    gets the head `typeArgsHead g [(P, X), …]`, printed `(g (P := X) …)`, naming
+    each type parameter `P` of `g` that `sigVars g` (the type variables of `g`'s
+    parameter and result types) leaves out, at the type argument `X` of the call;
+    a callee whose type parameters all occur in its signature keeps its name. An
+    error names a callee that `fn` calls at two lists of type arguments, or at a
+    list whose length differs from the callee's type parameters or that holds a
+    type the adapter does not read. -/
+def ClassHooks.typeArgCallHeads (h : ClassHooks) (sl : String → Option String)
+    (sigVars : String → List String) (fn : String) :
+    Except String (List (String × String)) := do
+  let calls := (h.typeArgCalls.filter (·.1 == fn)).flatMap (·.2)
+  let heads ← (calls.map (·.1)).eraseDups.mapM fun g => do
+    let tps := (h.genericFns.filter (·.name == g)).flatMap (·.typeParams)
+    let free := tps.filter fun p => !(sigVars g).contains p
+    if free.isEmpty then return none
+    let sites := ((calls.filter (·.1 == g)).map (·.2)).eraseDups
+    let [args] := sites
+      | throw (s!"`{fn}` calls `{g}` at {sites.length} lists of type arguments; the " ++
+          s!"type parameters {free} of `{g}` occur only in its bounds and are named " ++
+          "at one list")
+    if args.length != tps.length || args.any (·.isUnknown) then
+      throw (s!"`{fn}` calls `{g}` at type arguments the adapter does not read for " ++
+        s!"the type parameters {tps}")
+    return some (g, typeArgsHead g (((tps.zip args).filter (free.contains ·.1)).map
+      fun (p, a) => (p, argTypeStr sl a)))
+  return heads.filterMap id
+
+/-- The refusals of `typeArgCallHeads` over the callers of `typeArgCalls`, as
+    `(function, reason)`. -/
+def ClassHooks.typeArgCallRefusals (h : ClassHooks) (sigVars : String → List String) :
+    List (String × String) :=
+  (h.typeArgCalls.map (·.1)).eraseDups.filterMap fun fn =>
+    match h.typeArgCallHeads (fun _ => none) sigVars fn with
+    | .error msg => some (fn, msg)
+    | .ok _ => none
+
+/-- The result type of the class field of a trait method with the parameters
+    `ps` and the Rust result `r`, under the write-back convention of `&mut`
+    parameters that the definitions of the crate follow (`mutWriteRets` of
+    `toLeanDefTyped`): `r` without a `&mut` parameter; the parameter's type for one
+    `&mut` parameter and the result `()`; otherwise the product of `r`, unless it
+    is `()`, and the types of the `&mut` parameters in order. -/
+def writeBackResult (ps : List (String × ImpType)) (r : ImpType) : ImpType :=
+  let muts := ps.flatMap fun (_, t) =>
+    match t with
+    | .ref inner true => [inner]
+    | .ref _ false | .bool | .int | .uint _ | .sint _ | .unit | .str | .tuple _
+    | .option _ | .result _ _ | .controlFlow _ _ | .adt _ _ | .fn _ _ | .slice _
+    | .array _ _ | .typeVar _ | .unknown => []
+  if muts.isEmpty then r else
+  match (if r == .unit then [] else [r]) ++ muts with
+  | [t] => t
+  | ts => .tuple ts
+
 /-- The name of the class field of a trait with contract methods that holds the
     invariant of the Rust self type of an instance: `T_inv`. -/
 def selfInvField (t : String) : String := s!"{t}_inv"
@@ -692,8 +795,10 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
         ++ (if assocBeq a bs then [s!"  [instBEq_{a} : BEq {sanitizeName a}]"] else [])
     let consts := td.consts.map fun (c, ty) =>
       s!"  {sanitizeName c} : {ty.toLeanTypeStrSurface sl}"
-    let methods := td.methods.map fun (m, ps, r) =>
+    let methods := td.methods.map fun (m, ps, r0) =>
       let binders := ps.map fun (p, ty) => s!" ({sanitizeName p} : {ty.toLeanTypeStrSurface sl})"
+      -- A method with `&mut` parameters returns what it writes back.
+      let r := writeBackResult ps r0
       let res := if h.monadicMethods.contains (td.name, m) then
           s!"RustM ({r.toLeanTypeStrSurface sl})"
         else r.toLeanTypeStrSurface sl
