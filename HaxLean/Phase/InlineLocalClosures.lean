@@ -21,7 +21,9 @@ becomes `body` with each parameter replaced by the matching argument
 
 * the body is pure (`isPure`): literals, variables, `unitVal`, calls, tuples and
   projections, so running it changes no variable;
-* every call of `f` in `cont` passes pure arguments (`callsOk`);
+* every call of `f` in `cont` passes arguments without calls (`noCalls`, `callsOk`): the
+  body reads a parameter any number of times, and a call in its argument would run as
+  many times;
 * no variable the body captures, a variable of the body that is not a parameter
   (`captures`), is bound in `cont` by a `letBind`, an `assign`, a loop counter or a
   pattern (`noBind`).
@@ -45,10 +47,11 @@ may not err after inlining.
 `blockOk f ps body cont` holds: the parameters are distinct; the body is a chain of
 `letBind`s over an expression, reading only parameters, captured variables (`blockK`) and
 names the chain bound earlier, and binding no parameter (`bodyOk`); every call of `f` in
-`cont` has atomic arguments reading no variable the call binds (`blockW`), is not under a
-loop or a `match_`, and `cont` binds no captured variable (`contOk`). A call becomes its
-call block (`callBlock`): literal arguments bound to their parameters over the body in
-which a parameter whose argument is a variable reads that variable. The block leaves the
+`cont` has pure arguments without a call of `f` reading no variable the call binds
+(`blockW`), is not under a loop or a `match_`, and `cont` binds no captured variable
+(`contOk`). A call becomes its call block (`callBlock`): every argument that is not a
+variable bound to its parameter, so that it is read once, over the body in which a
+parameter whose argument is a variable reads that variable. The block leaves the
 variables of `blockW` bound, so the refinement relates environments that agree off
 `blockW` (`ContRel`, `RefR`).
 
@@ -269,9 +272,26 @@ where
     | (p, e) :: rest => (patVars p).all (fun x => !K.contains x) && noBind K e &&
         noBindArms K rest
 
-/-- Every call of `f` in `e` passes pure arguments. -/
+/-- An expression without calls: a literal, a variable, `unitVal`, or a tuple or projection
+    of such expressions. -/
+def noCalls : ImpExpr → Bool
+  | .lit _ => true
+  | .var _ => true
+  | .unitVal => true
+  | .tuple es => allNo es
+  | .proj e _ => noCalls e
+  | _ => false
+where
+  /-- `noCalls` of every expression of a list. -/
+  allNo : List ImpExpr → Bool
+    | [] => true
+    | e :: es => noCalls e && allNo es
+
+/-- Every call of `f` in `e` passes arguments without calls (`noCalls`). Inlining
+    substitutes an argument for every read of its parameter, so an argument without calls
+    runs no call more or fewer times than the source call. -/
 def callsOk (f : String) : ImpExpr → Bool
-  | .app g args => (g != f || isPure.allPure args) && callsOkList f args
+  | .app g args => (g != f || noCalls.allNo args) && callsOkList f args
   | .letBind _ v b => callsOk f v && callsOk f b
   | .assign _ rhs => callsOk f rhs
   | .lam _ b => callsOk f b
@@ -309,8 +329,9 @@ where
     | [] => true
     | (_, e) :: rest => callsOk f e && callsOkArms f rest
 
-/-- The binding `.letBind f (.lam ps body) cont` is in the fragment: a pure body, pure
-    arguments at every call of `f`, and no binding of a captured variable in `cont`. -/
+/-- The binding `.letBind f (.lam ps body) cont` is in the fragment: a pure body,
+    arguments without calls at every call of `f`, and no binding of a captured variable in
+    `cont`. -/
 def closureOk (f : String) (ps : List String) (body cont : ImpExpr) : Bool :=
   isPure body && callsOk f cont && noBind (captures ps body) cont
 
@@ -433,6 +454,22 @@ theorem allPure_eq (es : List ImpExpr) : isPure.allPure es = es.all isPure := by
   induction es with
   | nil => rfl
   | cons e es ih => simp [isPure.allPure, ih]
+
+/-- `noCalls.allNo` is `List.all noCalls`. -/
+theorem noCalls.allNo_eq (es : List ImpExpr) : noCalls.allNo es = es.all noCalls := by
+  induction es with
+  | nil => rfl
+  | cons e es ih => simp [noCalls.allNo, ih]
+
+/-- An expression without calls is pure. -/
+theorem isPure_of_noCalls (e : ImpExpr) (h : noCalls e = true) : isPure e = true := by
+  induction e using ImpExpr.ind with
+  | tuple es ih =>
+    simp only [noCalls, noCalls.allNo_eq, List.all_eq_true] at h
+    simp only [isPure, allPure_eq, List.all_eq_true]
+    exact fun a ha => ih a ha (h a ha)
+  | proj e _ ih => exact ih h
+  | _ => simp_all [noCalls, isPure]
 
 /-- A pure expression changes no variable, and its outcome does not depend on the
     fuel. -/
@@ -638,6 +675,43 @@ theorem pureArgs_vals (fuel : Nat) (σ : Env) :
           rcases hav with rfl | hav
           · exact ha
           · exact hz av hav
+    all_goals exact absurd (congrArg Prod.fst h) (by simp)
+
+/-- The values of pure arguments that read to values are no control-flow values. -/
+theorem pureArgs_noCF (fuel : Nat) (σ : Env) :
+    ∀ (args : List ImpExpr) (vals : List Value) (s : Env),
+      (∀ a, a ∈ args → isPure a = true) →
+      (denoteArgs' bi fuel args).run σ = (some vals, s) →
+      ∀ v, v ∈ vals → v.isControlFlow = false
+  | [], vals, s, _, h => by
+    rw [ContinueFlag.args_nil_run] at h
+    cases h; simp
+  | a :: as, vals, s, hp, h => by
+    have ha := pure_run bi a (hp a List.mem_cons_self) fuel fuel σ
+    rw [ContinueFlag.args_cons_run, ha] at h
+    have hpa : ∀ b, b ∈ as → isPure b = true := fun b hb => hp b (List.mem_cons_of_mem a hb)
+    generalize ho : ((denote' bi fuel a).run σ).1 = o at h ha
+    rcases o with v | _ | _ | _ | _
+    case val =>
+      cases v
+      case controlFlow => exact absurd (congrArg Prod.fst h) (by simp)
+      all_goals
+        try simp only at h
+        obtain ⟨hv, -⟩ := Prod.mk.inj h
+        cases hrest : ((denoteArgs' bi fuel as).run σ).1 with
+        | none => rw [hrest] at hv; simp at hv
+        | some vs =>
+          rw [hrest] at hv
+          simp only [Option.map_some, Option.some.injEq] at hv
+          have hr : (denoteArgs' bi fuel as).run σ = (some vs, σ) := by
+            rw [pureArgs_run bi as (fun b hb => pure_run bi b (hpa b hb)) fuel fuel σ, hrest]
+          have ih := pureArgs_noCF fuel σ as vs σ hpa hr
+          subst hv
+          intro w hw
+          simp only [List.mem_cons] at hw
+          rcases hw with rfl | hw
+          · rfl
+          · exact ih w hw
     all_goals exact absurd (congrArg Prod.fst h) (by simp)
 
 end Pure
@@ -995,7 +1069,7 @@ theorem call_arity_err (args : List ImpExpr) (hpure : ∀ a, a ∈ args → isPu
     exact ⟨_, rfl⟩
 
 /-- **Inlining the calls of a closure.** For a pure body, a continuation `e` whose calls
-    of `f` pass pure arguments and which binds no captured variable, `inlineCalls f ps
+    of `f` pass arguments without calls and which binds no captured variable, `inlineCalls f ps
     body e` read with `bi` refines `e` read with the closure table of `f` defined in `ρ`,
     from every environment agreeing with `ρ` on the captures. -/
 theorem denote'_inlineCalls (hbody : isPure body = true) (e : ImpExpr) :
@@ -1007,11 +1081,12 @@ theorem denote'_inlineCalls (hbody : isPure body = true) (e : ImpExpr) :
     intro hK hc fuel
     simp only [noBind, noBind.noBindList_eq, List.all_eq_true] at hK
     simp only [callsOk, callsOk.callsOkList_eq, Bool.and_eq_true, Bool.or_eq_true,
-      bne_iff_ne, ne_eq, allPure_eq, List.all_eq_true] at hc
+      bne_iff_ne, ne_eq, noCalls.allNo_eq, List.all_eq_true] at hc
     have ih' := fun a ha => ih a ha (hK a ha) (hc.2 a ha)
     by_cases hgf : g = f
     · subst hgf
-      have hp : ∀ a, a ∈ args → isPure a = true := hc.1.resolve_left (by simp)
+      have hp : ∀ a, a ∈ args → isPure a = true := fun a ha =>
+        isPure_of_noCalls a (hc.1.resolve_left (by simp) a ha)
       by_cases hl : args.length = ps.length
       · simp only [inlineCalls, hl, and_self, ite_true, inlineCalls.mapExpr_eq]
         exact call_ref bi fuel₀ g ps body ρ hbody args hp hl ih' fuel
@@ -1891,12 +1966,6 @@ end Body
 
 /-! ### The call block -/
 
-/-- A variable or a literal. -/
-def isAtom : ImpExpr → Bool
-  | .var _ => true
-  | .lit _ => true
-  | _ => false
-
 /-- The renaming of a call: a parameter whose argument is the variable `y` reads `y`;
     every other name is kept. -/
 def argRen (ps : List String) (args : List ImpExpr) (x : String) : String :=
@@ -1904,60 +1973,96 @@ def argRen (ps : List String) (args : List ImpExpr) (x : String) : String :=
   | some (.var y) => y
   | _ => x
 
-/-- Bind every parameter whose argument is a literal to it, in parameter order, over
-    `b`. -/
+/-- Bind every parameter whose argument is not a variable to that argument, in parameter
+    order, over `b`; each such argument is read once. -/
 def bindArgs : List String → List ImpExpr → ImpExpr → ImpExpr
   | p :: ps, a :: as, b =>
     match a with
-    | .lit l => .letBind p (.lit l) (bindArgs ps as b)
-    | _ => bindArgs ps as b
+    | .var _ => bindArgs ps as b
+    | _ => .letBind p a (bindArgs ps as b)
   | _, _, b => b
 
-/-- The environment `e` extended as `bindArgs` extends it. -/
-def bindLits : List String → List ImpExpr → Env → Env
-  | p :: ps, a :: as, e =>
+/-- The environment `e` extended as `bindArgs` extends it when the arguments take the
+    values `vals`. -/
+def bindVals : List String → List ImpExpr → List Value → Env → Env
+  | p :: ps, a :: as, v :: vs, e =>
     match a with
-    | .lit l => bindLits ps as (e.extend p (Value.ofLit l))
-    | _ => bindLits ps as e
-  | _, _, e => e
+    | .var _ => bindVals ps as vs e
+    | _ => bindVals ps as vs (e.extend p v)
+  | _, _, _, e => e
 
-/-- The block that replaces a call of a statement closure on atomic arguments: the
-    literal arguments bound to their parameters, over the body with every parameter
-    whose argument is a variable read as that variable. -/
+/-- The block that replaces a call of a statement closure: the arguments that are not
+    variables bound to their parameters, over the body with every parameter whose
+    argument is a variable read as that variable. -/
 def callBlock (ps : List String) (args : List ImpExpr) (body : ImpExpr) : ImpExpr :=
   bindArgs ps args (renameReads (argRen ps args) body)
 
-/-- The value an atom reads in `e`. -/
-def atomVal (e : Env) : ImpExpr → Option Value
-  | .var y => e y
-  | .lit l => some (Value.ofLit l)
-  | _ => none
-
-theorem bindLits_other (x : String) :
-    ∀ (ps : List String) (args : List ImpExpr) (e : Env), x ∉ ps → bindLits ps args e x = e x
-  | [], _, _, _ => by simp only [bindLits]
-  | _ :: _, [], _, _ => by simp only [bindLits]
-  | p :: ps, a :: as, e, hx => by
+theorem bindVals_other (x : String) :
+    ∀ (ps : List String) (args : List ImpExpr) (vals : List Value) (e : Env), x ∉ ps →
+      bindVals ps args vals e x = e x
+  | [], _, _, _, _ => by simp only [bindVals]
+  | _ :: _, [], _, _, _ => by simp only [bindVals]
+  | _ :: _, _ :: _, [], _, _ => by simp only [bindVals]
+  | p :: ps, a :: as, v :: vs, e, hx => by
     have hxp : x ≠ p := fun h => hx (h ▸ List.mem_cons_self)
     have hx' : x ∉ ps := fun h => hx (List.mem_cons_of_mem p h)
     cases a
-    case lit l =>
-      simp only [bindLits]
-      rw [bindLits_other x ps as _ hx', Env.extend_other _ _ _ _ hxp]
-    all_goals (simp only [bindLits]; exact bindLits_other x ps as e hx')
+    case var y => simp only [bindVals]; exact bindVals_other x ps as vs e hx'
+    all_goals
+      simp only [bindVals]
+      rw [bindVals_other x ps as vs _ hx', Env.extend_other _ _ _ _ hxp]
 
-theorem bindArgs_run (bi : Builtins) (fuel : Nat) (b : ImpExpr) :
-    ∀ (ps : List String) (args : List ImpExpr) (e : Env),
-      (denote' bi fuel (bindArgs ps args b)).run e = (denote' bi fuel b).run (bindLits ps args e)
-  | [], _, _ => by simp only [bindArgs, bindLits]
-  | _ :: _, [], _ => by simp only [bindArgs, bindLits]
-  | p :: ps, a :: as, e => by
-    cases a
-    case lit l =>
-      simp only [bindArgs, bindLits]
-      rw [ContinueFlag.letBind_run, ContinueFlag.lit_run]
-      cases l <;> exact bindArgs_run bi fuel b ps as _
-    all_goals (simp only [bindArgs, bindLits]; exact bindArgs_run bi fuel b ps as e)
+theorem bindArgs_cons_nonvar (p : String) (ps : List String) (a : ImpExpr)
+    (as : List ImpExpr) (b : ImpExpr) (h : ∀ y, a ≠ .var y) :
+    bindArgs (p :: ps) (a :: as) b = .letBind p a (bindArgs ps as b) := by
+  cases a <;> first | rfl | exact absurd rfl (h _)
+
+theorem bindVals_cons_nonvar (p : String) (ps : List String) (a : ImpExpr)
+    (as : List ImpExpr) (v : Value) (vs : List Value) (e : Env) (h : ∀ y, a ≠ .var y) :
+    bindVals (p :: ps) (a :: as) (v :: vs) e = bindVals ps as vs (e.extend p v) := by
+  cases a <;> first | rfl | exact absurd rfl (h _)
+
+/-- The run of `bindArgs`: when every parameter is in `W`, the environment agrees with `E`
+    off `W`, and every argument that is not a variable reads its value, no control-flow
+    value, from each environment agreeing with `E` off `W` and changes no variable, the
+    block runs `b` in the environment `bindVals` gives. -/
+theorem bindArgs_run (bi : Builtins) (fuel : Nat) (b : ImpExpr) (W : List String) (E : Env) :
+    ∀ (ps : List String) (args : List ImpExpr) (vals : List Value) (e : Env),
+      (∀ p, p ∈ ps → W.contains p = true) → args.length = ps.length →
+      vals.length = ps.length → (∀ x, W.contains x = false → e x = E x) →
+      (∀ av, av ∈ args.zip vals → (∀ y, av.1 ≠ .var y) → av.2.isControlFlow = false ∧
+        ∀ e', (∀ x, W.contains x = false → e' x = E x) →
+          (denote' bi fuel av.1).run e' = (.val av.2, e')) →
+      (denote' bi fuel (bindArgs ps args b)).run e =
+        (denote' bi fuel b).run (bindVals ps args vals e)
+  | [], _, _, _, _, _, _, _, _ => by simp only [bindArgs, bindVals]
+  | _ :: _, [], _, _, _, hl, _, _, _ => by simp at hl
+  | _ :: _, _ :: _, [], _, _, _, hl, _, _ => by simp at hl
+  | p :: ps, a :: as, v :: vs, e, hW, hl, hl', he, ha => by
+    have hW' : ∀ q, q ∈ ps → W.contains q = true := fun q hq =>
+      hW q (List.mem_cons_of_mem p hq)
+    have ha' : ∀ av, av ∈ as.zip vs → (∀ y, av.1 ≠ .var y) → av.2.isControlFlow = false ∧
+        ∀ e', (∀ x, W.contains x = false → e' x = E x) →
+          (denote' bi fuel av.1).run e' = (.val av.2, e') := fun av hav =>
+      ha av (by simp [hav])
+    by_cases hav : ∃ y, a = .var y
+    · obtain ⟨y, rfl⟩ := hav
+      simp only [bindArgs, bindVals]
+      exact bindArgs_run bi fuel b W E ps as vs e hW' (by simpa using hl) (by simpa using hl')
+        he ha'
+    · have hnv : ∀ y, a ≠ .var y := fun y h => hav ⟨y, h⟩
+      obtain ⟨hcf, hrun⟩ := ha (a, v) (by simp) hnv
+      rw [bindArgs_cons_nonvar p ps a as b hnv, bindVals_cons_nonvar p ps a as v vs e hnv,
+        ContinueFlag.letBind_run, hrun e he]
+      have he' : ∀ x, W.contains x = false → (e.extend p v) x = E x := fun x hx => by
+        have hxp : x ≠ p := fun h => by rw [h, hW p List.mem_cons_self] at hx; cases hx
+        rw [Env.extend_other _ _ _ _ hxp]
+        exact he x hx
+      have hrest := bindArgs_run bi fuel b W E ps as vs (e.extend p v) hW' (by simpa using hl)
+        (by simpa using hl') he' ha'
+      cases v
+      case controlFlow => simp at hcf
+      all_goals exact hrest
 
 theorem argFor_none (x : String) :
     ∀ (ps : List String) (args : List ImpExpr), x ∉ ps → argFor ps args x = none
@@ -1979,67 +2084,64 @@ theorem argFor_mem (x : String) :
     · cases h; exact List.mem_cons_self
     · exact List.mem_cons_of_mem b (argFor_mem x ps bs a h)
 
-theorem atomVal_extend {a : ImpExpr} (ha : isAtom a = true) {p : String}
-    (hp : ∀ y, a = .var y → y ≠ p) (e : Env) (w : Value) :
-    atomVal (e.extend p w) a = atomVal e a := by
-  cases a <;> simp_all [isAtom, atomVal, Env.extend_other]
-
-/-- At a parameter, the environment `bindLits ps args e` read through the renaming of the
-    call holds the value `bindAll` binds, when every argument is an atom that reads its
-    value in `e` and no variable argument is a parameter. -/
-theorem bindLits_param (ρ : Env) :
+/-- At a parameter, the environment `bindVals ps args vals e` read through the renaming of
+    the call holds the value `bindAll` binds, when every variable argument reads its value
+    in `e` and is no parameter. -/
+theorem bindVals_param (ρ : Env) :
     ∀ (ps : List String) (args : List ImpExpr) (vals : List Value) (e : Env),
       ps.Nodup → args.length = ps.length → vals.length = ps.length →
-      (∀ a, a ∈ args → isAtom a = true) → (∀ y, ImpExpr.var y ∈ args → y ∉ ps) →
-      (∀ av, av ∈ args.zip vals → atomVal e av.1 = some av.2) →
-      ∀ x, x ∈ ps → bindLits ps args e (argRen ps args x) = bindAll ρ ps vals x
-  | [], _, _, _, _, _, _, _, _, _, x, hx => by simp at hx
-  | _ :: _, [], _, _, _, hl, _, _, _, _, _, _ => by simp at hl
-  | _ :: _, _ :: _, [], _, _, _, hl, _, _, _, _, _ => by simp at hl
-  | p :: ps, a :: as, v :: vs, e, hnd, hl, hl', hat, hy, hz, x, hx => by
+      (∀ y, ImpExpr.var y ∈ args → y ∉ ps) →
+      (∀ av, av ∈ args.zip vals → ∀ y, av.1 = .var y → e y = some av.2) →
+      ∀ x, x ∈ ps → bindVals ps args vals e (argRen ps args x) = bindAll ρ ps vals x
+  | [], _, _, _, _, _, _, _, _, x, hx => by simp at hx
+  | _ :: _, [], _, _, _, hl, _, _, _, _, _ => by simp at hl
+  | _ :: _, _ :: _, [], _, _, _, hl, _, _, _, _ => by simp at hl
+  | p :: ps, a :: as, v :: vs, e, hnd, hl, hl', hy, hz, x, hx => by
     obtain ⟨hpn, hnd'⟩ := List.nodup_cons.mp hnd
-    have hza : atomVal e a = some v := hz (a, v) (by simp)
-    have hat' : ∀ b, b ∈ as → isAtom b = true := fun b hb => hat b (List.mem_cons_of_mem a hb)
     have hy' : ∀ y, ImpExpr.var y ∈ as → y ∉ ps := fun y hy'' h =>
       hy y (List.mem_cons_of_mem a hy'') (List.mem_cons_of_mem p h)
     have hyp : ∀ y, ImpExpr.var y ∈ as → y ≠ p := fun y hy'' h =>
       hy y (List.mem_cons_of_mem a hy'') (h ▸ List.mem_cons_self)
-    have hzs : ∀ w, ∀ av, av ∈ as.zip vs → atomVal (e.extend p w) av.1 = some av.2 := by
-      intro w av hav
+    have hzs' : ∀ av, av ∈ as.zip vs → ∀ y, av.1 = .var y → e y = some av.2 :=
+      fun av hav => hz av (by simp [hav])
+    have hzs : ∀ w, ∀ av, av ∈ as.zip vs → ∀ y, av.1 = .var y →
+        (e.extend p w) y = some av.2 := by
+      intro w av hav y hay
       have hmem := (List.of_mem_zip hav).1
-      rw [atomVal_extend (hat' _ hmem) (fun y hy'' => hyp y (hy'' ▸ hmem)) e w]
-      exact hz av (by simp [hav])
-    have hzs' : ∀ av, av ∈ as.zip vs → atomVal e av.1 = some av.2 := fun av hav =>
-      hz av (by simp [hav])
-    by_cases hxp : x = p
-    · subst hxp
-      simp only [bindAll, Env.extend_same]
-      have ha := hat a List.mem_cons_self
-      cases a with
-      | var y =>
-        simp only [argRen, argFor, ite_true, bindLits]
+      rw [Env.extend_other _ _ _ _ (hyp y (hay ▸ hmem))]
+      exact hzs' av hav y hay
+    have hl₁ : as.length = ps.length := by simpa using hl
+    have hl₂ : vs.length = ps.length := by simpa using hl'
+    by_cases hav : ∃ y, a = .var y
+    · obtain ⟨y, rfl⟩ := hav
+      by_cases hxp : x = p
+      · subst hxp
+        simp only [bindAll, Env.extend_same, argRen, argFor, ite_true, bindVals]
         have hyps : y ∉ ps := fun h => hy y List.mem_cons_self (List.mem_cons_of_mem x h)
-        rw [bindLits_other y ps as e hyps]
-        exact hza
-      | lit l =>
-        simp only [argRen, argFor, ite_true, bindLits]
-        rw [bindLits_other x ps as _ hpn, Env.extend_same]
-        simpa [atomVal] using hza
-      | _ => simp [isAtom] at ha
-    · have hx' : x ∈ ps := by simpa [hxp] using hx
-      simp only [bindAll, Env.extend_other _ _ _ _ hxp]
-      have hren : argRen (p :: ps) (a :: as) x = argRen ps as x := by
-        simp only [argRen, argFor, hxp, ite_false]
-      rw [hren]
-      cases a
-      case lit l =>
-        simp only [bindLits]
-        exact bindLits_param ρ ps as vs _ hnd' (by simpa using hl) (by simpa using hl') hat' hy'
-          (hzs _) x hx'
-      all_goals
-        simp only [bindLits]
-        exact bindLits_param ρ ps as vs e hnd' (by simpa using hl) (by simpa using hl') hat' hy'
-          hzs' x hx'
+        rw [bindVals_other y ps as vs e hyps]
+        exact hz (.var y, v) (by simp) y rfl
+      · have hx' : x ∈ ps := by simpa [hxp] using hx
+        have hren : argRen (p :: ps) (.var y :: as) x = argRen ps as x := by
+          simp only [argRen, argFor, hxp, ite_false]
+        simp only [bindAll, Env.extend_other _ _ _ _ hxp, hren, bindVals]
+        exact bindVals_param ρ ps as vs e hnd' hl₁ hl₂ hy' hzs' x hx'
+    · have hnv : ∀ y, a ≠ .var y := fun y h => hav ⟨y, h⟩
+      rw [bindVals_cons_nonvar p ps a as v vs e hnv]
+      by_cases hxp : x = p
+      · subst hxp
+        have hren : argRen (x :: ps) (a :: as) x = x := by
+          simp only [argRen, argFor, ite_true]
+          split
+          · rename_i y h; cases h; exact absurd rfl (hnv y)
+          · rfl
+        rw [hren, bindVals_other x ps as vs _ hpn]
+        simp only [bindAll, Env.extend_same]
+      · have hx' : x ∈ ps := by simpa [hxp] using hx
+        have hren : argRen (p :: ps) (a :: as) x = argRen ps as x := by
+          simp only [argRen, argFor, hxp, ite_false]
+        rw [hren]
+        simp only [bindAll, Env.extend_other _ _ _ _ hxp]
+        exact bindVals_param ρ ps as vs _ hnd' hl₁ hl₂ hy' (hzs _) x hx'
 
 /-! ### The rewriting and the fragment -/
 
@@ -2132,13 +2234,13 @@ theorem inlineBlocks_free (f : String) (ps : List String) (body e : ImpExpr)
   | _ => simp_all [frameOk, inlineBlocks]
 
 /-- The continuation of a statement closure `f`: every subexpression is either in
-    `frameOk rd bd` with no call of `f`, or is a call of `f` on atoms that read only `rd`
-    variables, or is a `letBind`, `assign`, `seq`, `ifThenElse`, call, tuple,
+    `frameOk rd bd` with no call of `f`, or is a call of `f` on pure arguments without a
+    call of `f` that read only `rd` variables, or is a `letBind`, `assign`, `seq`, `ifThenElse`, call, tuple,
     projection or single-operand node binding only `bd` names whose operands are in the
     fragment. A call of `f` under a loop or a `match_` is outside the fragment. -/
 def contOk (f : String) (rd bd : String → Bool) : ImpExpr → Bool
   | .app g args => frameOk rd bd (fun g => g != f) (.app g args) ||
-    (if g = f then args.all fun a => isAtom a && frameOk rd bd (fun _ => true) a
+    (if g = f then args.all fun a => isPure a && frameOk rd bd (fun g => g != f) a
      else contOkList f rd bd args)
   | .letBind n v b => frameOk rd bd (fun g => g != f) (.letBind n v b) ||
     (bd n && contOk f rd bd v && contOk f rd bd b)
@@ -2194,19 +2296,17 @@ variable (bi : Builtins) (fuel₀ : Nat) (f : String) (ps : List String) (body :
   (ρ : Env) {W K : List String}
 
 /-- **A call of a statement closure.** From environments related by `ContRel`, every run
-    of a call of `f` on atoms reading no variable of `W` under the closure table that does
-    not end in an error is matched by the run of the call block, the final environments
-    related by `ContRel`. -/
+    of a call of `f` on pure arguments without a call of `f` reading no variable of `W`
+    under the closure table that does not end in an error is matched by the run of the call
+    block, which reads each argument once, the final environments related by `ContRel`. -/
 theorem callBlock_rel (hW : ∀ p, p ∈ ps → W.contains p = true)
     (hKW : ∀ x, x ∈ K → W.contains x = false) (hnd : ps.Nodup)
     (hbody : bodyOk W ps (ps ++ K) body = true) (args : List ImpExpr)
-    (hat : ∀ a, a ∈ args → isAtom a = true ∧
-      frameOk (fun x => !W.contains x) (fun n => !K.contains n) (fun _ => true) a = true) :
+    (hat : ∀ a, a ∈ args → isPure a = true ∧
+      frameOk (fun x => !W.contains x) (fun n => !K.contains n) (fun g => g != f) a = true) :
     RefE (ContRel W K ρ) (denote' bi fuel₀ (inlineBlocks f ps body (.app f args)))
       (denote' (closureTable bi fuel₀ f ps body ρ) fuel₀ (.app f args)) := by
-  have hpure : ∀ a, a ∈ args → isPure a = true := fun a ha => by
-    have := (hat a ha).1
-    cases a <;> simp_all [isAtom, isPure]
+  have hpure : ∀ a, a ∈ args → isPure a = true := fun a ha => (hat a ha).1
   by_cases hl : args.length = ps.length
   case neg =>
     simp only [inlineBlocks, hl, and_false, ite_false]
@@ -2227,28 +2327,44 @@ theorem callBlock_rel (hW : ∀ p, p ∈ ps → W.contains p = true)
   simp only [closureTable, ite_true, hvl] at hsrc
   have hy : ∀ y, ImpExpr.var y ∈ args → W.contains y = false := fun y hy' => by
     simpa [frameOk] using (hat _ hy').2
-  have hzv : ∀ av, av ∈ args.zip vals → atomVal e₁ av.1 = some av.2 := by
-    intro av hav
+  have hzv : ∀ av, av ∈ args.zip vals → ∀ y, av.1 = .var y → e₁ y = some av.2 := by
+    intro av hav y hay
     have hmem := (List.of_mem_zip hav).1
     have hrun := hz av hav
-    have ha := (hat _ hmem).1
-    obtain ⟨a, v⟩ := av
-    cases a with
-    | var y =>
-      rw [ContinueFlag.var_run] at hrun
-      simp only [atomVal]
-      rw [hR.1 y (hy y hmem)]
-      cases h : e₂ y with
-      | none => simp only [h] at hrun; cases (Prod.mk.inj hrun).1
-      | some u =>
-        simp only [h] at hrun
-        cases (Prod.mk.inj hrun).1
-        rfl
-    | lit l =>
-      rw [ContinueFlag.lit_run] at hrun
+    rw [hay, ContinueFlag.var_run] at hrun
+    rw [hR.1 y (hy y (hay ▸ hmem))]
+    cases h : e₂ y with
+    | none => simp only [h] at hrun; cases (Prod.mk.inj hrun).1
+    | some u =>
+      simp only [h] at hrun
       cases (Prod.mk.inj hrun).1
       rfl
-    | _ => simp [isAtom] at ha
+  have hcf := pureArgs_noCF _ fuel₀ e₂ args vals e₂ hpure hpa
+  have hok : ∀ g, (g != f) = true → bi g = closureTable bi fuel₀ f ps body ρ g := fun g hg => by
+    have hgf : g ≠ f := by simpa using hg
+    funext vs; simp [closureTable, hgf]
+  have hargs : ∀ av, av ∈ args.zip vals → (∀ y, av.1 ≠ .var y) →
+      av.2.isControlFlow = false ∧ ∀ e', (∀ x, W.contains x = false → e' x = e₁ x) →
+        (denote' bi fuel₀ av.1).run e' = (.val av.2, e') := by
+    intro av hav _
+    refine ⟨hcf av.2 (List.of_mem_zip hav).2, fun e' he' => ?_⟩
+    have hmem := (List.of_mem_zip hav).1
+    have hfr := denote'_frame (R := fun x y => ∀ z, W.contains z = false → x z = y z)
+      (bi₁ := bi) (bi₂ := closureTable bi fuel₀ f ps body ρ) id
+      (fun x => !W.contains x) (fun n => !K.contains n) (fun g => g != f)
+      (fun _ _ x h hx => h x (by simpa using hx))
+      (fun e₁' e₂' n w h _ z hz' => by
+        by_cases hzn : z = n
+        · subst hzn; simp
+        · rw [Env.extend_other _ _ _ _ hzn, Env.extend_other _ _ _ _ hzn]; exact h z hz')
+      hok av.1 (hat _ hmem).2 fuel₀
+    rw [renameReads_id av.1 (frameOk_mono (fun _ _ => rfl) (fun _ _ => rfl) (fun _ _ => rfl)
+      av.1 (hat _ hmem).2)] at hfr
+    obtain ⟨s₁, h1, -⟩ := hfr e' e₂ (fun z hz' => (he' z hz').trans (hR.1 z hz')) _ _ (hz av hav)
+      (by rintro ⟨m, hm⟩; cases hm)
+    have hp := pure_run bi av.1 (hpure _ hmem) fuel₀ fuel₀ e'
+    rw [h1] at hp
+    rw [h1, (Prod.mk.inj hp).2]
   have hσps : ∀ x, ps.contains x = false → argRen ps args x = x := fun x hx => by
     simp only [argRen, argFor_none x ps args (by simpa using hx)]
   have hσ : ∀ x, argRen ps args x = x ∨ W.contains (argRen ps args x) = false := by
@@ -2258,20 +2374,21 @@ theorem callBlock_rel (hW : ∀ p, p ∈ ps → W.contains p = true)
     · rename_i y hy'
       exact Or.inr (hy y (argFor_mem x ps args _ hy'))
     · exact Or.inl rfl
-  have hpre : BodyRel (argRen ps args) W (ps ++ K) e₁ (bindLits ps args e₁) (bindAll ρ ps vals) := by
+  have hpre : BodyRel (argRen ps args) W (ps ++ K) e₁ (bindVals ps args vals e₁)
+      (bindAll ρ ps vals) := by
     refine ⟨fun x hx => ?_, fun x hx => ?_⟩
     · simp only [List.contains_append, Bool.or_eq_true] at hx
       rcases hx with hx | hx
-      · exact bindLits_param ρ ps args vals e₁ hnd hl hvl (fun a ha => (hat a ha).1)
+      · exact bindVals_param ρ ps args vals e₁ hnd hl hvl
           (fun y hy' hyp => by have := hW y hyp; rw [hy y hy'] at this; cases this) hzv x
           (by simpa using hx)
       · have hxK : x ∈ K := by simpa using hx
         have hxW := hKW x hxK
         have hxps : x ∉ ps := fun h => by rw [hW x h] at hxW; cases hxW
-        rw [hσps x (by simpa using hxps), bindLits_other x ps args e₁ hxps, hR.1 x hxW,
+        rw [hσps x (by simpa using hxps), bindVals_other x ps args vals e₁ hxps, hR.1 x hxW,
           hR.2 x hxK, bindAll_other ρ x ps vals hxps]
     · have hxps : x ∉ ps := fun h => by rw [hW x h] at hx; cases hx
-      exact bindLits_other x ps args e₁ hxps
+      exact bindVals_other x ps args vals e₁ hxps
   generalize hb : (denote' bi fuel₀ body).run (bindAll ρ ps vals) = rb at hsrc
   obtain ⟨ob, sb⟩ := rb
   rcases ob with w | _ | _ | _ | _
@@ -2280,7 +2397,7 @@ theorem callBlock_rel (hW : ∀ p, p ∈ ps → W.contains p = true)
     obtain ⟨s₁, h1, h2⟩ := denote'_body (E := e₁) bi hσ hσps body (ps ++ K) hbody fuel₀ _ _ hpre
       (.val w) sb hb (by rintro ⟨m, hm⟩; cases hm)
     refine ⟨s₁, ?_, fun x hx => (h2 x hx).trans (hR.1 x hx), hR.2⟩
-    rw [bindArgs_run]
+    rw [bindArgs_run bi fuel₀ _ W e₁ ps args vals e₁ hW hl hvl (fun _ _ => rfl) hargs]
     exact h1
   all_goals (simp only at hsrc; exact absurd ⟨_, (congrArg Prod.fst hsrc).symm⟩ hnb)
 
