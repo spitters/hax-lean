@@ -375,34 +375,76 @@ partial def localBoundSelfItems (j : Json)
     t.toList.foldl (fun a (_, v) => localBoundSelfItems v a) acc
   | _ => acc
 
+/-- The parse context of `typeArgCallsOf` for the export `j`: the inherent `impl`
+    blocks with their self types, type-argument heads and method collisions, and
+    the methods of the trait `impl` blocks, as `parseHaxFileWithTExprReport` builds
+    them, so that a reference to a method of an `impl` of the crate is named by the
+    definition the adapter emits for it. -/
+def typeArgImplMap (j : Json) : HaxAdapter.ImplSelfTypeMap :=
+  { impls := HaxAdapter.buildImplSelfTypeMap j
+    implArgHeads := HaxAdapter.inherentImplArgHeads j
+    inherentCollisions := HaxAdapter.inherentMethodCollisions j
+    traitImplMethods := buildTraitImplMethodMap j }
+
+/-- The `Type` entries of a hax `generic_args` list, in order
+    (`HaxAdapter.parseHaxType`). -/
+def typeArgsOfGenericArgs (args : Array Json) : List ImpType :=
+  args.toList.filterMap fun a => (a.getObjVal? "Type").toOption.map parseHaxType
+
 /-- The references with type arguments in a node of an export rewritten by
-    `keepTypeParams`, as `(callee, type arguments)`: every node with a `def_id`,
-    a `null` `in_trait` and a `generic_args` list with a `Type` entry, named by the
-    leaf of its `def_id`, with the `Type` entries in order
-    (`HaxAdapter.parseHaxType`). A call `g::<D>(…)` of a generic function of the
-    crate is such a reference. -/
-partial def typeArgCallsOf (j : Json) (acc : Array (String × List ImpType) := #[]) :
-    Array (String × List ImpType) :=
+    `keepTypeParams`, as `(callee, type arguments)`: every node with a `def_id`
+    and a `generic_args` list, whose type arguments are not empty, of one of two
+    kinds.
+
+    * A node with a `null` `in_trait`, with the `Type` entries of its
+      `generic_args`, which for a method of an inherent `impl` are the `impl`'s
+      followed by the method's own. It is named by
+      `HaxAdapter.disambiguateMethodCallWithImplMap` under `implMap`: the leaf of
+      its `def_id` for a function, `<SelfType>_<method>` for a method of an
+      inherent `impl` of the crate.
+    * A node whose `in_trait` resolves to a trait `impl` of the crate that defines
+      the method (`HaxAdapter.resolveTraitImplCall`), named by the definition of
+      that method, with the `Type` entries of the `impl`'s `Concrete` reference
+      followed by those of the node's `generic_args`, which for a trait item are
+      the method's own.
+
+    A call `g::<D>(…)` of a generic function of the crate, `S::m::<D>(…)` of a
+    generic method of an inherent `impl` and `<S as T>::m::<D>(…)` of a generic
+    method of a trait `impl` are such references. -/
+partial def typeArgCallsOf (j : Json) (acc : Array (String × List ImpType) := #[])
+    (implMap : HaxAdapter.ImplSelfTypeMap := {}) : Array (String × List ImpType) :=
   match j with
-  | .arr xs => xs.foldl (fun a x => typeArgCallsOf x a) acc
+  | .arr xs => xs.foldl (fun a x => typeArgCallsOf x a implMap) acc
   | .obj t =>
     let here : Option (String × List ImpType) := do
       let defId ← (j.getObjVal? "def_id").toOption
       let args ← (j.getObjValAs? (Array Json) "generic_args").toOption
-      guard ((j.getObjVal? "in_trait").toOption == some Json.null)
-      let tys := args.toList.filterMap fun a => (a.getObjVal? "Type").toOption.map parseHaxType
+      let inTrait ← (j.getObjVal? "in_trait").toOption
+      let funJ := Json.mkObj [("contents", Json.mkObj [("GlobalName",
+        Json.mkObj [("item", Json.mkObj [("value", j)])])])]
+      let (f, tys) ← if inTrait == Json.null then do
+          let leaf ← defIdLeafName defId
+          pure (HaxAdapter.disambiguateMethodCallWithImplMap funJ leaf implMap,
+            typeArgsOfGenericArgs args)
+        else do
+          let f ← HaxAdapter.resolveTraitImplCall funJ implMap
+          let implJ ← (inTrait.getObjVal? "impl").toOption
+          let concrete ← (implJ.getObjVal? "Concrete").toOption
+          let cVal ← (concrete.getObjVal? "value").toOption
+          let implArgs ← (cVal.getObjValAs? (Array Json) "generic_args").toOption
+          pure (f, typeArgsOfGenericArgs implArgs ++ typeArgsOfGenericArgs args)
       guard (!tys.isEmpty)
-      let f ← defIdLeafName defId
       pure (f, tys)
     let acc := match here with
       | some p => if acc.any (fun q => q.1 == p.1 && q.2 == p.2) then acc else acc.push p
       | none => acc
-    t.toList.foldl (fun a (_, v) => typeArgCallsOf v a) acc
+    t.toList.foldl (fun a (_, v) => typeArgCallsOf v a implMap) acc
   | _ => acc
 
 /-- The generic top-level functions of an export rewritten by
     `keepTypeParams`, one per name. -/
 def genericFns (traits : List String) (j : Json) : List GenericFn :=
+  let implMap := typeArgImplMap j
   let fs := (allItems j).filterMap fun it => do
     let k ← (it.getObjVal? "kind").toOption
     let f ← (k.getObjVal? "Fn").toOption
@@ -413,7 +455,7 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     let beqParams := ((typeParamBounds ["PartialEq", "Eq"] g).map (·.2)).eraseDups
     some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
            beqParams, boundItems := (localBoundSelfItems f).toList,
-           typeCalls := (typeArgCallsOf f).toList }
+           typeCalls := (typeArgCallsOf f #[] implMap).toList }
   fs.foldl (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
 
 /-- The generic methods of the `impl` blocks of an export rewritten by
@@ -424,6 +466,7 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     the definitions the adapter emits (`HaxAdapter.parseHaxFileWithTExpr`). -/
 def genericImplMethods (traits : List String) (j : Json) : List GenericFn :=
   let traitNames := buildTraitImplMethodMap j
+  let implMap := typeArgImplMap j
   (allItems j).flatMap fun it => ((do
     let k ← (it.getObjVal? "kind").toOption
     let impl ← (k.getObjVal? "Impl").toOption
@@ -459,7 +502,7 @@ def genericImplMethods (traits : List String) (j : Json) : List GenericFn :=
              bounds := (typeParamBounds traits ig ++ typeParamBounds traits mg).eraseDups,
              beqParams := (eqB.map (·.2)).eraseDups,
              boundItems := (localBoundSelfItems ii).toList,
-             typeCalls := (typeArgCallsOf ii).toList : GenericFn })) : Option _).getD []
+             typeCalls := (typeArgCallsOf ii #[] implMap).toList : GenericFn })) : Option _).getD []
 
 /-- The generic structs of an export, with their type-parameter names. A
     struct item is `Struct: [ident, generics, …]`. -/
@@ -570,7 +613,8 @@ structure ClassHooks where
       closure of `--emit-monadic`). -/
   monadicMethods : List (String × String) := []
   /-- Per function of the crate, its references with type arguments to the
-      generic top-level functions of the crate (`typeArgCallsOf`). -/
+      generic top-level functions and the generic methods of the `impl` blocks of
+      the crate (`genericFns`, `genericImplMethods`, `typeArgCallsOf`). -/
   typeArgCalls : List (String × List (String × List ImpType)) := []
   deriving Inhabited
 
@@ -595,13 +639,15 @@ def plan (traitExport crate : Json) : ClassHooks :=
   let topFns := genericFns names crate
   let gfns := (topFns ++ genericImplMethods names crate).foldl
     (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
-  let callees := topFns.map (·.name)
+  -- The generic top-level functions and the generic methods of the `impl` blocks.
+  let callees := gfns.map (·.name)
+  let implMap := typeArgImplMap crate
   -- Every top-level function, generic or not, and every generic method.
   let fnCalls := (allItems crate).filterMap fun it => do
     let k ← (it.getObjVal? "kind").toOption
     let f ← (k.getObjVal? "Fn").toOption
     let ident ← (f.getObjVal? "ident").toOption
-    pure (extractFnName ident, (typeArgCallsOf f).toList)
+    pure (extractFnName ident, (typeArgCallsOf f #[] implMap).toList)
   let callers := (fnCalls ++ gfns.map fun g => (g.name, g.typeCalls)).foldl
     (fun acc c => if acc.any (·.1 == c.1) then acc else acc ++ [c]) []
   { traits, exports
@@ -698,8 +744,9 @@ def ClassHooks.staticCallRefusals (h : ClassHooks) : List (String × String) :=
     | .error msg => some (g.name, msg)
     | .ok _ => none
 
-/-- The call heads of the generic functions of the crate that the function `fn`
-    calls with type arguments (`typeArgCalls`), as `(callee, head)`. A callee `g`
+/-- The call heads of the generic functions and `impl` methods of the crate that
+    the function `fn` calls with type arguments (`typeArgCalls`), as
+    `(callee, head)`. A callee `g`
     gets the head `typeArgsHead g [(P, X), …]`, printed `(g (P := X) …)`, naming
     each type parameter `P` of `g` that `sigVars g` (the type variables of `g`'s
     parameter and result types) leaves out, at the type argument `X` of the call;

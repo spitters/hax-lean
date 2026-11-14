@@ -949,6 +949,73 @@ def kdfRkItemRefJson : Lean.Json :=
 
 #guard (ClassEmit.typeArgCallsOf kdfRkItemRefJson).toList == [("kdf_rk", [.typeVar "D"])]
 
+/-! ## A generic `impl` method whose type parameter occurs only in its bound
+
+`impl Sess { fn open<D: KdfDeps>(s: &[u8]) -> Vec<u8> }` called as
+`Sess::open::<D>(s)` from a function generic over `D`. The adapter names the
+method `Sess_open`; no parameter or result type mentions `D`, so the call names
+it, `(Sess_open (D := D)) s`. A method of a trait `impl` resolved at a `Concrete`
+reference takes the `impl`'s type arguments followed by the method's own. -/
+
+/-- The method `open` of `impl Sess`, generic in `D` through its class bound only. -/
+def Sess_open {D : Type} [Inhabited D] [KdfDeps D] (s : Array Int) : Array Int :=
+  (KdfDeps.mac (Self := D)) s s
+
+/-- A generic caller of `Sess::open::<D>`, as the class mode prints it. -/
+def sessOpenCaller {D : Type} [Inhabited D] [KdfDeps D] (s : Array Int) : Array Int :=
+  (Sess_open (D := D)) s
+
+/-- The type argument `TypeVar v` of a hax `generic_args` list. -/
+def typeVarArgJson (v : String) : Lean.Json :=
+  Lean.Json.mkObj [("Type", Lean.Json.mkObj [("value", Lean.Json.mkObj [("TypeVar", v)])])]
+
+/-- The `ItemRef` of the method `m` of the `impl` block with interning id `implId`
+    at the type arguments `D`, with the `in_trait` field `inTrait`. -/
+def implMethodRefJson (implId : Nat) (m : String) (inTrait : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [
+    ("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("krate", "k"),
+      ("path", Lean.Json.arr #[Lean.Json.mkObj [("data", "Impl")],
+        Lean.Json.mkObj [("data", Lean.Json.mkObj [("ValueNs", m)])]]),
+      ("parent", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("id", implId),
+        ("value", Lean.Json.mkObj [("krate", "k"),
+          ("kind", Lean.Json.mkObj [("Impl", Lean.Json.mkObj [("of_trait", false)])]),
+          ("parent", .null)])])])])])]),
+    ("generic_args", Lean.Json.arr #[typeVarArgJson "D"]),
+    ("in_trait", inTrait)]
+
+/-- The parse context with the inherent `impl Sess` (id 7) and the trait `impl`
+    (id 9) whose method `m` the adapter names `Tr_m`. -/
+def sessImplMap : HaxAdapter.ImplSelfTypeMap :=
+  { impls := [(7, "Sess")], traitImplMethods := [(9, "m", "Tr_m")] }
+
+-- The inherent method is named by its definition; without the map, by its leaf.
+#guard (ClassEmit.typeArgCallsOf (implMethodRefJson 7 "open" .null) #[] sessImplMap).toList
+  == [("Sess_open", [.typeVar "D"])]
+#guard (ClassEmit.typeArgCallsOf (implMethodRefJson 7 "open" .null)).toList
+  == [("open", [.typeVar "D"])]
+-- A trait method at a `Concrete` `impl` of the crate: the `impl`'s argument `E`,
+-- then the method's own `D`.
+#guard (ClassEmit.typeArgCallsOf (implMethodRefJson 8 "m" (Lean.Json.mkObj [("impl",
+    Lean.Json.mkObj [("Concrete", Lean.Json.mkObj [("value", Lean.Json.mkObj [
+      ("def_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("id", 9)])]),
+      ("generic_args", Lean.Json.arr #[typeVarArgJson "E"])])])])]))
+    #[] sessImplMap).toList
+  == [("Tr_m", [.typeVar "E", .typeVar "D"])]
+
+/-- The plan of `kdfHooks` with the generic method `Sess_open<D>`, called from
+    `caller` at `D`. -/
+def sessHooks : ClassEmit.ClassHooks :=
+  { kdfHooks with
+    genericFns := kdfHooks.genericFns ++ [
+      { name := "Sess_open", typeParams := ["D"], bounds := [("KdfDeps", "D")] }]
+    typeArgCalls := [("caller", [("Sess_open", [.typeVar "D"])])] }
+
+#guard match sessHooks.typeArgCallHeads (fun _ => none) (fun _ => []) "caller" with
+  | .ok hs => hs == [("Sess_open", typeArgsHead "Sess_open" [("D", "D")])] | .error _ => false
+#guard ((toLean (.app (typeArgsHead "Sess_open" [("D", "D")]) [.var "s"])).splitOn
+  "(Sess_open (D := D)) s").length == 2
+
 /-! ## A Rust parameter named by a Lean keyword -/
 
 #guard sanitizeName "until" == "«until»" && sanitizeName "from" == "«from»"
