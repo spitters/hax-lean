@@ -168,7 +168,6 @@ HaxLean/
 │   ├── Parser.lean
 │   └── Adapter.lean
 ├── HaxAdapter.lean                  # hax-JSON → AST
-├── AdapterRefinement.lean           # per-constructor refinement proofs (~7800 LOC)
 ├── Canonicalize.lean                # AST canonicalisation
 ├── InlineClosures.lean / InlineClosuresErase.lean  # pre-pass: closure-as-value + erase
 ├── ThreadMutations.lean / ThreadMutationsErase.lean # pre-pass: if-join mutation + erase
