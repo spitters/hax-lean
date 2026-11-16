@@ -38,7 +38,7 @@ else
 fi
 
 # Test 2: invalid input is rejected with nonzero exit
-if echo 'not json' | "$HAXPIPE" --emit-json 2> /dev/null; then
+if echo 'not json' | "$HAXPIPE" --hax --emit-certified 2> /dev/null; then
   fail "invalid input rejected" "exit was 0"
 else
   pass "invalid input rejected"
@@ -75,17 +75,11 @@ else
   skip "typed path on lizard fixture" "no verified-dalek checkout found"
 fi
 
-# Test 4: --emit-json mode still works on the same fixture (sanity)
-if [ -n "$JSON_FIXTURE" ]; then
-  if "$HAXPIPE" --hax "$JSON_FIXTURE" --emit-json --name TestLizard \
-       > /tmp/haxpipeT_smoke.json 2> /dev/null
-  then
-    pass "--emit-json on lizard fixture"
-  else
-    fail "--emit-json on lizard fixture" "nonzero exit"
-  fi
+# Test 4: a run without --emit-certified is refused with nonzero exit
+if echo '[]' | "$HAXPIPE" --hax > /dev/null 2>&1; then
+  fail "run without --emit-certified refused" "exit was 0"
 else
-  skip "--emit-json on lizard fixture" "no verified-dalek checkout found"
+  pass "run without --emit-certified refused"
 fi
 
 # Test 5: typed path on the plonky3-hax fixture (if available).

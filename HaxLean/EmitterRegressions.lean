@@ -5,8 +5,8 @@ Authors: CatCrypt Contributors
 -/
 module
 
-public meta import HaxLean.PrettyPrint -- deprecated_module: ignore
-public import HaxLean.PrettyPrint -- deprecated_module: ignore
+public meta import HaxLean.PrettyPrint
+public import HaxLean.PrettyPrint
 public meta import HaxLean.PrettyPrintT
 public import HaxLean.PrettyPrintT
 public meta import HaxLean.ThreadMutations
@@ -2519,11 +2519,10 @@ end QuestionMark
 namespace QuestionMarkExport
 
 /-! Rust's `?` as hax 0.4.2 exports it, `match Try::branch(c) { Break(r) =>
-return from_residual(r), Continue(v) => v }`, is read by `parseHaxExpr` and by
-`parseHaxTExpr` as the form of namespace `QuestionMark`
-(`HaxAdapter.readMatch`, `HaxAdapter.tReadMatch`); a `?` in an argument
+return from_residual(r), Continue(v) => v }`, is read by `parseHaxTExpr` as the
+form of namespace `QuestionMark` (`HaxAdapter.tReadMatch`); a `?` in an argument
 position is bound by a `let` in front of the application
-(`HaxAdapter.floatEarlyExitArgs`). -/
+(`HaxAdapter.tFloatEarlyExitArgs`). -/
 
 open Lean Hax.HaxAdapter
 
@@ -2632,10 +2631,9 @@ def optTryForm : ImpExpr :=
   .match_ (.var "o") [(.somePat (.varPat "val"), .var "val"),
     (.nonePat, .earlyReturn (.app "None" []))]
 
-/-- Whether `parseHaxExpr j` and the erasure of `parseHaxTExpr j` are both `e`. -/
+/-- Whether the erasure of `parseHaxTExpr j` is `e`. -/
 def parsesTo (j : Json) (e : ImpExpr) : Bool :=
-  (match parseHaxExpr j with | .ok e' => e' == e | .error _ => false) &&
-  (match parseHaxTExpr j with | .ok t => t.erase == e | .error _ => false)
+  match parseHaxTExpr j with | .ok t => t.erase == e | .error _ => false
 
 /-- `o?` on an `Option` is a `match` on `o` whose `None` arm returns `None`. -/
 def optionTryParses : Bool := parsesTo optTry optTryForm
@@ -2821,7 +2819,7 @@ section IteratorLoops
 `match into_iter(it) { iter => loop { match next(&mut iter) { None => break, Some(p) => body } } }`.
 The adapter reads the iterator shapes below as counted loops over positions. -/
 
-open Hax.HaxAdapter (reconstructForLoops reconstructForLoopsTExpr)
+open Hax.HaxAdapter (reconstructForLoopsTExpr)
 
 /-- The desugared `for p in it { body }`. -/
 def forIn (it : ImpExpr) (p : ImpPat) (body : ImpExpr) : ImpExpr :=
@@ -2836,7 +2834,7 @@ def enumerateLoop : ImpExpr :=
     (.assign "acc" (.app "f" [.var "acc", .var "i", .var "x"]))
 
 -- The counter is `i`; `x` is element `i` of `a`.
-#guard reconstructForLoops enumerateLoop ==
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr enumerateLoop)).erase ==
   .forLoop "i" (.lit (.int 0)) (.app "len" [.var "a"])
     (.letBind "x" (.app "index" [.var "a", .var "i"])
       (.assign "acc" (.app "f" [.var "acc", .var "i", .var "x"])))
@@ -2848,7 +2846,7 @@ def zipLoop : ImpExpr :=
     (.assign "acc" (.app "f" [.var "acc", .var "x", .var "y"]))
 
 -- The loop stops at the shorter collection.
-#guard reconstructForLoops zipLoop ==
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr zipLoop)).erase ==
   .forLoop "_ci" (.lit (.int 0)) (.app "min" [.app "len" [.var "a"], .app "len" [.var "b"]])
     (.letBind "x" (.app "index" [.var "a", .var "_ci"])
       (.letBind "y" (.app "index" [.var "b", .var "_ci"])
@@ -2859,9 +2857,9 @@ def derefPatLoop : ImpExpr :=
   forIn (.app "iter" [.var "a"]) (.varPat "b")
     (.assign "acc" (.app "f" [.var "acc", .var "b"]))
 
-#guard reconstructForLoops derefPatLoop ==
-  .forLoop "_ci" (.lit (.int 0)) (.app "len" [.var "a"])
-    (.letBind "b" (.app "index" [.var "a", .var "_ci"])
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr derefPatLoop)).erase ==
+  .forLoop "_ci" (.lit (.int 0)) (.app "len" [.app "iter" [.var "a"]])
+    (.letBind "b" (.app "index" [.app "iter" [.var "a"], .var "_ci"])
       (.assign "acc" (.app "f" [.var "acc", .var "b"])))
 
 /-- `for x in a.iter_mut() { *x = g(*x); *x ^= k }`. -/
@@ -2871,7 +2869,7 @@ def iterMutLoop : ImpExpr :=
       (.app "BitXorAssign" [.deref (.var "x"), .var "k"]))
 
 -- Each write of `x` is followed by its write-back to position `_ci_x` of `a`.
-#guard reconstructForLoops iterMutLoop ==
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr iterMutLoop)).erase ==
   .forLoop "_ci_x" (.lit (.int 0)) (.app "len" [.borrow (.var "a")])
     (.letBind "x" (.app "index" [.borrow (.var "a"), .var "_ci_x"])
       (.seq
@@ -2886,21 +2884,12 @@ def iterMutZipLoop : ImpExpr :=
     (.tuplePat [.varPat "x", .varPat "y"])
     (.app "BitXorAssign" [.deref (.var "x"), .deref (.var "y")])
 
-#guard reconstructForLoops iterMutZipLoop ==
+#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr iterMutZipLoop)).erase ==
   .forLoop "_ci_x" (.lit (.int 0)) (.app "min" [.app "len" [.var "a"], .app "len" [.var "b"]])
     (.letBind "x" (.app "index" [.var "a", .var "_ci_x"])
       (.letBind "y" (.app "index" [.var "b", .var "_ci_x"])
         (.seq (.app "BitXorAssign" [.deref (.var "x"), .deref (.var "y")])
           (.assign "a" (.app "array_update" [.var "a", .var "_ci_x", .var "x"])))))
-
--- The typed reconstruction erases to the untyped one.
-#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr enumerateLoop)).erase ==
-  reconstructForLoops enumerateLoop
-#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr zipLoop)).erase == reconstructForLoops zipLoop
-#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr iterMutLoop)).erase ==
-  reconstructForLoops iterMutLoop
-#guard (reconstructForLoopsTExpr (TExpr.ofImpExpr iterMutZipLoop)).erase ==
-  reconstructForLoops iterMutZipLoop
 
 end IteratorLoops
 

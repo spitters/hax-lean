@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- The hax front is typed only. `haxpipeT` runs with `--hax --emit-certified`
+  (or `--python`); any other combination exits with code 1, and the options
+  `--emit-lean`, `--emit-json`, `--emit-bridge`, `--emit-debug-meta`,
+  `--validate` and `--extended` are unknown options. The untyped JSON reader
+  (`HaxAdapter.parseHaxExpr` and its mutual block, `parseHaxItem`,
+  `parseHaxItemWithTypes`, `parseHaxFile`, `parseHaxFileWithTypes`,
+  `parseHaxFileValidated`), the untyped passes `reconstructForLoops` and
+  `normalizeAssignOps`, the untyped file printers (`PrettyPrint.toLeanFile`,
+  `toLeanCertifiedFile`, `toHaxBridgeTemplate`) and the `CLI` readers of the
+  untyped modes are removed; their successors are `parseHaxTExpr`,
+  `parseHaxItemTExpr`, `reconstructForLoopsTExpr`, `normalizeAssignOpsTExpr`
+  and `PrettyPrintT.toLeanCertifiedFileTyped`. An `ImpExpr` reading of a body is
+  `(normalizeAssignOpsTExpr (reconstructForLoopsTExpr t)).erase` for
+  `t = parseHaxTExpr (thirBodyExpr body)`. `HaxLean.PrettyPrint` is no longer a
+  deprecated module: it holds the printers the typed path uses.
+
 - `haxpipeT --hax --emit-certified --emit-classes <trait-export.json>` emits
   Rust traits as Lean classes (`HaxLean/ClassEmit.lean`). The trait export is
   the hax frontend export of the crate that defines the traits; the traits the

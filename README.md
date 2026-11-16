@@ -138,9 +138,8 @@ typed pipeline.
 
 | Flag | Output |
 |------|--------|
-| `--emit-certified --hax` | Typed extraction: surface code plus post-pipeline `ImpExpr` literals, with hax JSON types preserved end-to-end. **The production path.** |
-| `--emit-json`            | Transformed `ImpExpr` AST as JSON (debug / inspection). |
-| `--emit-debug-meta`      | Debug metadata about hax types and struct layouts. |
+| `--emit-certified --hax` | Typed extraction: surface code plus post-pipeline `ImpExpr` literals, with hax JSON types preserved end-to-end. A run without `--python` needs both flags. |
+| `--python DUMP`          | The extraction module of a Python module of the subset, from its `py2json` dump. |
 
 ```bash
 haxpipeT --hax INPUT.json --emit-certified --name MyModule -o out.lean

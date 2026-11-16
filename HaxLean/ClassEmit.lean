@@ -6,7 +6,7 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.HaxAdapter
-public import HaxLean.PrettyPrint -- deprecated_module: ignore
+public import HaxLean.PrettyPrint
 
 /-!
 # Trait-to-class emission

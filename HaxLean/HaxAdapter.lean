@@ -1945,11 +1945,6 @@ def extractExprType (j : Json) : ImpType :=
 def extractExprWidth (j : Json) : Option String :=
   intTypeTag? (extractExprType j)
 
-/-- The tag (`castTag?`) of a hax `Cast` node, from the `ty` of its source and the
-    `ty` of the enclosing decorated node (the target type). -/
-def extractCastTag (srcJ outerJ : Json) : Option String :=
-  castTag? (extractExprType srcJ) (extractExprType outerJ)
-
 /-- Suffix an operator name with the width tag of its operand when the tag is
     known: the checked arithmetic operators `Add`, `Sub`, `Mul`, `Div`, `Rem`,
     whose overflow and division by zero depend on the operand type, and the
@@ -2087,108 +2082,18 @@ where
 
 /-! ## Expression mapping -/
 
-/-- Parse a hax literal. -/
-def parseLiteral (data : Json) : ImpExpr :=
-  -- Literal { lit: Spanned<LitKind>, neg: bool }
-  let neg := match data.getObjValAs? Bool "neg" with
-    | .ok true => true
-    | _ => false
-  let litKind := match data.getObjVal? "lit" with
-    | .ok spanned => match spanned.getObjVal? "node" with
-      | .ok n => n
-      | _ => spanned
-    | _ => data
-  if let .ok b := litKind.getObjValAs? Bool "Bool" then .lit (.bool b)
-  else if let .ok intData := litKind.getObjVal? "Int" then
-    -- Format 1: "Int": [n_string, suffix]
-    -- Format 2: "Int": {"Uint": [n_string, suffix]} or {"Int": [n_string, suffix]}
-    let nArr := match intData with
-      | .arr a => some a
-      | _ =>
-        let tryUint := intData.getObjVal? "Uint"
-        let tryInt := intData.getObjVal? "Int"
-        match (tryUint.toOption.orElse fun _ => tryInt.toOption) with
-        | some (.arr a) => some a
-        | _ => none
-    match nArr with
-    | some #[nJ, suffJ] =>
-      let n := match nJ.getStr? with
-        | .ok s => s.toInt?.getD 0
-        | _ => match nJ.getNat? with
-          | .ok n => n
-          | _ => 0
-      let val := if neg then -n else n
-      -- Parse suffix to determine width: "U8", "U16", {"Unsigned":"U8"}, etc.
-      let suffix := match suffJ with
-        | .str "Unsuffixed" => ""
-        | .str s => s
-        | _ =>
-          -- Try {"Unsigned": "U8"} format (lit expressions)
-          match suffJ.getObjVal? "Unsigned" with
-          | .ok (.str s) => "U" ++ s.replace "U" ""
-          | _ => match suffJ.getObjVal? "Signed" with
-            | .ok (.str s) => "I" ++ s.replace "I" ""
-            | _ => match suffJ.getObjVal? "Uint" with
-              | .ok (.str s) => s
-              | _ => match suffJ.getObjVal? "Int" with
-                | .ok (.str s) => "I" ++ s
-                | _ => ""
-      let nval := val.toNat
-      match suffix with
-      | "U8"  => .lit (.uintLit .w8 nval)
-      | "U16" => .lit (.uintLit .w16 nval)
-      | "U32" => .lit (.uintLit .w32 nval)
-      | "U64" => .lit (.uintLit .w64 nval)
-      | "U128" => .lit (.uintLit .w128 nval)
-      | "Usize" => .lit (.uintLit .wsize nval)
-      | _ => .lit (.int val)
-    | some #[nJ] =>
-      let n := match nJ.getStr? with
-        | .ok s => s.toInt?.getD 0
-        | _ => match nJ.getNat? with
-          | .ok n => n
-          | _ => 0
-      .lit (.int (if neg then -n else n))
-    | _ => .lit (.int 0)
-  else if let .ok bsData := litKind.getObjVal? "ByteStr" then
-    -- ByteStr: [[byte0, byte1, ...], "Cooked"]
-    match bsData with
-    | .arr #[.arr bytes, _] =>
-      let byteExprs : List ImpExpr := (bytes.toList.filterMap fun b =>
-        match b.getNat? with
-        | .ok n => some (ImpExpr.lit (.int n))
-        | _ => none)
-      .app "array_lit" byteExprs
-    | _ => .app "array_lit" []
-  else if let .ok _strData := litKind.getObjVal? "Str" then
-    -- Str: intentional opaque placeholder, see typed branch comment.
-    .app "str_opaque" []
-  else .app "literal" []  -- char, float, etc.
-
-/-- The bindings that destructure the tuple held by the variable `parent` by the
-    subpatterns `pats`, the first at component `i`. A variable is bound to its
-    projection (a name starting with `_` to `_`); a nested tuple pattern binds its
-    projection to the temporary `parent_i` and is destructured from it in turn;
-    any other subpattern binds its projection to `_`. -/
-def tupleDestructBinds (parent : String) : List ImpPat → Nat → List (String × ImpExpr)
-  | [], _ => []
-  | .varPat n :: ps, i =>
-    (if n.startsWith "_" then "_" else n, .proj (.var parent) i) ::
-      tupleDestructBinds parent ps (i + 1)
-  | .tuplePat qs :: ps, i =>
-    let t := parent ++ "_" ++ toString i
-    ((t, .proj (.var parent) i) :: tupleDestructBinds t qs 0) ++
-      tupleDestructBinds parent ps (i + 1)
-  | _ :: ps, i => ("_", .proj (.var parent) i) :: tupleDestructBinds parent ps (i + 1)
-
 /-- The type of component `i` of a tuple type; `.unknown` for any other type. -/
 def tupleComponentTy (ty : ImpType) (i : Nat) : ImpType :=
   match ty with
   | .tuple ts => ts.getD i .unknown
   | _ => .unknown
 
-/-- Typed `tupleDestructBinds`: `parentTy` is the type of `parent`; a temporary has
-    the type of its component, a projection has type `.unknown`. -/
+/-- The bindings that destructure the tuple held by the variable `parent`, of type
+    `parentTy`, by the subpatterns `pats`, the first at component `i`. A variable is
+    bound to its projection (a name starting with `_` to `_`); a nested tuple pattern
+    binds its projection to the temporary `parent_i`, of the type of its component,
+    and is destructured from it in turn; any other subpattern binds its projection
+    to `_`. A projection has type `.unknown`. -/
 def tTupleDestructBinds (parent : String) (parentTy : ImpType) :
     List ImpPat → Nat → List (String × TExpr)
   | [], _ => []
@@ -2229,27 +2134,13 @@ partial def structPatFields? (j : Json) : Option (List (String × Json)) := do
     let pj ← (fp.getObjVal? "pattern").toOption
     return (extractDefIdName fj, pj)
 
-/-- The bindings that destructure the struct held by the variable `parent` by the
-    field subpatterns `fields` (from `structPatFields?`). A variable is bound to the
-    field projection `.app ".f" [.var parent]` (a name starting with `_` to `_`); a
-    wildcard binds nothing; a nested tuple or struct pattern binds the projection to
-    the temporary `parent_f` and is destructured from it in turn; any other
-    subpattern binds the projection to `_`. -/
-partial def structDestructBinds (parent : String) (fields : List (String × Json)) :
-    List (String × ImpExpr) :=
-  fields.flatMap fun (f, pj) =>
-    let proj : ImpExpr := .app ("." ++ f) [.var parent]
-    let t := parent ++ "_" ++ f
-    match parseHaxPat pj with
-    | .varPat n => [(if n.startsWith "_" then "_" else n, proj)]
-    | .wildcard => []
-    | .tuplePat qs => (t, proj) :: tupleDestructBinds t qs 0
-    | _ => match structPatFields? pj with
-      | some fs => (t, proj) :: structDestructBinds t fs
-      | none => [("_", proj)]
-
-/-- Typed `structDestructBinds`: `parentTy` is the type of `parent`; a projection
-    has the type `ty` of its subpattern node. -/
+/-- The bindings that destructure the struct held by the variable `parent`, of type
+    `parentTy`, by the field subpatterns `fields` (from `structPatFields?`). A variable
+    is bound to the field projection `.app ".f" [.var parent]` (a name starting with
+    `_` to `_`); a wildcard binds nothing; a nested tuple or struct pattern binds the
+    projection to the temporary `parent_f` and is destructured from it in turn; any
+    other subpattern binds the projection to `_`. A projection has the type `ty` of
+    its subpattern node. -/
 partial def tStructDestructBinds (parent : String) (parentTy : ImpType)
     (fields : List (String × Json)) : List (String × TExpr) :=
   fields.flatMap fun (f, pj) =>
@@ -2263,21 +2154,6 @@ partial def tStructDestructBinds (parent : String) (parentTy : ImpType)
     | _ => match structPatFields? pj with
       | some fs => (t, proj) :: tStructDestructBinds t fTy fs
       | none => [("_", proj)]
-
-/-- Replace the deepest unitVal in a letBind chain with a continuation.
-    letBind a v1 (letBind b v2 unitVal) → letBind a v1 (letBind b v2 cont) -/
-def replaceDeepestUnit (e : ImpExpr) (cont : ImpExpr) : ImpExpr :=
-  match e with
-  | .letBind n v .unitVal => .letBind n v cont
-  | .letBind n v body => .letBind n v (replaceDeepestUnit body cont)
-  | _ => .seq e cont
-
-/-- Convert a list of statement expressions into nested seq/letBind. -/
-def stmtsToSeq (stmts : List ImpExpr) (tail : ImpExpr) : ImpExpr :=
-  match stmts with
-  | [] => tail
-  | [s] => replaceDeepestUnit s tail
-  | s :: rest => replaceDeepestUnit s (stmtsToSeq rest tail)
 
 /-- The parameter names of a hax `Closure` payload, in order: `some names` when every
     parameter with a pattern binds a variable or is a wildcard (named `_`) and at least one
@@ -2348,70 +2224,8 @@ def tryOperandOf? (cfTy retTy : ImpType) : Option TryOperand :=
     | _, _ => some (.result true)
   | _ => none
 
-/-- The type of the value of the first `Return` node of a hax JSON tree, in
-    depth-first order. -/
-partial def returnValueTy? (j : Json) : Option ImpType :=
-  match j.getObjVal? "Return" with
-  | .ok r =>
-    match r.getObjVal? "value" with
-    | .ok v =>
-      match v.getObjVal? "ty" with
-      | .ok t => some (parseHaxType t)
-      | .error _ => none
-    | .error _ => none
-  | .error _ =>
-    match j with
-    | .obj kvs => kvs.toList.findSome? fun (_, v) => returnValueTy? v
-    | .arr items => items.toList.findSome? returnValueTy?
-    | _ => none
-
-/-- The `match` on `c` that reads `c?`, from the arms of the exported `match` on
-    `Try::branch(c)`: a `Break(r)` arm returning `from_residual(r)` and a
-    `Continue(p)` arm with the body `b`. For an `Option` it is
-    `match c | some p => b | none => return None`; for a `Result` it is
-    `match c | ok p => b | err r => return Err(r')`, with `r' = from(r)` when the
-    error converts and `r' = r` otherwise. `none` when the arms have another
-    form. -/
-def tryMatch? (k : TryOperand) (c : ImpExpr) (arms : List (ImpPat × ImpExpr)) :
-    Option ImpExpr := do
-  guard (arms.length == 2)
-  let r ← arms.findSome? fun (p, b) =>
-    match p, b with
-    | .ctorPat "Break" [.varPat r], .earlyReturn (.app "from_residual" [.var r']) =>
-      if r == r' then some r else none
-    | _, _ => none
-  let (q, b) ← arms.findSome? fun (p, b) =>
-    match p with
-    | .ctorPat "Continue" [q] => some (q, b)
-    | _ => none
-  match k with
-  | .option =>
-    pure (.match_ c [(.somePat q, b), (.nonePat, .earlyReturn (.app "None" []))])
-  | .result convert =>
-    let err : ImpExpr := if convert then .app "from" [.var r] else .var r
-    pure (.match_ c [(.okPat q, b), (.errPat (.varPat r), .earlyReturn (.app "Err" [err]))])
-
 /-- The prefix of the names that bind a term moved in front of an application. -/
 def tryBindPrefix : String := "_try_"
-
-/-- Whether a term is a `match` with an arm that returns from the function. -/
-def isEarlyExitMatch : ImpExpr → Bool
-  | .match_ _ arms => arms.any fun (_, b) => (b matches .earlyReturn _)
-  | _ => false
-
-/-- The leading `let`s of a term whose names have the prefix `tryBindPrefix`,
-    and the term under them. -/
-def peelTryLets : ImpExpr → List (String × ImpExpr) × ImpExpr
-  | .letBind n v b =>
-    if n.startsWith tryBindPrefix then
-      let (bs, e) := peelTryLets b
-      ((n, v) :: bs, e)
-    else ([], .letBind n v b)
-  | e => ([], e)
-
-/-- The term `e` under the `let`s `bs`, the first one outermost. -/
-def wrapTryLets (bs : List (String × ImpExpr)) (e : ImpExpr) : ImpExpr :=
-  bs.foldr (fun (n, v) acc => .letBind n v acc) e
 
 /-- `base` when it is not in `avoid`, otherwise `base_k` for the least `k ≥ 1`
     with `base_k` not in `avoid`. -/
@@ -2430,78 +2244,15 @@ def isAtomicArg : ImpExpr → Bool
   | .lit _ | .var _ | .unitVal => true
   | _ => false
 
-/-- The application `f args` with its early-exit arguments in front of it. The
-    `let`s that `peelTryLets` finds at the head of an argument move in front of
-    the application; an argument that `isEarlyExitMatch` is bound by a `let` in
-    front of it and read by name. Every argument before the last such argument
-    that is not atomic (`isAtomicArg`), or is a variable with the prefix
-    `tryBindPrefix`, is bound in front as well, so that the arguments keep their
-    left-to-right order of evaluation. A new name is `_try_<v>` for a `match` on
-    the variable `v` and `_try_arg<i>` for argument `i` otherwise, made distinct
-    from the free variables of the application and the names moved in front
-    (`freshTryName`). -/
-def floatEarlyExitArgs (f : String) (args : List ImpExpr) : ImpExpr :=
-  let peeled := args.map peelTryLets
-  let lifted := peeled.zipIdx.filter fun ((bs, a), _) => !bs.isEmpty || isEarlyExitMatch a
-  match lifted.getLast? with
-  | none => .app f args
-  | some (_, last) =>
-    let avoid0 := freeVars (.app f args) ++ peeled.flatMap fun (bs, _) => bs.map (·.1)
-    let step (acc : List (String × ImpExpr) × List ImpExpr × List String)
-        (x : (List (String × ImpExpr) × ImpExpr) × Nat) :
-        List (String × ImpExpr) × List ImpExpr × List String :=
-      let (binds, out, avoid) := acc
-      let ((bs, a), i) := x
-      if i > last then (binds, out ++ [a], avoid)
-      else
-        let binds := binds ++ bs
-        let prefixedVar := match a with
-          | .var v => v.startsWith tryBindPrefix
-          | _ => false
-        if isEarlyExitMatch a || (i < last && (!isAtomicArg a || prefixedVar)) then
-          let base := match a with
-            | .match_ (.var v) _ => s!"{tryBindPrefix}{v}"
-            | _ => s!"{tryBindPrefix}arg{i}"
-          let n := freshTryName avoid base
-          (binds ++ [(n, a)], out ++ [.var n], n :: avoid)
-        else (binds, out ++ [a], avoid)
-    let (binds, out, _) := peeled.zipIdx.foldl step ([], [], avoid0)
-    wrapTryLets binds (.app f out)
-
-/-- The `match` of `scrut` with `arms`, the `let`s at the head of `scrut` with
-    the prefix `tryBindPrefix` moved in front of it when no arm reads their
-    names. -/
-def matchLiftingTryLets (scrut : ImpExpr) (arms : List (ImpPat × ImpExpr)) : ImpExpr :=
-  let (bs, s) := peelTryLets scrut
-  let armVars := arms.flatMap fun (_, b) => freeVars b
-  if bs.isEmpty || bs.any (fun (n, _) => armVars.contains n) then .match_ scrut arms
-  else wrapTryLets bs (.match_ s arms)
-
-/-- The `match` the adapter reads from an exported `match` on `scrut` with the
-    arms `arms`, `armsJ` being the JSON of the arms and `scrutTy` the type of
-    `scrut`: a `?` on `c` (`scrut = branch(c)`) is `tryMatch?`, and the `let`s
-    with the prefix `tryBindPrefix` at the head of `scrut` move in front of the
-    `match` (`matchLiftingTryLets`). -/
-def readMatch (scrut : ImpExpr) (scrutTy : ImpType) (armsJ : List Json)
-    (arms : List (ImpPat × ImpExpr)) : ImpExpr :=
-  let (bs, s) := peelTryLets scrut
-  let armVars := arms.flatMap fun (_, b) => freeVars b
-  let tryForm? : Option ImpExpr := match s with
-    | .app "branch" [c] =>
-      (tryOperandOf? scrutTy ((returnValueTy? (.arr armsJ.toArray)).getD .unknown)).bind
-        fun k => tryMatch? k c arms
-    | _ => none
-  match tryForm? with
-  | some m =>
-    if bs.any (fun (n, _) => armVars.contains n) then .match_ scrut arms
-    else wrapTryLets bs m
-  | none => matchLiftingTryLets scrut arms
-
-/-! The same for `TExpr`. -/
-
-/-- `tryMatch?` on `TExpr`. The `None` and `Err(r')` values have the type of
-    `from_residual(r)`; `r` has the error type of its residual type and `from(r)`
-    the error type the function returns. -/
+/-- The `match` on `c` that reads `c?`, from the arms of the exported `match` on
+    `Try::branch(c)`: a `Break(r)` arm returning `from_residual(r)` and a
+    `Continue(p)` arm with the body `b`. For an `Option` it is
+    `match c | some p => b | none => return None`; for a `Result` it is
+    `match c | ok p => b | err r => return Err(r')`, with `r' = from(r)` when the
+    error converts and `r' = r` otherwise. `none` when the arms have another
+    form. The `None` and `Err(r')` values have the type of `from_residual(r)`; `r`
+    has the error type of its residual type and `from(r)` the error type the
+    function returns. -/
 def tTryMatch? (k : TryOperand) (c : TExpr) (arms : List (ImpPat × TExpr)) :
     Option TExprKind := do
   guard (arms.length == 2)
@@ -2526,12 +2277,13 @@ def tTryMatch? (k : TryOperand) (c : TExpr) (arms : List (ImpPat × TExpr)) :
     pure (.match_ c [(.okPat q, b),
       (.errPat (.varPat r), .mk (.earlyReturn (.mk (.app "Err" [err]) fTy)) bTy)])
 
-/-- `isEarlyExitMatch` on `TExpr`. -/
+/-- Whether a term is a `match` with an arm that returns from the function. -/
 def tIsEarlyExitMatch : TExpr → Bool
   | .mk (.match_ _ arms) _ => arms.any fun (_, b) => (b.kind matches .earlyReturn _)
   | _ => false
 
-/-- `peelTryLets` on `TExpr`. -/
+/-- The leading `let`s of a term whose names have the prefix `tryBindPrefix`,
+    and the term under them. -/
 def tPeelTryLets : TExpr → List (String × TExpr) × TExpr
   | .mk (.letBind n v b) ty =>
     if n.startsWith tryBindPrefix then
@@ -2540,11 +2292,21 @@ def tPeelTryLets : TExpr → List (String × TExpr) × TExpr
     else ([], .mk (.letBind n v b) ty)
   | e => ([], e)
 
-/-- `wrapTryLets` on `TExpr`: each `let` has the type of `e`. -/
+/-- The term `e` under the `let`s `bs`, the first one outermost; each `let` has the
+    type of `e`. -/
 def tWrapTryLets (bs : List (String × TExpr)) (e : TExpr) : TExpr :=
   bs.foldr (fun (n, v) acc => .mk (.letBind n v acc) e.ty) e
 
-/-- `floatEarlyExitArgs` on `TExpr`, for an application of type `ty`. -/
+/-- The application `f args`, of type `ty`, with its early-exit arguments in front
+    of it. The `let`s that `tPeelTryLets` finds at the head of an argument move in
+    front of the application; an argument that `tIsEarlyExitMatch` is bound by a
+    `let` in front of it and read by name. Every argument before the last such
+    argument that is not atomic (`isAtomicArg`), or is a variable with the prefix
+    `tryBindPrefix`, is bound in front as well, so that the arguments keep their
+    left-to-right order of evaluation. A new name is `_try_<v>` for a `match` on
+    the variable `v` and `_try_arg<i>` for argument `i` otherwise, made distinct
+    from the free variables of the application and the names moved in front
+    (`freshTryName`). -/
 def tFloatEarlyExitArgs (f : String) (args : List TExpr) (ty : ImpType) : TExpr :=
   let peeled := args.map tPeelTryLets
   let lifted := peeled.zipIdx.filter fun ((bs, a), _) => !bs.isEmpty || tIsEarlyExitMatch a
@@ -2591,8 +2353,11 @@ def tFloatEarlyExitOperands (xs : List TExpr) (ty : ImpType)
 def tHasEarlyExit (e : TExpr) : Bool :=
   tIsEarlyExitMatch e || !(tPeelTryLets e).1.isEmpty
 
-/-- `readMatch` on `TExpr`, for a `match` of type `ty`: the operand of a `?` is
-    read from the type of `branch(c)` and the type of `from_residual(r)`. -/
+/-- The `match`, of type `ty`, the adapter reads from an exported `match` on
+    `scrut` with the arms `arms`: a `?` on `c` (`scrut = branch(c)`) is
+    `tTryMatch?`, its operand read from the type of `branch(c)` and the type of
+    `from_residual(r)`, and the `let`s with the prefix `tryBindPrefix` at the head
+    of `scrut` move in front of the `match` when no arm reads their names. -/
 def tReadMatch (scrut : TExpr) (arms : List (ImpPat × TExpr)) (ty : ImpType) : TExpr :=
   let (bs, s) := tPeelTryLets scrut
   let armVars := arms.flatMap fun (_, b) => freeVars b.erase
@@ -2609,591 +2374,6 @@ def tReadMatch (scrut : TExpr) (arms : List (ImpPat × TExpr)) (ty : ImpType) : 
   else tWrapTryLets bs m
 
 open Hax.JsonSize
-
-/-! ### `parseHaxExpr` and friends (mutually recursive on JSON sub-tree). -/
-
-mutual
-
-/-- Map hax's `Decorated<ExprKind>` JSON to our `ImpExpr`.
-    Strips metadata (span, hir_id, attributes), keeping only the expression and type. -/
-def parseHaxExpr (j : Json) : Except String ImpExpr := do
-  match h_c : j.getObjVal? "contents" with
-  | .ok contents => parseExprKind j contents
-  | .error e => throw e
-termination_by jsonSize j
-decreasing_by exact getObjVal?_decreases h_c
-
-/-- Parse a hax ExprKind (externally tagged enum).
-    `outerJ` is the full Decorated expression (for extracting `ty`).
-    `j` is the `contents` (ExprKind). -/
-def parseExprKind (outerJ j : Json) : Except String ImpExpr := do
-  -- Unit variants come as plain strings
-  match j.getStr? with
-  | .ok "Todo" => return .app "hax_unsupported_Todo" []  -- will cause Lean compile error
-  | _ => pure ()
-
-  -- Struct variants: {"VariantName": {fields...}}
-  match h_VarRef : j.getObjVal? "VarRef" with
-  | .ok data =>
-    let name := match data.getObjVal? "id" with
-      | .ok id => extractLocalIdentName id
-      | _ => "unknown_var"
-    return .var name
-  | .error _ =>
-  -- UpvarRef: a closure-captured variable. Structure:
-  -- `{"UpvarRef": {"var_hir_id": {"name": "x", "id": ...}}}`.
-  -- The OCaml `cargo hax into lean` backend treats this identically
-  -- to `VarRef` — the captured variable is lexically in scope at the
-  -- closure body's emission point, so a plain `.var name` reference
-  -- resolves correctly (see Libcrux_specs_hax aes128_gcm_encrypt:
-  -- `(fun block => Libcrux_specs_hax.Aes.aes128_encrypt k block)`
-  -- where `k` is the captured `let k := *key`).
-  match h_UpvarRef : j.getObjVal? "UpvarRef" with
-  | .ok data =>
-    let name := match data.getObjVal? "var_hir_id" with
-      | .ok h => extractLocalIdentName h
-      | _ => "unknown_upvar"
-    return .var name
-  | .error _ =>
-  match h_GlobalName : j.getObjVal? "GlobalName" with
-  | .ok data =>
-    let name := match data.getObjVal? "item" with
-      | .ok item => extractItemDefIdName item "global"
-      | _ => "global"
-    return .var name
-  | .error _ =>
-  match h_Literal : j.getObjVal? "Literal" with
-  | .ok data => return parseLiteral data
-  | .error _ =>
-  match h_If : j.getObjVal? "If" with
-  | .ok data =>
-    match h_If_cond : data.getObjVal? "cond" with
-    | .ok condJ =>
-      let cond ← parseHaxExpr condJ
-      match h_If_then : data.getObjVal? "then" with
-      | .ok thnJ =>
-        let thn ← parseHaxExpr thnJ
-        let els ← match h_If_else : data.getObjVal? "else_opt" with
-          | .ok (.null) => pure .unitVal
-          | .ok elsJ => parseHaxExpr elsJ
-          | _ => pure .unitVal
-        return .ifThenElse cond thn els
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_Call : j.getObjVal? "Call" with
-  | .ok data =>
-    let funName := match data.getObjVal? "fun" with
-      | .ok fj => extractCallName fj
-      | _ => "unknown_fn"
-    match h_Call_args : data.getObjValAs? (Array Json) "args" with
-    | .ok argsJ =>
-      let args ← argsJ.toList.attach.mapM (fun ⟨a, ha⟩ => parseHaxExpr a)
-      return floatEarlyExitArgs funName args
-    | .error e => throw e
-  | .error _ =>
-  match h_Let : j.getObjVal? "Let" with
-  | .ok data =>
-    match h_Let_expr : data.getObjVal? "expr" with
-    | .ok rhsJ =>
-      let rhs ← parseHaxExpr rhsJ
-      let pat := match data.getObjVal? "pat" with
-        | .ok p => parseHaxPat p
-        | _ => .wildcard
-      -- Handle tuple destructuring: let (a, b) = rhs → let _tup := rhs; let a := _tup.1; let b := _tup.2
-      match pat with
-      | .tuplePat pats =>
-        let tmpName := "_tup"
-        let bindings := tupleDestructBinds tmpName pats 0
-        let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
-        return .letBind tmpName rhs inner
-      | .varPat n =>
-        return .letBind n rhs .unitVal
-      | _ =>
-        -- Struct destructuring: let S { x, .. } = rhs → let _st := rhs; let x := _st.x
-        match data.getObjVal? "pat" |>.toOption |>.bind structPatFields? with
-        | some fields =>
-          let bindings := structDestructBinds "_st" fields
-          let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
-          return .letBind "_st" rhs inner
-        | none =>
-          return .letBind "_let" rhs .unitVal
-    | .error e => throw e
-  | .error _ =>
-  match h_Block : j.getObjVal? "Block" with
-  | .ok data =>
-    -- Block: {stmts: [...], expr: Option<Expr>, ...}
-    -- #[serde(flatten)] means Block fields are inlined into the ExprKind
-    let stmts ← match h_Block_stmts : data.getObjValAs? (Array Json) "stmts" with
-      | .ok ss => ss.toList.attach.mapM (fun ⟨s, hs⟩ => parseStmt s)
-      | _ => pure []
-    let tail ← match h_Block_expr : data.getObjVal? "expr" with
-      | .ok (.null) => pure .unitVal
-      | .ok e => parseHaxExpr e
-      | _ => pure .unitVal
-    return stmtsToSeq stmts tail
-  | .error _ =>
-  match h_Match : j.getObjVal? "Match" with
-  | .ok data =>
-    match h_Match_scrut : data.getObjVal? "scrutinee" with
-    | .ok scrutJ =>
-      let scrut ← parseHaxExpr scrutJ
-      match h_Match_arms : data.getObjValAs? (Array Json) "arms" with
-      | .ok armsJ =>
-        let arms ← armsJ.toList.attach.mapM (fun ⟨a, ha⟩ => parseArm a)
-        let scrutTy := match scrutJ.getObjVal? "ty" with
-          | .ok t => parseHaxType t
-          | .error _ => .unknown
-        return readMatch scrut scrutTy armsJ.toList arms
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_Tuple : j.getObjVal? "Tuple" with
-  | .ok data =>
-    match h_Tuple_fields : data.getObjValAs? (Array Json) "fields" with
-    | .ok fieldsJ =>
-      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, hf⟩ => parseHaxExpr f)
-      if fields.isEmpty then return .unitVal
-      return .tuple fields
-    | .error e => throw e
-  | .error _ =>
-  match h_Array : j.getObjVal? "Array" with
-  | .ok data =>
-    match h_Array_fields : data.getObjValAs? (Array Json) "fields" with
-    | .ok fieldsJ =>
-      let fields ← fieldsJ.toList.attach.mapM (fun ⟨f, hf⟩ => parseHaxExpr f)
-      return .app "array_lit" fields
-    | .error e => throw e
-  | .error _ =>
-  match h_Assign : j.getObjVal? "Assign" with
-  | .ok data =>
-    match h_Assign_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      match h_Assign_rhs : data.getObjVal? "rhs" with
-      | .ok rhsJ =>
-        let rhs ← parseHaxExpr rhsJ
-        -- Strip deref wrappers from LHS (references erased by dropReferences)
-        let rec stripD : ImpExpr → ImpExpr
-          | .deref e => stripD e
-          | e => e
-        let lhs' : ImpExpr := stripD lhs
-        let getVarName : ImpExpr → String
-          | .var n => n
-          | .deref (.var n) => n
-          | _ => "_assign"
-        -- `index` and `index_mut` are both element-access on the LHS of an
-        -- assignment (the latter from a `&mut`-indexed target, e.g. `arr[i] = v`
-        -- where `arr` is `&mut`). Normalise both to the same writeback form.
-        let isIndex (f : String) : Bool := f == "index" || f == "index_mut"
-        match lhs' with
-        | .var n => return .assign n rhs
-        -- Nested array element assignment: arr[i][j] = v
-        -- → assign arr (array_update arr i (array_update (index arr i) j v))
-        | .app outer [.app inner [outerArr, outerIdx], innerIdx] =>
-          if isIndex outer && isIndex inner then
-            let outerName := getVarName (stripD outerArr)
-            let innerUpdate := ImpExpr.app "array_update"
-              [.app "index" [outerArr, outerIdx], innerIdx, rhs]
-            return .assign outerName (.app "array_update" [outerArr, outerIdx, innerUpdate])
-          else return .assign "_assign" rhs
-        -- Array element assignment: arr[i] = v → assign arr (array_update arr i v)
-        | .app f [arr, idx] =>
-          if isIndex f then
-            let arrName := getVarName (stripD arr)
-            return .assign arrName (.app "array_update" [arr, idx, rhs])
-          else return .assign "_assign" rhs
-        | _ => return .assign "_assign" rhs
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_AssignOp : j.getObjVal? "AssignOp" with
-  | .ok data =>
-    let rawOp := match data.getObjVal? "op" with
-      | .ok opJ => binOpName opJ
-      | _ => "op"
-    -- Strip "Assign" suffix to get base op (BitXorAssign → BitXor)
-    let op := if rawOp.endsWith "Assign" then (rawOp.dropEnd 6).toString else rawOp
-    match h_AO_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      match h_AO_rhs : data.getObjVal? "rhs" with
-      | .ok rhsJ =>
-        let rhs ← parseHaxExpr rhsJ
-        -- Strip deref wrappers from LHS
-        let rec stripD2 : ImpExpr → ImpExpr
-          | .deref e => stripD2 e
-          | e => e
-        let lhs' : ImpExpr := stripD2 lhs
-        -- `index` / `index_mut` both denote element access; a `&mut`-indexed
-        -- compound-assign target (`arr[i] op= v`) arrives as `index_mut`.
-        let isIndexOp (f : String) : Bool := f == "index" || f == "index_mut"
-        match lhs' with
-        | .var n => return .assign n (.app op [lhs, rhs])
-        | .app f [arr, idx] =>
-          if isIndexOp f then
-            -- arr[i] op= v → assign arr (array_update arr idx (op(arr[i], v)))
-            -- The element-read inside `op` uses plain `index` (the rendered
-            -- `index_mut` would otherwise force a monomorphic element type).
-            let arrName := match stripD2 arr with
-              | .var n => n | .deref (.var n) => n | _ => "_assign"
-            let elemRead := ImpExpr.app "index" [arr, idx]
-            return .assign arrName (.app "array_update" [arr, idx, .app op [elemRead, rhs]])
-          else return .assign "_assign" (.app op [lhs, rhs])
-        | _ => return .assign "_assign" (.app op [lhs, rhs])
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_Borrow : j.getObjVal? "Borrow" with
-  | .ok data =>
-    match h_Borrow_arg : data.getObjVal? "arg" with
-    | .ok argJ =>
-      let arg ← parseHaxExpr argJ
-      return .borrow arg
-    | .error e => throw e
-  | .error _ =>
-  match h_Deref : j.getObjVal? "Deref" with
-  | .ok data =>
-    match h_Deref_arg : data.getObjVal? "arg" with
-    | .ok argJ =>
-      let arg ← parseHaxExpr argJ
-      return .deref arg
-    | .error e => throw e
-  | .error _ =>
-  match h_Loop : j.getObjVal? "Loop" with
-  | .ok data =>
-    match h_Loop_body : data.getObjVal? "body" with
-    | .ok bodyJ =>
-      let body ← parseHaxExpr bodyJ
-      -- hax Loop is a general loop (while true), not a for-range
-      return .whileLoop (.lit (.bool true)) body
-    | .error e => throw e
-  | .error _ =>
-  match h_Break : j.getObjVal? "Break" with
-  | .ok data =>
-    let value ← match h_Break_v : data.getObjVal? "value" with
-      | .ok (.null) => pure none
-      | .ok v => return .break_ (some (← parseHaxExpr v))
-      | _ => pure none
-    return .break_ value
-  | .error _ =>
-  match h_Continue : j.getObjVal? "Continue" with
-  | .ok _data => return .continue_
-  | .error _ =>
-  match h_Return : j.getObjVal? "Return" with
-  | .ok data =>
-    let value ← match h_Return_v : data.getObjVal? "value" with
-      | .ok (.null) => pure .unitVal
-      | .ok v => parseHaxExpr v
-      | _ => pure .unitVal
-    return .earlyReturn value
-  | .error _ =>
-  match h_Binary : j.getObjVal? "Binary" with
-  | .ok data =>
-    let op := match data.getObjVal? "op" with
-      | .ok opJ => binOpName opJ
-      | _ => "binop"
-    match h_Bin_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      match h_Bin_rhs : data.getObjVal? "rhs" with
-      | .ok rhsJ =>
-        let rhs ← parseHaxExpr rhsJ
-        -- Annotate width-sensitive ops with the bit width of the lhs operand
-        let opAnnotated := annotateOpWidth op (extractExprWidth lhsJ)
-        return .app opAnnotated [lhs, rhs]
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_Logical : j.getObjVal? "LogicalOp" with
-  | .ok data =>
-    let op := match data.getObjVal? "op" with
-      | .ok (.str "And") => "&&"
-      | .ok (.str "Or") => "||"
-      | _ => "logical_op"
-    match h_LO_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      match h_LO_rhs : data.getObjVal? "rhs" with
-      | .ok rhsJ =>
-        let rhs ← parseHaxExpr rhsJ
-        return .app op [lhs, rhs]
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_Unary : j.getObjVal? "Unary" with
-  | .ok data =>
-    let op := match data.getObjVal? "op" with
-      | .ok opJ => unOpName opJ
-      | _ => "unop"
-    match h_Un_arg : data.getObjVal? "arg" with
-    | .ok argJ =>
-      let arg ← parseHaxExpr argJ
-      let opAnnotated := annotateOpWidth op (extractExprWidth argJ)
-      return .app opAnnotated [arg]
-    | .error e => throw e
-  | .error _ =>
-  match h_Field : j.getObjVal? "Field" with
-  | .ok data =>
-    match h_Field_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      let fieldName := match data.getObjVal? "field" with
-        | .ok fj => extractDefIdName fj
-        | _ => "field"
-      return .app ("." ++ fieldName) [lhs]
-    | .error e => throw e
-  | .error _ =>
-  match h_TF : j.getObjVal? "TupleField" with
-  | .ok data =>
-    match h_TF_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      let idx := match data.getObjValAs? Nat "field" with
-        | .ok n => n
-        | _ => 0
-      return .proj lhs idx
-    | .error e => throw e
-  | .error _ =>
-  match h_Index : j.getObjVal? "Index" with
-  | .ok data =>
-    match h_Idx_lhs : data.getObjVal? "lhs" with
-    | .ok lhsJ =>
-      let lhs ← parseHaxExpr lhsJ
-      match h_Idx_idx : data.getObjVal? "index" with
-      | .ok indexJ =>
-        let index ← parseHaxExpr indexJ
-        return .app "index" [lhs, index]
-      | .error e => throw e
-    | .error e => throw e
-  | .error _ =>
-  match h_Cast : j.getObjVal? "Cast" with
-  | .ok data =>
-    -- Cast: annotate with the cast tag of the source type and the outer
-    -- expression's ty (the target type), e.g. `x as u8` → app "cast#8" [x],
-    -- `x as i32` → app "cast#i32" [x], `(x : i64) as u64` → app "cast#u64" [x].
-    match h_Cast_src : data.getObjVal? "source" with
-    | .ok srcJ =>
-      let source ← parseHaxExpr srcJ
-      let targetWidth := extractCastTag srcJ outerJ
-      match targetWidth with
-      | some w => return .app s!"cast#{w}" [source]
-      | none => return .app "cast" [source]
-    | .error e => throw e
-  | .error _ =>
-  match h_Use : j.getObjVal? "Use" with
-  | .ok data =>
-    match h_Use_src : data.getObjVal? "source" with
-    | .ok srcJ => parseHaxExpr srcJ
-    | .error e => throw e
-  | .error _ =>
-  match h_NTA : j.getObjVal? "NeverToAny" with
-  | .ok data =>
-    match h_NTA_src : data.getObjVal? "source" with
-    | .ok srcJ => parseHaxExpr srcJ
-    | .error e => throw e
-  | .error _ =>
-  match h_Box : j.getObjVal? "Box" with
-  | .ok data =>
-    match h_Box_v : data.getObjVal? "value" with
-    | .ok vJ => parseHaxExpr vJ
-    | .error e => throw e
-  | .error _ =>
-  match h_Adt : j.getObjVal? "Adt" with
-  | .ok data => parseAdtExpr data
-  | .error _ =>
-  match h_Closure : j.getObjVal? "Closure" with
-  | .ok data =>
-    -- A closure with named parameters is a `.lam`; the capture list is not kept.
-    match h_Cl_body : data.getObjVal? "body" with
-    | .ok bodyJ =>
-      let body ← parseHaxExpr bodyJ
-      match closureParams? data with
-      | some names => pure (.lam names body)
-      | none => pure body
-    | .error e => throw e
-  | .error _ =>
-  match h_Repeat : j.getObjVal? "Repeat" with
-  | .ok data =>
-    match h_Rpt_v : data.getObjVal? "value" with
-    | .ok vJ =>
-      let value ← parseHaxExpr vJ
-      let count ← match h_Rpt_c : data.getObjVal? "count" with
-        | .ok countJ => parseHaxExpr countJ
-        | _ => pure (.lit (.int 0))
-      return .app "repeat" [value, count]
-    | .error e => throw e
-  | .error _ =>
-  match h_PTA : j.getObjVal? "PlaceTypeAscription" with
-  | .ok data =>
-    match h_PTA_src : data.getObjVal? "source" with
-    | .ok srcJ => parseHaxExpr srcJ
-    | .error e => throw e
-  | .error _ =>
-  match h_VTA : j.getObjVal? "ValueTypeAscription" with
-  | .ok data =>
-    match h_VTA_src : data.getObjVal? "source" with
-    | .ok srcJ => parseHaxExpr srcJ
-    | .error e => throw e
-  | .error _ =>
-  match h_PC : j.getObjVal? "PointerCoercion" with
-  | .ok data =>
-    match h_PC_src : data.getObjVal? "source" with
-    | .ok srcJ => parseHaxExpr srcJ
-    | .error e => throw e
-  | .error _ =>
-  match h_CB : j.getObjVal? "ConstBlock" with
-  | .ok _data => return .app "const_block" []
-  | .error _ =>
-  match h_NC : j.getObjVal? "NamedConst" with
-  | .ok data =>
-    let name := match data.getObjVal? "item" with
-      | .ok item => extractItemDefIdName item "const"
-      | _ => "const"
-    return .var name
-  | .error _ =>
-  match h_CP : j.getObjVal? "ConstParam" with
-  | .ok _data => return .var "const_param"
-  | .error _ =>
-  match h_CR : j.getObjVal? "ConstRef" with
-  | .ok data =>
-    let name := match data.getObjVal? "id" with
-      | .ok id => match id.getObjValAs? String "name" with
-        | .ok n => n
-        | _ => "const_ref"
-      | _ => "const_ref"
-    return .var name
-  | .error _ =>
-  match h_SR : j.getObjVal? "StaticRef" with
-  | .ok data =>
-    let name := match data.getObjVal? "def_id" with
-      | .ok defId => extractDefIdName defId
-      | _ => "static"
-    return .var name
-  | .error _ =>
-  match h_Yield : j.getObjVal? "Yield" with
-  | .ok data =>
-    match h_Yield_v : data.getObjVal? "value" with
-    | .ok vJ =>
-      let value ← parseHaxExpr vJ
-      return .app "yield" [value]
-    | .error e => throw e
-  | .error _ =>
-  match h_Todo : j.getObjVal? "Todo" with
-  | .ok s =>
-    let msg := match s with
-      | .str m => m
-      | _ => "todo"
-    return .app ("todo:" ++ msg) []
-  | .error _ =>
-    throw s!"unknown hax ExprKind: {j.pretty}"
-termination_by jsonSize j
-decreasing_by
-  all_goals first
-    | exact getObjVal?_chain_decreases ‹_› ‹_›
-    | exact getObjVal?_decreases ‹_›
-    | (have ha := Array.mem_toList_iff.mp ‹_ ∈ Array.toList _›
-       exact Nat.lt_trans
-         (getObjValAs?_arr_mem_decreases ‹_› ha)
-         (getObjVal?_decreases ‹_›))
-
-/-- Parse a hax Stmt (from Block). -/
-def parseStmt (j : Json) : Except String ImpExpr := do
-  match h_kind : j.getObjVal? "kind" with
-  | .ok kind =>
-    match h_Expr : kind.getObjVal? "Expr" with
-    | .ok data =>
-      match h_E_e : data.getObjVal? "expr" with
-      | .ok e => parseHaxExpr e
-      | _ => return .unitVal
-    | .error _ =>
-    match h_Let : kind.getObjVal? "Let" with
-    | .ok data =>
-      let pat := match data.getObjVal? "pattern" with
-        | .ok p => parseHaxPat p
-        | _ => .wildcard
-      let init ← match h_init : data.getObjVal? "initializer" with
-        | .ok (.null) => pure .unitVal
-        | .ok e => parseHaxExpr e
-        | _ => pure .unitVal
-      -- The `let`s that `floatEarlyExitArgs` put at the head of the initializer
-      -- go in front of the statement.
-      let (tryBinds, init) := peelTryLets init
-      -- Handle tuple destructuring: let (a, b) = rhs → let _tup := rhs; let a := _tup.1; let b := _tup.2
-      -- Uses nested letBind so stmtsToSeq can connect the tail properly.
-      let stmt : ImpExpr := match pat with
-        | .tuplePat pats =>
-          let tmpName := "_tup"
-          let bindings := tupleDestructBinds tmpName pats 0
-          let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
-          .letBind tmpName init inner
-        | .varPat n =>
-          .letBind n init .unitVal  -- body filled in by stmtsToSeq
-        | _ =>
-          -- Struct destructuring: let S { x, .. } = init → let _st := init; let x := _st.x
-          match data.getObjVal? "pattern" |>.toOption |>.bind structPatFields? with
-          | some fields =>
-            let bindings := structDestructBinds "_st" fields
-            let inner := bindings.foldr (fun (n, proj) acc => .letBind n proj acc) .unitVal
-            .letBind "_st" init inner
-          | none =>
-            .letBind "_let" init .unitVal
-      return wrapTryLets tryBinds stmt
-    | .error _ => return .unitVal
-  | .error _ => return .unitVal
-termination_by jsonSize j
-decreasing_by
-  all_goals first
-    | (-- 3-level chain: j → kind → data → e (via h_kind, h_Let, h_init)
-       exact Nat.lt_trans (getObjVal?_decreases h_init)
-              (Nat.lt_trans (getObjVal?_decreases h_Let)
-                            (getObjVal?_decreases h_kind)))
-    | (-- 2-level chain
-       exact Nat.lt_trans (getObjVal?_decreases h_E_e)
-                          (Nat.lt_trans (getObjVal?_decreases h_Expr)
-                                        (getObjVal?_decreases h_kind)))
-
-/-- Parse a hax Arm (from Match). -/
-def parseArm (j : Json) : Except String (ImpPat × ImpExpr) := do
-  let pat := match j.getObjVal? "pattern" with
-    | .ok p => parseHaxPat p
-    | _ => .wildcard
-  let body ← match h_body : j.getObjVal? "body" with
-    | .ok b => parseHaxExpr b
-    | _ => pure .unitVal
-  return (pat, body)
-termination_by jsonSize j
-decreasing_by exact getObjVal?_decreases ‹_›
-
-/-- Parse a hax AdtExpr (struct/enum construction). -/
-def parseAdtExpr (j : Json) : Except String ImpExpr := do
-  -- hax JSON: info.variant is a DefId, info.type_namespace is a DefId
-  let name := match j.getObjVal? "info" with
-    | .ok info => match info.getObjVal? "variant" with
-      | .ok variantDefId => extractDefIdName variantDefId
-      | _ => match info.getObjVal? "type_namespace" with
-        | .ok nsDefId => extractDefIdName nsDefId
-        | _ => match info.getObjValAs? String "variant_name" with
-          | .ok n => n
-          | _ => "Adt"
-    | _ => "Adt"
-  let fields ← match h_flds : j.getObjValAs? (Array Json) "fields" with
-    | .ok fs => fs.toList.attach.mapM fun ⟨fj, hf⟩ =>
-      match h_v : fj.getObjVal? "value" with
-      | .ok v => parseHaxExpr v
-      | _ => pure .unitVal
-    | _ => pure []
-  return .app name fields
-termination_by jsonSize j
-decreasing_by
-  all_goals first
-    | (have ha := Array.mem_toList_iff.mp ‹_ ∈ Array.toList _›
-       exact Nat.lt_trans
-         (getObjVal?_decreases ‹_›)
-         (getObjValAs?_arr_mem_decreases ‹_› ha))
-    | exact getObjVal?_decreases ‹_›
-
-end -- mutual
 
 /-! ## For-Loop Reconstruction
 
@@ -3451,51 +2631,6 @@ def positionsPats (elems : List (ImpExpr × Bool)) (withIndex : Bool) (p : ImpPa
     pure (none, [a, b])
   | _, _, _ => none
 
-/-- The write-back `a := array_update a idx x` of the element variable `x` of an
-    `iter_mut` loop to position `idx` of the collection variable `a`. -/
-def iterMutStore (x a idx : String) : ImpExpr :=
-  .assign a (.app "array_update" [.var a, .var idx, .var x])
-
-/-- The body `e` of an `iter_mut` loop with every write of the element variable
-    `x` followed by its write-back `a := array_update a idx x` to position `idx`
-    of the collection variable `a`. A write is an `assign x _` or a compound
-    assignment call `XAssign` whose target is `x`. The walk stops below a
-    binder that rebinds `x` (a `let`, a loop counter, a closure parameter). -/
-partial def iterMutWriteBack (x a idx : String) : ImpExpr → ImpExpr
-  | .assign n rhs =>
-    let rhs' := iterMutWriteBack x a idx rhs
-    if n == x then .seq (.assign n rhs') (iterMutStore x a idx)
-    else .assign n rhs'
-  | .app f [t, v] =>
-    let e' := ImpExpr.app f [iterMutWriteBack x a idx t, iterMutWriteBack x a idx v]
-    if (stripAssignSuffix f).isSome && extractLValueName t == x then
-      .seq e' (iterMutStore x a idx)
-    else e'
-  | .app f args => .app f (args.map (iterMutWriteBack x a idx))
-  | .letBind n v b =>
-    .letBind n (iterMutWriteBack x a idx v) (if n == x then b else iterMutWriteBack x a idx b)
-  | .lam ps b => if ps.contains x then .lam ps b else .lam ps (iterMutWriteBack x a idx b)
-  | .tuple es => .tuple (es.map (iterMutWriteBack x a idx))
-  | .proj e i => .proj (iterMutWriteBack x a idx e) i
-  | .ifThenElse c t e =>
-    .ifThenElse (iterMutWriteBack x a idx c) (iterMutWriteBack x a idx t)
-      (iterMutWriteBack x a idx e)
-  | .match_ s arms =>
-    .match_ (iterMutWriteBack x a idx s) (arms.map fun (p, e) => (p, iterMutWriteBack x a idx e))
-  | .seq e1 e2 => .seq (iterMutWriteBack x a idx e1) (iterMutWriteBack x a idx e2)
-  | .borrow e => .borrow (iterMutWriteBack x a idx e)
-  | .deref e => .deref (iterMutWriteBack x a idx e)
-  | .forLoop v lo hi b => .forLoop v (iterMutWriteBack x a idx lo) (iterMutWriteBack x a idx hi)
-      (if v == x then b else iterMutWriteBack x a idx b)
-  | .forLoopRev v lo hi b => .forLoopRev v (iterMutWriteBack x a idx lo)
-      (iterMutWriteBack x a idx hi) (if v == x then b else iterMutWriteBack x a idx b)
-  | .whileLoop c b => .whileLoop (iterMutWriteBack x a idx c) (iterMutWriteBack x a idx b)
-  | .break_ (some e) => .break_ (some (iterMutWriteBack x a idx e))
-  | .earlyReturn e => .earlyReturn (iterMutWriteBack x a idx e)
-  | .questionMark e => .questionMark (iterMutWriteBack x a idx e)
-  | .typeAscription e ty => .typeAscription (iterMutWriteBack x a idx e) ty
-  | e => e
-
 /-- The collection variable of an `iter_mut` place: `a` for `a`, `&mut a` and
     `*a`, and `none` for any other place. -/
 def iterMutRoot : ImpExpr → Option String
@@ -3503,196 +2638,6 @@ def iterMutRoot : ImpExpr → Option String
   | .borrow e => iterMutRoot e
   | .deref e => iterMutRoot e
   | _ => none
-
-/-- The counted loop of a `positions` iterator over `elems` with body `body`
-    and element pattern `p`: the loop runs its counter over `0..len` (`min` of
-    the two lengths for `zip`, as `Iterator::zip` stops at the shorter one),
-    binds the `enumerate` counter pattern to the counter, and each element
-    variable to `index c counter`. The counter is the `enumerate` variable when
-    there is one, `_ci_x` for an `iter_mut` element `x` and `_ci` otherwise. An
-    `iter_mut` element whose collection is a variable `a` is written back to
-    position `counter` of `a` after each write (`iterMutWriteBack`). `none` when
-    the pattern does not fit, or an `iter_mut` collection is not a variable. -/
-def positionsLoop (elems : List (ImpExpr × Bool)) (withIndex : Bool) (p : ImpPat)
-    (body : ImpExpr) : Option ImpExpr := do
-  let (ip, eps) ← positionsPats elems withIndex p
-  let pairs := elems.zip eps
-  let mutVar := pairs.findSome? fun ((_, m), v) => if m then v else none
-  let idx := match ip with
-    | some (some i) => i
-    | _ => match mutVar with
-      | some x => "_ci_" ++ x
-      | none => "_ci"
-  -- Mutable elements need a variable collection root.
-  let mutRoots ← pairs.filterMapM fun ((c, m), v) =>
-    if m then
-      match v with
-      | some x => (iterMutRoot c).map fun a => some (x, a)
-      | none => some none
-    else some none
-  let body' := mutRoots.foldl (fun b (x, a) => iterMutWriteBack x a idx b) body
-  let bound := pairs.foldr (fun ((c, _), v) b =>
-    match v with
-    | some x => .letBind x (.app "index" [c, .var idx]) b
-    | none => b) body'
-  let hi := match elems with
-    | [(a, _), (b, _)] => ImpExpr.app "min" [.app "len" [a], .app "len" [b]]
-    | (a, _) :: _ => .app "len" [a]
-    | [] => .lit (.int 0)
-  pure (.forLoop idx (.lit (.int 0)) hi bound)
-
-/-- Reconstruct for-loops from desugared iterator patterns in a single expression.
-    Recursively traverses the expression, looking for the characteristic
-    `match(into_iter(Range(...))) { iter => loop { match(next(iter)) { ... } } }`
-    pattern produced by Rust's for-loop desugaring. -/
-partial def reconstructForLoops : ImpExpr → ImpExpr
-  | .match_ scrut arms =>
-    match tryExtractIterator scrut, arms with
-    | some (.range lo hi reversed inclusive),
-      [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
-      -- Found the pattern! Extract the loop var from the inner next() match
-      let lo' := reconstructForLoops lo
-      -- `forLoop` iterates `[lo, hi)`; an inclusive range ends one past `hi`
-      -- (`inclusiveUpper`, an integer literal on a literal `hi`).
-      let hi' :=
-        let h := reconstructForLoops hi
-        if inclusive then inclusiveUpper h else h
-      match tryExtractNextMatch innerBody _iterVar with
-      | some (loopVar, body) =>
-        let body' := reconstructForLoops body
-        if reversed then .forLoopRev loopVar lo' hi' body'
-        else .forLoop loopVar lo' hi' body'
-      | none =>
-        -- Inner match didn't match — fall through to regular match
-        .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
-    | some (.collection coll),
-      [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
-      -- Collection iteration: for elem in collection
-      -- → forLoop "_i" 0 (len collection) (let elem := index collection _i; body)
-      let coll' := reconstructForLoops coll
-      match tryExtractNextMatch innerBody _iterVar with
-      | some (loopVar, body) =>
-        let body' := reconstructForLoops body
-        let idxVar := "_ci"
-        let loopBody := .letBind loopVar (.app "index" [coll', .var idxVar]) body'
-        .forLoop idxVar (.lit (.int 0)) (.app "len" [coll']) loopBody
-      | none =>
-        .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
-    | some (.positions elems withIndex),
-      [(.varPat _iterVar, .whileLoop (.lit (.bool true)) innerBody)] =>
-      -- `iter_mut`, `enumerate` and `zip`: a counted loop over the positions
-      let elems' := elems.map fun (c, m) => (reconstructForLoops c, m)
-      let loop := tryExtractNextMatchPat innerBody _iterVar >>= fun (p, body) =>
-        positionsLoop elems' withIndex p (reconstructForLoops body)
-      match loop with
-      | some l => l
-      | none =>
-        .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
-    | _, _ =>
-      .match_ (reconstructForLoops scrut) (arms.map fun (p, e) => (p, reconstructForLoops e))
-  -- Recursive descent into all other constructors
-  | .lit v => .lit v
-  | .var n => .var n
-  | .letBind n v b => .letBind n (reconstructForLoops v) (reconstructForLoops b)
-  | .lam ps b => .lam ps (reconstructForLoops b)
-  | .app f args => .app f (args.map reconstructForLoops)
-  | .tuple es => .tuple (es.map reconstructForLoops)
-  | .proj e i => .proj (reconstructForLoops e) i
-  | .ifThenElse c t e => .ifThenElse (reconstructForLoops c) (reconstructForLoops t) (reconstructForLoops e)
-  | .unitVal => .unitVal
-  | .seq e1 e2 => .seq (reconstructForLoops e1) (reconstructForLoops e2)
-  | .borrow e => .borrow (reconstructForLoops e)
-  | .deref e => .deref (reconstructForLoops e)
-  | .assign n rhs => .assign n (reconstructForLoops rhs)
-  | .forLoop v lo hi body => .forLoop v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
-  | .forLoopRev v lo hi body => .forLoopRev v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
-  | .whileLoop c body => .whileLoop (reconstructForLoops c) (reconstructForLoops body)
-  | .break_ (some e) => .break_ (some (reconstructForLoops e))
-  | .break_ none => .break_ none
-  | .continue_ => .continue_
-  | .earlyReturn e => .earlyReturn (reconstructForLoops e)
-  | .questionMark e => .questionMark (reconstructForLoops e)
-  | .forFold v lo hi body => .forFold v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
-  | .forFoldRev v lo hi body => .forFoldRev v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
-  | .whileFold c body => .whileFold (reconstructForLoops c) (reconstructForLoops body)
-  | .forFoldReturn v lo hi body => .forFoldReturn v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
-  | .forFoldRevReturn v lo hi body => .forFoldRevReturn v (reconstructForLoops lo) (reconstructForLoops hi) (reconstructForLoops body)
-  | .whileFoldReturn c body => .whileFoldReturn (reconstructForLoops c) (reconstructForLoops body)
-  | .cfBreak e => .cfBreak (reconstructForLoops e)
-  | .cfContinue e => .cfContinue (reconstructForLoops e)
-  | .cfBreakContinue e => .cfBreakContinue (reconstructForLoops e)
-  | .typeAscription e ty => .typeAscription (reconstructForLoops e) ty
-
-/-! ## Compound Assignment Normalization
-
-Hax sometimes emits compound assignments (`state[3] ^= k0`) as `Call` expressions
-to trait methods like `BitXorAssign::bitxor_assign`, producing `app "BitXorAssign" [lhs, rhs]`.
-These should be `assign` nodes for the pipeline's LocalMutation phase to process correctly.
-
-We normalize:
-- `app "XAssign" [var x, rhs]` → `assign x (app "X" [var x, rhs])`
-- `app "XAssign" [index(arr, i), rhs]` → `assign arr (app "array_update" [var arr, i, app "X" [index(arr, i), rhs]])`
--/
-
-/-- Normalize compound assignment ops in an expression.
-    Converts `app "XAssign" [target, val]` into proper `assign` nodes
-    that the pipeline's LocalMutation phase can process. -/
-partial def normalizeAssignOps : ImpExpr → ImpExpr
-  | .app f [target, val] =>
-    match stripAssignSuffix f with
-    | some baseOp =>
-      let target' := normalizeAssignOps target
-      let val' := normalizeAssignOps val
-      let name := extractLValueName target'
-      match stripDeref target' with
-      | .app "index" [arr, idx] =>
-        -- Array element mutation: arr = array_update(arr, idx, X(arr[idx], val))
-        .assign name (.app "array_update" [arr, idx, .app baseOp [target', val']])
-      | _ =>
-        -- Simple variable mutation: x = X(x, val)
-        .assign name (.app baseOp [target', val'])
-    | none => .app f [normalizeAssignOps target, normalizeAssignOps val]
-  | .app f args => .app f (args.map normalizeAssignOps)
-  | .lit v => .lit v
-  | .var n => .var n
-  | .unitVal => .unitVal
-  | .letBind n v b => .letBind n (normalizeAssignOps v) (normalizeAssignOps b)
-  | .lam ps b => .lam ps (normalizeAssignOps b)
-  | .tuple es => .tuple (es.map normalizeAssignOps)
-  | .proj e i => .proj (normalizeAssignOps e) i
-  | .ifThenElse c t e =>
-    .ifThenElse (normalizeAssignOps c) (normalizeAssignOps t) (normalizeAssignOps e)
-  | .match_ s arms =>
-    .match_ (normalizeAssignOps s) (arms.map fun (p, b) => (p, normalizeAssignOps b))
-  | .seq e1 e2 => .seq (normalizeAssignOps e1) (normalizeAssignOps e2)
-  | .borrow e => .borrow (normalizeAssignOps e)
-  | .deref e => .deref (normalizeAssignOps e)
-  | .assign n rhs => .assign n (normalizeAssignOps rhs)
-  | .forLoop v lo hi body =>
-    .forLoop v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
-  | .forLoopRev v lo hi body =>
-    .forLoopRev v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
-  | .whileLoop c body => .whileLoop (normalizeAssignOps c) (normalizeAssignOps body)
-  | .break_ (some e) => .break_ (some (normalizeAssignOps e))
-  | .break_ none => .break_ none
-  | .continue_ => .continue_
-  | .earlyReturn e => .earlyReturn (normalizeAssignOps e)
-  | .questionMark e => .questionMark (normalizeAssignOps e)
-  | .forFold v lo hi body =>
-    .forFold v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
-  | .forFoldRev v lo hi body =>
-    .forFoldRev v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
-  | .whileFold c body => .whileFold (normalizeAssignOps c) (normalizeAssignOps body)
-  | .forFoldReturn v lo hi body =>
-    .forFoldReturn v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
-  | .forFoldRevReturn v lo hi body =>
-    .forFoldRevReturn v (normalizeAssignOps lo) (normalizeAssignOps hi) (normalizeAssignOps body)
-  | .whileFoldReturn c body =>
-    .whileFoldReturn (normalizeAssignOps c) (normalizeAssignOps body)
-  | .cfBreak e => .cfBreak (normalizeAssignOps e)
-  | .cfContinue e => .cfContinue (normalizeAssignOps e)
-  | .cfBreakContinue e => .cfBreakContinue (normalizeAssignOps e)
-  | .typeAscription e ty => .typeAscription (normalizeAssignOps e) ty
 
 /-- The THIR expression of an item body (the `body` of a `Fn` definition or
     of a `Const` item). In a hax 0.4 export an item body is the object
@@ -3726,7 +2671,7 @@ The `kind` field is an externally-tagged enum:
 
 - `"Fn"`: `{ident: [name, span], generics, def: {header, params, ret, body}}`
   where `body` is an item body (see `thirBodyExpr`) whose expression
-  `parseHaxExpr` handles.
+  `parseHaxTExpr` handles.
 - `"Const"`: `[ident_pair, generics, ty, body]` where `body` is an item body.
 - `"TyAlias"`, `"Mod"`, `"Use"`, `"ExternCrate"`: skipped.
 
@@ -4015,174 +2960,6 @@ partial def localFnParamSigs (items : List Json) : List (String × List (String 
         | _ => []
     | .error _ => []
 
-/-- Wrap a function body in parameter bindings.
-    Emits `letBind "param" (var "param") body` for each parameter,
-    which the pipeline processes as identity bindings.
-    The `extractFnDefs` in Main.lean then extracts these as function parameters. -/
-def wrapParams (params : List String) (body : ImpExpr) : ImpExpr :=
-  params.foldr (fun p acc => .letBind p (.var p) acc) body
-
-/-- Parse a single top-level item from `hax_frontend_export.json`.
-    Returns `some (name, body)` for `Fn` and `Const` items, `none` for others. -/
-partial def parseHaxItem (j : Json) : Except String (Option (String × ImpExpr)) := do
-  let kind ← j.getObjVal? "kind"
-  -- Fn: {ident: [name, span], generics: {...}, def: {header, params, ret, body}}
-  if let .ok fnData := kind.getObjVal? "Fn" then
-    let name := match fnData.getObjVal? "ident" with
-      | .ok ident => extractFnName ident
-      | _ => "unknown_fn"
-    -- Extract parameter names
-    let paramNames := match fnData.getObjVal? "def" with
-      | .ok def_ => match fnDefParams? def_ with
-        | some params => extractParamNames params
-        | none => []
-      | _ => []
-    let body ← match fnData.getObjVal? "def" with
-      | .ok def_ => parseHaxExpr (thirBodyExpr (← def_.getObjVal? "body"))
-      | _ => throw s!"Fn item '{name}' missing def.body"
-    let processed := normalizeAssignOps (reconstructForLoops body)
-    -- Wrap body in identity let-bindings for parameters so the pretty printer
-    -- can detect them and emit proper function signatures.
-    let wrapped := if paramNames.isEmpty then processed else wrapParams paramNames processed
-    return some (name, wrapped)
-  -- Const: top-level `pub const` has 4 elements [ident, generics, ty, body];
-  -- impl-item associated consts have 2 elements [ty, value-info] — skip those
-  -- (they're picked up at the Deps-typeclass bridge layer, not the surface).
-  else if let .ok (.arr constData) := kind.getObjVal? "Const" then
-    if constData.toList.length < 4 then
-      return none
-    let name := match constData.toList with
-      | (.arr ident) :: _ => extractFnName (.arr ident)
-      | _ => "unknown_const"
-    let body ← match constData.toList[3]? with
-      | some bodyJ => parseHaxExpr (thirBodyExpr bodyJ)
-      | none => throw s!"Const item '{name}' missing body"
-    return some (name, normalizeAssignOps (reconstructForLoops body))
-  -- Skip: Mod, Use, ExternCrate, TyAlias
-  else return none
-
-/-- Parse a single top-level item with type information.
-    Returns `some (name, body, fnTypeInfo)` for `Fn` items, `none` for others. -/
-partial def parseHaxItemWithTypes (j : Json) :
-    Except String (Option (String × ImpExpr × FnTypeInfo)) := do
-  let kind ← j.getObjVal? "kind"
-  if let .ok fnData := kind.getObjVal? "Fn" then
-    let name := match fnData.getObjVal? "ident" with
-      | .ok ident => extractFnName ident
-      | _ => "unknown_fn"
-    let def_ := match fnData.getObjVal? "def" with
-      | .ok d => some d
-      | _ => none
-    let paramNames := match def_ >>= fnDefParams? with
-      | some params => extractParamNames params
-      | none => []
-    let paramTypes := match def_ >>= fnDefParams? with
-      | some params => extractParamTypes params
-      | none => []
-    let retType := match def_ with
-      | some d => match d.getObjVal? "ret" with
-        | .ok retJ => parseHaxType retJ
-        | _ => .unknown
-      | none => .unknown
-    let body ← match def_ with
-      | some d => parseHaxExpr (thirBodyExpr (← d.getObjVal? "body"))
-      | none => throw s!"Fn item '{name}' missing def.body"
-    let processed := normalizeAssignOps (reconstructForLoops body)
-    let wrapped := if paramNames.isEmpty then processed else wrapParams paramNames processed
-    return some (name, wrapped, ⟨paramTypes, retType⟩)
-  else if let .ok (.arr constData) := kind.getObjVal? "Const" then
-    if constData.toList.length < 4 then
-      return none
-    let name := match constData.toList with
-      | (.arr ident) :: _ => extractFnName (.arr ident)
-      | _ => "unknown_const"
-    let body ← match constData.toList[3]? with
-      | some bodyJ => parseHaxExpr (thirBodyExpr bodyJ)
-      | none => throw s!"Const item '{name}' missing body"
-    return some (name, normalizeAssignOps (reconstructForLoops body), ⟨[], .unknown⟩)
-  else return none
-
-/-- Parse a full hax export with per-function type information.
-    Returns both the combined ImpExpr and a list of (name, FnTypeInfo).
-    Recurses into Mod items to find nested functions/constants. Projection
-    types are read at the types `resolveAssocTypes` gives them. -/
-partial def parseHaxFileWithTypes (j : Json) :
-    Except String (ImpExpr × List (String × FnTypeInfo)) := do
-  let rec parseItemsWithTypes (items : List Json) :
-      Except String (List (String × ImpExpr × FnTypeInfo)) := do
-    let mut result : List (String × ImpExpr × FnTypeInfo) := []
-    for item in items do
-      -- Try parsing as Fn/Const
-      match ← parseHaxItemWithTypes item with
-      | some r => result := result ++ [r]
-      | none =>
-        -- Recurse into Mod items
-        let kind := (item.getObjVal? "kind").toOption
-        match kind with
-        | some kindJ =>
-          -- Try Mod: kind.Mod = [name_data, [sub_items]]
-          match kindJ.getObjVal? "Mod" with
-          | .ok (.arr modData) =>
-            match modData.toList[1]? with
-            | some subJ =>
-              match subJ with
-              | .arr subItems =>
-                let sub ← parseItemsWithTypes subItems.toList
-                result := result ++ sub
-              | _ => pure ()
-            | _ => pure ()
-          | .ok modData =>
-            -- Mod might also be an object with items field
-            match modData.getObjValAs? (Array Json) "items" with
-            | .ok subItems =>
-              let sub ← parseItemsWithTypes subItems.toList
-              result := result ++ sub
-            | _ => pure ()
-          | _ =>
-            -- Impl blocks are skipped: a method there may carry no body.
-            pure ()
-        | none => pure ()
-    return result
-  match resolveAssocTypes j with
-  | .arr items =>
-    let parsed ← parseItemsWithTypes items.toList
-    match parsed with
-    | [] => throw "no functions or constants found in hax export"
-    | _ =>
-      let expr := parsed.foldr (fun (name, body, _) acc => .letBind name body acc) .unitVal
-      let fnTypes := parsed.map fun (name, _, ti) => (name, ti)
-      return (expr, fnTypes)
-  | _ =>
-    return (normalizeAssignOps (reconstructForLoops (← parseHaxExpr j)), [])
-
-/-- Collect return types for all function calls from the hax JSON expression tree.
-    Walks the raw JSON (before ImpExpr conversion) and extracts `ty` from each Call node.
-    Returns a map: functionName → ImpType (return type). -/
-partial def collectCallReturnTypes (j : Json) : List (String × ImpType) :=
-  match j with
-  | .obj _ =>
-    -- Check if this node has a Call in contents
-    let callTypes := match j.getObjVal? "contents" with
-      | .ok contents =>
-        match contents.getObjVal? "Call" with
-        | .ok callData =>
-          let funName := extractCallName (match callData.getObjVal? "fun" with
-            | .ok f => f | _ => .null)
-          let retType := match j.getObjVal? "ty" with
-            | .ok tyJ => parseHaxType tyJ
-            | _ => .unknown
-          if funName != "unknown_fn" && funName != "indirect_call" && !retType.isUnknown then
-            [(funName, retType)]
-          else []
-        | _ => []
-      | _ => []
-    -- Recurse into all object values
-    let childTypes := j.getObj?.toOption.map (fun obj =>
-      obj.toList.flatMap fun (_, v) => collectCallReturnTypes v) |>.getD []
-    callTypes ++ childTypes
-  | .arr items => items.toList.flatMap collectCallReturnTypes
-  | _ => []
-
 /-- The `defIdKey?` of the callee of a hax `Call`, read from its `fun`
     expression when that is a `GlobalName` (the same `def_id` lookup as
     `extractCallName`). -/
@@ -4312,113 +3089,6 @@ partial def extractCallSignaturesFromFile (j : Json) : List (String × FnTypeInf
       else acc
     | none => acc ++ [(name, ti)]) []
 
-/-- Collect types of free variable references from hax JSON expression tree.
-    For standalone variable references (VarRef) that are not function call targets,
-    extracts `ty` to determine whether a free var dep should be Int, Array Int, etc.
-    Returns: variableName → ImpType. -/
-partial def collectVarRefTypes (j : Json) : List (String × ImpType) :=
-  match j with
-  | .obj _ =>
-    let varTypes := match j.getObjVal? "contents" with
-      | .ok contents =>
-        -- Handle GlobalVar references
-        let globalVarTypes := match contents.getObjVal? "GlobalVar" with
-          | .ok varData =>
-            let varName := match varData.getObjVal? "id" with
-              | .ok id => match id.getObjValAs? String "name" with
-                | .ok n => n
-                | _ => "unknown"
-              | _ => "unknown"
-            let ty := match j.getObjVal? "ty" with
-              | .ok tyJ => parseHaxType tyJ
-              | _ => .unknown
-            if varName != "unknown" && !ty.isUnknown then [(varName, ty)] else []
-          | _ => ([] : List (String × ImpType))
-        -- Handle StaticRef references (static constants like AEGIS_C0)
-        let staticRefTypes := match contents.getObjVal? "StaticRef" with
-          | .ok data =>
-            let varName := match data.getObjVal? "def_id" with
-              | .ok defId => extractDefIdName defId
-              | _ => "unknown"
-            let ty := match j.getObjVal? "ty" with
-              | .ok tyJ => parseHaxType tyJ
-              | _ => .unknown
-            if varName != "unknown" && varName != "static" && !ty.isUnknown
-            then [(varName, ty)] else []
-          | _ => ([] : List (String × ImpType))
-        globalVarTypes ++ staticRefTypes
-      | _ => ([] : List (String × ImpType))
-    let childTypes := j.getObj?.toOption.map (fun obj =>
-      obj.toList.flatMap fun (_, v) => collectVarRefTypes v) |>.getD []
-    varTypes ++ childTypes
-  | .arr items => items.toList.flatMap collectVarRefTypes
-  | _ => []
-
-/-- Extract var ref types from a single hax JSON item. -/
-partial def extractVarRefTypesItem (item : Json) : List (String × ImpType) :=
-  match item.getObjVal? "kind" with
-  | .ok kind =>
-    match kind.getObjVal? "Fn" with
-    | .ok fnData =>
-      match fnData.getObjVal? "def" with
-      | .ok d => match d.getObjVal? "body" with
-        | .ok body => collectVarRefTypes (thirBodyExpr body)
-        | _ => []
-      | _ => []
-    | _ =>
-      match kind.getObjVal? "Const" with
-      | .ok (.arr constData) =>
-        match constData.toList[3]? with
-        | some bodyJ => collectVarRefTypes (thirBodyExpr bodyJ)
-        | none => []
-      | _ => []
-  | _ => []
-
-/-- Extract variable reference types from a full hax export JSON.
-    Returns deduplicated map: variableName → ImpType. Projection types are
-    read at the types `resolveAssocTypes` gives them. -/
-partial def extractVarRefTypesFromFile (j : Json) : List (String × ImpType) :=
-  let raw : List (String × ImpType) := match resolveAssocTypes j with
-    | Json.arr items => items.toList.flatMap fun item =>
-      extractVarRefTypesItem item ++
-      (match item.getObjVal? "kind" with
-       | .ok kind =>
-         match kind.getObjVal? "Mod" with
-         | .ok (Json.arr modData) =>
-           match modData.toList[1]? with
-           | some (Json.arr subItems) => subItems.toList.flatMap extractVarRefTypesItem
-           | _ => []
-         | _ => []
-       | _ => ([] : List (String × ImpType)))
-    | _ => []
-  raw.foldl (fun (acc : List (String × ImpType)) ((name, ty) : String × ImpType) =>
-    if acc.any (·.1 == name) then acc else acc ++ [(name, ty)]) []
-
-/-- Extract call return types from a single hax JSON item (Fn). -/
-partial def extractCallRetTypesItem (item : Json) : List (String × ImpType) :=
-  match item.getObjVal? "kind" with
-  | .ok kind =>
-    match kind.getObjVal? "Fn" with
-    | .ok fnData =>
-      match fnData.getObjVal? "def" with
-      | .ok d => match d.getObjVal? "body" with
-        | .ok body => collectCallReturnTypes (thirBodyExpr body)
-        | _ => []
-      | _ => []
-    | _ => []
-  | _ => []
-
-/-- Extract call return types from a full hax export JSON.
-    Returns deduplicated map: functionName → ImpType. Projection types are
-    read at the types `resolveAssocTypes` gives them. -/
-partial def extractCallReturnTypesFromFile (j : Json) : List (String × ImpType) :=
-  let raw := match resolveAssocTypes j with
-    | .arr items => items.toList.flatMap extractCallRetTypesItem
-    | _ => []
-  -- Deduplicate: keep first occurrence per function name
-  raw.foldl (fun acc (name, ty) =>
-    if acc.any (·.1 == name) then acc else acc ++ [(name, ty)]) []
-
 /-- Validate that an ImpExpr contains no unsupported/dangerous patterns
     that could produce vacuous proofs. Returns a list of warnings. -/
 partial def validateExtraction (e : ImpExpr) (path : String := "") : List String :=
@@ -4455,27 +3125,6 @@ partial def validateExtraction (e : ImpExpr) (path : String := "") : List String
   | .cfBreak e | .cfContinue e | .cfBreakContinue e =>
     validateExtraction e path
   | _ => []
-
-/-- Parse a full `hax_frontend_export.json` (top-level array of items).
-    Combines all `Fn` and `Const` items into nested `letBind`s. -/
-partial def parseHaxFile (j : Json) : Except String ImpExpr := do
-  match j with
-  | .arr items =>
-    let parsed ← items.toList.filterMapM parseHaxItem
-    match parsed with
-    | [] => throw "no functions or constants found in hax export"
-    | _ => return parsed.foldr (fun (name, body) acc => .letBind name body acc) .unitVal
-  | _ =>
-    -- Single Decorated<ExprKind> — use the existing single-expression parser
-    return normalizeAssignOps (reconstructForLoops (← parseHaxExpr j))
-
-/-- Parse and validate a hax export. Returns the ImpExpr and any warnings.
-    Warnings indicate incomplete translation (Todo, unsupported literals, etc.)
-    that could make downstream proofs vacuous. -/
-partial def parseHaxFileValidated (j : Json) : Except String (ImpExpr × List String) := do
-  let expr ← parseHaxFile j
-  let warnings := validateExtraction expr
-  return (expr, warnings)
 
 /-- Extract the type from a hax Decorated JSON node's `ty` field. -/
 def extractNodeType (j : Json) : ImpType :=
@@ -5675,8 +4324,8 @@ where
         | _ => "unknown_var"
       return .var name
 
-    -- UpvarRef: closure-captured variable. See the matching case in
-    -- `parseExprKind` (around line 879) for why this is just a `.var name`.
+    -- UpvarRef: a closure-captured variable, lexically in scope at the closure
+    -- body's emission point, so a plain `.var name` reference resolves.
     else if let .ok data := j.getObjVal? "UpvarRef" then
       let name := match data.getObjVal? "var_hir_id" with
         | .ok h => extractLocalIdentName h
@@ -6551,8 +5200,11 @@ where
       -- constructor takes the fields in declaration order.
       return (tFloatEarlyExitOperands fields .unknown fun xs => .app head (toDecl xs)).kind
 
-/-- `iterMutWriteBack` on a typed body: every write of the element variable `x`
-    is followed by `store`, the write-back of `x` to its collection. -/
+/-- The body `e` of an `iter_mut` loop with every write of the element variable `x`
+    followed by `store`, the write-back of `x` to its collection. A write is an
+    `assign x _` or a compound assignment call `XAssign` whose target is `x`. The
+    walk stops below a binder that rebinds `x` (a `let`, a loop counter, a closure
+    parameter). -/
 partial def tIterMutWriteBack (x : String) (store : TExpr) (e : TExpr) : TExpr :=
   let go := tIterMutWriteBack x store
   match e with
@@ -6572,10 +5224,18 @@ partial def tIterMutWriteBack (x : String) (store : TExpr) (e : TExpr) : TExpr :
     .mk (.forLoopRev v (go lo) (go hi) (if v == x then b else go b)) ty
   | e => tMapChildren go e
 
-/-- `positionsLoop` on typed collections and body. The counter and the
-    `enumerate` variable are typed `usize`, each element variable with the
-    element type of its collection, and the write-back of an `iter_mut` element
-    with the collection's type. -/
+/-- The counted loop of a `positions` iterator over `elems` with body `body` and
+    element pattern `p`: the loop runs its counter over `0..len` (`min` of the two
+    lengths for `zip`, as `Iterator::zip` stops at the shorter one), binds the
+    `enumerate` counter pattern to the counter, and each element variable to
+    `index c counter`. The counter is the `enumerate` variable when there is one,
+    `_ci_x` for an `iter_mut` element `x` and `_ci` otherwise. An `iter_mut` element
+    whose collection is a variable `a` is written back to position `counter` of `a`
+    after each write (`tIterMutWriteBack`). `none` when the pattern does not fit, or
+    an `iter_mut` collection is not a variable. The counter and the `enumerate`
+    variable are typed `usize`, each element variable with the element type of its
+    collection, and the write-back of an `iter_mut` element with the collection's
+    type. -/
 def tPositionsLoop (elems : List (TExpr × Bool)) (withIndex : Bool) (p : ImpPat)
     (body : TExpr) : Option TExpr := do
   let (ip, eps) ← positionsPats (elems.map fun (c, m) => (c.erase, m)) withIndex p
@@ -6731,8 +5391,7 @@ partial def reconstructForLoopsTExpr : TExpr → TExpr
           (arms.map fun (p, e) => (p, reconstructForLoopsTExpr e))) ty
     | some (.positions elems withIndex),
       [(.varPat _iterVar, .mk (.whileLoop (.mk (.lit (.bool true)) _) innerBody) _)] =>
-      -- `iter_mut`, `enumerate` and `zip`: the loop `positionsLoop` builds,
-      -- with the typed collections and body
+      -- `iter_mut`, `enumerate` and `zip`: the loop `tPositionsLoop` builds
       let elemsT := elems.map fun (c, m) =>
         (reconstructForLoopsTExpr (findSubTExprForImp scrut c), m)
       let loop := tryExtractNextMatchPat innerBody.erase _iterVar >>= fun (p, _) =>

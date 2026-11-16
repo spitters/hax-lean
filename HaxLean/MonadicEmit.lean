@@ -5,7 +5,7 @@ Authors: CatCrypt Contributors
 -/
 module
 
-public import HaxLean.PrettyPrint -- deprecated_module: ignore
+public import HaxLean.PrettyPrint
 public import HaxLean.Range.Heads
 
 /-!
