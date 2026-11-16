@@ -449,15 +449,22 @@ is a parameter. -/
 def wrapUint (w : IntWidth) (n : Nat) : Value :=
   .uint w (n % w.modulus)
 
-/-- Unsigned arithmetic operations (wrapping semantics). -/
+/-- Unsigned arithmetic operations with Rust's checked semantics: `add`, `sub` and `mul` are
+    undefined where the exact result leaves `[0, 2^w)`, and `div` and `rem` are undefined
+    at a zero divisor, where Rust panics. These are the guards of `Hax.addM_w`, `Hax.subM_w`,
+    `Hax.mulM_w`, `Hax.divM_w` and `Hax.remM_w` of `HaxLean.RuntimeM`. The wrapping
+    operations have their own names (`wrapping_add`, …). -/
 def widthArithOps : Builtins
-  | "add", [.uint w a, .uint _ b] => some (wrapUint w (a + b))
-  | "sub", [.uint w a, .uint _ b] => some (wrapUint w ((a + w.modulus - b) % w.modulus))
-  | "mul", [.uint w a, .uint _ b] => some (wrapUint w (a * b))
+  | "add", [.uint w a, .uint _ b] =>
+    if a + b < w.modulus then some (.uint w (a + b)) else none
+  | "sub", [.uint w a, .uint _ b] =>
+    if b ≤ a ∧ a - b < w.modulus then some (.uint w (a - b)) else none
+  | "mul", [.uint w a, .uint _ b] =>
+    if a * b < w.modulus then some (.uint w (a * b)) else none
   | "div", [.uint w a, .uint _ b] =>
-    if b = 0 then some (.uint w 0) else some (.uint w (a / b))
+    if b = 0 then none else some (.uint w (a / b))
   | "rem", [.uint w a, .uint _ b] =>
-    if b = 0 then some (.uint w 0) else some (.uint w (a % b))
+    if b = 0 then none else some (.uint w (a % b))
   | _, _ => none
 
 /-- Unsigned bitwise operations. -/
@@ -595,10 +602,16 @@ def signedBitwiseOps : Builtins
     some (wrapSint w (↑(((xu <<< shift) ||| (xu >>> (w.bits - shift))) % w.modulus)))
   | _, _ => none
 
-/-- Panic/unwrap operations. Models Rust's `unwrap`, `expect`, `unwrap_or`.
-    Successful unwraps return the inner value; panic cases return `none`
-    (mapped to `Outcome.err` by `denote`, modeling Rust panics). -/
+/-- Panic/unwrap operations. Models Rust's `panic`, `assert`, `unwrap`, `expect`,
+    `unwrap_or`. Successful unwraps and assertions return their value; panic cases return
+    `none` (mapped to `Outcome.err` by `denote`, modeling Rust panics). The head `panic`
+    is undefined at every argument list; `assert` is defined only at `true`. -/
 def panicOps : Builtins
+  -- panic!(..): undefined
+  | "panic", _ => none
+  -- assert!(b)
+  | "assert", [.bool true] => some .unit
+  | "assert", [.bool false] => none
   -- Option::unwrap / Result::unwrap
   | "unwrap", [.option (some v)] => some v
   | "unwrap", [.result true v] => some v

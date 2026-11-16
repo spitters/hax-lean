@@ -11,16 +11,11 @@ import all Lean.Data.Json.Basic
 import all Lean.Data.Json.FromToJson.Basic
 
 /-!
-# Json structural-size measure (Path A foundation)
+# Json structural-size measure
 
-Provides `jsonSize : Json → Nat` and the strict-decrease lemmas used as
-termination measures when converting `Hax.HaxAdapter.parseHaxExpr` from
-`partial def` to `def`.
-
-This file is a *split* of the original Path-A foundations that previously
-lived in `Hax/AdapterRefinement.lean`. We extract them here so that
-`Hax/HaxAdapter.lean` (the parser) can import the lemmas without creating
-a circular import (`AdapterRefinement` already imports `HaxAdapter`).
+`jsonSize : Json → Nat` and the strict-decrease lemmas, termination measures for a total
+version of `Hax.HaxAdapter.parseHaxExpr` (today a `partial def`). `HaxAdapter.lean` imports
+this module.
 
 ## Contents
 

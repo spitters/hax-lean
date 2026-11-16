@@ -6,9 +6,10 @@ Authors: CatCrypt Contributors
 module
 
 public import HaxLean.Semantics
+public import HaxLean.RuntimeM
 
 /-!
-# Value refinement on partial results
+# Value refinement and exact agreement on partial results
 
 The refinement order on `Option` results of the hax reference semantics, in the sense of
 CompCert's `Val.lessdef` (Leroy, CACM 52(7), 2009) and LLVM poison refinement (`isRefinedBy`
@@ -22,6 +23,12 @@ is refined only by itself.
 * `Defined bi f args` — the call `f args` of the builtin table `bi` has a value.
 * `Builtins.LessDefOn N bi bi'` — on the names satisfying `N`, every call of `bi` is
   refined by the same call of `bi'`.
+* `ExactAgree enc a m` — the partial result `a` and the `RustM` computation `m` agree
+  exactly: `a = some (enc v)` when `m = ok v`, and `a = none` when `m` fails by a panic.
+
+The literal semantics and the guarded operations of `HaxLean.RuntimeM` are related by
+`ExactAgree`: a call of the literal is undefined exactly where Rust panics. `LessDef`
+remains the order between two partial tables.
 
 ## Main statements
 
@@ -32,6 +39,11 @@ is refined only by itself.
 * `RefinesBy.of_lessDef`, `refinesBy_ite_iff`.
 * `hax64Builtins_lessDef_hax64WordOps`, `defined_hax64Builtins_of_hax64WordOps` — a call
   that `hax64WordOps` defines is defined by `hax64Builtins` with the same value.
+* `ExactAgree.eq_some_of_ok`, `ExactAgree.eq_none_iff`, `ExactAgree.lessDef_of_ok`.
+* `widthArithOps_add_exactAgree` and its siblings for `sub`, `mul`, `div`, `rem`: the
+  unsigned arithmetic of the literal agrees exactly with `Hax.addM_w`, … at `w.bits`.
+* `panicOps_panic_exactAgree`, `panicOps_assert_exactAgree`: the heads `panic` and
+  `assert` agree exactly with `Hax.panicM` and `Hax.assertM`.
 -/
 
 @[expose] public section
@@ -198,5 +210,94 @@ theorem defined_hax64Builtins_of_hax64WordOps {f : String} {args : List Value}
 theorem defined_hax64Builtins_of_eq {f : String} {args : List Value} {v : Value}
     (h : hax64WordOps f args = some v) : Defined hax64Builtins f args :=
   defined_hax64Builtins_of_hax64WordOps (by rw [h]; rfl)
+
+/-! ### Exact agreement with the guarded runtime -/
+
+open Aeneas.Std (RustM Error)
+
+/-- `ExactAgree enc a m`: the partial result `a` and the computation `m` agree exactly.
+    `RustM.ofOption a .panic` is `enc <$> m`, so `a = some (enc v)` when `m = ok v` and
+    `a = none` when `m = fail panic`; neither side diverges or fails otherwise. -/
+def ExactAgree {α β : Type} (enc : β → α) (a : Option α) (m : RustM β) : Prop :=
+  RustM.ofOption a .panic = enc <$> m
+
+namespace ExactAgree
+
+variable {α β : Type} {enc : β → α} {a : Option α} {m : RustM β}
+
+/-- A computation returning `v` gives the defined result `enc v`. -/
+theorem eq_some_of_ok (h : ExactAgree enc a m) {v : β} (hm : m = .ok v) : a = some (enc v) := by
+  subst hm; cases a <;> simp_all [ExactAgree, Functor.map, pure] <;> cases h <;> rfl
+
+/-- The result is undefined exactly when the computation panics. -/
+theorem eq_none_iff (h : ExactAgree enc a m) : a = none ↔ m = .fail .panic := by
+  cases a <;> cases m <;> simp_all [ExactAgree, Functor.map, pure] <;> cases h
+
+/-- Exact agreement gives the refinement of the result by the computation's value. -/
+theorem lessDef_of_ok (h : ExactAgree enc a m) {v : β} (hm : m = .ok v) :
+    LessDef a (some (enc v)) := by
+  rw [h.eq_some_of_ok hm]
+
+end ExactAgree
+
+/-- The unsigned word read as an integer result. -/
+abbrev uintOfInt (w : IntWidth) (r : Int) : Value := .uint w r.toNat
+
+/-- Unsigned `add` of the literal is checked addition `addM_w`. -/
+theorem widthArithOps_add_exactAgree (w w' : IntWidth) (a b : Nat) :
+    ExactAgree (uintOfInt w) (widthArithOps "add" [.uint w a, .uint w' b])
+      (addM_w w.bits a b) := by
+  have hp : (2 : Int) ^ w.bits = ((2 ^ w.bits : Nat) : Int) := by simp
+  simp only [ExactAgree, widthArithOps, addM_w]
+  split <;> split <;> rename_i h1 h2 <;> rw [hp] at h2 <;>
+    simp only [IntWidth.modulus] at h1 <;> generalize 2 ^ w.bits = M at h1 h2 <;>
+    first | rfl | (exfalso; omega)
+
+/-- Unsigned `sub` of the literal is checked subtraction `subM_w`. -/
+theorem widthArithOps_sub_exactAgree (w w' : IntWidth) (a b : Nat) :
+    ExactAgree (uintOfInt w) (widthArithOps "sub" [.uint w a, .uint w' b])
+      (subM_w w.bits a b) := by
+  have hp : (2 : Int) ^ w.bits = ((2 ^ w.bits : Nat) : Int) := by simp
+  simp only [ExactAgree, widthArithOps, subM_w]
+  split <;> split <;> rename_i h1 h2 <;> rw [hp] at h2 <;>
+    simp only [IntWidth.modulus] at h1 <;> generalize 2 ^ w.bits = M at h1 h2 <;>
+    first | rfl | (exfalso; omega) | skip
+  change RustM.ok _ = RustM.ok _
+  simp only [sub, uintOfInt, RustM.ok.injEq, Value.uint.injEq, true_and]
+  omega
+
+/-- Unsigned `mul` of the literal is checked multiplication `mulM_w`. -/
+theorem widthArithOps_mul_exactAgree (w w' : IntWidth) (a b : Nat) :
+    ExactAgree (uintOfInt w) (widthArithOps "mul" [.uint w a, .uint w' b])
+      (mulM_w w.bits a b) := by
+  have hp : (2 : Int) ^ w.bits = ((2 ^ w.bits : Nat) : Int) := by simp
+  simp only [ExactAgree, widthArithOps, mulM_w]
+  split <;> split <;> rename_i h1 h2 <;> rw [hp] at h2 <;>
+    simp only [IntWidth.modulus] at h1 <;> generalize 2 ^ w.bits = M at h1 h2 <;>
+    first | rfl | (exfalso; omega)
+
+/-- Unsigned `div` of the literal is `divM_w`, failing on a zero divisor. -/
+theorem widthArithOps_div_exactAgree (w w' : IntWidth) (a b : Nat) :
+    ExactAgree (uintOfInt w) (widthArithOps "div" [.uint w a, .uint w' b])
+      (divM_w w.bits a b) := by
+  simp only [ExactAgree, widthArithOps, divM_w]
+  split <;> split <;> first | rfl | omega
+
+/-- Unsigned `rem` of the literal is `remM_w`, failing on a zero divisor. -/
+theorem widthArithOps_rem_exactAgree (w w' : IntWidth) (a b : Nat) :
+    ExactAgree (uintOfInt w) (widthArithOps "rem" [.uint w a, .uint w' b])
+      (remM_w w.bits a b) := by
+  simp only [ExactAgree, widthArithOps, remM_w]
+  split <;> split <;> first | rfl | omega
+
+/-- The head `panic` is `panicM` at every argument list. -/
+theorem panicOps_panic_exactAgree (args : List Value) :
+    ExactAgree id (panicOps "panic" args) (panicM (α := Value)) := by
+  simp only [ExactAgree, panicOps]; rfl
+
+/-- The head `assert` is `assertM`. -/
+theorem panicOps_assert_exactAgree (b : Bool) :
+    ExactAgree (fun _ : Unit => Value.unit) (panicOps "assert" [.bool b]) (assertM b) := by
+  cases b <;> rfl
 
 end Hax

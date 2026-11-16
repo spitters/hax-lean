@@ -5770,25 +5770,20 @@ where
       if funName == "indirect_call" then
         throw ("unsupported construct: a call whose callee is not a named function " ++
           "(a function pointer in a variable or a field)")
-      -- Strip panicking calls. `assert!`, `assert_eq!`, `panic!`,
+      -- Panicking calls. `assert!`, `assert_eq!`, `panic!`,
       -- `unreachable!` etc. expand through hax into calls to
       -- `core::panicking::*` helpers (`assert_failed`, `panic`,
-      -- `panic_fmt`, `unreachable_display`, …). These are runtime
-      -- crash points with no verification value — extracting them
-      -- faithfully would force the verifier to model panicking
-      -- semantics. Replace with `.unitVal` so the surrounding
-      -- `let _ := <assert>; rest` reduces (via rule A of
-      -- `tFlattenLetFoldReturn`) to just `rest`. The `AssertKind::Eq`
-      -- variant tag that precedes `assert_failed` also resolves to a
-      -- bare last-segment name (e.g. `Eq` → conflicts with binary
-      -- ops); replacing the call discards the whole `let kind := …; …`
-      -- shape before it can be rendered.
+      -- `panic_fmt`, `unreachable_display`, …). Each becomes the head
+      -- `panic` with no arguments, which the literal semantics leaves
+      -- undefined (`panicOps`), so the run fails there as Rust does.
+      -- The message arguments are not parsed: the `AssertKind::Eq`
+      -- tag and the format arguments have no effect once the call fails.
       let panickingFns := ["assert_failed", "panic", "panic_fmt",
         "begin_panic", "panic_explicit", "panic_display",
         "unreachable_display", "panic_nounwind", "panic_nounwind_fmt",
         "panic_str", "panic_bounds_check"]
       if panickingFns.contains funName then
-        return .unitVal
+        return .app "panic" []
       let argsJ ← data.getObjValAs? (Array Json) "args"
       let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a implMap)
       -- A call of a method of `primeir_hax::Field` resolved to a field `impl`
@@ -5919,17 +5914,11 @@ where
           throw "unsupported construct: a let chain or `if let` guard with a refutable pattern"
 
     else if let .ok data := j.getObjVal? "Block" then
-      -- Strip assertion-shape Blocks. `assert!`/`assert_eq!` expands
+      -- Assertion-shape Blocks. `assert!`/`assert_eq!` expands
       -- into a Block whose `expr` is a `Call` to `assert_failed` (with
-      -- the AssertKind tag bound in preceding `Let` stmts). After the
-      -- panicking-call strip in the Call branch the assert_failed
-      -- becomes `.unitVal`, but the surrounding `let kind := …` and
-      -- argument-construction stmts remain as dead bindings whose
-      -- renderer output collides with the surrounding context. Collapse
-      -- the entire Block to `.unitVal` when its `expr` resolves to a
-      -- known panicking function — the stmts only existed to compute
-      -- panic arguments and have no observable effect once the call
-      -- itself is gone.
+      -- the AssertKind tag bound in preceding `Let` stmts). The stmts
+      -- only compute the panic's arguments, so the Block is the head
+      -- `panic` when its `expr` resolves to a known panicking function.
       let panickingFns := ["assert_failed", "panic", "panic_fmt",
         "begin_panic", "panic_explicit", "panic_display",
         "unreachable_display", "panic_nounwind", "panic_nounwind_fmt",
@@ -5947,7 +5936,7 @@ where
           | _ => false
         | _ => false
       if exprIsPanic then
-        return .unitVal
+        return .app "panic" []
       let stmtsJ := (data.getObjValAs? (Array Json) "stmts").toOption.getD #[]
       let tail ← match data.getObjVal? "expr" with
         | .ok (.null) => pure (TExpr.mk .unitVal .unit)
@@ -6184,9 +6173,9 @@ where
       -- `NeverToAny` is the `!` → any-type coercion. Two distinct uses:
       --
       --   * **Panicking** (`assert!`, `panic!`, `unreachable!`): the
-      --     wrapped source has no observable value. Strip the whole
-      --     subtree to `.unitVal` so the renderer doesn't try to emit
-      --     `AssertKind` tags or `panic_fmt` marshalling code.
+      --     coercion of a failing source is that failure, the head
+      --     `panic`; the `AssertKind` tags and `panic_fmt` arguments
+      --     of the source are not parsed.
       --
       --   * **Early return** (`return None;` inside `if`): the wrapped
       --     source is a `Return` whose payload IS observable as a
@@ -6202,7 +6191,7 @@ where
         "unreachable_display", "panic_nounwind", "panic_nounwind_fmt",
         "panic_str", "panic_bounds_check"]
       if divergesByPanic panickingFns srcJ then
-        return .unitVal
+        return .app "panic" []
       else
         return (← parseHaxTExpr srcJ implMap).kind
 
