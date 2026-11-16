@@ -19,6 +19,7 @@ uses it to parse hax's JSON AST dumps; it is also usable standalone.
 | `RoundtripObj` | The `obj` leaf, **roundtrip modulo canonicalisation** (structural equality is unattainable — the parser rebuilds objects via `mkObj = Json.obj ∘ TreeMap.Raw.ofList`). |
 | `All` | Import manifest forcing the whole suite into the build (CI rot-guard). |
 | `Adapter` | hax-JSON → `Lean.Json` glue (trusted at the top level). |
+| `Chunked` | Chunked parse of a large export (`haxpipeT --json-chunk N`): values over `N` bytes are split into their elements and each piece is parsed by `parseJsonString`; trusted glue, with the same value as the whole-file parse (regression in `tests/run_tests.sh`). |
 
 ## Documented scope limits
 

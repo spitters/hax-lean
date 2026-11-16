@@ -3,6 +3,7 @@ module
 public import HaxLean.Json
 public import HaxLean.Json.Adapter
 public import HaxLean.Json.IdTable
+public import HaxLean.Json.Chunked
 public import HaxLean.HaxAdapter
 public import HaxLean.PrettyPrint
 public import HaxLean.Pipeline
@@ -18,17 +19,21 @@ open Lean (Json ToJson FromJson toJson fromJson?)
 def Json.parseVerified (s : String) : Except String Json :=
   Hax.resolveIds <$> Hax.Json.parseJsonString s
 
-/-- The item array of a hax frontend export parsed by `Json.parseVerified`
-    (`HaxAdapter.haxExportArray`: the `Legacy` items of a hax 0.4 export, the
-    bare array of a hax 0.3 export). -/
-def parseHaxExportItems (s : String) : Except String Json :=
-  Json.parseVerified s >>= HaxAdapter.haxExportArray
+/-- The item array of a hax frontend export (`HaxAdapter.haxExportArray`: the `Legacy`
+    items of a hax 0.4 export, the bare array of a hax 0.3 export), parsed by
+    `Json.Chunked.chunkedParseResolved T`: every value whose text exceeds `T` bytes is
+    parsed element by element with the verified parser, and `T = 0` is the whole-file
+    parse `Json.parseVerified`; the value is the same for every `T`. -/
+def parseHaxExportItems (s : String)
+    (T : Nat := Hax.Json.Chunked.defaultChunkThreshold) : Except String Json :=
+  Hax.Json.Chunked.chunkedParseResolved T s >>= HaxAdapter.haxExportArray
 
 /-- The item array of a hax frontend export (`parseHaxExportItems`), with its
     items listed once each and every `Mod` sub-item list emptied
     (`HaxAdapter.flattenModItems`). -/
-def parseHaxExport (s : String) : Except String Json :=
-  HaxAdapter.flattenModItems <$> parseHaxExportItems s
+def parseHaxExport (s : String)
+    (T : Nat := Hax.Json.Chunked.defaultChunkThreshold) : Except String Json :=
+  HaxAdapter.flattenModItems <$> parseHaxExportItems s T
 
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do
@@ -111,6 +116,9 @@ structure Options where
       calls an omitted one; the rest of the crate is translated. Without the flag the
       first refusal aborts the run. -/
   keepGoing : Bool := false
+  /-- `--json-chunk N`: values of the hax export whose text exceeds `N` bytes are parsed
+      element by element (`parseHaxExportItems`); `none` is the default threshold. -/
+  jsonChunk : Option Nat := none
   /-- The arguments starting with `--` that name no option, in order; `haxpipeT`
       stops with an error when there is one. -/
   unknownArgs : List String := []
@@ -141,6 +149,10 @@ where
     | "--emit-monadic" :: rest, opts => go rest { opts with emitMonadic := true }
     | "--emit-reading" :: m :: rest, opts => go rest { opts with emitReading := some m }
     | "--keep-going" :: rest, opts => go rest { opts with keepGoing := true }
+    | "--json-chunk" :: n :: rest, opts =>
+      match n.toNat? with
+      | some k => go rest { opts with jsonChunk := some k }
+      | none => go rest { opts with unknownArgs := opts.unknownArgs ++ ["--json-chunk " ++ n] }
     | arg :: rest, opts =>
       if arg.startsWith "--" then go rest { opts with unknownArgs := opts.unknownArgs ++ [arg] }
       else go rest { opts with inputFile := some arg }
@@ -205,6 +217,9 @@ OPTIONS:
   --keep-going      With --emit-certified --hax: report each refused function
                     (REFUSED name: construct) and each function calling an
                     omitted one on stderr, omit them, and translate the rest
+  --json-chunk N    Parse each value of the hax export whose text exceeds N
+                    bytes element by element (default 4194304; 0 parses the
+                    whole file at once); the parsed value is the same
   --python DUMP     Read the py2json dump of a module of the Python subset and
                     print its extraction module (with --name NAME, -o FILE);
                     a refusal is printed with its position and the run fails

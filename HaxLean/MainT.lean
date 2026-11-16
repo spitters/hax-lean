@@ -133,7 +133,8 @@ def main (args : List String) : IO UInt32 := do
     -- immutable, so the parse is hoisted here. The small metadata tables are
     -- derived first; `parseHaxFileWithTExpr` is the last use of `inputJson`,
     -- so the JSON tree is released before the pipeline runs.
-    let inputJson ← IO.ofExcept (parseHaxExport input)
+    let chunk := Hax.Json.Chunked.chunkThreshold opts.jsonChunk
+    let inputJson ← IO.ofExcept (parseHaxExport input chunk)
     let t ← phaseTick "json-parse" t
     -- `--emit-classes`: keep the type parameters of both exports as named
     -- type variables and plan the classes, instances and generic binders
@@ -149,7 +150,7 @@ def main (args : List String) : IO UInt32 := do
           ({} : ClassEmit.ClassHooks),
           if opts.emitContracts then [inputJson] else [])
       | some traitFile => do
-        let traitJson ← IO.ofExcept (parseHaxExport (← IO.FS.readFile traitFile))
+        let traitJson ← IO.ofExcept (parseHaxExport (← IO.FS.readFile traitFile) chunk)
         let inputKept := ClassEmit.keepTypeParams inputJson
         let traitKept := ClassEmit.keepTypeParams traitJson
         let inputJson := ContractEmit.dropContractItems opts.emitContracts inputKept

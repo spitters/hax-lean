@@ -71,6 +71,16 @@ if [ -n "$JSON_FIXTURE" ]; then
   else
     fail "typed path on lizard fixture" "haxpipeT nonzero exit (see /tmp/haxpipeT_smoke.err)"
   fi
+  # The chunked parse gives the same extraction at every threshold.
+  for T in 0 1; do
+    if "$HAXPIPE" --hax "$JSON_FIXTURE" --emit-certified --name TestLizard --json-chunk "$T" \
+         > "/tmp/haxpipeT_chunk$T.lean" 2>/dev/null \
+       && cmp -s /tmp/haxpipeT_smoke.lean "/tmp/haxpipeT_chunk$T.lean"; then
+      pass "json-chunk $T output identical"
+    else
+      fail "json-chunk $T output identical" "output differs from the default run"
+    fi
+  done
 else
   skip "typed path on lizard fixture" "no verified-dalek checkout found"
 fi
