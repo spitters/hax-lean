@@ -167,6 +167,9 @@ structure TraitDef where
   krate : String
   /-- The supertraits outside `core`, `alloc` and `std`, by short name. -/
   supers : List String := []
+  /-- The type parameters of the trait other than `Self` (`trait T<N>`), each a
+      parameter `(N : Type)` of the class after `Self`. -/
+  typeParams : List String := []
   /-- Associated types, each with the short names of its trait bounds. -/
   assocTypes : List (String × List String) := []
   /-- Associated constants with their types. -/
@@ -264,9 +267,23 @@ def addTraitItem (td : TraitDef) (it : Json) : TraitDef :=
 def dedupTraits (tds : List TraitDef) : List TraitDef :=
   tds.foldl (fun acc d => if acc.any (·.name == d.name) then acc else acc ++ [d]) []
 
+/-- The type-parameter names of a hax `generics` node, by
+    `typeParamLeanName`: the synthetic parameter of an argument-position
+    `impl Trait` is among them. -/
+def typeParamNames (generics : Json) : List String :=
+  match generics.getObjValAs? (Array Json) "params" with
+  | .ok ps => ps.toList.filterMap fun p => do
+    let k ← (p.getObjVal? "kind").toOption
+    let _ ← (k.getObjVal? "Type").toOption
+    let n ← (p.getObjVal? "name").toOption
+    let plain ← (n.getObjVal? "Plain").toOption
+    (plain.getObjValAs? String "name").toOption.map typeParamLeanName
+  | _ => []
+
 /-- The trait definitions of an export rewritten by `keepTypeParams`, one per
     trait name, in export order. A trait item is `Trait: [constness, auto,
-    safety, ident, generics, supertrait clauses, items]`. -/
+    safety, ident, generics, supertrait clauses, items]`; the type parameters of
+    its generics other than `Self` are `TraitDef.typeParams`. -/
 def parseTraitDefs (j : Json) : List TraitDef :=
   let defs := (allItems j).filterMap fun it => do
     let k ← (it.getObjVal? "kind").toOption
@@ -277,10 +294,11 @@ def parseTraitDefs (j : Json) : List TraitDef :=
       | _ => ""
     let supers := (tr[5]?.map localTraitsOfClauses).getD []
     let beq := (tr[5]?.map hasPartialEqClause).getD false
+    let typeParams := (typeParamNames (tr[4]?.getD .null)).filter (· != "Self")
     let items := match tr[6]? with
       | some (.arr xs) => xs.toList
       | _ => []
-    some (items.foldl addTraitItem { name, krate, supers, beq })
+    some (items.foldl addTraitItem { name, krate, supers, typeParams, beq })
   dedupTraits defs
 
 /-- Order trait definitions so that each follows its supertraits. -/
@@ -302,6 +320,9 @@ structure GenericFn where
   name : String
   typeParams : List String
   bounds : List (String × String)
+  /-- The bounds of `bounds` whose trait reference carries type arguments after
+      the self argument, with those arguments (`typeParamBoundArgs`). -/
+  boundArgs : List (String × String × List ImpType) := []
   /-- The type parameters with a `PartialEq` or `Eq` bound of their own, which
       are bound with a `BEq` instance. -/
   beqParams : List String := []
@@ -313,22 +334,17 @@ structure GenericFn where
   typeCalls : List (String × List ImpType) := []
   deriving Inhabited
 
-/-- The type-parameter names of a hax `generics` node, by
-    `typeParamLeanName`: the synthetic parameter of an argument-position
-    `impl Trait` is among them. -/
-def typeParamNames (generics : Json) : List String :=
-  match generics.getObjValAs? (Array Json) "params" with
-  | .ok ps => ps.toList.filterMap fun p => do
-    let k ← (p.getObjVal? "kind").toOption
-    let _ ← (k.getObjVal? "Type").toOption
-    let n ← (p.getObjVal? "name").toOption
-    let plain ← (n.getObjVal? "Plain").toOption
-    (plain.getObjValAs? String "name").toOption.map typeParamLeanName
-  | _ => []
+/-- The `Type` entries of a hax `generic_args` list, in order
+    (`HaxAdapter.parseHaxType`). -/
+def typeArgsOfGenericArgs (args : Array Json) : List ImpType :=
+  args.toList.filterMap fun a => (a.getObjVal? "Type").toOption.map parseHaxType
 
-/-- The bounds `(trait, type parameter)` of a hax `generics` node whose trait
-    is among `traits` and whose self argument is a type parameter. -/
-def typeParamBounds (traits : List String) (generics : Json) : List (String × String) :=
+/-- The bounds `(trait, type parameter, type arguments)` of a hax `generics` node
+    whose trait is among `traits` and whose self argument is a type parameter. The
+    type arguments are the `Type` entries of the trait reference after the self
+    argument: the bound `K: KeySchedule<N>` is `("KeySchedule", "K", [N])`. -/
+def typeParamBoundArgs (traits : List String) (generics : Json) :
+    List (String × String × List ImpType) :=
   match generics.getObjValAs? (Array Json) "bounds" with
   | .ok bs => bs.toList.filterMap fun b => do
     let k ← (b.getObjVal? "kind").toOption
@@ -344,8 +360,19 @@ def typeParamBounds (traits : List String) (generics : Json) : List (String × S
     let ty ← (a0.getObjVal? "Type").toOption
     let tyv ← (ty.getObjVal? "value").toOption
     let p ← (tyv.getObjValAs? String "TypeVar").toOption
-    some (tn, p)
+    some (tn, p, typeArgsOfGenericArgs (args.extract 1 args.size))
   | _ => []
+
+/-- The bounds `(trait, type parameter)` of a hax `generics` node whose trait
+    is among `traits` and whose self argument is a type parameter
+    (`typeParamBoundArgs` without the type arguments). -/
+def typeParamBounds (traits : List String) (generics : Json) : List (String × String) :=
+  (typeParamBoundArgs traits generics).map fun (t, p, _) => (t, p)
+
+/-- The bounds of `typeParamBoundArgs` that carry type arguments. -/
+def typeParamBoundArgsNonEmpty (traits : List String) (generics : Json) :
+    List (String × String × List ImpType) :=
+  (typeParamBoundArgs traits generics).filter (!·.2.2.isEmpty)
 
 /-- The trait items a node of an export rewritten by `keepTypeParams` reads
     through a trait bound, as `(trait, item, self type)`: every node carrying an
@@ -385,11 +412,6 @@ def typeArgImplMap (j : Json) : HaxAdapter.ImplSelfTypeMap :=
     implArgHeads := HaxAdapter.inherentImplArgHeads j
     inherentCollisions := HaxAdapter.inherentMethodCollisions j
     traitImplMethods := buildTraitImplMethodMap j }
-
-/-- The `Type` entries of a hax `generic_args` list, in order
-    (`HaxAdapter.parseHaxType`). -/
-def typeArgsOfGenericArgs (args : Array Json) : List ImpType :=
-  args.toList.filterMap fun a => (a.getObjVal? "Type").toOption.map parseHaxType
 
 /-- The references with type arguments in a node of an export rewritten by
     `keepTypeParams`, as `(callee, type arguments)`: every node with a `def_id`
@@ -454,7 +476,8 @@ def genericFns (traits : List String) (j : Json) : List GenericFn :=
     guard (!ps.isEmpty)
     let beqParams := ((typeParamBounds ["PartialEq", "Eq"] g).map (·.2)).eraseDups
     some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
-           beqParams, boundItems := (localBoundSelfItems f).toList,
+           boundArgs := typeParamBoundArgsNonEmpty traits g, beqParams,
+           boundItems := (localBoundSelfItems f).toList,
            typeCalls := (typeArgCallsOf f #[] implMap).toList }
   fs.foldl (fun acc f => if acc.any (·.name == f.name) then acc else acc ++ [f]) []
 
@@ -500,6 +523,8 @@ def genericImplMethods (traits : List String) (j : Json) : List GenericFn :=
       let eqB := typeParamBounds ["PartialEq", "Eq"] ig ++ typeParamBounds ["PartialEq", "Eq"] mg
       some { name, typeParams := ps,
              bounds := (typeParamBounds traits ig ++ typeParamBounds traits mg).eraseDups,
+             boundArgs := typeParamBoundArgsNonEmpty traits ig
+               ++ typeParamBoundArgsNonEmpty traits mg,
              beqParams := (eqB.map (·.2)).eraseDups,
              boundItems := (localBoundSelfItems ii).toList,
              typeCalls := (typeArgCallsOf ii #[] implMap).toList : GenericFn })) : Option _).getD []
@@ -556,6 +581,13 @@ structure ImplInstance where
       parameter)` over the known traits, bound by the instance. -/
   typeParams : List String := []
   bounds : List (String × String) := []
+  /-- The bounds with type arguments after the self argument
+      (`GenericFn.boundArgs`). -/
+  boundArgs : List (String × String × List ImpType) := []
+  /-- The type arguments of the implemented trait after the self type
+      (`impl KeySchedule<TLSnames> for K` has `[TLSnames]`), one per
+      `TraitDef.typeParams` entry of the trait. -/
+  traitArgs : List ImpType := []
   deriving Inhabited
 
 /-- The trait `impl`s of the extracted crate whose trait is among `traits`,
@@ -583,8 +615,12 @@ def implInstances (traits : List String) (j : Json) : List ImplInstance :=
     let fields := ((items.filter (·.1 == implId)).map fun (_, item, emitted) =>
       (item, emitted)).eraseDups
     let ig := (impl.getObjVal? "generics").toOption.getD .null
+    let traitArgs := match tv.getObjValAs? (Array Json) "generic_args" with
+      | .ok args => typeArgsOfGenericArgs (args.extract 1 args.size)
+      | _ => []
     some (implId, { trait := tn, selfTy, fields, implId, typeParams := typeParamNames ig,
-                    bounds := typeParamBounds traits ig : ImplInstance })
+                    bounds := typeParamBounds traits ig,
+                    boundArgs := typeParamBoundArgsNonEmpty traits ig, traitArgs : ImplInstance })
   (found.foldl (fun acc p => if acc.any (·.1 == p.1) then acc else acc ++ [p]) []).map (·.2)
 
 /-! ## The plan handed to the renderer -/
@@ -870,7 +906,10 @@ def ClassHooks.renderClasses (h : ClassHooks) (sl : String → Option String) : 
             [s!"\nattribute [instance_reducible, instance] {td.name}.instBEq_{a}"] else [])
     let beqAttr := if ownBeq then
         s!"\nattribute [instance_reducible, instance] {td.name}.instBEq" else ""
-    s!"/-- The Rust trait `{td.name}` of the crate `{td.krate}`, as a class over its `Self` type. -/\nclass {td.name} (Self : Type){ext} where\n"
+    -- A type parameter of the trait is a parameter of the class after `Self`.
+    let params := String.join (td.typeParams.map fun p => s!" ({sanitizeName p} : Type)")
+    s!"/-- The Rust trait `{td.name}` of the crate `{td.krate}`, as a class over its "
+      ++ s!"`Self` type. -/\nclass {td.name} (Self : Type){params}{ext} where\n"
       ++ "\n".intercalate (beqField ++ assoc ++ consts ++ methods ++ prePost)
       ++ beqAttr ++ String.join attrs
   let exports := h.exports.map fun (t, items) =>
@@ -905,11 +944,17 @@ def ClassHooks.renderGenericStructs (h : ClassHooks) (structMeta : StructMeta)
 
 /-- The binders of a generic function: `{F : Type} [Inhabited F] [CtField F]`.
     The `Inhabited` binder is what the runtime's total indexing and default
-    values (`Hax.index`, `Hax.repeat_`) ask of an element type. -/
-def GenericFn.binders (g : GenericFn) : String :=
+    values (`Hax.index`, `Hax.repeat_`) ask of an element type. A bound with
+    type arguments (`GenericFn.boundArgs`) applies the class to them after the
+    type parameter: `K: KeySchedule<N>` is `[KeySchedule K N]`. -/
+def GenericFn.binders (g : GenericFn) (sl : String → Option String := fun _ => none) :
+    String :=
   " ".intercalate (g.typeParams.map (fun p => s!"\{{p} : Type} [Inhabited {p}]")
     ++ g.beqParams.map (fun p => s!"[BEq {p}]")
-    ++ g.bounds.map fun (t, p) => s!"[{t} {p}]")
+    ++ g.bounds.map fun (t, p) =>
+      let args := ((g.boundArgs.find? fun (t', p', _) => t' == t && p' == p).map
+        (·.2.2)).getD []
+      s!"[{t} {p}{String.join (args.map fun a => " " ++ argTypeStr sl a)}]")
 
 /-- A rendered definition with the binders of its generic function inserted
     after `def <name>`. Other definitions are returned unchanged. -/
@@ -934,9 +979,12 @@ def ClassHooks.renderInstance (h : ClassHooks) (sl : String → Option String)
   let fields := inst.fields.map fun (item, d) => s!"  {sanitizeName item} := {d}"
   let contractFields := inst.contractFields.map fun (f, v) => s!"  {f} := {v}"
   let binders := if inst.typeParams.isEmpty then ""
-    else " " ++ ({ name := "", typeParams := inst.typeParams, bounds := inst.bounds :
-      GenericFn }).binders
-  s!"instance{binders} : {inst.trait} {argTypeStr sl inst.selfTy} where\n"
+    else
+      let g : GenericFn := { name := "", typeParams := inst.typeParams,
+                             bounds := inst.bounds, boundArgs := inst.boundArgs }
+      " " ++ g.binders sl
+  let traitArgs := String.join (inst.traitArgs.map fun a => " " ++ argTypeStr sl a)
+  s!"instance{binders} : {inst.trait} {argTypeStr sl inst.selfTy}{traitArgs} where\n"
     ++ "\n".intercalate (superFields ++ fields ++ contractFields) ++ "\n"
 
 /-- The rendered definitions and instances in dependency order, or `none` when

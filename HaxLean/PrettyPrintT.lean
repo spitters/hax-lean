@@ -2071,6 +2071,15 @@ partial def tDeclassifyHeads (e : TExpr) : TExpr :=
 def depsHeadsDef (moduleName : String) (heads : List String) : String :=
   s!"/-- The `Deps` heads of the `ImpExpr` and `TExpr` literals, as they print them. -/\ndef {sanitizeName (moduleName ++ "_depsHeads")} : List String :=\n  [{", ".intercalate (heads.map fun h => (repr h).pretty)}]\n\n"
 
+/-- The name under which the `pub type` alias `a` is declared in a file whose
+    definitions are `definedNames`: `a`, or `a_T`, the suffix of the opaque-type
+    clash rename, when a definition prints under the name `a` (a Rust `const fn`
+    named like the alias, `type U8 = u8` beside `const fn U8(x: u8) -> U8`). Hax
+    inlines aliases at their use sites, so no emitted text refers to the renamed
+    alias. -/
+def typeAliasDeclName (definedNames : List String) (a : String) : String :=
+  if definedNames.any (sanitizeName · == a) then s!"{a}_T" else a
+
 /-- Generate a complete certified Lean 4 file from typed TExpr definitions.
     `rawTdefs` has types preserved from hax JSON (for deps class + param annotations).
     `procTdefs` (optional) has pipeline-processed TExprs (for body rendering).
@@ -2353,7 +2362,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     if aliasMeta.isEmpty then ""
     else
       let lines := aliasMeta.map fun a =>
-        s!"abbrev {a.name} := {renderAliasBody a.body}"
+        s!"abbrev {typeAliasDeclName definedNames a.name} := {renderAliasBody a.body}"
       "/-- `pub type` aliases extracted from hax JSON. Bodies use the resolved\n    underlying type because hax inlines aliases at field-use sites. -/\n"
         ++ "\n".intercalate lines ++ "\n\n"
   -- Inductive datatypes for user-defined Rust enums. Emitting

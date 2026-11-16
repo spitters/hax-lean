@@ -296,6 +296,23 @@ def scalarNewtypes : HaxAdapter.NewtypeMap := [("Scalar", .array (.uint .w8) 32)
   ++ moduleDocstring "Test" "" false 1 []
   ++ "\nset_option linter.unusedVariables false\nset_option maxRecDepth 2048\n\nnamespace Test\n\nopen Hax\n\n-- All emitted functions are `noncomputable`: extracted bodies may\n-- depend on Runtime axioms (sha256, bridgeCast, ...) which the Lean\n-- code generator rejects. Verification doesn't require execution.\nnoncomputable section\n\n/-- Newtype tuple-struct aliases: transparent type equalities\n    with definitional `.0` unwraps and definitional constructors. Inner\n    types may themselves be axiomatized (see the axiom block above). -/\nabbrev Scalar := Array (Int)\nnoncomputable def «Scalar.0» (x : Scalar) : Array (Int) := x\nnoncomputable def «Scalar.mk» (x : Array (Int)) : Scalar := x\n\n\n/-- External dependencies for Test extraction (auto-generated). -/\nclass TestDeps where\n\n\n/-- Type annotations shared by the `TExpr` literals. -/\nabbrev ty_0 : ImpType := .unknown\n\nmutual\n\ndef from_bytes_secret :=\n(fun bytes => «Scalar.mk» bytes)\n\nend\n\ndef from_bytes_secret_impExpr : ImpExpr :=\n  (.lam [\"bytes\"] (.var \"bytes\"))\n\ndef from_bytes_secret_texpr : TExpr :=\n  (.mk (.lam [\"bytes\"] (.mk (.var \"bytes\") ty_0)) ty_0)\n\nexample : from_bytes_secret_texpr.erase = from_bytes_secret_impExpr := rfl\n\nend  -- noncomputable section\n\nend Test\n"
 
+/-- `const fn U8(x: u8) -> U8 { x }`, a function named like the alias `type U8 = u8`. -/
+def u8CtorFn : TExpr :=
+  .mk (.lam ["x"] (.mk (.var "x") .unknown)) .unknown
+
+/-- The file printed for `u8CtorFn` beside the aliases `type U8 = u8` and `type U9 = u8`. -/
+def u8AliasFile : String :=
+  toLeanCertifiedFileTyped [("U8", u8CtorFn)] "Test" [] [] []
+    (aliasMeta := [{ name := "U8", body := .uint .w8 }, { name := "U9", body := .uint .w8 }])
+
+-- A `pub type` alias that a definition of the file names is declared under the
+-- clash rename `U8_T`, so `U8` is declared once, by the definition; an alias no
+-- definition names keeps its name.
+#guard (u8AliasFile.splitOn "abbrev U8_T := ").length == 2
+#guard (u8AliasFile.splitOn "abbrev U8 :=").length == 1
+#guard (u8AliasFile.splitOn "abbrev U9 := ").length == 2
+#guard (u8AliasFile.splitOn "\ndef U8 ").length == 2
+
 /-! ## Operator methods on a type parameter
 
 A generic type parameter is parsed as `.slice .int` (`Array (Int)` at the
@@ -731,6 +748,48 @@ def nttFormProjJson (param : String) : Lean.Json :=
 #guard (ClassEmit.plan ringTraitJson ringTraitJson).traits.map (·.name) == ["Ring"]
 #guard (((ClassEmit.plan ringTraitJson ringTraitJson).renderClasses (fun _ => none)).splitOn
   "class Ring ").length == 2
+
+open ClassEmit in
+/-- `trait Declassify<T> { fn declassify(self) -> T; }` in the export form of a hax
+    `Trait` item: a trait with a type parameter other than `Self`. -/
+def declassifyTraitJson : Lean.Json :=
+  let tParam : Lean.Json := Lean.Json.mkObj [("id", 2), ("value",
+    Lean.Json.mkObj [("Param", Lean.Json.mkObj [("index", 1), ("name", "T")])])]
+  let self : Lean.Json := Lean.Json.mkObj [("id", 1), ("value",
+    Lean.Json.mkObj [("Param", Lean.Json.mkObj [("index", 0), ("name", "Self")])])]
+  let generics := Lean.Json.mkObj [("params", Lean.Json.arr #[Lean.Json.mkObj [
+    ("kind", Lean.Json.mkObj [("Type", Lean.Json.mkObj [])]),
+    ("name", Lean.Json.mkObj [("Plain", Lean.Json.mkObj [("name", "T")])])]])]
+  let decl := Lean.Json.mkObj [("ident", Lean.Json.arr #["declassify", .null]),
+    ("kind", Lean.Json.mkObj [("RequiredFn", Lean.Json.arr #[
+      Lean.Json.mkObj [("decl", Lean.Json.mkObj [("inputs", Lean.Json.arr #[self]),
+        ("output", Lean.Json.mkObj [("Return", tParam)])])],
+      Lean.Json.arr #[Lean.Json.arr #["self", .null]]])])]
+  keepTypeParams (Lean.Json.arr #[Lean.Json.mkObj [
+    ("kind", Lean.Json.mkObj [("Trait", Lean.Json.arr #["NotConst", "No", "Safe",
+      Lean.Json.arr #["Declassify", .null], generics, Lean.Json.arr #[],
+      Lean.Json.arr #[decl]])]),
+    ("owner_id", Lean.Json.mkObj [("contents", Lean.Json.mkObj [("value",
+      Lean.Json.mkObj [("krate", "k")])])])]])
+
+/-- The plan of a crate with `trait Declassify<T>` and `impl Declassify<u8> for U8`. -/
+def declassifyHooks : ClassEmit.ClassHooks :=
+  { traits := ClassEmit.parseTraitDefs declassifyTraitJson
+    instances := [{ trait := "Declassify", selfTy := .int, traitArgs := [.uint .w8],
+                    fields := [("declassify", "Declassify_u8_declassify")] }] }
+
+-- A type parameter of a trait is a parameter `(T : Type)` of its class after
+-- `Self`, so a field whose type names it has no universe metavariable; an
+-- instance applies the class to the trait's type arguments, and a bound
+-- `K: Declassify<N>` of a generic function to its type arguments.
+#guard declassifyHooks.traits.map (·.typeParams) == [["T"]]
+#guard ((declassifyHooks.renderClasses (fun _ => none)).splitOn
+  "class Declassify (Self : Type) (T : Type) where\n  declassify (self : Self) : T").length == 2
+#guard declassifyHooks.renderInstance (fun _ => none) declassifyHooks.instances.head! ==
+  "instance : Declassify Int Int where\n  declassify := Declassify_u8_declassify\n"
+#guard ({ name := "f", typeParams := ["K", "N"], bounds := [("Declassify", "K")],
+          boundArgs := [("Declassify", "K", [.typeVar "N"])] } : ClassEmit.GenericFn).binders ==
+  "{K : Type} [Inhabited K] {N : Type} [Inhabited N] [Declassify K N]"
 
 -- A generic struct renders at its type arguments; the default plan leaves the
 -- lookup as it was.
