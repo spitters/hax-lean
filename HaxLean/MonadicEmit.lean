@@ -719,7 +719,8 @@ partial def renderSeq (cx : Ctx) (lvl : Nat) (a b : ImpExpr) : M String := do
     if hasCfBreak fb then seqFoldReturn cx lvl a fb b
     else seqFold cx lvl a fb b (match a with | .whileFoldReturn .. => true | _ => false)
   | .ifThenElse c t f =>
-    if isCfGuardIf t f then return ← renderM cx lvl (inlineRestIntoCfGuard b a)
+    if isCfGuardIf t f && cfGuardFusible b a then
+      return ← renderM cx lvl (inlineRestIntoCfGuard b a)
     match extractCfBreak t, extractCfBreak f with
     | some rv, none =>
       let t' := match rv with | .cfBreak _ => .cfBreak rv | _ => stripCfBreak t

@@ -2687,6 +2687,148 @@ def optionTryTyped : Bool :=
 
 end QuestionMarkExport
 
+namespace QuestionMarkStmt
+
+/-! A `?` in statement position, `g(x)?;` on `g : u8 -> Result<(), u8>` in a function
+returning `Result<u8, u8>`, returns from the function on `Err`: the renderer puts the
+rest of the body into the `Ok` arm of the `match` and returns the `Err` value from
+the other arm (the CF-guard `match` of `seqToLean`). -/
+
+open Lean Hax.HaxAdapter Hax.EmitterRegressions.QuestionMarkExport
+
+/-- `u8`. -/
+def u8J : Json := tyJ (Json.mkObj [("Uint", Json.str "U8")])
+
+/-- `()`. -/
+def unitJ : Json := tyJ (Json.mkObj [("Tuple", Json.mkObj [])])
+
+/-- `Result<u8, u8>`, the return type of `f`. -/
+def retJ : Json := resJ u8J u8J
+
+/-- The expression statement `e;`. -/
+def exprStmtJ (e : Json) : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Expr", Json.mkObj [("expr", e)])])]
+
+/-- The block `{ stmts; tail }` of type `ty`; no tail when `tail` is `null`. -/
+def blockJ (ty : Json) (stmts : List Json) (tail : Json) : Json :=
+  nodeJ ty (Json.mkObj [("Block", Json.mkObj [
+    ("stmts", Json.arr stmts.toArray), ("expr", tail)])])
+
+/-- `g(x)?`, with `g : u8 -> Result<(), u8>`. -/
+def gTry : Json :=
+  tryJ (callJ (resJ unitJ u8J) "k" [("ValueNs", "g")] [varJ u8J "x"]) (resJ infJ u8J) unitJ retJ
+
+/-- `Ok(1)` of type `Result<u8, u8>`. -/
+def ok1J : Json :=
+  nodeJ retJ (Json.mkObj [("Adt", Json.mkObj [
+    ("info", Json.mkObj [("variant", defIdJ "core" [("TypeNs", "Result"), ("TypeNs", "Ok")])]),
+    ("fields", Json.arr #[Json.mkObj [("value", nodeJ u8J (Json.mkObj [("Literal",
+      Json.mkObj [("lit", Json.mkObj [("node",
+        Json.mkObj [("Int", Json.arr #[Json.str "1", Json.str "U8"])])])])]))]])])])
+
+/-- The body of `fn f(x: u8) -> Result<u8, u8> { g(x)?; Ok(1) }`. -/
+def topBody : Json := blockJ retJ [exprStmtJ gTry] ok1J
+
+/-- The body of `fn f(x: u8) -> Result<u8, u8> { { g(x)?; } Ok(1) }`. -/
+def nestedBody : Json :=
+  blockJ retJ [exprStmtJ (blockJ unitJ [exprStmtJ gTry] .null)] ok1J
+
+/-- The rendered body of a function whose body is `j`, after the typed pipeline. -/
+def rendered (j : Json) : Option String :=
+  match parseHaxTExpr j with
+  | .ok t => some (toLean (stripFunctionTailCfBreak (tPipelineFull [] t).erase) 1 [])
+  | .error _ => none
+
+-- `{ g(x)?; Ok(1) }`: the `Ok` arm continues with `Ok(1)`, the `Err` arm returns.
+#guard rendered topBody == some ("  match g x with\n  | Except.ok (_) => Except.ok (1 : Int)\n" ++
+  "  | Except.error (residual) => Except.error residual")
+
+-- `{ { g(x)?; } Ok(1) }`: the `?` of the inner block returns from the function as well.
+#guard rendered nestedBody == some ("  match g x with\n" ++
+  "  | Except.ok (_) =>     Except.ok (1 : Int)\n" ++
+  "  | Except.error (residual) => Except.error residual")
+
+end QuestionMarkStmt
+
+namespace NestedNewtype
+
+/-! A newtype over a newtype, `struct HandshakeData(Bytes); struct Bytes(Vec<u8>);`,
+whose names take the `_T` alias (each is the head of a constructor call): the alias of
+the outer newtype names the inner one by its alias `Bytes_T`, and the inner alias is
+declared first. -/
+
+/-- The emitted file of `fn wrap(x: Vec<u8>) -> HandshakeData { HandshakeData(Bytes(x)) }`. -/
+def file : String :=
+  let bytes : ImpType := .adt "Bytes" []
+  let hd : ImpType := .adt "HandshakeData" []
+  let arr : ImpType := .adt "Vec" [.uint .w8]
+  toLeanCertifiedFileTyped
+    [("wrap", .mk (.letBind "x" (.mk (.var "x") arr)
+      (.mk (.app "HandshakeData" [.mk (.app "Bytes" [.mk (.var "x") arr]) bytes]) hd)) hd)]
+    "Test" (newtypes := [("HandshakeData", bytes), ("Bytes", arr)])
+
+#guard (file.splitOn "abbrev HandshakeData_T := Bytes_T\n").length == 2
+#guard (((file.splitOn "abbrev HandshakeData_T").head?.getD "").splitOn
+  "abbrev Bytes_T := Array (Int)\n").length == 2
+
+end NestedNewtype
+
+namespace OpaqueVariant
+
+/-! A variant of a type the crate does not define, `Algorithm::Sha256` of the opaque
+`Algorithm`, is a constant `axiom Algorithm.Sha256 : Algorithm`; a variant with a
+payload takes the argument types of its construction. -/
+
+/-- The emitted file of
+    `fn pick(b: bool) -> Algorithm { if b { Algorithm::Sha256 } else { Algorithm::Custom(b) } }`. -/
+def file : String :=
+  let alg : ImpType := .adt "Algorithm" []
+  toLeanCertifiedFileTyped
+    [("pick", .mk (.letBind "b" (.mk (.var "b") .bool) (.mk (.ifThenElse (.mk (.var "b") .bool)
+      (.mk (.app "Algorithm::Sha256" []) alg)
+      (.mk (.app "Algorithm::Custom" [.mk (.var "b") .bool]) alg)) alg)) alg)] "Test"
+
+#guard (file.splitOn "axiom Algorithm : Type\n").length == 2
+#guard (file.splitOn
+  "axiom Algorithm.Sha256 : Algorithm\naxiom Algorithm.Custom : Bool → Algorithm\n").length == 2
+-- The constants precede the definition that uses them.
+#guard (((file.splitOn "def pick ").head?.getD "").splitOn "axiom Algorithm.Custom").length == 2
+
+end OpaqueVariant
+
+namespace TupleWriterDeps
+
+/-! The `Deps` field of a tuple-form external write-back callee, `HashMap_insert` in
+`self.keys.insert(h, k)`, has the result type of its processed call sites: the pair of
+its Rust result `Option<V>` and the written map, which the call sites project
+(`_wb.2`). -/
+
+/-- The map `Vec<(i64, i64)>`. -/
+def mapTy : ImpType := .adt "Vec" [.tuple [.int, .int]]
+
+/-- `HashMap_insert(m, h, k)` at the type `ty`. -/
+def insertCall (ty : ImpType) : TExpr :=
+  .mk (.app "HashMap_insert" [.mk (.var "m") mapTy, .mk (.var "h") .int, .mk (.var "k") .int]) ty
+
+/-- The raw body: the call at its Rust result type. -/
+def rawBody : TExpr :=
+  .mk (.letBind "m" (.mk (.var "m") mapTy) (insertCall (.option .int))) (.option .int)
+
+/-- The processed body: the call bound to `_wb` at the pair type, the map projected. -/
+def procBody : TExpr :=
+  .mk (.letBind "m" (.mk (.var "m") mapTy)
+    (.mk (.letBind "_wb" (insertCall (.tuple [.option .int, mapTy]))
+      (.mk (.proj (.mk (.var "_wb") (.tuple [.option .int, mapTy])) 1) mapTy)) mapTy)) mapTy
+
+/-- The `Deps` preamble of the two bodies. -/
+def preamble : String :=
+  (generatePreambleTyped [("set", rawBody)] "Test" (procTdefs := [("set", procBody)])).1
+
+#guard (preamble.splitOn ("HashMap_insert (a : Array (Int × Int)) (b : Int) (c : Int) : " ++
+  "Option (Int) × (Array (Int × Int))\n")).length == 2
+
+end TupleWriterDeps
+
 namespace AssocFieldType
 
 /-! A struct field typed by an associated type of a type parameter

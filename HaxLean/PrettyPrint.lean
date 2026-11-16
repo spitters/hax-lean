@@ -1222,11 +1222,14 @@ partial def isCfGuardTail : ImpExpr → Bool
   | .unitVal => true  -- implicit fall-through
   | .seq (.cfBreak _) _ | .seq (.cfContinue _) _ => true
   | .ifThenElse _ thn els => isCfGuardTail thn && isCfGuardTail els
+  | .match_ _ arms => arms.all fun (_, b) => isCfGuardTail b
   | .letBind _ _ body => isCfGuardTail body
   | .seq _ rest => isCfGuardTail rest
   | _ => false
 
-/-- Check whether `e` contains a `cfBreak` somewhere in its tail positions.
+/-- Check whether `e` contains a `cfBreak` somewhere in its tail positions,
+    or has a statement that is a CF guard (`isCfGuardTail`) with one, such as
+    the `match` of a statement-position `?` in front of the unit value.
     Used together with `isCfGuardTail` to ensure we don't fire the
     CF-guard fusion on plain `if cond then () else ()` patterns that
     aren't actually doing early returns. -/
@@ -1234,9 +1237,41 @@ partial def tailHasCfBreak : ImpExpr → Bool
   | .cfBreak _ => true
   | .seq (.cfBreak _) _ => true
   | .ifThenElse _ thn els => tailHasCfBreak thn || tailHasCfBreak els
+  | .match_ _ arms => arms.any fun (_, b) => tailHasCfBreak b
   | .letBind _ _ body => tailHasCfBreak body
-  | .seq _ rest => tailHasCfBreak rest
+  | .seq a rest => tailHasCfBreak rest || (isCfGuardTail a && tailHasCfBreak a)
   | _ => false
+
+/-- Whether `e` is a bare fall-through of a CF guard: `cfContinue x` or the unit
+    value. -/
+def isBareFallThrough : ImpExpr → Bool
+  | .cfContinue _ | .unitVal => true
+  | _ => false
+
+/-- The pattern `p` with each variable binder replaced by a wildcard. -/
+partial def patDropBinders : ImpPat → ImpPat
+  | .varPat _ => .wildcard
+  | .tuplePat ps => .tuplePat (ps.map patDropBinders)
+  | .somePat p => .somePat (patDropBinders p)
+  | .okPat p => .okPat (patDropBinders p)
+  | .errPat p => .errPat (patDropBinders p)
+  | .ctorPat n ps => .ctorPat n (ps.map patDropBinders)
+  | p => p
+
+/-- Whether `inlineRestIntoCfGuard rest e` reads every free variable of `rest` at
+    its binding outside `e`: each `match` arm on the way to a fall-through either
+    binds no free variable of `rest` or is a bare fall-through (`isBareFallThrough`),
+    whose binders `inlineRestIntoCfGuard` drops. -/
+partial def cfGuardFusible (rest : ImpExpr) : ImpExpr → Bool
+  | .match_ _ arms => arms.all fun (p, b) =>
+      isBareFallThrough b ||
+        ((patBindersImp p).all (fun n => !(freeVars rest).contains n) &&
+          cfGuardFusible rest b)
+  | .ifThenElse _ thn els => cfGuardFusible rest thn && cfGuardFusible rest els
+  | .letBind _ _ body => cfGuardFusible rest body
+  | .seq (.cfBreak _) _ | .seq (.cfContinue _) _ => true
+  | .seq _ b => cfGuardFusible rest b
+  | _ => true
 
 /-- An if-then-else is a CF guard exactly when both branches are
     CF-guard tails and at least one branch contains a `cfBreak`. -/
@@ -1256,6 +1291,8 @@ partial def inlineRestIntoCfGuard (rest : ImpExpr) : ImpExpr → ImpExpr
   | .seq (.cfContinue _) _ => rest
   | .ifThenElse c thn els =>
     .ifThenElse c (inlineRestIntoCfGuard rest thn) (inlineRestIntoCfGuard rest els)
+  | .match_ s arms => .match_ s (arms.map fun (p, b) =>
+      (if isBareFallThrough b then patDropBinders p else p, inlineRestIntoCfGuard rest b))
   | .letBind n v body => .letBind n v (inlineRestIntoCfGuard rest body)
   | .seq e1 e2 => .seq e1 (inlineRestIntoCfGuard rest e2)
   | e => e
@@ -1954,7 +1991,7 @@ where
       -- the function's value. Closes the "let ... statement after if-with-
       -- cfBreak in else=()" pattern that the legacy renderer emitted as
       -- invalid Lean (statement following a non-unit if-expression).
-      else if isCfGuardIf thn els then
+      else if isCfGuardIf thn els && cfGuardFusible e2 e1 then
         let fused := inlineRestIntoCfGuard e2 (.ifThenElse cond thn els)
         atLine fused lvl
       -- Early-return guard pattern:
@@ -2096,7 +2133,13 @@ where
       let hasUnitArm := arms.any fun (_, b) => b == .unitVal
       let hasNonUnitArm := arms.any fun (_, b) => b != .unitVal
       let armMuts := matchArmMutations [] (freeVars scrut) arms
-      if !armMuts.isEmpty && !arms.any (fun (_, b) => hasSurfaceControlFlow b) then
+      -- CF-guard match: a statement-position `?`, whose failure arm returns
+      -- from the function (`cfBreak`) and whose other arms fall through. The
+      -- rest of the body goes into the fall-through arms and each `cfBreak v`
+      -- becomes `v`, as for a CF-guard `if`.
+      if isCfGuardTail e1 && tailHasCfBreak e1 && cfGuardFusible e2 e1 then
+        atLine (inlineRestIntoCfGuard e2 e1) lvl
+      else if !armMuts.isEmpty && !arms.any (fun (_, b) => hasSurfaceControlFlow b) then
         -- Statement arms rebind variables of the enclosing scope. The match
         -- returns the tuple of every variable an arm rebinds, and the tuple is
         -- rebound:
