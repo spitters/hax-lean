@@ -61,7 +61,8 @@ def sanitizeName (n : String) : String :=
     | "deriving" | "extends" | "abbrev" | "opaque" | "at" | "initialize"
     | "seal" | "unseal" | "omit" | "include" | "example" | "universe"
     | "until" | "unless" | "from" | "using" | "calc" | "suffices" | "nomatch" | "nofun"
-    | "mut"
+    | "mut" | "rec" | "nonrec" | "export" | "attribute" | "local" | "termination_by"
+    | "decreasing_by" | "renaming" | "obtain"
     | "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "mod" | "not" | "or" | "and"
     | "Or" | "And" | "Not" | "True" | "False" | "Eq" | "Ne" | "Nat" | "Int"
     | "Bool" | "String" | "Array" | "List" | "Option" | "IO" | "Monad"
@@ -1258,6 +1259,32 @@ partial def patDropBinders : ImpPat → ImpPat
   | .ctorPat n ps => .ctorPat n (ps.map patDropBinders)
   | p => p
 
+/-- The free variables of `e` outside the names `bound`, each binder scoped to the
+    expression it binds in: a `letBind` binder in its body, the parameters of a
+    `lam` in its body, a loop variable in the loop body and the binders of a
+    `match` arm's pattern (`patBindersImp`) in that arm's body. An assigned name
+    counts as free. -/
+partial def freeVarsScoped (bound : List String := []) : ImpExpr → List String
+  | .var n => if bound.contains n then [] else [n]
+  | .assign n rhs => (if bound.contains n then [] else [n]) ++ freeVarsScoped bound rhs
+  | .letBind n val body => freeVarsScoped bound val ++ freeVarsScoped (n :: bound) body
+  | .lam ps body => freeVarsScoped (ps ++ bound) body
+  | .app _ es | .tuple es => es.flatMap (freeVarsScoped bound)
+  | .match_ scrut arms => freeVarsScoped bound scrut
+      ++ arms.flatMap fun (p, b) => freeVarsScoped (patBindersImp p ++ bound) b
+  | .ifThenElse c t e => freeVarsScoped bound c ++ freeVarsScoped bound t
+      ++ freeVarsScoped bound e
+  | .seq a b | .whileLoop a b | .whileFold a b | .whileFoldReturn a b =>
+    freeVarsScoped bound a ++ freeVarsScoped bound b
+  | .forLoop v lo hi body | .forLoopRev v lo hi body | .forFold v lo hi body
+  | .forFoldRev v lo hi body | .forFoldReturn v lo hi body
+  | .forFoldRevReturn v lo hi body =>
+    freeVarsScoped bound lo ++ freeVarsScoped bound hi ++ freeVarsScoped (v :: bound) body
+  | .proj e _ | .borrow e | .deref e | .break_ (some e) | .earlyReturn e
+  | .questionMark e | .cfBreak e | .cfContinue e | .cfBreakContinue e
+  | .typeAscription e _ => freeVarsScoped bound e
+  | .lit _ | .unitVal | .break_ none | .continue_ => []
+
 /-- Whether `inlineRestIntoCfGuard rest e` reads every free variable of `rest` at
     its binding outside `e`: each `match` arm on the way to a fall-through either
     binds no free variable of `rest` or is a bare fall-through (`isBareFallThrough`),
@@ -1265,7 +1292,7 @@ partial def patDropBinders : ImpPat → ImpPat
 partial def cfGuardFusible (rest : ImpExpr) : ImpExpr → Bool
   | .match_ _ arms => arms.all fun (p, b) =>
       isBareFallThrough b ||
-        ((patBindersImp p).all (fun n => !(freeVars rest).contains n) &&
+        ((patBindersImp p).all (fun n => !(freeVarsScoped [] rest).contains n) &&
           cfGuardFusible rest b)
   | .ifThenElse _ thn els => cfGuardFusible rest thn && cfGuardFusible rest els
   | .letBind _ _ body => cfGuardFusible rest body

@@ -1108,12 +1108,34 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   -- Mirror that logic to predict whether all params will have explicit
   -- types — otherwise emitting `: RetT` triggers Lean's no-body-inference
   -- mode and the un-annotated param fails to elaborate.
-  let isParamAnnotated (ty : ImpType) : Bool :=
-    if ty.isUnknown then false
+  -- The type annotation of a parameter of type `ty`, as `paramStr` below prints
+  -- it, or `none` for a parameter printed bare.
+  let isTypeVarTy (ty : ImpType) : Bool :=
+    match ty with | .typeVar _ | .ref (.typeVar _) _ => true | _ => false
+  let paramAnnot (ty : ImpType) : Option String :=
+    if ty.isUnknown then none
+    -- A type parameter or an associated type of one (`.typeVar`, possibly
+    -- behind a reference) is annotated with its surface spelling, which may
+    -- be a parenthesized application such as `(PolyRing.NttForm R)`.
+    else if isTypeVarTy ty then
+      some (ty.toLeanTypeStrSurface structLookup)
     else
-      let s := ty.toLeanTypeStrSurface structLookup
-      s == "Int" || s.startsWith "Array" || s == "Bool" || (s.splitOn " × ").length > 1
-  let allParamsTyped := tparams.all fun (_, ty) => isParamAnnotated ty
+      -- Use surface types (Int/Array Int) for compatibility with untyped Runtime.
+      -- Width-aware types (UInt16, Vector) are preserved in ImpExpr literals.
+      let tyStr := ty.toLeanTypeStrSurface structLookup
+      if tyStr == "Int" || tyStr.startsWith "Array" || tyStr == "Bool"
+          || (tyStr.splitOn " × ").length > 1 then some tyStr
+      -- Axiom-typed parameters (single-token uppercase-start names like
+      -- `Commitment_T`, `VectorCommitment_T`, `SchnorrProof`) also need
+      -- annotation — otherwise Lean's binder-type inference fails
+      -- when the body never uses the param.
+      else if tyStr != "Unit" && tyStr.length > 0 && tyStr.front.isUpper then some tyStr
+      else none
+  -- The return type is annotated when every parameter of a concrete type is
+  -- annotated; a function with a parameter typed by a type parameter keeps
+  -- its return type to inference.
+  let allParamsTyped := tparams.all fun (_, ty) =>
+    (paramAnnot ty).isSome && !isTypeVarTy ty
   -- A tuple-form `&mut` write-back callee (`mutWriteRets`) returns its Rust
   -- result, when it carries one, paired with the parameters it writes back, so
   -- its annotation is the product of their types in that order. A component
@@ -1145,27 +1167,9 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   let paramStr := if tparams.isEmpty then ""
     else " " ++ " ".intercalate (tparams.map fun (p, ty) =>
       let sn := sanitizeName p
-      -- Use the type directly from TExpr when it's known
-      if ty.isUnknown then sn
-      -- A type parameter or an associated type of one (`.typeVar`, possibly
-      -- behind a reference) is annotated with its surface spelling, which may
-      -- be a parenthesized application such as `(PolyRing.NttForm R)`.
-      else if (match ty with | .typeVar _ | .ref (.typeVar _) _ => true | _ => false) then
-        s!"({sn} : {ty.toLeanTypeStrSurface structLookup})"
-      else
-        -- Use surface types (Int/Array Int) for compatibility with untyped Runtime.
-        -- Width-aware types (UInt16, Vector) are preserved in ImpExpr literals.
-        let tyStr := ty.toLeanTypeStrSurface structLookup
-        if tyStr == "Int" || tyStr.startsWith "Array" then s!"({sn} : {tyStr})"
-        else if tyStr == "Bool" then s!"({sn} : Bool)"
-        else if (tyStr.splitOn " × ").length > 1 then s!"({sn} : {tyStr})"
-        -- Axiom-typed parameters (single-token uppercase-start names like
-        -- `Commitment_T`, `VectorCommitment_T`, `SchnorrProof`) also need
-        -- annotation — otherwise Lean's binder-type inference fails
-        -- when the body never uses the param.
-        else if tyStr != "Unit" && tyStr.length > 0 && tyStr.front.isUpper then
-          s!"({sn} : {tyStr})"
-        else sn)
+      match paramAnnot ty with
+      | some tyStr => s!"({sn} : {tyStr})"
+      | none => sn)
   let body := Hax.stripFunctionTailCfBreak body
   let bools := boolVarNames rawTe
   let body := if bools.isEmpty then body else markBoolTests bools body
@@ -2350,14 +2354,16 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- When the body is an ADT referencing a known struct, emit `<Name>_T`
   -- (the tuple-encoded abbrev) instead of inlining the tuple structure,
   -- so cross-references between aliased and unaliased Rust types remain
-  -- visible in the Lean output.
+  -- visible in the Lean output. Other types are named through the
+  -- clash-aware `structLookup`, as the inner types of newtypes are, so an
+  -- alias of a clashing type names its `<Name>_T` alias.
   let renderAliasBody (ty : ImpType) : String :=
     match ty with
     | .adt name _ =>
       let short := ImpType.sanitizeAdtShortName name
       if structMeta.any (·.1 == short) then s!"{short}_T"
-      else ty.toLeanTypeStrPrecise baseStructLookup
-    | _ => ty.toLeanTypeStrPrecise baseStructLookup
+      else ty.toLeanTypeStrPrecise structLookup
+    | _ => ty.toLeanTypeStrPrecise structLookup
   let typeAliasBlock : String :=
     if aliasMeta.isEmpty then ""
     else

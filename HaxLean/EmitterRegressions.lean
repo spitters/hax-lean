@@ -2807,6 +2807,32 @@ def rendered (j : Json) : Option String :=
   "  | Except.ok (_) =>     Except.ok (1 : Int)\n" ++
   "  | Except.error (residual) => Except.error residual")
 
+/-- `h(x)?`, with `h : u8 -> Result<(), u8>`. -/
+def hTry : Json :=
+  tryJ (callJ (resJ unitJ u8J) "k" [("ValueNs", "h")] [varJ u8J "x"]) (resJ infJ u8J) unitJ retJ
+
+/-- The body of `fn f(x: u8) -> Result<u8, u8> { g(x)?; h(x)?; Ok(1) }`. -/
+def twoBody : Json := blockJ retJ [exprStmtJ gTry, exprStmtJ hTry] ok1J
+
+/-- The body of `fn f(x: u8) -> Result<u8, u8> { g(x)?; { h(x)?; } Ok(1) }`. -/
+def laterNestedBody : Json :=
+  blockJ retJ [exprStmtJ gTry, exprStmtJ (blockJ unitJ [exprStmtJ hTry] .null)] ok1J
+
+/-- Whether the rendered body of `j` fuses each of its `?` with the rest of the
+    block: one `match` on each of `g x` and `h x`, an `Err` return from each and no
+    `let _ :=` binding. The rest after `g(x)?` holds the later `?`, whose arm binds
+    `residual` again; the binder is local to that arm (`freeVarsScoped`). -/
+def fusesBoth (j : Json) : Bool :=
+  match rendered j with
+  | some s => (s.splitOn "match g x with").length == 2 && (s.splitOn "match h x with").length == 2
+      && (s.splitOn "Except.error (residual) => Except.error residual").length == 3
+      && (s.splitOn "let _ :=").length == 1
+  | none => false
+
+-- `{ g(x)?; h(x)?; Ok(1) }` and `{ g(x)?; { h(x)?; } Ok(1) }`: both `?` return.
+#guard fusesBoth twoBody
+#guard fusesBoth laterNestedBody
+
 end QuestionMarkStmt
 
 namespace NestedNewtype
@@ -2830,7 +2856,48 @@ def file : String :=
 #guard (((file.splitOn "abbrev HandshakeData_T").head?.getD "").splitOn
   "abbrev Bytes_T := Array (Int)\n").length == 2
 
+/-- The file of `file` with the alias `type Random = Bytes;` beside it. -/
+def aliasFile : String :=
+  let bytes : ImpType := .adt "Bytes" []
+  let hd : ImpType := .adt "HandshakeData" []
+  let arr : ImpType := .adt "Vec" [.uint .w8]
+  toLeanCertifiedFileTyped
+    [("wrap", .mk (.letBind "x" (.mk (.var "x") arr)
+      (.mk (.app "HandshakeData" [.mk (.app "Bytes" [.mk (.var "x") arr]) bytes]) hd)) hd)]
+    "Test" (newtypes := [("HandshakeData", bytes), ("Bytes", arr)])
+    (aliasMeta := [{ name := "Random", body := bytes }])
+
+-- A plain alias of a newtype that takes the `_T` alias names it by that alias,
+-- declared before it.
+#guard (aliasFile.splitOn "abbrev Random := Bytes_T\n").length == 2
+#guard (((aliasFile.splitOn "abbrev Random").head?.getD "").splitOn
+  "abbrev Bytes_T :=").length == 2
+
 end NestedNewtype
+
+namespace InfallibleResult
+
+/-! A function returning `Result<Algorithm, u8>` whose body is a bare `Ok(…)`, with a
+parameter of an enum type, `fn hmac_algorithm(self: HashAlgorithm) -> Result<Algorithm,
+u8> { Ok(Algorithm::Sha256) }`, carries its result type, so the error type of
+`Except.ok` is known. -/
+
+/-- The typed literal of `hmac_algorithm`, its parameter bound to itself. -/
+def hmacAlgDef : TExpr :=
+  let res : ImpType := .result (.adt "Algorithm" []) .int
+  .mk (.letBind "self" (.mk (.var "self") (.adt "HashAlgorithm" []))
+    (.mk (.app "Ok" [.mk (.app "Algorithm::Sha256" []) (.adt "Algorithm" [])]) res)) res
+
+#guard toLeanDefTyped "hmac_algorithm" hmacAlgDef hmacAlgDef.erase ==
+  "def hmac_algorithm (self : HashAlgorithm) : Except (Int) (Algorithm) :=\n" ++
+  "Except.ok (Algorithm.Sha256)\n"
+
+end InfallibleResult
+
+-- A binder named like a Lean keyword is quoted: `let rec = …` binds `«rec»`.
+#guard sanitizeName "rec" == "«rec»"
+#guard toLean (.letBind "rec" (.lit (.int 1)) (.var "rec")) 1 [] ==
+  "  let «rec» := (1 : Int)\n  «rec»"
 
 namespace OpaqueVariant
 
