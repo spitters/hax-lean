@@ -185,6 +185,9 @@ HaxLean/
 ├── TPipeline.lean / TPipelineErase.lean  # typed pipeline + full-chain commuting square
 ├── PrettyPrint.lean / PrettyPrintT.lean  # AST → Lean source (structural emit, trusted)
 ├── Py/                              # Python front: reader, checker, translation to TExpr
+├── Rust/                            # vendored Aeneas standard library over the flat RustM
+│   ├── ITreeResult.lean             # upstream's interaction-tree Result; RustM.toITree
+│   └── Data/Coinductive/            # vendored ITree and coinductive types (after ISTA-PLV)
 └── CLI.lean / MainT.lean            # haxpipeT entry point
 python/                              # Python front: catcrypt_py, py2json (see python/README.md)
 ```

@@ -25,7 +25,11 @@ Paths: `HL/` is `hax-lean/HaxLean/Rust/`, `HP` is `hax-lean/HaxLean/AeneasBacken
   `fail e` a `vis` node and `div := ITree.div`; vendored `RustM` is the inductive
   `ok | fail | div` with the flat order. `ok`, `bind` and `pure` correspond; a statement of
   the form "`f a = ok y` implies ..." transfers name by name, while a statement about
-  failure or divergence depends on the model.
+  failure or divergence depends on the model. The map `RustM.toITree`
+  (`HaxLean/Rust/ITreeResult.lean`) is a monad morphism (`toITree_bind`) and injective;
+  `toITree_eq_ok_iff` states that `toITree x` is the leaf `ok y` exactly when `x = .ok y`,
+  and `loop_toITree_of_ok` that an `ok` run of the flat `loop` is an `ok` run of the upstream
+  `loop` on the image of the body.
 * Error kinds differ: upstream has seven (`assertionFailure`, `integerOverflow`,
   `divisionByZero`, `arrayOutOfBounds`, `maximumSizeExceeded`, `panic`, `undef`), the
   vendored model two (`panic`, `undef`), and every upstream failure of the names below is a
@@ -43,7 +47,7 @@ Paths: `HL/` is `hax-lean/HaxLean/Rust/`, `HP` is `hax-lean/HaxLean/AeneasBacken
 
 | name | vendored | upstream | comparison |
 |---|---|---|---|
-| `Result` | `HP:53`, `abbrev Result := RustM`; `RustM` inductive `ok \| fail \| div` (`HL/Primitives.lean:55-59`) | `AE/Primitives.lean:92`, `ITree RustEffect α`, irreducible | flat type against interaction tree; `ok` values correspond |
+| `Result` | `HP:53`, `abbrev Result := RustM`; `RustM` inductive `ok \| fail \| div` (`HL/Primitives.lean:55-59`) | `AE/Primitives.lean:92`, `ITree RustEffect α`, irreducible | flat type against interaction tree; `ok` values correspond: `toITree_eq_ok_iff` (`HaxLean/Rust/ITreeResult.lean`) |
 | `Result.ok` / `ok` | `HP:56`, `RustM.ok` | `AE/Primitives.lean:95`, `.ret a` | same value |
 | `Result.fail` / `fail` | `HP:59`, `RustM.fail e` | `AE/Primitives.lean:102`, a `vis (.fail e)` node | failure on both sides; kinds differ (above) |
 | `Result.div` | `HP:62`, `RustM.div` | `AE/Primitives.lean:107`, `ITree.div` | divergence; bottom of the flat order against the coinductive order |
@@ -92,7 +96,7 @@ Paths: `HL/` is `hax-lean/HaxLean/Rust/`, `HP` is `hax-lean/HaxLean/AeneasBacken
 | name | vendored | upstream | comparison |
 |---|---|---|---|
 | `ControlFlow`, `cont`, `done` | `HL/Primitives.lean:285-288` | `AE/Primitives.lean:464-467` | identical |
-| `loop body x` | `HL/Primitives.lean:292-300`, a match on the flat `body x`, `partial_fixpoint` | `AE/Primitives.lean:469-474`, `bind (body x)` with the match on the `ControlFlow`, `partial_fixpoint` over the ITree order | same unfolding at `ok`: `ok (cont x')` continues at `x'`, `ok (done y)` returns `ok y`; the fixpoint orders differ (flat against coinductive) |
+| `loop body x` | `HL/Primitives.lean:292-300`, a match on the flat `body x`, `partial_fixpoint` | `AE/Primitives.lean:469-474`, `bind (body x)` with the match on the `ControlFlow`, `partial_fixpoint` over the ITree order | same unfolding at `ok`: `ok (cont x')` continues at `x'`, `ok (done y)` returns `ok y`; the fixpoint orders differ (flat against coinductive); an `ok` run of the flat `loop` is an `ok` run of the upstream `loop` on `toITree` of the body: `loop_toITree_of_ok` |
 | `core.ops.range.Range`, `start`, `end` | `HL/Range.lean:35-38` | `AE/Range.lean:17-20` | identical |
 | `core.iter.range.Step` | `HP:66-68`: `lt`, `forward_checked` | `AE/Core/Iter.lean:19-24`: `cloneInst`, `partialOrdInst`, `steps_between`, `forward_checked`, `backward_checked` | the prelude keeps the two fields `next` reads |
 | `core.iter.range.UScalarStep.forward_checked` | `HP:71-75`, `some (start + n)` when `start.val + n.val < 2 ^ numBits` | `AE/Core/Iter.lean:256-261`, the same when `start.val + n.val ≤ UScalar.max ty` | same: `UScalar.max ty = 2 ^ numBits - 1` |
