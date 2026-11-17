@@ -184,4 +184,57 @@ uscalar /-- `wrapping_mul` on an unsigned scalar, in `RustM`. -/
 def num.«%S».wrapping_mul (x y : «%S») : RustM «%S» :=
   .ok (Aeneas.Std.core.num.«%S».wrapping_mul x y)
 
+/-- `core::slice::{[T]}::len` in `RustM`: the vendored pure `Slice.len`
+    (`backends/lean/Aeneas/Std/Slice.lean`, `Slice.len`, `@[rust_fun "core::slice::{[@T]}::len"
+    -canFail -lift]`), which the backend output calls through the lifted form. -/
+def slice.Slice.len {T : Type} (s : Slice T) : RustM Usize :=
+  .ok (Aeneas.Std.Slice.len s)
+
+/-- `<usize as SliceIndex<[T]>>`: the vendored `SliceIndexUsizeSlice`
+    (`backends/lean/Aeneas/Std/Slice.lean`, `core.slice.index.SliceIndexUsizeSlice`). -/
+abbrev Usize.Insts.CoreSliceIndexSliceIndexSliceT (T : Type) :
+    Aeneas.Std.core.slice.index.SliceIndex Usize (Slice T) T :=
+  Aeneas.Std.core.slice.index.SliceIndexUsizeSlice T
+
 end CoreModels.core
+
+namespace CoreModels.alloc
+
+open Aeneas.Std
+
+/-- `alloc::vec::{Vec<T>}::len` in `RustM`: the vendored pure `Vec.len`
+    (`backends/lean/Aeneas/Std/Vec.lean`, `Vec.len`, `-canFail -lift`), which the backend
+    output calls through the lifted form. The pure form stays `Aeneas.Std.alloc.vec.Vec.len`. -/
+def vec.Vec.len {T : Type} (v : Aeneas.Std.alloc.vec.Vec T) : RustM Usize :=
+  .ok (Aeneas.Std.alloc.vec.Vec.len v)
+
+/-- `<Vec<T> as IndexMut<I>>::index_mut`: the vendored `Vec.index_mut`
+    (`backends/lean/Aeneas/Std/Vec.lean`, `Vec.index_mut`), under the instance name the
+    backend output uses. -/
+def vec.Vec.Insts.CoreOpsIndexIndexMut.index_mut {T I Output : Type}
+    (inst : Aeneas.Std.core.slice.index.SliceIndex I (Slice T) Output)
+    (self : Aeneas.Std.alloc.vec.Vec T) (i : I) :
+    RustM (Output × (Output → Aeneas.Std.alloc.vec.Vec T)) :=
+  Aeneas.Std.alloc.vec.Vec.index_mut inst self i
+
+end CoreModels.alloc
+
+namespace Aeneas.Discriminant
+
+open Lean
+
+/-- The attribute `@[discriminant ty]` or `@[discriminant ty [v, ...]]` the backend places on
+    an enumeration. It derives the `Discriminant` instance upstream
+    (`backends/lean/Aeneas/Data/Discriminant.lean`, syntax `readDiscriminant`); here it
+    accepts the syntax and does nothing. -/
+syntax (name := readDiscriminant) "discriminant" ident ("[" num,* "]")? : attr
+
+meta initialize registerBuiltinAttribute {
+  ref := by exact decl_name%
+  name := `readDiscriminant
+  descr := "accepts @[discriminant ty] and does nothing"
+  applicationTime := .afterTypeChecking
+  add := fun _ _ _ => pure ()
+}
+
+end Aeneas.Discriminant
