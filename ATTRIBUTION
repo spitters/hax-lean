@@ -32,3 +32,24 @@ the license is available at http://www.apache.org/licenses/LICENSE-2.0.
   OR CONDITIONS OF ANY KIND, either express or implied. See the License for
   the specific language governing permissions and limitations under the
   License.
+
+HaxLean/Rust/Data/Coinductive/
+------------------------------
+
+CoInd.lean, Effect.lean and ITree.lean are the coinductive types and
+interaction trees of the Aeneas Lean library, which adapts them from
+ISTA-PLV/coinductive (https://github.com/ISTA-PLV/coinductive):
+
+  Repository: https://github.com/AeneasVerif/aeneas
+  Commit:     b08bf81f2524ee295a8c37444893acfc9c5f4dde
+  Directory:  backends/lean/Aeneas/Data/Coinductive/
+  License:    BSD 3-Clause (LICENSE in the same directory)
+  Copyright:  the coinductive contributors
+
+The files are changed only where Lean v4.35 and the hax-lean options
+require it: explicit universe declarations in place of auto-bound ones,
+and proofs completed after a `simp` that no longer closes the goal. Each
+file names its source file in its header. HaxLean/Rust/ITreeResult.lean
+transcribes the interaction-tree result monad of Aeneas
+(backends/lean/Aeneas/Std/Primitives.lean at the same commit) and relates
+it to the ported flat `RustM`.

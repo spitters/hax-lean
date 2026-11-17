@@ -46,6 +46,7 @@ public import HaxLean.Py.Secrecy
 public import HaxLean.Py.ToTExpr
 public import HaxLean.Py.Emit
 public import HaxLean.Py.ToTExprProps
+public import HaxLean.Rust.ITreeResult
 
 
 @[expose] public section
