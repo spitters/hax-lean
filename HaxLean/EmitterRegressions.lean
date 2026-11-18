@@ -3782,6 +3782,27 @@ def projTy : Json := Json.mkObj [("Alias", nttFormProjJson "C")]
 
 end AssocShared
 
+/-! The chunked parse of an inline export interns its id nodes
+(`Json.Chunked.internIds`): a node `{"id": n, "value": v}` whose value equals the value
+recorded for `n` is the recorded node. The parsed value equals that of the whole-file
+parse at every threshold, for a node repeated inside one slice, a node assembled from
+split members, an id met again with another value, and an empty object and array. -/
+
+namespace InternIds
+
+/-- An inline export `{"Legacy": items}` whose id `3` occurs twice with one value, nested
+over id `1`, and whose id `1` occurs again with another value and with the first. -/
+def inlineExport : String :=
+  "{\"Legacy\": [{\"ty\": {\"id\": 3, \"value\": {\"A\": [{\"id\": 1, \"value\": 7}, 1.0]}}}, " ++
+  "{\"ty\": {\"id\": 3, \"value\": {\"A\": [{\"id\": 1, \"value\": 7}, 1.0]}}}, " ++
+  "{\"id\": 1, \"value\": 8}, {\"id\": 1, \"value\": 7}, {}, []]}"
+
+#guard [0, 1, 5, 20, 40, 100000].all fun t =>
+  (Hax.Json.Chunked.chunkedParse t inlineExport).toOption ==
+    (Hax.Json.parseJsonString inlineExport).toOption
+
+end InternIds
+
 /-! ## Modulus-tagged field calls
 
 A call of a `primeir_hax::Field` method resolved to a field `impl` of the crate

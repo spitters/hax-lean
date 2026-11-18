@@ -70,6 +70,16 @@ def phaseTick (label : String) (start : Nat) : IO Nat := do
   IO.eprintln s!"TIMING {label}: {now - start} ms"
   return now
 
+/-- Whether `path` names the input file `input`: both resolve to the same path
+    (`IO.FS.realPath`). Standard input (`none` or `-`) and a path that does not
+    resolve name no file. -/
+def namesInputFile (input : Option String) (path : String) : IO Bool := do
+  match input with
+  | none | some "-" => return false
+  | some p =>
+    try return (← IO.FS.realPath p) == (← IO.FS.realPath path)
+    catch _ => return false
+
 /-- The options of `--python`: the dump, the module name and the output file. -/
 structure PyOptions where
   dump : Option String := none
@@ -150,9 +160,12 @@ def main (args : List String) : IO UInt32 := do
           ({} : ClassEmit.ClassHooks),
           if opts.emitContracts then [inputJson] else [])
       | some traitFile => do
-        let traitJson ← IO.ofExcept (parseHaxExport (← IO.FS.readFile traitFile) chunk)
+        -- A trait export naming the input file is the parsed input.
+        let sameFile ← namesInputFile opts.inputFile traitFile
+        let traitJson ← if sameFile then pure inputJson
+          else do IO.ofExcept (parseHaxExport (← IO.FS.readFile traitFile) chunk)
         let inputKept := ClassEmit.keepTypeParams inputJson
-        let traitKept := ClassEmit.keepTypeParams traitJson
+        let traitKept := if sameFile then inputKept else ClassEmit.keepTypeParams traitJson
         let inputJson := ContractEmit.dropContractItems opts.emitContracts inputKept
         let hooks := ClassEmit.plan
           (ContractEmit.dropContractItems opts.emitContracts traitKept) inputJson
