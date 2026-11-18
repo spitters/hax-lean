@@ -3734,6 +3734,54 @@ def isNttFormTy : ImpType → Bool
     (fun (ps, as) => (ps.map isNttFormTy, as.map isNttFormTy))
   == some ([true], [true])
 
+/-! An export in the inline form `Hax.resolveIds` gives an id-table export:
+each type node `{"id": n, "value": v}` carries the one value `v` of entry `n`,
+shared between its occurrences. `resolveAssocTypes` and `keepTypeParams`
+rewrite such an export to the inline form of the id-table export rewritten
+entry by entry. -/
+
+namespace AssocShared
+
+open Lean
+
+/-- The type node `{"id": n, "value": v}`. -/
+def idTy (n : Nat) (v : Json) : Json := Json.mkObj [("id", n), ("value", v)]
+
+/-- `impl PolyRing for _ { type NttForm = ty; }`. -/
+def polyRingImplTyJson (ty : Json) : Json :=
+  Json.mkObj [("kind", Json.mkObj [("Impl", Json.mkObj [
+    ("of_trait", Json.mkObj [("value", Json.mkObj [("def_id", Json.mkObj [("contents",
+      Json.mkObj [("value", Json.mkObj [("krate", "k"), ("path", Json.arr
+        #[Json.mkObj [("data", Json.mkObj [("TypeNs", "poly")])],
+          Json.mkObj [("data", Json.mkObj [("TypeNs", "PolyRing")])]])])])])])]),
+    ("items", Json.arr #[Json.mkObj [("ident", Json.arr #[Json.str "NttForm", Json.null]),
+      ("kind", Json.mkObj [("Type", Json.mkObj [("ty", ty)])])]])])])]
+
+/-- The inline form of the id-table export with entries `0 ↦ Inner`,
+    `1 ↦ e1` and `2 ↦ (t, t, Inner)`, where `t` is entry `proj`, and the items
+    `{ty: 2}`, `{ty: 2}`, `{ty: proj}` and `impl PolyRing` with
+    `NttForm = Inner`. Each entry is one value shared by its occurrences. -/
+def sharedExport (proj : Nat) (e1 : Json) : Json :=
+  let inner := idTy 0 ((AssocFieldType.adtTyJson "Inner").getObjValD "value")
+  let t := if proj == 0 then inner else idTy 1 e1
+  let tup := idTy 2 (Json.mkObj [("Tuple", Json.arr #[t, t, inner])])
+  Json.arr #[Json.mkObj [("ty", tup)], Json.mkObj [("ty", tup)], Json.mkObj [("ty", t)],
+    polyRingImplTyJson inner]
+
+/-- The projection `C::NttForm` as a type value. -/
+def projTy : Json := Json.mkObj [("Alias", nttFormProjJson "C")]
+
+-- The projection `C::NttForm` (entry 1), named three times, is read at
+-- `Inner` (entry 0) at each occurrence.
+#guard HaxAdapter.resolveAssocTypes (sharedExport 1 projTy) == sharedExport 0 projTy
+
+-- The projection on the type parameter `C` is the type variable
+-- `(PolyRing.NttForm C)` at each occurrence.
+#guard ClassEmit.keepTypeParams (sharedExport 1 projTy) ==
+  sharedExport 1 (Json.mkObj [("TypeVar", "(PolyRing.NttForm C)")])
+
+end AssocShared
+
 /-! ## Modulus-tagged field calls
 
 A call of a `primeir_hax::Field` method resolved to a field `impl` of the crate

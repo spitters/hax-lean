@@ -114,29 +114,28 @@ def paramAssocType (alias : Json) : Option String := do
   guard (param != "Self")
   pure s!"({traitName}.{item} {param})"
 
+/-- The `TypeVar` node of `keepTypeParams` for a type-parameter node or a
+    projection it rewrites, and `none` for any other value. -/
+def keepTypeParamsNode : Json → Option Json
+  | .obj t =>
+    match t.toList with
+    | [("Param", p)] => (p.getObjValAs? String "name").toOption.map fun n =>
+      Json.mkObj [("TypeVar", .str (typeParamLeanName n))]
+    | [("Alias", a)] => (selfAssocName a <|> paramAssocType a).map fun n =>
+      Json.mkObj [("TypeVar", .str n)]
+    | _ => none
+  | _ => none
+
 /-- Rewrite every type-parameter node `{"Param": {"index": i, "name": n}}` of
     a hax export to `{"TypeVar": n}`, and every projection `Self::A` through the
     enclosing trait to `{"TypeVar": A}`, and every projection `P::A` of a trait
     `T` on another type parameter `P` to `{"TypeVar": "(T.A P)"}`.
     `HaxAdapter.parseHaxType` reads the rewritten node as `ImpType.typeVar n`;
     it reads a `Param` as `.slice .int`. A parameter is named by
-    `typeParamLeanName`. -/
-partial def keepTypeParams (j : Json) : Json :=
-  match j with
-  | .arr xs => .arr (xs.map keepTypeParams)
-  | .obj t =>
-    match t.toList with
-    | [("Param", p)] =>
-      match p.getObjValAs? String "name" with
-      | .ok n => Json.mkObj [("TypeVar", .str (typeParamLeanName n))]
-      | _ => Json.mkObj [("Param", keepTypeParams p)]
-    | [("Alias", a)] =>
-      match selfAssocName a, paramAssocType a with
-      | some n, _ => Json.mkObj [("TypeVar", .str n)]
-      | none, some n => Json.mkObj [("TypeVar", .str n)]
-      | none, none => Json.mkObj [("Alias", keepTypeParams a)]
-    | kvs => Json.mkObj (kvs.map fun (k, v) => (k, keepTypeParams v))
-  | _ => j
+    `typeParamLeanName`. Each id node is rewritten once per value
+    (`HaxAdapter.rewriteIdShared`). -/
+def keepTypeParams (j : Json) : Json :=
+  HaxAdapter.rewriteIdShared keepTypeParamsNode j
 
 /-- Every item of an export, with the sub-items of each `Mod` item after it. -/
 partial def allItems (j : Json) : List Json :=

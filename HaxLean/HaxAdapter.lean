@@ -2825,24 +2825,65 @@ def resolveAssocType? (assoc : List (String × String × Json)) (tyJ : Json) :
 def resolveAssocFieldType (assoc : List (String × String × Json)) (tyJ : Json) : Json :=
   (resolveAssocType? assoc tyJ).getD tyJ
 
+/-- The run-time implementation of `sameJson`: address equality, then `==`. -/
+unsafe def sameJsonImpl (a b : Json) : Bool := ptrEq a b || a == b
+
+/-- Equality `a == b` of two JSON values. At run time two values at the same
+    address are equal without a traversal (`sameJsonImpl`). -/
+@[implemented_by sameJsonImpl]
+def sameJson (a b : Json) : Bool := a == b
+
+/-- The id and the value of a hax id node `{"id": n, "value": v}`, an object
+    of exactly these two members with `n` a natural number; `none` for any
+    other object. -/
+def idNodeOf? (kvs : Std.TreeMap.Raw String Json compare) : Option (Nat × Json) :=
+  if kvs.size == 2 then
+    match kvs.get? "id", kvs.get? "value" with
+    | some (.num n), some v =>
+      if n.exponent == 0 && 0 ≤ n.mantissa then some (n.mantissa.toNat, v) else none
+    | _, _ => none
+  else none
+
+/-- The top-down rewrite of a JSON value by `f`: an object `o` becomes `r`
+    when `f o = some r`, and otherwise `Json.mkObj` of its members rewritten;
+    an array has its elements rewritten; any other value is unchanged.
+    The rewrite of an id node `{"id": n, "value": v}` (`idNodeOf?`) is
+    computed once and shared by every later node with the id `n` and a value
+    equal to `v` (`sameJson`), so a value shared between the occurrences of
+    an id, as `Hax.resolveIds` produces, is rewritten once and its rewrite is
+    shared. The value is the rewrite of the tree when `f` takes equal results
+    on equal objects. -/
+partial def rewriteIdShared (f : Json → Option Json) (j : Json) : Json :=
+  (go j).run' {}
+where
+  /-- The rewrite of `rewriteIdShared`, with the rewrites of the id nodes
+      met so far, by id, beside the value each was computed from. -/
+  go (j : Json) : StateM (Std.HashMap Nat (Json × Json)) Json := do
+    match j with
+    | .arr xs => return .arr (← xs.mapM go)
+    | .obj t =>
+      let key := idNodeOf? t
+      if let some (n, v) := key then
+        if let some (vIn, out) := (← get)[n]? then
+          if sameJson vIn v then return out
+      let out ← match f j with
+        | some r => pure r
+        | none => do
+          let kvs ← t.toList.mapM fun (k, v) => do pure (k, ← go v)
+          pure (Json.mkObj kvs)
+      if let some (n, v) := key then modify (·.insert n (v, out))
+      return out
+    | _ => return j
+
 /-- An export with every type node that `resolveAssocType?` resolves, at any
     depth, replaced by its resolution under the export's associated types
     (`implAssocTypes`). An export whose trait `impl` blocks define no
     associated type is returned unchanged. The replacement types are not
-    rewritten further. -/
-partial def resolveAssocTypes (j : Json) : Json :=
+    rewritten further. Each id node is rewritten once per value
+    (`rewriteIdShared`). -/
+def resolveAssocTypes (j : Json) : Json :=
   let assoc := implAssocTypes j
-  if assoc.isEmpty then j else go assoc j
-where
-  /-- The rewrite of `resolveAssocTypes` under the associated types `assoc`. -/
-  go (assoc : List (String × String × Json)) (j : Json) : Json :=
-    match j with
-    | .arr xs => .arr (xs.map (go assoc))
-    | .obj t =>
-      match resolveAssocType? assoc j with
-      | some ty => ty
-      | none => Json.mkObj (t.toList.map fun (k, v) => (k, go assoc v))
-    | _ => j
+  if assoc.isEmpty then j else rewriteIdShared (resolveAssocType? assoc) j
 
 /-- Extract the function name from a hax `Fn` item's `ident` field.
     Format: `[name_string, span_object]`. -/
