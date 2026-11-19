@@ -273,11 +273,18 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
       -- local definition of the same short name (`shadowsLocalFn`): the two are
       -- distinct functions, and only the qualified one is absent from the
       -- emitted defs, which is what routes it into the `Deps` class.
+      --
+      -- An item of the crate whose short name is a builtin head (a free `fn new`
+      -- beside `Vec::new`) is in `collisions` (`fnNameCollisions`); at the crate
+      -- root it has no parent and is qualified by its krate. An item of
+      -- `builtinKrates` whose short name is a builtin head keeps that head, the key
+      -- of the builtin table, so `Vec::new` stays `new` beside a local `m_new`.
       let qualified :=
         match names.reverse with
         | _ :: parent :: _ => s!"{parent}_{base}"
-        | _ => base
+        | _ => if builtinHeads.contains n && krateOf != "" then s!"{krateOf}_{base}" else base
       let krateName : String := (inner.getObjValAs? String "krate").toOption.getD ""
+      let builtinItem := builtinKrates.contains krateName && builtinHeads.contains n
       -- A method declared by a trait (`kind: AssocFn` under a `Trait` parent),
       -- called on a type parameter, has no body in the export; when a local
       -- function has the same short name, the trait method is qualified with
@@ -293,8 +300,9 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
       let traitMethodShadow :=
         (inner.getObjValAs? String "kind").toOption == some "AssocFn"
           && parentKind == some "Trait" && lc.fnNames.contains n
-          && !(builtinKrates.contains krateName && builtinHeads.contains n)
-      if collisions.contains n || shadowsLocalFn lc krateName n || traitMethodShadow then
+          && !builtinItem
+      if (collisions.contains n && !builtinItem) || shadowsLocalFn lc krateName n
+          || traitMethodShadow then
         qualified
       else base
     | none =>
@@ -6313,14 +6321,21 @@ partial def localCrateOfExport (root : Json) : LocalCrate :=
     fnNames := (pairs.map (·.2)).eraseDups }
 
 /-- The short names of functions and constants that two distinct parents define
-    (`collectFnNameParents`). Such a name is qualified by its parent (`parent_name`,
-    `extractDefIdName`) at the definition and at every call and read. -/
+    (`collectFnNameParents`), followed by the builtin heads (`builtinHeads`) that a
+    function or constant of a crate outside `builtinKrates` defines
+    (`collectItemKrateNames`). Such a name is qualified by its parent (`parent_name`,
+    `extractDefIdName`), or at the crate root by its krate, at the definition and at
+    every call and read; an item of `builtinKrates` keeps its head. -/
 partial def fnNameCollisions (root : Json) : List String :=
   let items := match root with | .arr xs => xs.toList | _ => []
   let pairs := collectFnNameParents items
   let names := (pairs.map (·.1)).eraseDups
-  names.filter fun nm =>
+  let twoParents := names.filter fun nm =>
     ((pairs.filter (·.1 == nm)).map (·.2)).eraseDups.length > 1
+  let builtinShadows := (collectItemKrateNames items).filterMap fun (k, nm) =>
+    if !builtinKrates.contains k && builtinHeads.contains nm && !twoParents.contains nm
+    then some nm else none
+  twoParents ++ builtinShadows.eraseDups
 
 /-- Whether the `impl` item `implItem` is a method whose first parameter is
     `self`. Its parameters sit under `kind.Fn`, or under `kind.Fn.def`. -/

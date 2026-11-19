@@ -2720,9 +2720,25 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
           ++ "\n"
       -- A `mutual` block holds either `partial` definitions only or none.
       let anyPartial := surfaceDefs.any fun (_, t) => t.startsWith "partial def "
-      let texts := surfaceDefs.map fun (_, t) =>
-        if anyPartial && t.startsWith "def " then "partial " ++ t else t
-      (texts, "mutual\n\n", "end\n\n" ++ insts)
+      let partialize (ts : List String) : List String :=
+        if ts.any (·.startsWith "partial def ") then
+          ts.map fun t => if t.startsWith "def " then "partial " ++ t else t
+        else ts
+      if anyPartial && !needsPartial then
+        -- With a `partial` definition, each strongly connected component of the
+        -- call graph is emitted in dependency order (`ClassHooks.orderGroups`): a
+        -- definition on no cycle is an ordinary `def`, and a cycle of several
+        -- definitions is a `mutual` block of its own.
+        let hooks : ClassEmit.ClassHooks := if classHooks.enabled then classHooks else {}
+        let groups := hooks.orderGroups structLookup ((defs.zip surfaceDefs).map
+          fun ((n, e), (_, t)) => (n, t, (collectAppCalls e).map (·.1) ++ collectFreeVars [n] e))
+        let texts := groups.map fun g =>
+          match g with
+          | [t] => t
+          | _ => "mutual\n\n" ++ "\n".intercalate (partialize g) ++ "\nend\n"
+        (texts, "", "")
+      else
+        (partialize (surfaceDefs.map (·.2)), "mutual\n\n", "end\n\n" ++ insts)
   -- Under `--emit-monadic` the file imports the guarded operations and names `RustM`.
   let monadicImport := if emitMonadic then "import HaxLean.RuntimeM\n" else ""
   let monadicOpen := if emitMonadic then "open Aeneas.Std (RustM)\n" else ""

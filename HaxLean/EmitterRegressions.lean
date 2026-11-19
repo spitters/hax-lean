@@ -6051,4 +6051,91 @@ def keys (j : Json) : List (Option (String × Array String)) :=
 
 end UnwrapOpaque
 
+/-! ## Builtin heads defined by the crate, and `partial` only on cycles
+
+A function or constant of the crate whose short name is a builtin head (a free
+`fn new` beside `Vec::new`) is qualified by its parent module, or at the crate root
+by its krate, at the definition and at every call (`HaxAdapter.fnNameCollisions`,
+`HaxAdapter.extractDefIdName`); `alloc::vec::Vec::new` keeps the head `new`, which
+prints as `#[]`. The definitions of a file with a `partial` definition are emitted by
+the strongly connected components of the call graph (`ClassHooks.orderGroups`), so a
+definition on no cycle is an ordinary `def`. -/
+
+namespace BuiltinShadowCycles
+
+open Lean Hax.HaxAdapter
+
+/-- A path segment of a `DefId` with the data `d`. -/
+def segJ (d : Json) : Json := Json.mkObj [("data", d), ("disambiguator", (0 : Nat))]
+
+/-- A `DefId` of `krate` with the path segments `segs`. -/
+def didJ (krate : String) (segs : List Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [("krate", Json.str krate),
+    ("path", Json.arr segs.toArray)])])]
+
+/-- `u32`. -/
+def u32T : Json := Json.mkObj [("value", Json.mkObj [("Uint", Json.str "U32")])]
+
+/-- An expression node of type `u32`. -/
+def nodeT (c : Json) : Json := Json.mkObj [("ty", u32T), ("contents", c)]
+
+/-- A call of the item `did` on `args`. -/
+def callT (did : Json) (args : List Json) : Json :=
+  nodeT (Json.mkObj [("Call", Json.mkObj [
+    ("fun", nodeT (Json.mkObj [("GlobalName", Json.mkObj [
+      ("item", Json.mkObj [("value", Json.mkObj [("def_id", did)])])])])),
+    ("args", Json.arr args.toArray)])])
+
+/-- The local variable `n`. -/
+def varT (n : String) : Json :=
+  nodeT (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str n)])])])
+
+/-- The function item `nm` with `DefId` `did`, one parameter `x: u32` and the body
+    `body`. -/
+def fnT (did : Json) (nm : String) (body : Json) : Json :=
+  Json.mkObj [("def_id", did), ("ident", Json.arr #[Json.str nm]),
+    ("kind", Json.mkObj [("Fn", Json.mkObj [("def", Json.mkObj [
+    ("params", Json.arr #[Json.mkObj [("pat", Json.mkObj [("contents", Json.mkObj [
+      ("Binding", Json.mkObj [("var", Json.mkObj [("name", Json.str "x")])])])]),
+      ("ty", u32T)]]), ("ret", u32T), ("body", body)])])])]
+
+/-- The crate's `k::m::new`. -/
+def localNew : Json :=
+  didJ "k" [segJ (Json.mkObj [("TypeNs", "m")]), segJ (Json.mkObj [("ValueNs", "new")])]
+
+/-- `alloc::vec::Vec::new`, an inherent method of `alloc`. -/
+def vecNew : Json :=
+  didJ "alloc" [segJ (Json.mkObj [("TypeNs", "vec")]), segJ (Json.str "Impl"),
+    segJ (Json.mkObj [("ValueNs", "new")])]
+
+/-- `fn new(x) { x }` and `fn user(x) { new(Vec::new()) }` of the module `k::m`. -/
+def shadowExport : Json :=
+  Json.arr #[fnT localNew "new" (varT "x"),
+    fnT (didJ "k" [segJ (Json.mkObj [("TypeNs", "m")]),
+      segJ (Json.mkObj [("ValueNs", "user")])]) "user"
+      (callT localNew [callT vecNew []])]
+
+-- `new` is a builtin head the crate defines; the crate's `new` is `m_new` at its
+-- definition and its call, and `Vec::new` keeps the head `new`.
+#guard fnNameCollisions shadowExport == ["new"]
+#guard match parseHaxFileWithTExpr shadowExport with
+  | .ok (_, _, _, proc) =>
+    let p : List (String × TExpr) := proc
+    p.map (·.1) == ["m_new", "user"] && (p.lookup "user").map TExpr.erase ==
+      some (ImpExpr.letBind "x" (.var "x") (ImpExpr.app "m_new" [ImpExpr.app "new" []]))
+  | .error _ => false
+-- At the crate root the crate's `new` is qualified by its krate.
+#guard extractDefIdName (didJ "k" [segJ (Json.mkObj [("ValueNs", "new")])]) ["new"] == "k_new"
+#guard extractDefIdName vecNew ["new"] == "new"
+
+-- Definitions on no cycle are components of their own, in dependency order; the
+-- cycle `a ↔ b` is one component; a self-reference is no edge.
+#guard (({} : ClassEmit.ClassHooks).orderGroups (fun _ => none)
+    [("user", "U", ["a", "K"]), ("a", "A", ["b"]), ("b", "B", ["a", "K"]),
+     ("K", "C", []), ("p", "P", ["p"])]) == [["C"], ["A", "B"], ["U"], ["P"]]
+#guard (({} : ClassEmit.ClassHooks).orderGroups (fun _ => none)
+    [("f", "F", ["g"]), ("g", "G", [])]) == [["G"], ["F"]]
+
+end BuiltinShadowCycles
+
 end Hax.EmitterRegressions

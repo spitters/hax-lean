@@ -986,17 +986,18 @@ def ClassHooks.renderInstance (h : ClassHooks) (sl : String → Option String)
   s!"instance{binders} : {inst.trait} {argTypeStr sl inst.selfTy}{traitArgs} where\n"
     ++ "\n".intercalate (superFields ++ fields ++ contractFields) ++ "\n"
 
-/-- The rendered definitions and instances in dependency order, or `none` when
-    the call graph of the definitions has a cycle other than self-recursion.
+/-- The dependency graph of `orderBody` and `orderGroups` and the rendered text of
+    each node: a definition's text, or the instance declaration of `instance#i`.
 
     `defs` pairs each definition's name and rendered text with the names its
-    body refers to. An instance follows the definitions it names and the
+    body refers to. An instance depends on the definitions it names and the
     instances of its supertraits at the same self type; a non-generic
-    definition that calls a generic one follows every instance, since the call
-    is resolved at a concrete type by instance search. Ties keep the input
-    order. -/
-def ClassHooks.orderBody (h : ClassHooks) (sl : String → Option String)
-    (defs : List (String × String × List String)) : Option (List String) :=
+    definition that calls a generic one depends on every instance, since the
+    call is resolved at a concrete type by instance search. A self-reference is
+    no edge. -/
+def ClassHooks.orderNodes (h : ClassHooks) (sl : String → Option String)
+    (defs : List (String × String × List String)) :
+    List (String × List String) × (String → String) :=
   let defNames := defs.map (·.1)
   let genericNames := h.genericFns.map (·.name)
   let instIds := (List.range h.instances.length).map fun i => s!"instance#{i}"
@@ -1021,6 +1022,14 @@ def ClassHooks.orderBody (h : ClassHooks) (sl : String → Option String)
       match (h.instances.zip instIds).find? (·.2 == id) with
       | some (inst, _) => h.renderInstance sl inst
       | none => ""
+  (nodes, text)
+
+/-- The rendered definitions and instances in dependency order, or `none` when
+    the call graph of the definitions has a cycle other than self-recursion.
+    The graph is `orderNodes`; ties keep the input order. -/
+def ClassHooks.orderBody (h : ClassHooks) (sl : String → Option String)
+    (defs : List (String × String × List String)) : Option (List String) :=
+  let (nodes, text) := h.orderNodes sl defs
   let rec go (fuel : Nat) (done : List String) (rest : List (String × List String)) :
       Option (List String) :=
     if rest.isEmpty then some done else
@@ -1031,5 +1040,48 @@ def ClassHooks.orderBody (h : ClassHooks) (sl : String → Option String)
       | none => none
       | some (id, _) => go fuel (done ++ [id]) (rest.filter (·.1 != id))
   (go nodes.length [] nodes).map (·.map text)
+
+/-- The nodes reachable from `x` in at least one step of the graph `nodes`. -/
+def ClassHooks.reachFrom (nodes : List (String × List String)) (x : String) : List String :=
+  let succ (y : String) : List String := match nodes.find? (·.1 == y) with
+    | some (_, ds) => ds
+    | none => []
+  let rec go (fuel : Nat) (seen frontier : List String) : List String :=
+    match fuel with
+    | 0 => seen
+    | fuel + 1 =>
+      let next := (frontier.flatMap succ).eraseDups.filter (!seen.contains ·)
+      if next.isEmpty then seen else go fuel (seen ++ next) next
+  go (nodes.length + 1) [] [x]
+
+/-- The rendered definitions and instances grouped by the strongly connected
+    components of the graph of `orderNodes`, the components in dependency order
+    (ties keep the input order of their first member) and each component's members
+    in input order. A definition on no cycle is a component of its own. -/
+def ClassHooks.orderGroups (h : ClassHooks) (sl : String → Option String)
+    (defs : List (String × String × List String)) : List (List String) :=
+  let (nodes, text) := h.orderNodes sl defs
+  let ids := nodes.map (·.1)
+  let reach := ids.map fun x => (x, ClassHooks.reachFrom nodes x)
+  let reachOf (x : String) : List String := match reach.find? (·.1 == x) with
+    | some (_, r) => r
+    | none => []
+  let compOf (x : String) : List String :=
+    ids.filter fun y => y == x || ((reachOf x).contains y && (reachOf y).contains x)
+  let comps : List (List String) := ids.foldl (fun acc x =>
+    if acc.any (·.contains x) then acc else acc ++ [compOf x]) []
+  let compDeps (c : List String) : List String :=
+    (c.flatMap fun x => match nodes.find? (·.1 == x) with
+      | some (_, ds) => ds
+      | none => []).filter (!c.contains ·)
+  let rec go (fuel : Nat) (done : List String) (rest : List (List String)) :
+      List (List String) :=
+    match fuel with
+    | 0 => rest
+    | fuel + 1 =>
+      match rest.find? (fun c => (compDeps c).all done.contains) with
+      | none => rest
+      | some c => c :: go fuel (done ++ c) (rest.filter (· != c))
+  (go comps.length [] comps).map (·.map text)
 
 end Hax.ClassEmit
