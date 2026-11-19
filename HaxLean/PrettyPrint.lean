@@ -1635,7 +1635,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
         s!"{ind}let {sanitizeName nm} := ({toLean val 0}){path}\n{atLine rest lvl}"
       else
         let nameStr := ", ".intercalate (names.map sanitizeName)
-        s!"{ind}let ({nameStr}) := {toLean val 0}\n{atLine rest lvl}"
+        -- A `match` value is parenthesised: its arms are printed from column 0, and
+        -- without the parentheses the statement after the binding is read as part
+        -- of the last arm.
+        let valStr := match val with
+          | .match_ _ _ => s!"({toLean val 0})"
+          | _ => toLean val 0
+        s!"{ind}let ({nameStr}) := {valStr}\n{atLine rest lvl}"
     | none =>
       -- For compound values (if/else, match), put on next line with proper indentation
       -- to avoid branches appearing before the let-binding column

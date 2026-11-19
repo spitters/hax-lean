@@ -30,10 +30,12 @@ def parseHaxExportItems (s : String)
 
 /-- The item array of a hax frontend export (`parseHaxExportItems`), with its
     items listed once each and every `Mod` sub-item list emptied
-    (`HaxAdapter.flattenModItems`). -/
+    (`HaxAdapter.flattenModItems`), and the structs, enums and unions that share
+    a short name named apart (`HaxAdapter.qualifyAdtCollisions`). -/
 def parseHaxExport (s : String)
     (T : Nat := Hax.Json.Chunked.defaultChunkThreshold) : Except String Json :=
-  HaxAdapter.flattenModItems <$> parseHaxExportItems s T
+  parseHaxExportItems s T >>= fun j =>
+    HaxAdapter.qualifyAdtCollisions (HaxAdapter.flattenModItems j)
 
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do

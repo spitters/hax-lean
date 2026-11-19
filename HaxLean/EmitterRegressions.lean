@@ -5445,4 +5445,103 @@ def failedChecks : List String := (gateChecks.filter (!·.2)).map (·.1)
 
 end ConsumedFieldsGate
 
+/-! ## ADT short-name collisions, string data, a `match` bound to a tuple
+
+Two structs whose paths end in the same segment are named by their shortest
+distinguishing module suffix (`HaxAdapter.qualifyAdtCollisions`), at their
+definitions and at every type that names them. Rust `str` and `String` are both
+read at the byte type `HaxAdapter.stringBytesType`. A `match` bound to a tuple
+pattern is printed in parentheses. -/
+
+namespace AdtCollision
+
+open Lean
+
+/-- The path segment `{"data": {ns: nm}}`. -/
+def seg (ns nm : String) : Json := Json.mkObj [("data", Json.mkObj [(ns, Json.str nm)])]
+
+/-- A `def_id` node of krate `krate` and path `segs`, in the inline form. -/
+def did (krate : String) (segs : List Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("id", (7 : Nat)), ("value",
+    Json.mkObj [("krate", Json.str krate), ("path", Json.arr segs.toArray)])])]
+
+/-- The type of the ADT `k::mods::s` with no type arguments. -/
+def adtTy (krate : String) (mods : List String) (s : String) : Json :=
+  Json.mkObj [("value", Json.mkObj [("Adt", Json.mkObj [("value", Json.mkObj [
+    ("def_id", did krate (mods.map (seg "TypeNs") ++ [seg "TypeNs" s])),
+    ("generic_args", Json.arr #[])])])])]
+
+/-- The Rust type `str`. -/
+def strTy : Json := Json.mkObj [("value", Json.str "Str")]
+
+/-- The Rust type `alloc::string::String`. -/
+def stringTy : Json := adtTy "alloc" ["string"] "String"
+
+/-- A struct field `nm : ty`. -/
+def field (nm : String) (ty : Json) : Json :=
+  Json.mkObj [("ident", Json.arr #[Json.str nm, Json.null]), ("ty", ty)]
+
+/-- The item `struct k::mods::s { fields }`. -/
+def structItem (mods : List String) (s : String) (fields : List Json) : Json :=
+  Json.mkObj [("def_id", did "k" (mods.map (seg "TypeNs") ++ [seg "TypeNs" s])),
+    ("kind", Json.mkObj [("Struct", Json.arr #[Json.arr #[Json.str s, Json.null], Json.null,
+      Json.mkObj [("Struct", Json.mkObj [("fields", Json.arr fields.toArray)])]])])]
+
+/-- `proto::Msg` and `protocol::Msg`, the second with a field of the first and a
+    `String` field; `a::x::Key` and `b::x::Key`; `Other`. -/
+def collidingExport : Json := Json.arr #[
+  structItem ["proto"] "Msg" [field "a" (adtTy "k" [] "Other")],
+  structItem ["protocol"] "Msg" [field "m" (adtTy "k" ["proto"] "Msg"), field "s" stringTy],
+  structItem ["a", "x"] "Key" [field "t" strTy], structItem ["b", "x"] "Key" [],
+  structItem [] "Other" []]
+
+#guard (HaxAdapter.adtCollisionRenames (HaxAdapter.adtDefKeys collidingExport)).toOption ==
+  some
+  [(("k", #["proto", "Msg"]), "proto_Msg"), (("k", #["protocol", "Msg"]), "protocol_Msg"),
+   (("k", #["a", "x", "Key"]), "a_x_Key"), (("k", #["b", "x", "Key"]), "b_x_Key")]
+
+-- The structs keep apart, and the field of type `proto::Msg` names it.
+#guard ((HaxAdapter.qualifyAdtCollisions collidingExport).map (fun j =>
+    (HaxAdapter.parseStructDefsFromJson j).map (fun si =>
+      (si.name, si.fields.map fun f => (f.name, f.impType.toLeanTypeStrSurface))))).toOption ==
+  some
+  [("proto_Msg", [("a", "Other")]),
+   ("protocol_Msg", [("m", "proto_Msg"), ("s", "Array (Int)")]),
+   ("a_x_Key", [("t", "Array (Int)")]), ("b_x_Key", []), ("Other", [])]
+
+/-- An export without a collision. -/
+def plainExport : Json := Json.arr #[structItem ["m"] "Msg" [], structItem [] "Other" []]
+
+-- An export without a collision is returned unchanged.
+#guard match HaxAdapter.qualifyAdtCollisions plainExport with
+  | .ok j => j == plainExport
+  | .error _ => false
+
+-- Two definitions whose named segments agree at every depth are refused.
+#guard (HaxAdapter.adtCollisionRenames [("k", #["a", "K"]), ("k", #["a", "", "K"])]).toOption
+  |>.isNone
+
+-- `str` and `String` are both the byte type, with no opaque ADT to declare.
+#guard HaxAdapter.parseHaxType strTy == HaxAdapter.stringBytesType
+#guard HaxAdapter.parseHaxType stringTy == HaxAdapter.stringBytesType
+#guard (HaxAdapter.parseHaxType stringTy).collectOpaqueAdtNames == []
+
+/-- `let (a, b) := match e { None => (x, y), Some(k) => (k, y) }; f(a, b)`. -/
+def letMatch : ImpExpr :=
+  .letBind "_tup" (.match_ (.var "e")
+      [(.nonePat, .tuple [.var "x", .var "y"]),
+       (.somePat (.varPat "k"), .tuple [.var "k", .var "y"])])
+    (.letBind "a" (.proj (.var "_tup") 0) (.letBind "b" (.proj (.var "_tup") 1)
+      (.app "f" [.var "a", .var "b"])))
+
+#guard toLean letMatch 1 ==
+  "  let (a, b) := (match e with\n  | none => (x, y)\n  | some (k) => (k, y))\n  f a b"
+
+-- A call bound to a tuple pattern is printed without parentheses.
+#guard toLean (.letBind "_tup" (.app "g" []) (.letBind "a" (.proj (.var "_tup") 0)
+    (.letBind "b" (.proj (.var "_tup") 1) (.app "f" [.var "a", .var "b"])))) 1 ==
+  "  let (a, b) := g\n  f a b"
+
+end AdtCollision
+
 end Hax.EmitterRegressions

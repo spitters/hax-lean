@@ -1761,6 +1761,18 @@ def hashMapAsEntries (krate n : String) (args : List ImpType) : ImpType :=
   | "std", "HashMap", k :: v :: _ => .adt "Vec" [.tuple [k, v]]
   | _, _, _ => .adt n args
 
+/-- The type of string data: a sequence of UTF-8 bytes, `&[u8]`. Rust `str`
+    and `String` are both read at this type, in fields, parameters and
+    results alike. -/
+def stringBytesType : ImpType := .slice (.uint .w8)
+
+/-- The type of an ADT `n` of krate `krate` with type arguments `args`:
+    `alloc::string::String` is `stringBytesType`, and every other ADT is
+    `hashMapAsEntries krate n args`. -/
+def adtAsType (krate n : String) (args : List ImpType) : ImpType :=
+  if (krate == "alloc" || krate == "std") && n == "String" then stringBytesType
+  else hashMapAsEntries krate n args
+
 /-- Extract generic_args from an Adt/Array/Tuple inner value. -/
 def extractGenericArgs (adtInner : Json) : Array Json :=
   -- adtInner might be {id, value: {def_id, generic_args, ...}} or {def_id, generic_args, ...}
@@ -1806,7 +1818,7 @@ partial def parseHaxType (j : Json) : ImpType :=
   match tyKind with
   | .str "Bool" => .bool
   | .str "Char" => .int  -- approximate
-  | .str "Str" => .str
+  | .str "Str" => stringBytesType
   | .str "Never" => .unknown
   | .str "Error" => .unknown
   | _ =>
@@ -1922,7 +1934,7 @@ partial def parseHaxType (j : Json) : ImpType :=
         | .ok d => defIdKrate d
         | _ => ""
       match pathName with
-      | some n => hashMapAsEntries krate n typeArgs
+      | some n => adtAsType krate n typeArgs
       | none => .adt "unknown" typeArgs
     else if let .ok _ := tyKind.getObjVal? "Arrow" then .unknown
     else if let .ok alias := tyKind.getObjVal? "Alias" then
@@ -2884,6 +2896,156 @@ where
 def resolveAssocTypes (j : Json) : Json :=
   let assoc := implAssocTypes j
   if assoc.isEmpty then j else rewriteIdShared (resolveAssocType? assoc) j
+
+/-! ## Short-name collisions of ADT definitions
+
+The emitter names a struct, enum or union by the last segment of its path. Two
+definitions of an export whose paths end in the same segment (`proto::Msg` and
+`protocol::Msg`) are given distinct names before any reader runs
+(`qualifyAdtCollisions`). -/
+
+/-- The resolved value of a hax `def_id` node: `contents.value` of
+    `{"contents": {"id": n, "value": v}}`, else the node itself. -/
+def defIdValue (defId : Json) : Json :=
+  match defId.getObjVal? "contents" with
+  | .ok c => match c.getObjVal? "value" with | .ok v => v | _ => c
+  | _ => defId
+
+/-- The name of a path segment `{"data": {"<Ns>": name}, ...}`, and `""` for a
+    segment without one (an `impl`, a closure). -/
+def pathSegName (seg : Json) : String :=
+  match seg.getObjVal? "data" with
+  | .ok (.obj kvs) => match kvs.toList with
+    | [(_, .str n)] => n
+    | _ => ""
+  | _ => ""
+
+/-- The krate and the segment names of a resolved hax `DefId` value
+    `{"krate": k, "path": [...], ...}`; `none` for any other value. -/
+def defIdKeyOf? (v : Json) : Option (String × Array String) :=
+  match v.getObjVal? "krate", v.getObjVal? "path" with
+  | .ok (.str k), .ok (.arr segs) => some (k, segs.map pathSegName)
+  | _, _ => none
+
+/-- The kinds of item that define an ADT. -/
+def adtItemKinds : List String := ["Struct", "Enum", "Union"]
+
+/-- The `DefId` keys (`defIdKeyOf?`) of the struct, enum and union items of an
+    item array, each once. -/
+def adtDefKeys (j : Json) : List (String × Array String) :=
+  match j with
+  | .arr items => (items.toList.filterMap fun it => do
+      let k ← (it.getObjVal? "kind").toOption
+      guard (adtItemKinds.any fun t => (k.getObjVal? t).isOk)
+      let d ← (it.getObjVal? "def_id").toOption
+      let key ← defIdKeyOf? (defIdValue d)
+      guard ((key.2.back?.getD "") != "")
+      pure key).eraseDups
+  | _ => []
+
+/-- The name of the ADT `key` qualified by the last `n` segments of its krate
+    and module path: `m_Msg` for `k::a::m::Msg` at `n = 1`. Characters other
+    than letters, digits and `_` become `_`. -/
+def adtQualifiedName (key : String × Array String) (n : Nat) : String :=
+  let names := (key.1 :: key.2.toList).filter (· != "")
+  let mods := names.dropLast
+  let short := names.getLastD ""
+  let raw := "_".intercalate (mods.drop (mods.length - n) ++ [short])
+  String.ofList (raw.toList.map fun c => if c.isAlphanum || c == '_' then c else '_')
+
+/-- The new name of each ADT definition whose short name another definition
+    of `keys` shares: the shortest qualification (`adtQualifiedName`) that no
+    other definition of that short name takes at the same length. An error
+    names a short name whose definitions no qualification tells apart, or a
+    qualified name that another definition already has. -/
+def adtCollisionRenames (keys : List (String × Array String)) :
+    Except String (List ((String × Array String) × String)) := do
+  let short (k : String × Array String) : String := k.2.back?.getD ""
+  let shorts := (keys.map short).eraseDups
+  let groups := shorts.filterMap fun s =>
+    let g := keys.filter (short · == s)
+    if g.length > 1 then some (s, g) else none
+  let perGroup ← groups.mapM fun (s, g) => g.mapM fun key => do
+    let others := g.filter (· != key)
+    match (List.range (key.2.size + 1)).find? fun i =>
+        others.all fun o => adtQualifiedName o (i + 1) != adtQualifiedName key (i + 1) with
+    | some i => pure (key, adtQualifiedName key (i + 1))
+    | none => throw s!"ADT name collision: {g.length} definitions have the short name \
+        `{s}` and no module suffix tells them apart"
+  let ren := perGroup.flatten
+  let renamed := ren.map (·.1)
+  let kept := (keys.filter fun k => !renamed.contains k).map short
+  let names := ren.map (·.2)
+  for (key, nm) in ren do
+    if kept.contains nm || names.count nm > 1 then
+      throw s!"ADT name collision: the qualified name `{nm}` of \
+        `{"::".intercalate (key.1 :: key.2.toList)}` is the name of another definition"
+  pure ren
+
+/-- The `DefId` value `o` with the segment of each renamed ADT on its path
+    (`ren`) carrying the new name; `none` when `o` is not a `DefId` value or no
+    ADT of `ren` is a prefix of its path. -/
+def renameAdtDefIdPath (ren : List ((String × Array String) × String)) (o : Json) :
+    Option Json := do
+  let (k, segs) ← defIdKeyOf? o
+  let hits := ren.filter fun ((k', p), _) =>
+    k' == k && p.size ≤ segs.size && segs.extract 0 p.size == p
+  guard !hits.isEmpty
+  let .arr path ← (o.getObjVal? "path").toOption | none
+  let path := hits.foldl (fun (acc : Array Json) ((_, p), nm) =>
+    acc.modify (p.size - 1) fun seg =>
+      match seg.getObjVal? "data" with
+      | .ok (.obj kvs) => match kvs.toList with
+        | [(ns, .str _)] => seg.setObjVal! "data" (Json.mkObj [(ns, .str nm)])
+        | _ => seg
+      | _ => seg) path
+  pure (o.setObjVal! "path" (.arr path))
+
+/-- The item `it` with its name (`kind.<Struct|Enum|Union>[0][0]`) replaced by
+    the new name `ren` gives its `def_id`. -/
+def renameAdtItemIdent (ren : List ((String × Array String) × String)) (it : Json) : Json :=
+  let newName : Option String := do
+    let d ← (it.getObjVal? "def_id").toOption
+    let key ← defIdKeyOf? (defIdValue d)
+    (ren.find? (·.1 == key)).map (·.2)
+  match newName, it.getObjVal? "kind" with
+  | some nm, .ok kind =>
+    match adtItemKinds.findSome? fun t => (kind.getObjVal? t).toOption.map (t, ·) with
+    | some (t, .arr data) =>
+      let data := data.modify 0 fun idj => match idj with
+        | .arr xs => .arr (xs.set! 0 (.str nm))
+        | _ => idj
+      it.setObjVal! "kind" (kind.setObjVal! t (.arr data))
+    | _ => it
+  | _, _ => it
+
+/-- The rewrite of `qualifyAdtCollisions` at the renames `ren`: every `DefId`
+    value whose path starts with a renamed ADT (the ADT, its fields, its
+    constructors and variants) names the ADT by its new name, at any depth. -/
+partial def renameAdtPaths (ren : List ((String × Array String) × String)) (j : Json) : Json :=
+  rewriteIdShared node j
+where
+  /-- A renamed `DefId` value with its other members rewritten. -/
+  node (o : Json) : Option Json := do
+    let o' ← renameAdtDefIdPath ren o
+    match o' with
+    | .obj kvs => pure (Json.mkObj (kvs.toList.map fun (k, v) =>
+        if k == "path" then (k, v) else (k, renameAdtPaths ren v)))
+    | _ => pure o'
+
+/-- The item array `j` (a flattened export, `flattenModItems`) with every
+    struct, enum and union whose short name another such definition of `j`
+    shares named by its shortest distinguishing module qualification
+    (`adtCollisionRenames`): its item name and every `DefId` on or under its
+    path. An export without such a collision is returned unchanged; one whose
+    colliding definitions no qualification tells apart is an error. -/
+def qualifyAdtCollisions (j : Json) : Except String Json := do
+  let ren ← adtCollisionRenames (adtDefKeys j)
+  if ren.isEmpty then return j
+  let j := match j with
+    | .arr items => .arr (items.map (renameAdtItemIdent ren))
+    | _ => j
+  return renameAdtPaths ren j
 
 /-- Extract the function name from a hax `Fn` item's `ident` field.
     Format: `[name_string, span_object]`. -/
