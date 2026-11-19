@@ -99,7 +99,7 @@ def guardedHead? (f : String) (args : List ImpExpr) : Option (String × List Imp
   | "vec_remove", [_, _] => some ("Hax.vec_removeM", args)
   | "slice_update", [_, _, _, _] => some ("Hax.slice_updateM", args)
   | "copy_from_slice", [_, _] => some ("Hax.copy_from_sliceM", args)
-  | "unwrap", [_] => some ("Hax.unwrapM", args)
+  | "unwrap", [_] | "::unwrapOption", [_] => some ("Hax.unwrapM", args)
   | "expect", [_, _] => some ("Hax.expectM", args)
   | "assert", [_] => some ("Hax.assertM", args)
   | "assert_failed", [_, _, _, _] | "assert_failed'", [_, _, _, _] =>

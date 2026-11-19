@@ -3067,6 +3067,70 @@ def qualifyAdtCollisions (j : Json) : Except String Json := do
     | _ => j
   return renameAdtPaths ren j
 
+/-! ## Short-name collisions of external ADTs
+
+A struct, enum or union of a dependency crate that the export does not define is
+an opaque type of the emitted file, named by the last segment of its path. Two
+such types of one short name (`libcrux_kem::Algorithm` and
+`libcrux_hkdf::Algorithm`), or one such type and a definition of the export
+(`libcrux_kem::Error` and the crate's own `Error`), are told apart by naming each
+external type by its shortest distinguishing qualification
+(`qualifyExternalAdtCollisions`), so that each crate has its own opaque type. -/
+
+/-- The key (`defIdKeyOf?`) of a resolved `DefId` value `v` of a struct, enum or
+    union that is not local and whose krate is not in `builtinKrates`; `none` for
+    any other value. -/
+def extAdtKey? (v : Json) : Option (String × Array String) := do
+  let key ← defIdKeyOf? v
+  guard !(builtinKrates.contains key.1)
+  guard ((v.getObjVal? "is_local").toOption == some (.bool false))
+  let kind ← (v.getObjValAs? String "kind").toOption
+  guard (adtItemKinds.contains kind)
+  let last ← key.2.back?
+  guard (last != "")
+  pure key
+
+/-- The keys (`extAdtKey?`) of the `DefId` values of `j` at any depth, each id
+    node (`idNodeOf?`) visited once. -/
+partial def extAdtKeys (j : Json) : List (String × Array String) :=
+  ((go j).run ({}, [])).2.2.eraseDups
+where
+  /-- The traversal of `extAdtKeys`, with the ids visited and the keys found. -/
+  go (j : Json) : StateM (Std.HashSet Nat × List (String × Array String)) Unit := do
+    match j with
+    | .arr xs => xs.forM go
+    | .obj t =>
+      if let some (n, _) := idNodeOf? t then
+        if (← get).1.contains n then return
+        modify fun (s, ks) => (s.insert n, ks)
+      if let some key := extAdtKey? j then
+        modify fun (s, ks) => (s, key :: ks)
+      else
+        for (_, v) in t.toList do go v
+    | .null | .bool _ | .num _ | .str _ => pure ()
+
+/-- The item array `j` with every external ADT (`extAdtKeys`) whose short name
+    another external ADT or an ADT definition of `j` shares named by its shortest
+    distinguishing qualification (`adtCollisionRenames`) in every `DefId` on or
+    under its path; the definitions of `j` keep their names. An export without
+    such a collision is returned unchanged; an error names a qualified name that
+    is the name of a definition of `j`. -/
+def qualifyExternalAdtCollisions (j : Json) : Except String Json := do
+  let locals := adtDefKeys j
+  let exts := (extAdtKeys j).filter (!locals.contains ·)
+  let short (k : String × Array String) : Option String := k.2.back?
+  let localShorts := locals.map short
+  let clashing := exts.filter fun k =>
+    localShorts.contains (short k) || exts.any fun o => o != k && short o == short k
+  if clashing.isEmpty then return j
+  let ren ← adtCollisionRenames (locals ++ clashing)
+  let ren := ren.filter fun (k, _) => clashing.contains k
+  for (key, nm) in ren do
+    if localShorts.contains (some nm) then
+      throw s!"ADT name collision: the qualified name `{nm}` of \
+        `{"::".intercalate (key.1 :: key.2.toList)}` is the name of a definition"
+  return renameAdtPaths ren j
+
 /-! ## Short-name collisions of external inherent methods
 
 A method of an inherent `impl` of a dependency crate is called by its short name,

@@ -32,13 +32,17 @@ def parseHaxExportItems (s : String)
     items listed once each and every `Mod` sub-item list emptied
     (`HaxAdapter.flattenModItems`), and the structs, enums and unions that share
     a short name named apart (`HaxAdapter.qualifyAdtCollisions`), as are the
-    methods of the inherent `impl`s of dependency crates that share a short name
+    structs, enums and unions of dependency crates that share a short name with
+    another of them or with a definition of the export
+    (`HaxAdapter.qualifyExternalAdtCollisions`) and the methods of the inherent
+    `impl`s of dependency crates that share a short name
     (`HaxAdapter.qualifyExternalInherentCollisions`). -/
 def parseHaxExport (s : String)
     (T : Nat := Hax.Json.Chunked.defaultChunkThreshold) : Except String Json :=
   parseHaxExportItems s T >>= fun j =>
     HaxAdapter.qualifyExternalInherentCollisions <$>
-      HaxAdapter.qualifyAdtCollisions (HaxAdapter.flattenModItems j)
+      (HaxAdapter.qualifyAdtCollisions (HaxAdapter.flattenModItems j) >>=
+        HaxAdapter.qualifyExternalAdtCollisions)
 
 /-- Read input from file or stdin. -/
 def readInput (path : Option String) : IO String := do

@@ -1402,6 +1402,19 @@ def panicHasValueType (ty : ImpType) : Bool :=
   | .bool | .int | .uint _ | .sint _ | .str | .option _ | .result _ _ | .controlFlow _ _
   | .adt _ _ | .fn _ _ | .ref _ _ | .slice _ | .array _ _ | .typeVar _ => true
 
+/-- The renderer marker and the receiver of a call `f args` of `unwrap` (one
+    argument) or `expect` (the receiver and a message) whose receiver has an
+    `Option` type (`::unwrapOption`) or a `Result` type (`::unwrapResult`), possibly
+    behind a reference; `none` for any other call. -/
+def unwrapMarker? (f : String) (args : List TExpr) : Option (String × TExpr) := do
+  let recv ← match f, args with
+    | "unwrap", [r] | "expect", [r, _] => some r
+    | _, _ => none
+  match recv.ty.pointee with
+  | .option _ => pure ("::unwrapOption", recv)
+  | .result _ _ => pure ("::unwrapResult", recv)
+  | _ => none
+
 /-- TCB pre-process: rewrite `.namedProj T x` to `.app "::namedProj::T" [x]`
     so the renderer can recognize newtype `.0` projections via the
     function-name marker after erasure. This is the bridge between the
@@ -1421,12 +1434,17 @@ def panicHasValueType (ty : ImpType) : Bool :=
     its receiver, which the renderer prints as the one component.
 
     A panic whose type is a value type (`panicHasValueType`) is rewritten to the
-    marker `::diverge`, which the renderer prints as `default`. -/
+    marker `::diverge`, which the renderer prints as `default`. A call of `unwrap`
+    or `expect` on an `Option` or a `Result` (`unwrapMarker?`) is rewritten to its
+    marker on the receiver, which the renderer prints as a core term polymorphic
+    in the payload, so that it is no `Deps` field of one type. -/
 partial def markNamedProj : TExpr → TExpr
   | .mk (.namedProj tname e) ty =>
     .mk (.app s!"::namedProj::{tname}" [markNamedProj e]) ty
   | .mk (.app f args) ty =>
     if f == "panic" && panicHasValueType ty then .mk (.app "::diverge" []) ty
+    else if let some (m, recv) := unwrapMarker? f args then
+      .mk (.app m [markNamedProj recv]) ty
     else .mk (.app f (args.map markNamedProj)) ty
   | .mk (.letBind n v b) ty => .mk (.letBind n (markNamedProj v) (markNamedProj b)) ty
   | .mk (.tuple es) ty => .mk (.tuple (es.map markNamedProj)) ty
@@ -2447,6 +2465,11 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   let axiomsBlock := if allOpaque.isEmpty then ""
     else "/-- Opaque types extracted from hax JSON. Concrete instances are\n    provided by the protocol's bridge-adapter at the CatCrypt surface. -/\n"
       ++ "\n".intercalate (allOpaque.map fun n => s!"axiom {n} : Type") ++ "\n\n"
+      ++ "-- An element of each opaque type, so that a function generic over\n"
+      ++ "-- `[Inhabited T]` applies at it.\n"
+      ++ String.join (allOpaque.map fun n =>
+        s!"axiom {n}.inhabitant : {n}\ninstance : Inhabited {n} := ⟨{n}.inhabitant⟩\n")
+      ++ "\n"
   -- `pub type X = T` aliases emitted as `abbrev X := T`. Hax resolves
   -- aliases at field-use sites, so these are top-level human-readable
   -- bindings rather than affecting downstream struct field types.

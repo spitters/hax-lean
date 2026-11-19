@@ -1777,6 +1777,11 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
   -- A panic at a type other than unit (`markNamedProj`): the default value of
   -- the expected type.
   | .app "::diverge" [] => "default"
+  -- `unwrap`/`expect` of an `Option` and of a `Result` (`markNamedProj`): the
+  -- payload, and on `None` or `Err` (a panic in Rust) the default value of its type.
+  | .app "::unwrapOption" [o] => s!"Option.getD {parensIf (toLean o 0) (!isAtom o)} default"
+  | .app "::unwrapResult" [r] =>
+    s!"Option.getD (Except.toOption {parensIf (toLean r 0) (!isAtom r)}) default"
   | .app f args =>
     -- Special-case: index/index_mut with range args → slice functions
     match f, args with

@@ -2401,9 +2401,9 @@ def unitStructFile : String :=
 -- No `axiom` for the crate-defined type, and no `Deps` field for its value.
 #guard ((unitStructFile.splitOn "axiom HkdfOutputTooLong").length) == 1
 #guard ((unitStructFile.splitOn "\n  HkdfOutputTooLong :").length) == 1
--- A type the crate does not define stays an `axiom`.
+-- A type the crate does not define stays an `axiom` (with its `inhabitant` axiom beside it).
 #guard ((toLeanCertifiedFileTyped [("expand", unitStructErrFn)] "Test" [] []).splitOn
-  "axiom HkdfOutputTooLong").length == 2
+  "axiom HkdfOutputTooLong_T :").length == 2
 
 /-! ### Tuple structs
 
@@ -4984,6 +4984,11 @@ open MonadicEmit
     [(.wildcard, .app "Div#i32" [.var "a", .var "b"])]) ==
   "  do\n    let _m0 ← Hax.unwrapM o\n    match _m0 with\n    | _ =>\n      Hax.divM_iw 32 a b"
 
+-- The `unwrap` of an `Option` that `markNamedProj` marks is guarded the same way.
+#guard renderBody { monadic := [] } (.match_ (.app "::unwrapOption" [.var "o"])
+    [(.wildcard, .app "Div#i32" [.var "a", .var "b"])]) ==
+  "  do\n    let _m0 ← Hax.unwrapM o\n    match _m0 with\n    | _ =>\n      Hax.divM_iw 32 a b"
+
 -- A variable rebound in a monadic branch is returned by the branch and rebound.
 #guard renderBody { monadic := [] } (.letBind "y" (.lit (.int 0))
     (.seq (.ifThenElse (.app "Lt" [.var "i", .lit (.int 3)])
@@ -5946,5 +5951,104 @@ def panicBranch : TExpr :=
 #guard collectAppCalls (.lam ["f"] (.app "random" [.app "f" []])) == [("random", 1)]
 
 end ExtInherent
+
+/-! ## `unwrap` and `expect`, external ADTs of one name, inhabited opaque types
+
+A call of `unwrap` or `expect` on an `Option` or a `Result` is printed as
+`Option.getD`, through `Except.toOption` for a `Result`, with `default` for the
+panic (`markNamedProj`), so it is no `Deps` field of one type; a receiver of unknown
+type keeps the call. External structs, enums and unions that share a short name with
+each other or with a definition of the export are named by their shortest
+distinguishing qualification (`HaxAdapter.qualifyExternalAdtCollisions`). Each opaque
+type of the emitted file has an `Inhabited` instance from an axiom beside it. -/
+
+namespace UnwrapOpaque
+
+open Lean
+
+-- The markers print as core terms.
+#guard toLean (.letBind "pk" (.app "::unwrapResult" [.app "dec" [.var "b"]])
+    (.app "::unwrapOption" [.var "o"])) 1 ==
+  "  let pk := Option.getD (Except.toOption (dec b)) default\n  Option.getD o default"
+
+-- The printed terms elaborate at two payload types in one body.
+example (b : Except Int (Array Int)) (o : Option Bool) : Array Int × Bool :=
+  (Option.getD (Except.toOption b) default, Option.getD o default)
+
+-- An `unwrap` whose receiver has no known type stays a call.
+#guard (markNamedProj (.mk (.app "unwrap" [.mk (.var "x") .unknown]) .int)).erase ==
+  .app "unwrap" [.var "x"]
+
+/-- The opaque `Algorithm`. -/
+def alg : ImpType := .adt "Algorithm" []
+
+/-- The opaque `PublicKey`. -/
+def pk : ImpType := .adt "PublicKey" []
+
+/-- `fn pick(b: Result<PublicKey, i64>) -> (PublicKey, Algorithm)
+    { let o = f(); (b.unwrap(), o.expect(msg)) }`. -/
+def pickDef : TExpr :=
+  let t : ImpType := .tuple [pk, alg]
+  let u : TExpr := .mk (.app "unwrap" [.mk (.var "b") (.result pk .int)]) pk
+  let e : TExpr := .mk (.app "expect" [.mk (.var "o") (.option alg),
+    .mk (.var "msg") .str]) alg
+  let body : TExpr := .mk (.tuple [u, e]) t
+  let inner : TExpr := .mk (.letBind "o" (.mk (.app "f" []) (.option alg)) body) t
+  .mk (.letBind "b" (.mk (.var "b") (.result pk .int)) inner) t
+
+/-- The emitted file of `pick`. -/
+def file : String :=
+  toLeanCertifiedFileTyped [("pick", pickDef)] "Test" (procTdefs := [("pick", pickDef)])
+
+#guard (file.splitOn
+  "  (Option.getD (Except.toOption b) default, Option.getD o default)\n").length == 2
+#guard (file.splitOn "class TestDeps where\n  f : Option (Algorithm)\n\n").length == 2
+#guard (file.splitOn "  unwrap (").length == 1 && (file.splitOn "  expect (").length == 1
+#guard (file.splitOn ("axiom Algorithm.inhabitant : Algorithm\n" ++
+  "instance : Inhabited Algorithm := ⟨Algorithm.inhabitant⟩\n")).length == 2
+#guard (file.splitOn ("axiom PublicKey.inhabitant : PublicKey\n" ++
+  "instance : Inhabited PublicKey := ⟨PublicKey.inhabitant⟩\n")).length == 2
+
+/-- The `def_id` node of the item `p` of krate `k` of kind `kind`, interned at `id`. -/
+def tyDid (id : Nat) (k : String) (p : List String) (loc : Bool) (kind : String) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("id", id), ("value", Json.mkObj [("krate", .str k),
+    ("path", Json.arr (p.toArray.map fun s =>
+      Json.mkObj [("data", Json.mkObj [("TypeNs", .str s)]), ("disambiguator", (0 : Nat))])),
+    ("is_local", .bool loc), ("kind", .str kind)])])]
+
+/-- The enum `utils::Error` of the crate, `Algorithm` of `libcrux_kem` and of
+    `libcrux_hkdf`, a variant of the first, `Error` and `PublicKey` of `libcrux_kem`,
+    and the first `Algorithm` again. -/
+def collidingExport : Json := Json.arr #[
+  Json.mkObj [("kind", Json.mkObj [("Enum", Json.arr #[])]),
+    ("def_id", tyDid 1 "bertie" ["utils", "Error"] true "Enum")],
+  tyDid 2 "libcrux_kem" ["Algorithm"] false "Enum",
+  tyDid 3 "libcrux_hkdf" ["Algorithm"] false "Enum",
+  tyDid 4 "libcrux_kem" ["Algorithm", "X25519"] false "Variant",
+  tyDid 5 "libcrux_kem" ["Error"] false "Enum",
+  tyDid 6 "libcrux_kem" ["PublicKey"] false "Enum",
+  tyDid 2 "libcrux_kem" ["Algorithm"] false "Enum"]
+
+/-- The krate and path names of the `def_id` nodes of the export `j`. -/
+def keys (j : Json) : List (Option (String × Array String)) :=
+  match j with
+  | .arr xs => xs.toList.map fun d => HaxAdapter.defIdKeyOf? (HaxAdapter.defIdValue d)
+  | _ => []
+
+#guard (keys <$> HaxAdapter.qualifyExternalAdtCollisions collidingExport).toOption ==
+  some [none, some ("libcrux_kem", #["libcrux_kem_Algorithm"]),
+    some ("libcrux_hkdf", #["libcrux_hkdf_Algorithm"]),
+    some ("libcrux_kem", #["libcrux_kem_Algorithm", "X25519"]),
+    some ("libcrux_kem", #["libcrux_kem_Error"]), some ("libcrux_kem", #["PublicKey"]),
+    some ("libcrux_kem", #["libcrux_kem_Algorithm"])]
+
+-- An export without a collision is returned unchanged.
+#guard (HaxAdapter.qualifyExternalAdtCollisions
+    (Json.arr #[tyDid 2 "libcrux_kem" ["Algorithm"] false "Enum",
+      tyDid 6 "libcrux_kem" ["PublicKey"] false "Enum"])).toOption ==
+  some (Json.arr #[tyDid 2 "libcrux_kem" ["Algorithm"] false "Enum",
+    tyDid 6 "libcrux_kem" ["PublicKey"] false "Enum"])
+
+end UnwrapOpaque
 
 end Hax.EmitterRegressions
