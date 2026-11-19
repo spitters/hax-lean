@@ -912,6 +912,26 @@ def consistentLetTypes (t : TExpr) (typeMap : List (String × String)) :
   typeMap.filter fun (n, ty) =>
     !unknown.contains n && typeMap.all fun (n', ty') => n' != n || ty' == ty
 
+/-- The surface type of each `let` of `t` whose value has a known type, other than a
+    parameter shadow `let n := n`, with or without an `.ann` mark: a binding of a
+    type that takes no ascription (an integer, a tuple) has its type here and none
+    in `collectLetBindingTypes`. -/
+partial def letBindingTypeStrs (sl : String → Option String) : TExpr → List (String × String)
+  | .mk (.letBind n val body) _ =>
+    let shadow := if let .mk (.var v) _ := val then v == n else false
+    let here := if shadow || val.ty.isUnknown then [] else [(n, val.ty.toLeanTypeStrSurface sl)]
+    here ++ letBindingTypeStrs sl val ++ letBindingTypeStrs sl body
+  | t => (tChildren t).flatMap (letBindingTypeStrs sl)
+
+/-- The let ascriptions printed for the annotated body `t`: those of
+    `consistentLetTypes` whose type is the surface type of every binding of their name
+    (`letBindingTypeStrs`), so that `let len := b.len(); let len := f(len)` ascribes
+    neither binding with the type of the second. -/
+def ascribedLetTypes (sl : String → Option String) (t : TExpr) : List (String × String) :=
+  let bound := letBindingTypeStrs sl t
+  (consistentLetTypes t (collectLetBindingTypes sl t)).filter fun (n, ty) =>
+    bound.all fun (n', ty') => n' != n || ty' == ty
+
 /-- Inject `ImpExpr.typeAscription` wrappers into letBind RHSs in an
     ImpExpr body, using the given name→tyStr map. The renderer
     (`Hax.PrettyPrint.toLean`) consumes the wrapper as `(val : T)`.
@@ -1148,8 +1168,7 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   -- denotation-preserving (see `Hax/TPhase/AnnotateLets.lean`); this
   -- module only translates its decisions into ImpExpr injections.
   let annotatedRawTe := tAnnotateLetBindings rawTe
-  let letTypes := consistentLetTypes annotatedRawTe
-    (collectLetBindingTypes structLookup annotatedRawTe)
+  let letTypes := ascribedLetTypes structLookup annotatedRawTe
   let body := stripParamBindings (injectLetTypeAnnotations letTypes pipelinedBody)
   -- Return-type annotation: rawBody.ty is the function's return type per
   -- hax JSON. Emit `: T` after the param list when known AND non-trivial
@@ -2557,10 +2576,15 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- A non-monadic definition on a cycle of the call graph is a `partial def` when no
   -- parameter has the type of an enum with a payload, the one case in which a
   -- structural recursion may be evident, and its result names no opaque type,
-  -- which would carry no `Inhabited` instance. The file-wide rule of
-  -- `needsPartial` takes precedence.
+  -- which would carry no `Inhabited` instance. A newtype is an `abbrev` of its inner
+  -- type (`newtypeRenamed`), not opaque, when its inner type names no opaque type
+  -- (`inhabitedNewtype`). The file-wide rule of `needsPartial` takes precedence.
   let payloadEnums :=
     (enumMeta.filter fun ei => ei.variants.any (!·.payload.isEmpty)).map (·.name)
+  let rec inhabitedNewtype : Nat → String → Bool
+    | 0, _ => false
+    | k + 1, a => (newtypes.find? (·.1 == a)).any fun (_, inner) =>
+        (inner.collectOpaqueAdtNames baseStructLookup).all (inhabitedNewtype k)
   let recursiveSurface : List String :=
     if needsPartial then []
     else
@@ -2570,7 +2594,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       cands.filter fun n =>
         match fnTypes.find? (·.1 == n) with
         | some (_, ti) =>
-          (ti.retType.collectOpaqueAdtNames baseStructLookup).isEmpty &&
+          (ti.retType.collectOpaqueAdtNames baseStructLookup).all
+              (inhabitedNewtype newtypes.length) &&
             !ti.paramTypes.any fun (_, ty) =>
               if let .adt a _ := TQualifyProjections.unwrapRefs ty then
                 payloadEnums.contains a

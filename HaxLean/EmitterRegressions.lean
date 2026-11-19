@@ -5809,4 +5809,76 @@ def rebind : TExpr :=
 
 end EnumCastsRecursion
 
+/-! ## Indexing a `Vec` by a range variable; ascriptions of a rebound name
+
+`v[r]` for `v : Vec<T>` reaches hax as the call `core::ops::Index::index(&v, r)`; with
+`r` a variable of type `core::ops::Range` the index is the slice of `v` over `r`
+(`HaxAdapter.tRangeVarIndex`), as for an `Index` node. A `let` ascription is printed
+when every binding of its name has its type (`PrettyPrintT.ascribedLetTypes`); an
+integer binding takes no ascription of its own, so `let len = b.len(); let len =
+f(len);` ascribes neither binding. A recursive function whose result is a newtype is
+a `partial def` when the newtype's inner type names no opaque type
+(`PrettyPrintT.toLeanCertifiedFileTyped`). -/
+
+namespace RangeCallLetTypes
+
+open Lean Hax.HaxAdapter
+
+/-- `Index::index(a, range)` with `range : Range<usize>`. -/
+def indexRangeCallJson : Json :=
+  let range := haxNodeT CfTailsRanges.rangeTy
+    (Json.mkObj [("VarRef", Json.mkObj [("id", Json.mkObj [("name", Json.str "range")])])])
+  haxNode (Json.mkObj [("Call", Json.mkObj [
+    ("fun", haxFnJson "core" [defIdSeg "TypeNs" "ops", defIdSeg "TypeNs" "index",
+      defIdSeg "TypeNs" "Index", defIdSeg "ValueNs" "index"]),
+    ("args", Json.arr #[haxVarRef "a", range])])])
+
+-- The index is the range from the first position of `range` over its length.
+#guard (parseT indexRangeCallJson).erase == .app "index" [.var "a", .app "Range"
+  [.app "index" [.var "range", .lit (.int 0)],
+   .app "add" [.app "index" [.var "range", .lit (.int 0)], .app "len" [.var "range"]]]]
+#guard (toLean (parseT indexRangeCallJson).erase).startsWith "Hax.slice_range a "
+
+/-- `let len = b.len(); let len = f(len); len`, an integer and then a byte array. -/
+def lenRebind : TExpr :=
+  .mk (.letBind "len" (.mk (.app "Bytes_len" [.mk (.var "b") (.adt "Bytes" [])]) (.uint .wsize))
+    (.mk (.letBind "len" (.mk (.app "f" [.mk (.var "len") (.uint .wsize)]) (.slice (.uint .w8)))
+      (.mk (.var "len") (.slice (.uint .w8)))) (.slice (.uint .w8)))) (.slice (.uint .w8))
+
+-- Only the second binding carries an ascription mark; the type map keeps it.
+#guard collectLetBindingTypes (fun _ => none) (tAnnotateLetBindings lenRebind) ==
+  [("len", "Array (Int)")]
+#guard consistentLetTypes (tAnnotateLetBindings lenRebind)
+  (collectLetBindingTypes (fun _ => none) (tAnnotateLetBindings lenRebind)) ==
+  [("len", "Array (Int)")]
+-- The first binding has the type `Int`, so neither binding is ascribed.
+#guard ascribedLetTypes (fun _ => none) (tAnnotateLetBindings lenRebind) == []
+
+/-- `let len = f(b); len`, one binding of a byte array. -/
+def lenOnce : TExpr :=
+  .mk (.letBind "len" (.mk (.app "f" [.mk (.var "b") (.uint .wsize)]) (.slice (.uint .w8)))
+    (.mk (.var "len") (.slice (.uint .w8)))) (.slice (.uint .w8))
+
+#guard ascribedLetTypes (fun _ => none) (tAnnotateLetBindings lenOnce) ==
+  [("len", "Array (Int)")]
+
+/-- `fn fks(n: usize) -> Bytes { fks(n) }`, one parameter binding and the body. -/
+def fks : TExpr :=
+  .mk (.letBind "n" (.mk (.var "n") (.uint .wsize))
+    (.mk (.app "fks" [.mk (.var "n") (.uint .wsize)]) (.adt "Bytes" []))) (.adt "Bytes" [])
+
+/-- The `partial def` lines of the file emitted for `fks` with the newtype `Bytes` over
+    `inner`. -/
+def fksPartialLines (inner : ImpType) : List String :=
+  (toLeanCertifiedFileTyped [("fks", fks)] "Test" []
+    [("fks", { paramTypes := [("n", .uint .wsize)], retType := .adt "Bytes" [] })] []
+    [("Bytes", inner)]).splitOn "\n" |>.filter (·.startsWith "partial def")
+
+-- A recursive function whose result is a newtype over a byte array is a `partial def`;
+-- over an opaque type, which has no `Inhabited` instance, it is not.
+#guard fksPartialLines (.slice (.uint .w8)) == ["partial def fks (n : Int) : Bytes :="]
+#guard fksPartialLines (.adt "Opq" []) == []
+
+end RangeCallLetTypes
+
 end Hax.EmitterRegressions

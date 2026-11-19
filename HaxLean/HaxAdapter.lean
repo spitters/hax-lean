@@ -4674,6 +4674,14 @@ where
         return .app "panic" []
       let argsJ ← data.getObjValAs? (Array Json) "args"
       let args ← argsJ.toList.attach.mapM (fun ⟨a, _h⟩ => parseHaxTExpr a implMap)
+      -- The overloaded `core::ops::Index::index(a, r)` (a `Vec` indexed by `r`) with `r` a
+      -- variable of type `core::ops::Range` is the slice of `a` over `r`, as for an
+      -- `Index` node (`tRangeVarIndex`).
+      let args := if funName == "index" && callKrate funJ == "core" then
+          match args, argsJ.toList with
+          | [a, r], [_, rJ] => [a, tRangeVarIndex r rJ]
+          | _, _ => args
+        else args
       -- A call of a method of `primeir_hax::Field` resolved to a field `impl`
       -- of the crate takes its modulus-tagged head (`fieldTaggedHead?`).
       if let some h := fieldTaggedHead? funJ args.length implMap then
