@@ -91,6 +91,8 @@ partial def collectTAppCalls : TExpr → List (String × Nat × List ImpType × 
   -- `.ann e ty` is a type-ascription wrapper; recurse into the payload
   -- so calls beneath the ascription are still discovered.
   | .mk (.ann e) _ => collectTAppCalls e
+  -- The calls in the body of a closure, other than calls of its parameters.
+  | .mk (.lam ps body) _ => (collectTAppCalls body).filter fun (f, _) => !ps.contains f
   | _ => []
 
 /-- The ADTs a type names, by their short names. -/
@@ -1390,6 +1392,16 @@ partial def rewriteNewFromStructMap (sname : String) (fields : List (String × S
 
 /-! ## Full Typed Certified File Generator -/
 
+/-- Whether a panic of type `ty` stands where a value is expected: `ty` is neither
+    unit, the empty tuple nor unknown. Such a panic is the tail of a branch or of a
+    function of that type (`unimplemented!(..);` in an `else` branch). -/
+def panicHasValueType (ty : ImpType) : Bool :=
+  match ty with
+  | .unit | .unknown => false
+  | .tuple elems => !elems.isEmpty
+  | .bool | .int | .uint _ | .sint _ | .str | .option _ | .result _ _ | .controlFlow _ _
+  | .adt _ _ | .fn _ _ | .ref _ _ | .slice _ | .array _ _ | .typeVar _ => true
+
 /-- TCB pre-process: rewrite `.namedProj T x` to `.app "::namedProj::T" [x]`
     so the renderer can recognize newtype `.0` projections via the
     function-name marker after erasure. This is the bridge between the
@@ -1405,11 +1417,17 @@ partial def rewriteNewFromStructMap (sname : String) (fields : List (String × S
     destructuring chain, so `toLean`'s untyped `.proj` fallback (which
     prints an unknown identifier for any component past `0`) is only
     reached when the receiver's tuple arity truly cannot be recovered
-    from the hax-provided type. -/
+    from the hax-provided type. A projection of component `0` of a one-tuple is
+    its receiver, which the renderer prints as the one component.
+
+    A panic whose type is a value type (`panicHasValueType`) is rewritten to the
+    marker `::diverge`, which the renderer prints as `default`. -/
 partial def markNamedProj : TExpr → TExpr
   | .mk (.namedProj tname e) ty =>
     .mk (.app s!"::namedProj::{tname}" [markNamedProj e]) ty
-  | .mk (.app f args) ty => .mk (.app f (args.map markNamedProj)) ty
+  | .mk (.app f args) ty =>
+    if f == "panic" && panicHasValueType ty then .mk (.app "::diverge" []) ty
+    else .mk (.app f (args.map markNamedProj)) ty
   | .mk (.letBind n v b) ty => .mk (.letBind n (markNamedProj v) (markNamedProj b)) ty
   | .mk (.tuple es) ty => .mk (.tuple (es.map markNamedProj)) ty
   | .mk (.proj e i) ty =>
@@ -1417,6 +1435,7 @@ partial def markNamedProj : TExpr → TExpr
     match e'.ty.pointee with
     | .tuple elems =>
       if elems.length ≥ 2 then .mk (.app s!"::proj::{projPath i elems.length}" [e']) ty
+      else if elems.length == 1 && i == 0 then e'
       else .mk (.proj e' i) ty
     | _ => .mk (.proj e' i) ty
   | .mk (.ifThenElse c t e) ty =>

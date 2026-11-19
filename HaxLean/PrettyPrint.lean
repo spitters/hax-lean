@@ -1774,6 +1774,9 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
     else s!"(Hax.Not {parensIf (toLean x 0) (!isAtom x)})"
   -- panic/panic_fmt → unit (Rust panics become no-ops in the extraction)
   | .app "panic" _ | .app "panic_fmt" _ => "()"
+  -- A panic at a type other than unit (`markNamedProj`): the default value of
+  -- the expected type.
+  | .app "::diverge" [] => "default"
   | .app f args =>
     -- Special-case: index/index_mut with range args → slice functions
     match f, args with
@@ -2906,9 +2909,12 @@ partial def collectFreeVars (bound : List String := []) : ImpExpr → List Strin
   | .cfBreak e | .cfContinue e | .cfBreakContinue e => collectFreeVars bound e
   | _ => []
 
-/-- Collect all (function_name, arg_count) pairs from app calls in an expression. -/
+/-- Collect all (function_name, arg_count) pairs from app calls in an expression,
+    among them the calls in the body of a closure other than calls of its
+    parameters. -/
 partial def collectAppCalls : ImpExpr → List (String × Nat)
   | .app f args => (f, args.length) :: args.foldl (fun acc a => acc ++ collectAppCalls a) []
+  | .lam ps body => (collectAppCalls body).filter fun (f, _) => !ps.contains f
   | .letBind _ v body => collectAppCalls v ++ collectAppCalls body
   | .seq a b => collectAppCalls a ++ collectAppCalls b
   | .ifThenElse c t e => collectAppCalls c ++ collectAppCalls t ++ collectAppCalls e

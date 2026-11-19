@@ -5881,4 +5881,70 @@ def fksPartialLines (inner : ImpType) : List String :=
 
 end RangeCallLetTypes
 
+/-! ## External inherent methods of one name, value-typed panics, one-tuples, closures
+
+Methods of distinct inherent `impl`s of a dependency crate that share a short name
+are named `Impl<d>_<name>` (`HaxAdapter.qualifyExternalInherentCollisions`). A panic
+whose type is a value type is printed `default`, a projection of component `0` of a
+one-tuple is its receiver (`markNamedProj`), and the calls in the body of a closure
+reach the `Deps` collection (`collectAppCalls`, `collectTAppCalls`). -/
+
+namespace ExtInherent
+
+open Lean
+
+/-- The `def_id` node of the inherent `impl` `d` of krate `k`, interned at `id`. -/
+def implDid (id : Nat) (k : String) (d : Nat) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("id", id), ("value", Json.mkObj [("krate", .str k),
+    ("path", Json.arr #[Json.mkObj [("data", .str "Impl"), ("disambiguator", d)]]),
+    ("is_local", .bool false),
+    ("kind", Json.mkObj [("Impl", Json.mkObj [("of_trait", .bool false)])])])])]
+
+/-- The `def_id` node of the method `m` of the inherent `impl` `d` of krate `k`. -/
+def methDid (id implId : Nat) (k : String) (d : Nat) (m : String) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("id", id), ("value", Json.mkObj [("krate", .str k),
+    ("path", Json.arr #[Json.mkObj [("data", .str "Impl"), ("disambiguator", d)],
+      Json.mkObj [("data", Json.mkObj [("ValueNs", .str m)]), ("disambiguator", (0 : Nat))]]),
+    ("parent", implDid implId k d), ("is_local", .bool false), ("kind", .str "AssocFn")])])]
+
+/-- `kem::Impl#7::encode`, `kem::Impl#8::encode`, `kem::Impl#7::key_gen`, and the
+    first again. -/
+def collidingExport : Json := Json.arr #[methDid 1 10 "kem" 7 "encode",
+  methDid 2 11 "kem" 8 "encode", methDid 3 10 "kem" 7 "key_gen", methDid 1 10 "kem" 7 "encode"]
+
+/-- The emitted names of the `def_id` nodes of the export `j`. -/
+def names (j : Json) : List String :=
+  match j with
+  | .arr xs => xs.toList.map fun d => HaxAdapter.extractDefIdName d
+  | _ => []
+
+#guard names collidingExport == ["encode", "encode", "key_gen", "encode"]
+#guard names (HaxAdapter.qualifyExternalInherentCollisions collidingExport) ==
+  ["Impl7_encode", "Impl8_encode", "key_gen", "Impl7_encode"]
+
+-- An export without a collision is returned unchanged.
+#guard HaxAdapter.qualifyExternalInherentCollisions
+    (Json.arr #[methDid 1 10 "kem" 7 "encode", methDid 3 10 "kem" 7 "key_gen"]) ==
+  Json.arr #[methDid 1 10 "kem" 7 "encode", methDid 3 10 "kem" 7 "key_gen"]
+
+/-- `if c { panic!() } else { x }` at the type `Bytes`. -/
+def panicBranch : TExpr :=
+  .mk (.ifThenElse (.mk (.var "c") .bool) (.mk (.app "panic" []) (.adt "Bytes" []))
+    (.mk (.var "x") (.adt "Bytes" []))) (.adt "Bytes" [])
+
+#guard ((toLean (markNamedProj panicBranch).erase).splitOn "default").length == 2
+#guard toLean (markNamedProj (.mk (.app "panic" []) .unit)).erase == "()"
+
+-- Component `0` of the one-tuple `(&c,)` of `format!("{}", c)` is `args`.
+#guard toLean (markNamedProj
+  (.mk (.proj (.mk (.var "args") (.tuple [.ref .int false])) 0) .int)).erase == "args"
+
+-- `(0..len).map(|_| rand::random())`: the call in the closure is collected, a call
+-- of the closure's parameter is not.
+#guard (collectTAppCalls (.mk (.lam ["f"]
+  (.mk (.app "random" [.mk (.app "f" []) .int]) .int)) (.fn [] .int))).map (·.1) == ["random"]
+#guard collectAppCalls (.lam ["f"] (.app "random" [.app "f" []])) == [("random", 1)]
+
+end ExtInherent
+
 end Hax.EmitterRegressions

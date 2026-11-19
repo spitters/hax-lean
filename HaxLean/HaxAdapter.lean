@@ -3067,6 +3067,95 @@ def qualifyAdtCollisions (j : Json) : Except String Json := do
     | _ => j
   return renameAdtPaths ren j
 
+/-! ## Short-name collisions of external inherent methods
+
+A method of an inherent `impl` of a dependency crate is called by its short name,
+and a call of it reaches the `Deps` class as a field of that name. Two such
+methods of one short name in distinct `impl`s (`libcrux_kem`'s `PrivateKey::encode`
+and `PublicKey::encode`, in its `impl`s 7 and 8) are named
+`Impl<d>_<name>` by the disambiguator `d` of their `impl`
+(`qualifyExternalInherentCollisions`), each a field of its own type. -/
+
+/-- A method of an inherent `impl` of a dependency crate, as its krate, the names
+    of the path segments before its `impl`, the disambiguator of the `impl` and
+    the method's short name. -/
+abbrev ExtInherentKey := String × Array String × Nat × String
+
+/-- The key (`ExtInherentKey`) of a resolved `DefId` value `v` of an `AssocFn`
+    that is not local, outside `builtinKrates`, whose path ends in an `impl`
+    segment and the method name, whose parent is an inherent `impl`
+    (`of_trait` false), and whose name is no builtin head; `none` for any other
+    value. -/
+def extInherentKey? (v : Json) : Option ExtInherentKey := do
+  let (k, names) ← defIdKeyOf? v
+  guard !(builtinKrates.contains k)
+  guard ((v.getObjVal? "is_local").toOption == some (.bool false))
+  guard ((v.getObjValAs? String "kind").toOption == some "AssocFn")
+  let .arr segs ← (v.getObjVal? "path").toOption | none
+  guard (segs.size ≥ 2)
+  let implSeg := segs[segs.size - 2]!
+  guard ((implSeg.getObjVal? "data").toOption == some (.str "Impl"))
+  let d ← (implSeg.getObjValAs? Nat "disambiguator").toOption
+  let parent ← (v.getObjVal? "parent").toOption
+  let imp ← ((defIdValue parent).getObjVal? "kind" >>= (·.getObjVal? "Impl")).toOption
+  guard ((imp.getObjVal? "of_trait").toOption == some (.bool false))
+  let m ← names.back?
+  guard (m != "" && !builtinHeads.contains m)
+  pure (k, names.extract 0 (names.size - 2), d, m)
+
+/-- The keys (`extInherentKey?`) of the `DefId` values of `j` at any depth, each
+    id node (`idNodeOf?`) visited once. -/
+partial def extInherentKeys (j : Json) : List ExtInherentKey :=
+  ((go j).run ({}, [])).2.2.eraseDups
+where
+  /-- The traversal of `extInherentKeys`, with the ids visited and the keys found. -/
+  go (j : Json) : StateM (Std.HashSet Nat × List ExtInherentKey) Unit := do
+    match j with
+    | .arr xs => xs.forM go
+    | .obj t =>
+      if let some (n, _) := idNodeOf? t then
+        if (← get).1.contains n then return
+        modify fun (s, ks) => (s.insert n, ks)
+      if let some key := extInherentKey? j then
+        modify fun (s, ks) => (s, key :: ks)
+      else
+        for (_, v) in t.toList do go v
+    | .null | .bool _ | .num _ | .str _ => pure ()
+
+/-- The new name of each key of `keys` whose method name another key of `keys`
+    shares: `Impl<d>_<name>`, prefixed by the krate and `_` when another key of
+    that name has the same `d`. -/
+def extInherentRenames (keys : List ExtInherentKey) : List (ExtInherentKey × String) :=
+  let keys := keys.eraseDups
+  let ms := (keys.map (·.2.2.2)).eraseDups
+  ms.flatMap fun m =>
+    let g := keys.filter (·.2.2.2 == m)
+    if g.length < 2 then []
+    else
+      let short (k : ExtInherentKey) : String := s!"Impl{k.2.2.1}_{m}"
+      g.map fun k =>
+        if (g.filter (short · == short k)).length > 1 then (k, s!"{k.1}_{short k}")
+        else (k, short k)
+
+/-- The `DefId` value `o` with the name of its last path segment replaced by the
+    new name `ren` gives its key; `none` when `ren` renames no key of `o`. -/
+def renameExtInherentDefId (ren : List (ExtInherentKey × String)) (o : Json) :
+    Option Json := do
+  let key ← extInherentKey? o
+  let nm ← ren.lookup key
+  let .arr path ← (o.getObjVal? "path").toOption | none
+  let path := path.modify (path.size - 1) fun seg =>
+    seg.setObjVal! "data" (Json.mkObj [("ValueNs", .str nm)])
+  pure (o.setObjVal! "path" (.arr path))
+
+/-- The export `j` with every external inherent method whose short name a method
+    of another external inherent `impl` shares (`extInherentKeys`,
+    `extInherentRenames`) named `Impl<d>_<name>` in every `DefId` that names it.
+    An export without such a collision is returned unchanged. -/
+def qualifyExternalInherentCollisions (j : Json) : Json :=
+  let ren := extInherentRenames (extInherentKeys j)
+  if ren.isEmpty then j else rewriteIdShared (renameExtInherentDefId ren) j
+
 /-- Extract the function name from a hax `Fn` item's `ident` field.
     Format: `[name_string, span_object]`. -/
 def extractFnName (ident : Json) : String :=
