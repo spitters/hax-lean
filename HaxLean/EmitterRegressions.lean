@@ -5682,4 +5682,131 @@ def stmtArmTry : ImpExpr :=
 
 end CfTailsRanges
 
+/-! ## Polymorphic `core` helpers, enum casts, recursion, `BEq`, accessors, ascriptions
+
+`o.ok_or(e)` and `r.map_err(f)` are printed as `Option.elim` and `Except.mapError` at
+each call, so they are not `Deps` fields of one type. A cast `x as u8` of a field-less
+enum reads `E.discriminant x`, defined from the variants' discriminants
+(`HaxAdapter.variantDiscriminants`). A recursive definition with an annotated result
+is a `partial def`. `BEq` is derived for the enums a body compares (`comparedAdts`).
+A projection head qualified by its receiver's type keeps it under the usage-based
+qualifier. A `let` ascription keyed by a name is dropped where another binding of the
+name has another or an unknown type (`consistentLetTypes`). -/
+
+namespace EnumCastsRecursion
+
+open Lean Hax.HaxAdapter
+
+-- `ok_or` and `map_err` print as core Lean terms and are no `Deps` fields.
+#guard toLean (.app "f" [.app "ok_or" [.var "o", .var "e"],
+    .app "map_err" [.app "g" [.var "x"], .lam ["_"] (.var "E")]]) ==
+  "f (Option.elim o (Except.error e) Except.ok) (Except.mapError ((fun _ => E)) (g x))"
+#guard isAlwaysBuiltin "ok_or" && isAlwaysBuiltin "map_err"
+#guard builtinHeads.contains "ok_or" && builtinHeads.contains "map_err"
+
+-- The printed `ok_or` elaborates at two payload types in one body.
+example (o : Option (Array Int)) (p : Option Bool) (e : Int) :
+    Except Int (Array Int) × Except Int Bool :=
+  (Option.elim o (Except.error e) Except.ok, Option.elim p (Except.error e) Except.ok)
+
+/-- A unit variant `n` with the discriminant entry `d` and, for `some s`, the literal
+    `s` as its `disr_expr`. -/
+def variant (n : String) (d : Json) (lit? : Option String) : Json :=
+  Json.mkObj ([("ident", Json.arr #[Json.str n, Json.null]), ("discr", d)] ++
+    match lit? with
+    | some s => [("disr_expr", Json.mkObj [("body", Json.mkObj [("expr", Json.mkObj [
+        ("contents", Json.mkObj [("Literal", Json.mkObj [("lit", Json.mkObj [("node",
+          Json.mkObj [("Int", Json.arr #[Json.str s, Json.str "Unsuffixed"])])]),
+          ("neg", Json.bool false)])])])])])]
+    | none => [])
+
+/-- `enum H { A = 1, B, C = 254 }`. -/
+def enumH : Json := Json.arr #[Json.mkObj [("kind", Json.mkObj [("Enum", Json.arr #[
+  Json.arr #[Json.str "H", Json.null], Json.null, Json.arr #[
+    variant "A" (Json.mkObj [("Explicit", Json.null)]) (some "1"),
+    variant "B" (Json.mkObj [("Relative", (1 : Nat))]) none,
+    variant "C" (Json.mkObj [("Explicit", Json.null)]) (some "254")]])])]]
+
+#guard (parseEnumDefsFromJson enumH).map (fun ei => ei.variants.map (·.discr)) ==
+  [[some 1, some 2, some 254]]
+#guard (parseEnumDefsFromJson enumH).map (·.discriminantDef?) ==
+  [some ("/-- The discriminant of `H`, the value of an `as` cast. -/\n" ++
+    "def H.discriminant : H → Int\n  | .A => 1\n  | .B => 2\n  | .C => 254")]
+-- An enum with a payload has none.
+#guard EnumInfo.discriminantDef?
+  { name := "P", variants := [{ name := "V", payload := [.int], discr := some 0 }] } == none
+
+/-- `x as u8` with `x : H`. -/
+def castH : Json :=
+  let adt := Json.mkObj [("value", Json.mkObj [("Adt", Json.mkObj [("value", Json.mkObj [
+    ("def_id", Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [
+      ("krate", Json.str "k"), ("path", Json.arr #[Json.mkObj [("data",
+        Json.mkObj [("TypeNs", Json.str "H")])]])])])]),
+    ("generic_args", Json.arr #[])])])])]
+  let u8 := Json.mkObj [("value", Json.mkObj [("Uint", Json.str "U8")])]
+  let v := Json.mkObj [("ty", adt), ("contents", Json.mkObj [("VarRef", Json.mkObj [
+    ("id", Json.mkObj [("name", Json.str "x"), ("id", (0 : Nat))])])])]
+  Json.mkObj [("ty", u8), ("contents", Json.mkObj [("Cast", Json.mkObj [("source", v)])])]
+
+#guard (parseHaxTExpr castH).toOption.map (·.erase) ==
+  some (.app "cast#8" [.app "H::discriminant" [.var "x"]])
+#guard toLean (.app "cast#8" [.app "H::discriminant" [.var "x"]]) ==
+  "Hax.castVal_w 8 (H.discriminant x)"
+
+/-- The printed enum and its discriminant. -/
+inductive H : Type where
+  | A
+  | B
+  | C
+  deriving Inhabited
+
+/-- The discriminant of `H`, the value of an `as` cast. -/
+def H.discriminant : H → Int
+  | .A => 1
+  | .B => 2
+  | .C => 254
+
+example : H.discriminant .C = 254 := rfl
+
+/-- `fn padlen(n: u64) -> u64 { padlen(n) }`, one parameter binding and the body. -/
+def padlen : TExpr :=
+  .mk (.letBind "n" (.mk (.var "n") (.uint .w64))
+    (.mk (.app "padlen" [.mk (.var "n") (.uint .w64)]) (.uint .w64))) (.uint .w64)
+
+-- A recursive definition is a `partial def` with its `Int` result annotated.
+#guard toLeanDefTyped "padlen" padlen (.app "padlen" [.var "n"]) (recursive := true) ==
+  "partial def padlen (n : Int) : Int :=\npadlen n\n"
+#guard toLeanDefTyped "padlen" padlen (.app "padlen" [.var "n"]) ==
+  "def padlen (n : Int) :=\npadlen n\n"
+
+-- `E` is compared and its payload names `F`; `G` is not compared.
+#guard comparedAdts [("eq", 2, [.adt "E" [], .adt "E" []], .bool)] []
+  [{ name := "E", variants := [{ name := "A", payload := [.adt "F" []] }] },
+   { name := "F", variants := [] }, { name := "G", variants := [] }] [] == ["E", "F"]
+-- An equality test at an unknown type takes every enum.
+#guard comparedAdts [("eq", 2, [.unknown, .unknown], .bool)] []
+  [{ name := "E", variants := [] }, { name := "G", variants := [] }] [] == ["E", "G"]
+
+-- A head `SenderChain.chain_key` keeps its qualification; a bare `.chain_key` takes it
+-- from the usage table.
+#guard qualifyProjectionsFromUsageT [] [("c", "Chain")]
+    [("Chain", [("chain_key", "int", .unknown)]),
+     ("SenderChain", [("chain_key", "int", .unknown)])] ["chain_key"]
+    (.tuple [.app "SenderChain.chain_key" [.var "c"], .app ".chain_key" [.var "c"]]) ==
+  .tuple [.app "SenderChain.chain_key" [.var "c"], .app "Chain.chain_key" [.var "c"]]
+
+/-- `let s = t.1; let s = g(s); s`, the first binding of unknown type. -/
+def rebind : TExpr :=
+  .mk (.letBind "s" (.mk (.proj (.mk (.var "t") .unknown) 1) .unknown)
+    (.mk (.letBind "s" (.mk (.app "g" [.mk (.var "s") (.adt "S" [])]) (.adt "S" []))
+      (.mk (.var "s") (.adt "S" []))) (.adt "S" []))) (.adt "S" [])
+
+-- The ascription of the second `s` is collected and dropped, since the first `s` has
+-- an unknown type.
+#guard collectLetBindingTypes (fun _ => none) (tAnnotateLetBindings rebind) == [("s", "S")]
+#guard consistentLetTypes (tAnnotateLetBindings rebind)
+  (collectLetBindingTypes (fun _ => none) (tAnnotateLetBindings rebind)) == []
+
+end EnumCastsRecursion
+
 end Hax.EmitterRegressions

@@ -148,7 +148,8 @@ def builtinHeads : List String :=
     "shr_w", "BitAnd", "BitOr", "BitXor", "shl", "shr", "Shl", "Shr",
     "eq", "Eq", "ne", "Ne", "lt", "le", "gt", "ge", "Lt", "Le", "Gt", "Ge",
     "not", "Not", "and", "And", "or", "Or", "&&", "||", "min", "max",
-    "expect", "is_err", "is_none", "is_ok", "is_some", "unwrap", "unwrap_or", "select" ]
+    "expect", "is_err", "is_none", "is_ok", "is_some", "unwrap", "unwrap_or", "select",
+    "ok_or", "map_err" ]
 
 /-- No builtin head contains `:`, so no head `q::h` is a builtin head. -/
 theorem colon_not_mem_builtinHeads : ∀ s ∈ builtinHeads, ':' ∉ s.toList := by
@@ -5050,6 +5051,12 @@ where
       | _ =>
         -- The outer decorated node has the target type.
         let targetWidth := castTag? source.ty (extractExprType _parentJ)
+        -- The only ADT an `as` cast accepts is a field-less enum, whose value is
+        -- cast through its discriminant `E.discriminant` (`EnumInfo.discriminantDef?`).
+        let source := match source.ty with
+          | .adt e _ =>
+            TExpr.mk (.app s!"{ImpType.sanitizeAdtShortName e}::discriminant" [source]) .int
+          | _ => source
         match targetWidth with
         | some w => return .app s!"cast#{w}" [source]
         | none => return .app "cast" [source]
@@ -7522,10 +7529,13 @@ def parseTypeAliasDefsFromJson (j : Json) : List TypeAliasInfo :=
     field types; `[]` means a unit variant. Tuple variants
     (`Foo(A, B)`) and struct variants (`Foo { x: A, y: B }`) are
     flattened to their positional shape; field names are dropped
-    (downstream we always pattern-match positionally). -/
+    (downstream we always pattern-match positionally). `discr` is the
+    variant's discriminant when the export determines it
+    (`variantDiscriminants`). -/
 structure EnumVariantInfo where
   name : String
   payload : List ImpType := []
+  discr : Option Int := none
   deriving Inhabited
 
 /-- A Rust enum definition: name + variants. -/
@@ -7533,6 +7543,44 @@ structure EnumInfo where
   name : String
   variants : List EnumVariantInfo
   deriving Inhabited
+
+/-- The explicit discriminant of a variant JSON: the integer literal of its
+    `disr_expr`, or `none` when it has none or another expression. -/
+def explicitDiscriminant? (variantJ : Json) : Option Int := do
+  let lit ← ((variantJ.getObjVal? "disr_expr" >>= (·.getObjVal? "body") >>=
+    (·.getObjVal? "expr") >>= (·.getObjVal? "contents") >>=
+    (·.getObjVal? "Literal"))).toOption
+  let neg ← (lit.getObjValAs? Bool "neg").toOption
+  let digits ← ((lit.getObjVal? "lit" >>= (·.getObjVal? "node") >>=
+    (·.getObjVal? "Int"))).toOption
+  let s ← (digits.getArrVal? 0 >>= Json.getStr?).toOption
+  let n ← s.toNat?
+  return if neg then -(n : Int) else n
+
+/-- The discriminants of the variants `variants` of an enum, in order. A variant
+    with `discr: {"Relative": k}` has the value of the last explicit discriminant
+    before it, or `0` when there is none, plus `k` (rustc's `VariantDiscr`); an
+    explicit one has the value of its literal. A variant whose explicit
+    discriminant is no literal, and every relative one after it, has none. -/
+def variantDiscriminants (variants : List Json) : List (Option Int) :=
+  (variants.foldl (fun (acc, base) vj =>
+    let relative := (vj.getObjVal? "discr" >>= (·.getObjValAs? Nat "Relative")).toOption
+    match relative with
+    | some k => (acc ++ [base.map (· + (k : Int))], base)
+    | none =>
+      let v := explicitDiscriminant? vj
+      (acc ++ [v], v)) (([] : List (Option Int)), (some 0 : Option Int))).1
+
+/-- The definition `E.discriminant : E → Int` of a field-less enum `E` whose
+    discriminants are all known, the value of a Rust `as` cast of an `E`; `none`
+    for any other enum. -/
+def EnumInfo.discriminantDef? (ei : EnumInfo) : Option String := do
+  guard (!ei.variants.isEmpty && ei.variants.all (·.payload.isEmpty))
+  let arms ← ei.variants.mapM fun v => v.discr.map fun d =>
+    let ds := if d < 0 then s!"({d})" else toString d
+    s!"  | .{v.name} => {ds}"
+  return s!"/-- The discriminant of `{ei.name}`, the value of an `as` cast. -/\n" ++
+    s!"def {ei.name}.discriminant : {ei.name} → Int\n" ++ "\n".intercalate arms
 
 /-- Parse the positional payload types of one enum variant from its
     hax JSON. Returns `[]` for unit variants. Handles two shapes:
@@ -7588,11 +7636,13 @@ partial def parseEnumDefs (items : List Json) : List EnumInfo :=
       let variantsJ := enumData.toList[2]?
       match variantsJ with
       | some (Json.arr variantList) =>
-        let variants := variantList.toList.filterMap fun vj =>
+        let discrs := variantDiscriminants variantList.toList
+        let variants := (variantList.toList.zip discrs).filterMap fun (vj, d) =>
           match vj.getObjVal? "ident" with
           | Except.ok (Json.arr identPair) => match identPair.toList with
             | (Json.str n) :: _ =>
-              some ({ name := n, payload := parseEnumVariantPayload vj } : EnumVariantInfo)
+              some ({ name := n, payload := parseEnumVariantPayload vj, discr := d } :
+                EnumVariantInfo)
             | _ => none
           | _ => none
         some { name := name, variants := variants }

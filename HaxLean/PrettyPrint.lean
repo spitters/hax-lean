@@ -1809,6 +1809,13 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       s!"Hax.range {parensIf (toLean lo 0) (!isAtom lo)} {parensIf (toLean hi 0) (!isAtom hi)}"
     -- Vec::new() → empty array literal (polymorphic)
     | "new", [] => "#[]"
+    -- `o.ok_or(e)` and `r.map_err(f)` of `core` are polymorphic in the payload, so
+    -- they are the core Lean terms at each call, not `Deps` fields of one type.
+    | "ok_or", [o, err] =>
+      s!"Option.elim {parensIf (toLean o 0) (!isAtom o)} " ++
+        s!"(Except.error {parensIf (toLean err 0) (!isAtom err)}) Except.ok"
+    | "map_err", [r, g] =>
+      s!"Except.mapError {parensIf (toLean g 0) (!isAtom g)} {parensIf (toLean r 0) (!isAtom r)}"
     | _, _ =>
     -- Resolved struct-field update: `struct_update#S#i#n s v` renders as the
     -- `Hax.struct_update_fst`/`_snd` composition on the tuple encoding.
@@ -2827,7 +2834,7 @@ def builtinTable : List (String × List String) :=
                           "from", "into", "literal", "str_opaque", "deref", "deref_mut", "clone",
                           "cast", "castVal", "castVal_w", "from_val",
                           "panic", "sha256", "rotate_right", "rotate_left"])
-  , ("option-result",    ["Some", "None", "Ok", "Err"])
+  , ("option-result",    ["Some", "None", "Ok", "Err", "ok_or", "map_err"])
   , ("arith-bare",       ["add", "sub", "mul", "div", "rem", "neg",
                           "wrapping_add", "wrapping_sub", "wrapping_mul"])
   , ("arith-capital",    ["Add", "Sub", "Mul", "Div", "Rem", "Neg"])
@@ -4482,7 +4489,10 @@ partial def detectLetBindStructTypes : ImpExpr → List (String × String)
   | _ => []
 
 /-- Rewrite ambiguous projections on array elements or variables whose struct type
-    can be inferred from constructor usage patterns. -/
+    can be inferred from constructor usage patterns. Only a bare projection `.f`
+    is rewritten: a head `S.f` was qualified by the receiver's type
+    (`tQualifyProjections`), which the usage tables, keyed by variable name
+    across all definitions, do not override. -/
 partial def qualifyProjectionsFromUsageT
     (arrayElemTypes : List (String × String))
     (varStructTypes : List (String × String))
@@ -4494,7 +4504,7 @@ partial def qualifyProjectionsFromUsageT
         else if projName.contains '.' then
           match projName.splitOn "." with | _ :: f :: _ => f | _ => projName
         else projName
-      if ambiguousFields.contains fieldName then
+      if projName.startsWith "." && ambiguousFields.contains fieldName then
         match arrayElemTypes.find? (·.1 == arr) with
         | some (_, structName) =>
           let hasField := structMeta.any fun (sn, fields) =>
@@ -4516,7 +4526,7 @@ partial def qualifyProjectionsFromUsageT
       else if projName.contains '.' then
         match projName.splitOn "." with | _ :: f :: _ => f | _ => projName
       else projName
-    if ambiguousFields.contains fieldName then
+    if projName.startsWith "." && ambiguousFields.contains fieldName then
       match varStructTypes.find? (·.1 == v) with
       | some (_, structName) =>
         let hasField := structMeta.any fun (sn, fields) =>

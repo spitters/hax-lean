@@ -93,6 +93,41 @@ partial def collectTAppCalls : TExpr → List (String × Nat × List ImpType × 
   | .mk (.ann e) _ => collectTAppCalls e
   | _ => []
 
+/-- The ADTs a type names, by their short names. -/
+partial def adtShortNames : ImpType → List String
+  | .adt n args => ImpType.sanitizeAdtShortName n :: args.flatMap adtShortNames
+  | .tuple es => es.flatMap adtShortNames
+  | .option t | .ref t _ | .slice t | .array t _ => adtShortNames t
+  | .result a b | .controlFlow a b => adtShortNames a ++ adtShortNames b
+  | .fn ps r => ps.flatMap adtShortNames ++ adtShortNames r
+  | _ => []
+
+/-- The ADTs whose values the calls `calls` compare: those named in the argument
+    types of an equality test or of a call of a generic function of
+    `genericFns` (whose bounds may ask for `BEq`), closed under the payload types
+    of the enums `enumMeta` and the field types of the structs `structMeta`, of
+    which a derived `BEq` needs an instance each. When an equality test has an
+    argument of unknown type, every enum of `enumMeta` is taken. -/
+def comparedAdts (calls : List (String × Nat × List ImpType × ImpType))
+    (genericFns : List String) (enumMeta : List HaxAdapter.EnumInfo)
+    (structMeta : StructMeta) : List String :=
+  let cmpHeads := ["eq", "Eq", "ne", "Ne", "PartialEq_eq", "PartialEq_ne", "beq", "bne",
+    "contains"]
+  let unknownCmp := calls.any fun (f, _, argTys, _) =>
+    cmpHeads.contains ((f.splitOn "#").headD f) && argTys.any (·.isUnknown)
+  let seeds := if unknownCmp then enumMeta.map (·.name)
+    else calls.flatMap fun (f, _, argTys, _) =>
+      let base := (f.splitOn "#").headD f
+      if cmpHeads.contains base || genericFns.contains base then argTys.flatMap adtShortNames
+      else []
+  let step (ns : List String) : List String :=
+    (ns ++ ns.flatMap fun n =>
+      (enumMeta.filter (·.name == n)).flatMap (fun ei =>
+          ei.variants.flatMap fun v => v.payload.flatMap adtShortNames) ++
+        (structMeta.filter (·.1 == n)).flatMap fun (_, fs) =>
+          fs.flatMap fun (_, _, t) => adtShortNames t).eraseDups
+  Nat.repeat step (enumMeta.length + structMeta.length + 1) seeds.eraseDups
+
 /-- Collect names bound by an `ImpPat`. These are introduced as locals
     in the arm body and must extend `bound` for free-var collection. -/
 partial def patBinders : ImpPat → List String
@@ -855,6 +890,28 @@ partial def collectLetBindingTypes (sl : String → Option String) :
   | .mk (.ann e) _ => collectLetBindingTypes sl e
   | _ => []
 
+/-- The names bound by a `let` of `t` whose value has the unknown type and no
+    `.ann` mark, other than a parameter shadow `let n := n`. The ascription
+    map is keyed by name, so a type collected for another binding of such a
+    name is not known to hold at this one. -/
+partial def unknownLetNames : TExpr → List String
+  | .mk (.letBind n val body) _ =>
+    let here := match val with
+      | .mk (.var v) _ => if v == n then [] else if val.ty.isUnknown then [n] else []
+      | .mk (.ann _) _ => []
+      | _ => if val.ty.isUnknown then [n] else []
+    here ++ unknownLetNames val ++ unknownLetNames body
+  | t => (tChildren t).flatMap unknownLetNames
+
+/-- The ascriptions of `collectLetBindingTypes` that hold at every binding of
+    their name in `t`: a name with two ascriptions that differ, or with a
+    binding of unknown type (`unknownLetNames`), is dropped. -/
+def consistentLetTypes (t : TExpr) (typeMap : List (String × String)) :
+    List (String × String) :=
+  let unknown := unknownLetNames t
+  typeMap.filter fun (n, ty) =>
+    !unknown.contains n && typeMap.all fun (n', ty') => n' != n || ty' == ty
+
 /-- Inject `ImpExpr.typeAscription` wrappers into letBind RHSs in an
     ImpExpr body, using the given name→tyStr map. The renderer
     (`Hax.PrettyPrint.toLean`) consumes the wrapper as `(val : T)`.
@@ -1070,14 +1127,16 @@ def loopInvDefs (name : String) (tparams : List (String × ImpType))
     `pipelinedBody` is the post-pipeline ImpExpr (for rendering).
     `monadic`, the monadic functions of the crate when this one is among them, renders
     the body as a `RustM` `do` block (`MonadicEmit.renderBody`) and the return type,
-    when annotated, as `RustM` of it. -/
+    when annotated, as `RustM` of it. A non-monadic `recursive` definition is
+    annotated with its return type also when that is `Int`, and is a
+    `partial def` when the annotation is printed. -/
 def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
     (structLookup : String → Option String := fun _ => none)
     (structMeta : StructMeta := [])
     (allFnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (boolNames : List String := [])
     (mutWriteRets : List (String × List String × Bool) := [])
-    (monadic : Option (List String) := none) : String :=
+    (monadic : Option (List String) := none) (recursive : Bool := false) : String :=
   let (tparams, rawBody) := extractTParams rawTe
   -- Use the pipelined body, but strip leading param bindings (same as extractParams on ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
@@ -1089,7 +1148,8 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   -- denotation-preserving (see `Hax/TPhase/AnnotateLets.lean`); this
   -- module only translates its decisions into ImpExpr injections.
   let annotatedRawTe := tAnnotateLetBindings rawTe
-  let letTypes := collectLetBindingTypes structLookup annotatedRawTe
+  let letTypes := consistentLetTypes annotatedRawTe
+    (collectLetBindingTypes structLookup annotatedRawTe)
   let body := stripParamBindings (injectLetTypeAnnotations letTypes pipelinedBody)
   -- Return-type annotation: rawBody.ty is the function's return type per
   -- hax JSON. Emit `: T` after the param list when known AND non-trivial
@@ -1162,7 +1222,7 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
       if !allParamsTyped || strs.isEmpty || strs.any (·.isNone) then ""
       else s!" : {" × ".intercalate (strs.filterMap id)}"
     | none =>
-      if ty.isUnknown || s == "Int" || s == "Unit" || !allParamsTyped then ""
+      if ty.isUnknown || (s == "Int" && !recursive) || s == "Unit" || !allParamsTyped then ""
       else s!" : {s}"
   let paramStr := if tparams.isEmpty then ""
     else " " ++ " ".intercalate (tparams.map fun (p, ty) =>
@@ -1178,7 +1238,8 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   match monadic with
   | none =>
     let bodyStr := toLean body 1 boolNames
-    s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
+    let kw := if recursive && !retTyStr.isEmpty then "partial def" else "def"
+    s!"{kw} {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
   | some cl =>
     -- A monadic definition returns `RustM` of the surface return type; without a
     -- return-type annotation, the `do` block's monad comes from its last element.
@@ -2375,6 +2436,8 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
   -- `inductive T : Type where ...` gives pattern matches
   -- `match x with | .Variant => ...` real constructors to resolve, where
   -- `axiom T : Type` would leave them unresolved.
+  let compared := comparedAdts allTCallsAxiom (classHooks.genericFns.map (·.name))
+    enumMeta structMeta
   let enumDecls : List (String × Nat × String × List String) :=
       enumMeta.map fun ei =>
         -- Render `| Name : T1 → T2 → ... → MyEnum` for payload variants.
@@ -2397,10 +2460,20 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
         -- so an enum over one cannot derive them either.
         let hasOpaquePayload := ei.variants.any fun v =>
           v.payload.any fun ty => allOpaque.contains (renderPayload ty)
-        let derivingClause := if hasOpaquePayload then "" else "\n  deriving Inhabited, BEq"
+        -- `BEq` is derived for the enums a body compares (`comparedAdts`); for a
+        -- payload of a large product type its derivation exhausts instance search.
+        let derivingClause := if hasOpaquePayload then ""
+          else if compared.contains ei.name then "\n  deriving Inhabited, BEq"
+          else "\n  deriving Inhabited"
         let refs := (ei.variants.flatMap fun v =>
           v.payload.flatMap fun ty => typeStrTokens (renderPayload ty)).eraseDups
-        (ei.name, 0, s!"inductive {ei.name} : Type where\n{variants}{derivingClause}", refs)
+        -- A field-less enum with known discriminants carries `E.discriminant`, the
+        -- function the adapter applies at an `as` cast of an `E`.
+        let discrDef := match ei.discriminantDef? with
+          | some d => "\n\n" ++ d
+          | none => ""
+        (ei.name, 0,
+          s!"inductive {ei.name} : Type where\n{variants}{derivingClause}{discrDef}", refs)
   -- Newtype preamble: emit the alias `abbrev <T> := <Inner>`, the
   -- definitional unwrap `def «<T>.0» x := x`, and the definitional
   -- constructor wrap `def «<T>.mk» x := x` (the inverse of `«<T>.0»`) per
@@ -2481,6 +2554,28 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     else MonadicEmit.recursiveFns (defs.map fun (n, e) =>
         (n, ((collectAppCalls e).map (·.1) ++ collectFreeVars [n] e).filter definedNames.contains))
       monadicFns
+  -- A non-monadic definition on a cycle of the call graph is a `partial def` when no
+  -- parameter has the type of an enum with a payload, the one case in which a
+  -- structural recursion may be evident, and its result names no opaque type,
+  -- which would carry no `Inhabited` instance. The file-wide rule of
+  -- `needsPartial` takes precedence.
+  let payloadEnums :=
+    (enumMeta.filter fun ei => ei.variants.any (!·.payload.isEmpty)).map (·.name)
+  let recursiveSurface : List String :=
+    if needsPartial then []
+    else
+      let cands := (MonadicEmit.recursiveFns (defs.map fun (n, e) =>
+          (n, ((collectAppCalls e).map (·.1) ++ collectFreeVars [n] e).filter
+            definedNames.contains)) (defs.map (·.1))).filter (!monadicFns.contains ·)
+      cands.filter fun n =>
+        match fnTypes.find? (·.1 == n) with
+        | some (_, ti) =>
+          (ti.retType.collectOpaqueAdtNames baseStructLookup).isEmpty &&
+            !ti.paramTypes.any fun (_, ty) =>
+              if let .adt a _ := TQualifyProjections.unwrapRefs ty then
+                payloadEnums.contains a
+              else false
+        | none => false
   let surfaceDefs : List (String × String) := defs.map fun (n, e0) =>
     -- A call of a static trait method names its class and self type
     -- (`ClassHooks.staticCallHeads`); a refused function keeps its calls, and
@@ -2511,8 +2606,15 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
       | some (_, rawTe) => toLeanDefTyped n rawTe e (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes) (boolNames := boolNames) (mutWriteRets := mutWriteRets)
           (monadic := if monadicFns.contains n then some monadicFns else none)
+          (recursive := recursiveSurface.contains n)
       | none => toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
+    -- `addBinders` reads the `def <name>` prefix.
+    let partialPfx := "partial "
+    let isPartialDef := surfaceDef.startsWith (partialPfx ++ "def ")
+    let surfaceDef := if isPartialDef then (surfaceDef.drop partialPfx.length).toString
+      else surfaceDef
     let surfaceDef := classHooks.addBinders n surfaceDef
+    let surfaceDef := if isPartialDef then partialPfx ++ surfaceDef else surfaceDef
     let surfaceDef := if needsPartial then surfaceDef.replace "def " "partial def " else surfaceDef
     -- A monadic definition on a cycle of the call graph is a fixpoint in the order of
     -- `RustM`.
@@ -2549,7 +2651,11 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
       let insts := if !classHooks.enabled then ""
         else "\n".intercalate (classHooks.instances.map (classHooks.renderInstance structLookup))
           ++ "\n"
-      (surfaceDefs.map (·.2), "mutual\n\n", "end\n\n" ++ insts)
+      -- A `mutual` block holds either `partial` definitions only or none.
+      let anyPartial := surfaceDefs.any fun (_, t) => t.startsWith "partial def "
+      let texts := surfaceDefs.map fun (_, t) =>
+        if anyPartial && t.startsWith "def " then "partial " ++ t else t
+      (texts, "mutual\n\n", "end\n\n" ++ insts)
   -- Under `--emit-monadic` the file imports the guarded operations and names `RustM`.
   let monadicImport := if emitMonadic then "import HaxLean.RuntimeM\n" else ""
   let monadicOpen := if emitMonadic then "open Aeneas.Std (RustM)\n" else ""
