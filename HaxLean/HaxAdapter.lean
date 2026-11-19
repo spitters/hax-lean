@@ -280,7 +280,10 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
       -- A method declared by a trait (`kind: AssocFn` under a `Trait` parent),
       -- called on a type parameter, has no body in the export; when a local
       -- function has the same short name, the trait method is qualified with
-      -- the trait's name so the call does not reach that function.
+      -- the trait's name so the call does not reach that function. A method of
+      -- a trait of `builtinKrates` whose name is a builtin head
+      -- (`core::cmp::PartialEq::eq`) keeps that head, which the printer reads
+      -- as the runtime operation (`Hax.beq` over the type's `BEq` instance).
       let parentKind : Option String := do
         let p ← (inner.getObjVal? "parent").toOption
         let pc ← (p.getObjVal? "contents").toOption
@@ -289,6 +292,7 @@ partial def extractDefIdName (j : Json) (collisions : List String := [])
       let traitMethodShadow :=
         (inner.getObjValAs? String "kind").toOption == some "AssocFn"
           && parentKind == some "Trait" && lc.fnNames.contains n
+          && !(builtinKrates.contains krateName && builtinHeads.contains n)
       if collisions.contains n || shadowsLocalFn lc krateName n || traitMethodShadow then
         qualified
       else base
@@ -1767,11 +1771,15 @@ def hashMapAsEntries (krate n : String) (args : List ImpType) : ImpType :=
 def stringBytesType : ImpType := .slice (.uint .w8)
 
 /-- The type of an ADT `n` of krate `krate` with type arguments `args`:
-    `alloc::string::String` is `stringBytesType`, and every other ADT is
+    `alloc::string::String` is `stringBytesType`; `core::ops::Range<t>` is the
+    sequence of its elements `[t]`, the value `Hax.Range lo hi` of the runtime
+    (the positions `lo, …, hi - 1`); and every other ADT is
     `hashMapAsEntries krate n args`. -/
 def adtAsType (krate n : String) (args : List ImpType) : ImpType :=
   if (krate == "alloc" || krate == "std") && n == "String" then stringBytesType
-  else hashMapAsEntries krate n args
+  else match krate, n, args with
+    | "core", "Range", [t] => .slice t
+    | _, _, _ => hashMapAsEntries krate n args
 
 /-- Extract generic_args from an Adt/Array/Tuple inner value. -/
 def extractGenericArgs (adtInner : Json) : Array Json :=
@@ -2289,9 +2297,20 @@ def tTryMatch? (k : TryOperand) (c : TExpr) (arms : List (ImpPat × TExpr)) :
     pure (.match_ c [(.okPat q, b),
       (.errPat (.varPat r), .mk (.earlyReturn (.mk (.app "Err" [err]) fTy)) bTy)])
 
-/-- Whether a term is a `match` with an arm that returns from the function. -/
+/-- Whether a return from the function is reached through the arms of a `match`,
+    the branches of an `if` and the bodies of `let`s and sequences of a term: a
+    term whose value is one of its results or the return. -/
+partial def tReturnsInTail (e : TExpr) : Bool :=
+  if let .match_ _ arms := e.kind then arms.any fun (_, b) => tReturnsInTail b
+  else if let .ifThenElse _ t f := e.kind then tReturnsInTail t || tReturnsInTail f
+  else if let .letBind _ _ b := e.kind then tReturnsInTail b
+  else if let .seq _ b := e.kind then tReturnsInTail b
+  else e.kind matches .earlyReturn _
+
+/-- Whether a term is a `match` or an `if` that returns from the function in an
+    arm or a branch, at any depth of the arms and branches (`tReturnsInTail`). -/
 def tIsEarlyExitMatch : TExpr → Bool
-  | .mk (.match_ _ arms) _ => arms.any fun (_, b) => (b.kind matches .earlyReturn _)
+  | e@(.mk (.match_ _ _) _) | e@(.mk (.ifThenElse _ _ _) _) => tReturnsInTail e
   | _ => false
 
 /-- The leading `let`s of a term whose names have the prefix `tryBindPrefix`,
@@ -4116,6 +4135,22 @@ def isCoreRangeTy (tyJ : Json) : Bool :=
   | some ("core", "Range") | some ("core", "RangeInclusive") => true
   | _ => false
 
+/-- The index `r` of `a[r]` as the range literal `Range lo hi`, which the printer
+    reads as a slice, when `r` is a variable whose export node `node` has the type
+    `core::ops::Range`: a range value is the sequence of its positions
+    (`adtAsType`), so `lo` is its first element and `hi` is `lo` plus its length.
+    Any other index is returned unchanged. -/
+def tRangeVarIndex (r : TExpr) (node : Json) : TExpr :=
+  match r.kind, node.getObjVal? "ty" with
+  | .var _, .ok tyJ =>
+    if adtKrateLeaf? tyJ == some ("core", "Range") then
+      let usz : ImpType := .uint .wsize
+      let lo : TExpr := .mk (.app "index" [r, .mk (.lit (.int 0)) usz]) usz
+      let hi : TExpr := .mk (.app "add" [lo, .mk (.app "len" [r]) usz]) usz
+      .mk (.app "Range" [lo, hi]) r.ty
+    else r
+  | _, _ => r
+
 /-- Whether a type is a sequence (array, slice or `Vec`) seen through references. -/
 def isSeqImpType : ImpType → Bool
   | .array _ _ | .slice _ => true
@@ -4999,7 +5034,8 @@ where
 
     else if let .ok data := j.getObjVal? "Index" then
       let lhs ← parseHaxTExpr (← data.getObjVal? "lhs") implMap
-      let index ← parseHaxTExpr (← data.getObjVal? "index") implMap
+      let indexJ ← data.getObjVal? "index"
+      let index := tRangeVarIndex (← parseHaxTExpr indexJ implMap) indexJ
       return (tFloatEarlyExitArgs "index" [lhs, index] (extractNodeType _parentJ)).kind
 
     else if let .ok data := j.getObjVal? "Cast" then

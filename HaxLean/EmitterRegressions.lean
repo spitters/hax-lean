@@ -5544,4 +5544,142 @@ def letMatch : ImpExpr :=
 
 end AdtCollision
 
+/-! ## Ranges as values, equality of a `core` trait, `?` below the first level
+
+A `core::ops::Range` value is the sequence of its positions (`HaxAdapter.adtAsType`),
+the type of `Hax.Range lo hi`, and indexing by a variable of that type is the slice
+from its first element over its length (`HaxAdapter.tRangeVarIndex`). A call of
+`core::cmp::PartialEq::eq` keeps the builtin head `eq` when a local function is named
+`eq` (`HaxAdapter.extractDefIdName`). A `match` or an `if` with a `?` in an arm or a
+branch at any depth is bound in front of the application it is an argument of
+(`HaxAdapter.tIsEarlyExitMatch`), and a `let` whose value returns early below its
+first level takes the rest of the block as the continuation of each result
+(`pushIntoCfTails`), also for a `let` in a sequence (a reassignment `x = e?;`). -/
+
+namespace CfTailsRanges
+
+open Lean Hax.HaxAdapter
+
+/-- The path segment `{"data": {ns: nm}}`. -/
+def seg (ns nm : String) : Json := Json.mkObj [("data", Json.mkObj [(ns, Json.str nm)])]
+
+/-- A `def_id` node of krate `krate`, path `segs`, kind `kind` and parent `parent`. -/
+def did (krate : String) (segs : List Json) (kind parent : Json) : Json :=
+  Json.mkObj [("contents", Json.mkObj [("value", Json.mkObj [("krate", Json.str krate),
+    ("path", Json.arr segs.toArray), ("kind", kind), ("parent", parent)])])]
+
+/-- The trait method `core::<m>::<T>::<f>`. -/
+def traitMethod (m t f : String) : Json :=
+  did "core" [seg "TypeNs" m, seg "TypeNs" t, seg "ValueNs" f] (Json.str "AssocFn")
+    (did "core" [seg "TypeNs" m, seg "TypeNs" t] (Json.str "Trait") .null)
+
+-- `PartialEq::eq` keeps the builtin head beside a local `eq`; `Default::default`, whose
+-- name is no builtin head, is qualified beside a local `default`.
+#guard extractDefIdName (traitMethod "cmp" "PartialEq" "eq") []
+  { krates := ["k"], fnNames := ["eq"] } == "eq"
+#guard extractDefIdName (traitMethod "default" "Default" "default") []
+  { krates := ["k"], fnNames := ["default"] } == "Default_default"
+
+/-- The type `core::ops::Range<usize>`. -/
+def rangeTy : Json := Json.mkObj [("value", Json.mkObj [("Adt", Json.mkObj [("value",
+  Json.mkObj [("def_id", did "core" [seg "TypeNs" "ops", seg "TypeNs" "range",
+    seg "TypeNs" "Range"] (Json.str "Struct") .null),
+  ("generic_args", Json.arr #[Json.mkObj [("Type", Json.mkObj [("value",
+    Json.mkObj [("Uint", Json.str "Usize")])])]])])])])]
+
+-- A range is the sequence of its positions, printed `Array (Int)` as `Hax.Range` returns.
+#guard parseHaxType rangeTy == .slice (.uint .wsize)
+#guard (parseHaxType rangeTy).toLeanTypeStrSurface == "Array (Int)"
+
+/-- `a[r]` with `r : Range<usize>`, after the adapter. -/
+def rangeIndex : ImpExpr :=
+  .app "index" [.var "a", (tRangeVarIndex (.mk (.var "r") .unknown)
+    (Json.mkObj [("ty", rangeTy)])).erase]
+
+#guard rangeIndex == .app "index" [.var "a", .app "Range"
+  [.app "index" [.var "r", .lit (.int 0)],
+   .app "add" [.app "index" [.var "r", .lit (.int 0)], .app "len" [.var "r"]]]]
+-- The index is printed as a slice.
+#guard (toLean rangeIndex).startsWith "Hax.slice_range a "
+
+/-- A return of `Err(e)`. -/
+def ret : TExpr :=
+  .mk (.earlyReturn (.mk (.app "Err" [.mk (.var "e") .unknown]) .unknown)) .unknown
+
+/-- `match a { A => X, _ => Err(E)? }`. -/
+def labelsArg : TExpr := .mk (.match_ (.mk (.var "a") .unknown) [(.ctorPat "A" [],
+  .mk (.app "X" []) .unknown), (.wildcard,
+  .mk (.match_ (.mk (.app "Err" [.mk (.var "E") .unknown]) .unknown)
+    [(.okPat (.varPat "v"), .mk (.var "v") .unknown), (.errPat (.varPat "e"), ret)]) .unknown)])
+  .unknown
+
+-- `Ok(f(match a { A => X, _ => Err(E)? }))`: the `match` is bound in front of both calls.
+#guard (tFloatEarlyExitArgs "Ok" [tFloatEarlyExitArgs "f" [labelsArg] .unknown] .unknown).erase
+  == .letBind "_try_a" labelsArg.erase (.app "Ok" [.app "f" [.var "_try_a"]])
+-- An `if` without a return is not bound.
+#guard !tIsEarlyExitMatch (.mk (.ifThenElse (.mk (.var "c") .bool) (.mk (.var "y") .unknown)
+  (.mk (.var "z") .unknown)) .unknown)
+
+/-- The `match` of `s?` after the pipeline, whose `Ok` arm yields `k val`. -/
+def tryM (s : ImpExpr) (k : ImpExpr → ImpExpr) : ImpExpr :=
+  .match_ s [(.okPat (.varPat "val"), k (.var "val")),
+    (.errPat (.varPat "residual"), .cfBreak (.app "Err" [.var "residual"]))]
+
+/-- `let mut o = g(x)?; o = h(o)?; Ok(o)` after the pipeline: the reassignment is a
+    `let` in a sequence. -/
+def reassign : ImpExpr :=
+  .letBind "o" (tryM (.app "g" [.var "x"]) id)
+    (.seq (.seq (.letBind "o" (tryM (.app "h" [.var "o"]) id) (.var "o")) .unitVal)
+      (.app "Ok" [.var "o"]))
+
+#guard toLean (stripFunctionTailCfBreak reassign) 1 ==
+  "  match g x with\n  | Except.ok (val) =>\n    let o := val\n    match h o with\n" ++
+  "    | Except.ok (val) =>\n      let o := val\n      Except.ok o\n" ++
+  "    | Except.error (residual) => Except.error residual\n" ++
+  "  | Except.error (residual) => Except.error residual"
+
+/-- `let t = match a { A => X, _ => Err(E)? }; Ok(f(t))` after the pipeline. -/
+def armTry : ImpExpr :=
+  .letBind "_try" (.match_ (.var "a") [(.ctorPat "A" [], .app "X" []),
+      (.wildcard, tryM (.app "Err" [.var "E"]) .cfContinue)])
+    (.app "Ok" [.app "f" [.var "_try"]])
+
+#guard toLean (stripFunctionTailCfBreak armTry) 1 ==
+  "  match a with\n  | .A =>     let _try := X\n    Except.ok (f _try)\n" ++
+  "  | _ =>     match Except.error E with\n    | Except.ok (val) =>       let _try := val\n" ++
+  "      Except.ok (f _try)\n    | Except.error (residual) => Except.error residual"
+
+/-- `let k = if c { l += 1; xpd(l)? } else { xpd(d)? }; (Ok(k), l)` after the pipeline. -/
+def branchTry : ImpExpr :=
+  .letBind "k" (.ifThenElse (.var "c")
+      (.seq (.letBind "l" (.app "add" [.var "l", .lit (.int 1)]) (.var "l"))
+        (tryM (.app "xpd" [.var "l"]) .cfContinue))
+      (tryM (.app "xpd" [.var "d"]) .cfContinue))
+    (.tuple [.app "Ok" [.var "k"], .var "l"])
+
+#guard toLean (stripFunctionTailCfBreak branchTry) 1 ==
+  "  if Hax.bne c 0 then\n    let l := Hax.add l (1 : Int)\n    match xpd l with\n" ++
+  "    | Except.ok (val) =>       let k := val\n      (Except.ok k, l)\n" ++
+  "    | Except.error (residual) => Except.error residual\n  else\n    match xpd d with\n" ++
+  "    | Except.ok (val) =>       let k := val\n      (Except.ok k, l)\n" ++
+  "    | Except.error (residual) => Except.error residual"
+
+/-- `let out = match t { 0 => { chk(b)?; out } _ => out }; Ok(out)` after the pipeline:
+    the `?` is a statement of an arm. -/
+def stmtArmTry : ImpExpr :=
+  .letBind "_mtup" (.match_ (.var "t") [
+      (.litPat (.int 0), .match_ (.app "chk" [.var "b"]) [(.okPat (.varPat "val"), .var "out"),
+        (.errPat (.varPat "residual"),
+          .seq (.cfBreak (.app "Err" [.var "residual"])) (.var "out"))]),
+      (.wildcard, .var "out")])
+    (.letBind "out" (.var "_mtup") (.app "Ok" [.var "out"]))
+
+#guard toLean (stripFunctionTailCfBreak stmtArmTry) 1 ==
+  "  match t with\n  | 0 =>     match chk b with\n" ++
+  "    | Except.ok (val) =>       let _mtup := out\n      let out := _mtup\n" ++
+  "      Except.ok out\n    | Except.error (residual) => Except.error residual\n" ++
+  "  | _ =>     let _mtup := out\n    let out := _mtup\n    Except.ok out"
+
+end CfTailsRanges
+
 end Hax.EmitterRegressions

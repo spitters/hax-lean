@@ -1324,6 +1324,74 @@ partial def inlineRestIntoCfGuard (rest : ImpExpr) : ImpExpr → ImpExpr
   | .seq e1 e2 => .seq e1 (inlineRestIntoCfGuard rest e2)
   | e => e
 
+/-- Whether an early return (`cfBreak`) of `e` is reached through the branches of
+    an `if`, the arms of a `match`, the value and the body of a `let` and both
+    parts of a sequence: a value whose evaluation may return from the function. -/
+partial def hasCfBreakTail : ImpExpr → Bool
+  | .cfBreak _ => true
+  | .ifThenElse _ t e => hasCfBreakTail t || hasCfBreakTail e
+  | .match_ _ arms => arms.any fun (_, b) => hasCfBreakTail b
+  | .letBind _ v b => hasCfBreakTail v || hasCfBreakTail b
+  | .seq a b => hasCfBreakTail a || hasCfBreakTail b
+  | .typeAscription e _ => hasCfBreakTail e
+  | _ => false
+
+/-- Whether every result of `e` is a `ControlFlow` value (`cfContinue`, `cfBreak`,
+    `cfBreakContinue`), as the results of a loop body are. -/
+partial def isCfResult : ImpExpr → Bool
+  | .cfContinue _ | .cfBreak _ | .cfBreakContinue _ => true
+  | .letBind _ _ b | .seq _ b => isCfResult b
+  | .ifThenElse _ t e => isCfResult t && isCfResult e
+  | .match_ _ arms => arms.all fun (_, b) => isCfResult b
+  | _ => false
+
+/-- The value `e` whose result is passed to the continuation `k`, as one term: each
+    result `x` of `e` (a leaf of the branches, arms, `let` bodies and sequence tails
+    of `e`, or the payload of a `cfContinue`) becomes `k x`, and each early return
+    `cfBreak v` stays an early return, `cfBreak v` when `keepBreak` and `v`
+    otherwise. A `let` value or a statement of `e` with an early return
+    (`hasCfBreakTail`) is first rewritten with its own continuation. `avoid` holds
+    the free variables of `k`'s term; a `match` arm of `e` binding one of them, or,
+    unless `letsLeak`, a `let` of `e` binding one of them, makes the result `none`,
+    since `k`'s term would read the inner binding. With `letsLeak` the `let`s of a
+    statement scope over the rest of its sequence, as `seqToLean` prints them. -/
+partial def pushIntoCfTails (k : ImpExpr → ImpExpr) (avoid : List String)
+    (keepBreak letsLeak : Bool) : ImpExpr → Option ImpExpr
+  | .cfBreak v | .seq (.cfBreak v) _ => some (if keepBreak then .cfBreak v else v)
+  | .cfContinue v => some (k v)
+  | .typeAscription e ty =>
+    if hasCfBreakTail e then
+      pushIntoCfTails (fun x => k (.typeAscription x ty)) avoid keepBreak letsLeak e
+    else some (k (.typeAscription e ty))
+  | .ifThenElse c t e => do
+    let t' ← pushIntoCfTails k avoid keepBreak letsLeak t
+    let e' ← pushIntoCfTails k avoid keepBreak letsLeak e
+    pure (.ifThenElse c t' e')
+  | .match_ s arms => do
+    let arms' ← arms.mapM fun (p, b) => do
+      if (patBindersImp p).any avoid.contains then none
+      pure (p, ← pushIntoCfTails k avoid keepBreak letsLeak b)
+    pure (.match_ s arms')
+  | .letBind m v b =>
+    if hasCfBreakTail v then do
+      let v' ← pushIntoCfTails (fun x => .letBind m x b) (freeVarsScoped [m] b) true false v
+      pushIntoCfTails k avoid keepBreak letsLeak v'
+    else if !letsLeak && avoid.contains m then none
+    else do pure (.letBind m v (← pushIntoCfTails k avoid keepBreak letsLeak b))
+  | .seq a b =>
+    if hasCfBreakTail a then do
+      let a' ← pushIntoCfTails (fun x => .seq x b) (freeVarsScoped [] b) true true a
+      pushIntoCfTails k avoid keepBreak letsLeak a'
+    else do pure (.seq a (← pushIntoCfTails k avoid keepBreak letsLeak b))
+  | e => some (k e)
+
+/-- Whether the `match` rendering of `let n := val; body` in `toLean` applies to the
+    value `val`: a `match` each of whose arms with an early return is one
+    (`extractCfBreak`). -/
+def isFlatCfBreakMatch : ImpExpr → Bool
+  | .match_ _ arms => arms.all fun (_, b) => !hasCfBreak b || (extractCfBreak b).isSome
+  | _ => false
+
 /-- Check if an expression references a name as a function call (.app fname ...). -/
 partial def exprContainsApp (fname : String) : ImpExpr → Bool
   | .app f args => f == fname || args.any (exprContainsApp fname)
@@ -1567,6 +1635,19 @@ partial def toLean (e : ImpExpr) (lvl : Nat := 0) (boolNames : List String := []
       | .match_ scrut arms =>
         if arms.any fun (_, b) => hasCfBreak b then some (scrut, arms) else none
       | _ => none
+    -- A value with an early return below its first level (a `?` in a branch of
+    -- an `if`, in an arm of a `match` or in a statement of a block) takes the
+    -- continuation `let n := x; body` at each of its results `x`
+    -- (`pushIntoCfTails`); its early returns stay `cfBreak` exactly when the
+    -- rest of the block is a loop body, whose results are `ControlFlow` values.
+    let pushed : Option ImpExpr :=
+      if hasCfBreakTail val && !isFlatCfBreakMatch unwrappedVal then
+        pushIntoCfTails (fun x => .letBind n x body) (freeVarsScoped [n] body)
+          (isCfResult body) false val
+      else none
+    match pushed with
+    | some e => atLine e lvl
+    | none =>
     match matchCfBreak with
     | some (scrut, arms) =>
       -- Inline continuation into non-cfBreak arms. For the cfBreak arms,
@@ -1973,6 +2054,17 @@ where
   /-- Flatten seq chains into proper let-bindings. -/
   seqToLean (lvl : Nat) (e1 e2 : ImpExpr) : String :=
     let ind := indent lvl
+    -- A `let` whose value may return early (`hasCfBreakTail`) and is not itself
+    -- an early return scopes over the rest of the sequence: it is printed as
+    -- `let n := v; (body; e2)`, whose value takes the rest as its continuation
+    -- in the `letBind` case of `toLean`.
+    let cfLet : Option ImpExpr := match e1 with
+      | .letBind _ (.cfBreak _) _ => none
+      | .letBind n v body => if hasCfBreakTail v then some (.letBind n v (.seq body e2)) else none
+      | _ => none
+    match cfLet with
+    | some e => atLine e lvl
+    | none =>
     match e1, e2 with
     -- Skip unitVal in either position
     | .unitVal, _ => atLine e2 lvl
