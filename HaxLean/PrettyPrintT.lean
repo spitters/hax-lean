@@ -1405,14 +1405,17 @@ def panicHasValueType (ty : ImpType) : Bool :=
 /-- The renderer marker and the receiver of a call `f args` of `unwrap` (one
     argument) or `expect` (the receiver and a message) whose receiver has an
     `Option` type (`::unwrapOption`) or a `Result` type (`::unwrapResult`), possibly
-    behind a reference; `none` for any other call. -/
+    behind a reference; `none` for any other call. The adapter reads `core`'s
+    `Option<T>` and `Result<T, E>` as the ADTs `Option` and `Result`
+    (`HaxAdapter.tryOperandOf?` reads both forms), so these count as the
+    `Option` and `Result` types. -/
 def unwrapMarker? (f : String) (args : List TExpr) : Option (String × TExpr) := do
   let recv ← match f, args with
     | "unwrap", [r] | "expect", [r, _] => some r
     | _, _ => none
   match recv.ty.pointee with
-  | .option _ => pure ("::unwrapOption", recv)
-  | .result _ _ => pure ("::unwrapResult", recv)
+  | .option _ | .adt "Option" _ => pure ("::unwrapOption", recv)
+  | .result _ _ | .adt "Result" _ => pure ("::unwrapResult", recv)
   | _ => none
 
 /-- TCB pre-process: rewrite `.namedProj T x` to `.app "::namedProj::T" [x]`

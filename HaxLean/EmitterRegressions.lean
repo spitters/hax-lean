@@ -6138,4 +6138,91 @@ def shadowExport : Json :=
 
 end BuiltinShadowCycles
 
+/-! ## `unwrap` on the adapter's `Option` and `Result`, generic functions by their names
+
+The adapter reads `core`'s `Option<T>` and `Result<T, E>` as the ADTs `Option` and
+`Result`; a call of `unwrap` or `expect` on a receiver of such a type, behind a
+reference or not, is marked like one on `ImpType.option` and `ImpType.result`
+(`unwrapMarker?`). The class plan names a generic function and the callee of a call
+with type arguments as the adapter names the definition and the call
+(`ClassEmit.genericFns`, `ClassEmit.typeArgCallsOf`): the crate's generic `m::new`
+is `m_new`, which gets the binders of its type parameters and the head of its type
+arguments at a call, and `Vec::new::<u32>` keeps the builtin head `new`, which is
+no callee of the plan. -/
+
+namespace GenericNames
+
+open Lean Hax.HaxAdapter BuiltinShadowCycles
+
+/-- The opaque `PrivateKey`. -/
+def sk : ImpType := .adt "PrivateKey" []
+
+/-- The receiver type `Result<PrivateKey, Error>` as the adapter reads it. -/
+def resTy : ImpType := .adt "Result" [sk, .adt "Error" []]
+
+#guard (markNamedProj (.mk (.app "unwrap" [.mk (.app "dec" [.mk (.var "b") .int]) resTy])
+    sk)).erase == .app "::unwrapResult" [.app "dec" [.var "b"]]
+#guard (markNamedProj (.mk (.app "expect" [.mk (.var "o") (.ref (.adt "Option" [.int]) false),
+    .mk (.var "m") .str]) .int)).erase == .app "::unwrapOption" [.var "o"]
+-- An ADT of another name keeps the call.
+#guard (markNamedProj (.mk (.app "unwrap" [.mk (.var "o") (.adt "Opt" [.int])]) .int)).erase ==
+  .app "unwrap" [.var "o"]
+
+/-- `fn decap(b: u32) -> PrivateKey { dec(b).unwrap() }`, with `dec` external. -/
+def decapDef : TExpr :=
+  .mk (.letBind "b" (.mk (.var "b") .int)
+    (.mk (.app "unwrap" [.mk (.app "dec" [.mk (.var "b") .int]) resTy]) sk)) sk
+
+/-- The emitted file of `decap`. -/
+def decapFile : String :=
+  toLeanCertifiedFileTyped [("decap", decapDef)] "Test" (procTdefs := [("decap", decapDef)])
+
+#guard (decapFile.splitOn "Option.getD (Except.toOption (dec b)) default").length == 2
+#guard (decapFile.splitOn "  unwrap (").length == 1
+
+/-- A call of the item `did` with the type arguments `targs` on `args`. -/
+def callTyT (did : Json) (targs args : List Json) : Json :=
+  nodeT (Json.mkObj [("Call", Json.mkObj [
+    ("fun", nodeT (Json.mkObj [("GlobalName", Json.mkObj [
+      ("item", Json.mkObj [("value", Json.mkObj [("def_id", did),
+        ("generic_args", Json.arr (targs.map fun t => Json.mkObj [("Type", t)]).toArray),
+        ("in_trait", Json.null)])])])])),
+    ("args", Json.arr args.toArray)])])
+
+/-- The generics `<D>`. -/
+def genD : Json := Json.mkObj [("params", Json.arr #[Json.mkObj [
+  ("kind", Json.mkObj [("Type", Json.mkObj [])]),
+  ("name", Json.mkObj [("Plain", Json.mkObj [("name", Json.str "D")])])]])]
+
+/-- The function item `nm<D>` with `DefId` `did`, one parameter `x: u32` and the
+    body `body`. -/
+def fnGenT (did : Json) (nm : String) (body : Json) : Json :=
+  Json.mkObj [("def_id", did), ("ident", Json.arr #[Json.str nm]),
+    ("kind", Json.mkObj [("Fn", Json.mkObj [("ident", Json.arr #[Json.str nm]),
+      ("generics", genD), ("def", Json.mkObj [
+    ("params", Json.arr #[Json.mkObj [("pat", Json.mkObj [("contents", Json.mkObj [
+      ("Binding", Json.mkObj [("var", Json.mkObj [("name", Json.str "x")])])])]),
+      ("ty", u32T)]]), ("ret", u32T), ("body", body)])])])]
+
+/-- `fn new<D>(x) { x }` and `fn user<D>(x) { new::<D>(Vec::new::<u32>()) }` of the
+    module `k::m`, with `u32` for the type argument `D`. -/
+def genericShadowExport : Json :=
+  Json.arr #[fnGenT localNew "new" (varT "x"),
+    fnGenT (didJ "k" [segJ (Json.mkObj [("TypeNs", "m")]),
+      segJ (Json.mkObj [("ValueNs", "user")])]) "user"
+      (callTyT localNew [u32T] [callTyT vecNew [u32T] []])]
+
+/-- The class plan of `genericShadowExport`. -/
+def genericShadowPlan : ClassEmit.ClassHooks :=
+  ClassEmit.plan (Json.arr #[]) genericShadowExport
+
+#guard genericShadowPlan.genericFns.map (·.name) == ["m_new", "user"]
+#guard genericShadowPlan.addBinders "m_new" "def m_new (x : Int) : Int := x" ==
+  "def m_new {D : Type} [Inhabited D] (x : Int) : Int := x"
+#guard genericShadowPlan.typeArgCalls.map (·.1) == ["user"]
+#guard ((genericShadowPlan.typeArgCallHeads (fun _ => none) (fun _ => []) "user").toOption.map
+  (·.map (·.1))) == some ["m_new"]
+
+end GenericNames
+
 end Hax.EmitterRegressions

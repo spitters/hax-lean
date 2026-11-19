@@ -403,14 +403,17 @@ partial def localBoundSelfItems (j : Json)
 
 /-- The parse context of `typeArgCallsOf` for the export `j`: the inherent `impl`
     blocks with their self types, type-argument heads and method collisions, and
-    the methods of the trait `impl` blocks, as `parseHaxFileWithTExprReport` builds
-    them, so that a reference to a method of an `impl` of the crate is named by the
-    definition the adapter emits for it. -/
+    the methods of the trait `impl` blocks, the short names qualified at their
+    definitions and calls (`HaxAdapter.fnNameCollisions`) and the local crate, as
+    `parseHaxFileWithTExprReport` builds them, so that a reference to a function or
+    a method of the crate is named by the definition the adapter emits for it. -/
 def typeArgImplMap (j : Json) : HaxAdapter.ImplSelfTypeMap :=
   { impls := HaxAdapter.buildImplSelfTypeMap j
     implArgHeads := HaxAdapter.inherentImplArgHeads j
     inherentCollisions := HaxAdapter.inherentMethodCollisions j
-    traitImplMethods := buildTraitImplMethodMap j }
+    traitImplMethods := buildTraitImplMethodMap j
+    collisions := HaxAdapter.fnNameCollisions j
+    localCrate := HaxAdapter.localCrateOfExport j }
 
 /-- The references with type arguments in a node of an export rewritten by
     `keepTypeParams`, as `(callee, type arguments)`: every node with a `def_id`
@@ -419,10 +422,12 @@ def typeArgImplMap (j : Json) : HaxAdapter.ImplSelfTypeMap :=
 
     * A node with a `null` `in_trait`, with the `Type` entries of its
       `generic_args`, which for a method of an inherent `impl` are the `impl`'s
-      followed by the method's own. It is named by
-      `HaxAdapter.disambiguateMethodCallWithImplMap` under `implMap`: the leaf of
-      its `def_id` for a function, `<SelfType>_<method>` for a method of an
-      inherent `impl` of the crate.
+      followed by the method's own. It is named as the adapter names a call
+      (`HaxAdapter.extractDefIdName` under the collisions and the local crate of
+      `implMap`, then `HaxAdapter.disambiguateMethodCallWithImplMap`): the leaf of
+      its `def_id` for a function, qualified by its parent when its short name is in
+      the collisions, and `<SelfType>_<method>` for a method of an inherent `impl`
+      of the crate.
     * A node whose `in_trait` resolves to a trait `impl` of the crate that defines
       the method (`HaxAdapter.resolveTraitImplCall`), named by the definition of
       that method, with the `Type` entries of the `impl`'s `Concrete` reference
@@ -444,8 +449,9 @@ partial def typeArgCallsOf (j : Json) (acc : Array (String × List ImpType) := #
       let funJ := Json.mkObj [("contents", Json.mkObj [("GlobalName",
         Json.mkObj [("item", Json.mkObj [("value", j)])])])]
       let (f, tys) ← if inTrait == Json.null then do
-          let leaf ← defIdLeafName defId
-          pure (HaxAdapter.disambiguateMethodCallWithImplMap funJ leaf implMap,
+          let _ ← defIdLeafName defId
+          let base := HaxAdapter.extractDefIdName defId implMap.collisions implMap.localCrate
+          pure (HaxAdapter.disambiguateMethodCallWithImplMap funJ base implMap,
             typeArgsOfGenericArgs args)
         else do
           let f ← HaxAdapter.resolveTraitImplCall funJ implMap
@@ -463,18 +469,22 @@ partial def typeArgCallsOf (j : Json) (acc : Array (String × List ImpType) := #
   | _ => acc
 
 /-- The generic top-level functions of an export rewritten by
-    `keepTypeParams`, one per name. -/
+    `keepTypeParams`, one per name. A function is named by its definition
+    (`HaxAdapter.haxFnItemName` under `HaxAdapter.fnNameCollisions`), so a crate
+    function whose short name is a builtin head or is defined by two modules has
+    its qualified name. -/
 def genericFns (traits : List String) (j : Json) : List GenericFn :=
   let implMap := typeArgImplMap j
   let fs := (allItems j).filterMap fun it => do
     let k ← (it.getObjVal? "kind").toOption
     let f ← (k.getObjVal? "Fn").toOption
-    let ident ← (f.getObjVal? "ident").toOption
+    let _ ← (f.getObjVal? "ident").toOption
     let g ← (f.getObjVal? "generics").toOption
     let ps := typeParamNames g
     guard (!ps.isEmpty)
     let beqParams := ((typeParamBounds ["PartialEq", "Eq"] g).map (·.2)).eraseDups
-    some { name := extractFnName ident, typeParams := ps, bounds := typeParamBounds traits g,
+    some { name := HaxAdapter.haxFnItemName it f implMap.collisions, typeParams := ps,
+           bounds := typeParamBounds traits g,
            boundArgs := typeParamBoundArgsNonEmpty traits g, beqParams,
            boundItems := (localBoundSelfItems f).toList,
            typeCalls := (typeArgCallsOf f #[] implMap).toList }
@@ -677,12 +687,14 @@ def plan (traitExport crate : Json) : ClassHooks :=
   -- The generic top-level functions and the generic methods of the `impl` blocks.
   let callees := gfns.map (·.name)
   let implMap := typeArgImplMap crate
-  -- Every top-level function, generic or not, and every generic method.
+  -- Every top-level function, generic or not, and every generic method, by the
+  -- name of its definition.
   let fnCalls := (allItems crate).filterMap fun it => do
     let k ← (it.getObjVal? "kind").toOption
     let f ← (k.getObjVal? "Fn").toOption
-    let ident ← (f.getObjVal? "ident").toOption
-    pure (extractFnName ident, (typeArgCallsOf f #[] implMap).toList)
+    let _ ← (f.getObjVal? "ident").toOption
+    pure (HaxAdapter.haxFnItemName it f implMap.collisions,
+      (typeArgCallsOf f #[] implMap).toList)
   let callers := (fnCalls ++ gfns.map fun g => (g.name, g.typeCalls)).foldl
     (fun acc c => if acc.any (·.1 == c.1) then acc else acc ++ [c]) []
   { traits, exports
