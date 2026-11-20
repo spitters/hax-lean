@@ -84,11 +84,12 @@ bound are class items rather than `Deps` fields, the conflict does not arise and
 def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
     (structFields : StructFieldNames) (newtypes : HaxAdapter.NewtypeMap)
     (classMode : Bool := false) (nominalKrates : List String := [])
-    (keepGoing : Bool := false) :
+    (keepGoing : Bool := false) (opaqueFns : List String := []) :
     Except String TypedDefs := do
   let ((_expr, fnTypes, rawTdefs, procTdefs), refused) ←
     HaxAdapter.parseHaxFileWithTExprReport inputJson structFields
       (traitImplConsts := classMode) (nominalKrates := nominalKrates) (keepGoing := keepGoing)
+      (opaqueFns := opaqueFns)
   let fnTypes ← distinctByName fnTypes
   let rawTdefs ← distinctByName rawTdefs
   let procTdefs ← distinctByName procTdefs
@@ -109,6 +110,7 @@ def typedDefsOfExport (inputJson : Json) (structMeta : StructMeta)
     let ((_expr, fnTypes, rawTdefs, procTdefs), refused) ←
       HaxAdapter.parseHaxFileWithTExprReport inputJson structFields
         (resolveTraitImpls := false) (nominalKrates := nominalKrates) (keepGoing := keepGoing)
+        (opaqueFns := opaqueFns)
     pure { fnTypes := ← distinctByName fnTypes, rawTdefs := ← distinctByName rawTdefs,
            procTdefs := ← distinctByName procTdefs, traitImplNames, depTypeConflicts, refused }
 

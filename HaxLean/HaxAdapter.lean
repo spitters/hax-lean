@@ -4373,6 +4373,22 @@ def forLoopRefusal? (m : Json) : Option String := do
     some (s!"unsupported construct: a `for` loop over {name} " ++
       "(an iterator adapter the loop translation does not model)")
 
+/-- The `core` iterator methods without a translation: `Iterator::step_by` and the
+    string splitters `str::split_whitespace` and `str::split_ascii_whitespace`. A call of
+    one is refused (`iterAdapterCallRefusal?`); a `for` loop over one is refused by
+    `forLoopRefusal?`. -/
+def unmodelledIterAdapters : List String :=
+  ["step_by", "split_whitespace", "split_ascii_whitespace"]
+
+/-- The refusal of a hax `Call` node `j` whose callee is a `core` method of
+    `unmodelledIterAdapters`. A function holding such a call can be made a `Deps`
+    operation with `haxpipeT --opaque`. -/
+def iterAdapterCallRefusal? (j : Json) : Option String := do
+  let (k, f, _) ← haxCallee? j
+  guard (k == "core" && unmodelledIterAdapters.contains f)
+  some (s!"unsupported construct: a call of the iterator method `{f}` " ++
+    "(no translation models it; `--opaque` makes the function a `Deps` operation)")
+
 /-- Whether a hax place expression is rooted at a captured variable (`UpvarRef`),
     through fields, tuple fields, indexing and dereferences. -/
 partial def placeRootIsUpvar (j : Json) : Bool :=
@@ -4598,7 +4614,7 @@ partial def bodyRefusal? (loopId : Option Nat) (argPos : Bool) (j : Json) :
         let argsR := match (c.getObjVal? "Call" >>= (·.getObjValAs? (Array Json) "args")) with
           | .ok args => args.toList.findSome? (bodyRefusal? loopId true)
           | _ => none
-        argsR <|> bodyRefusal? loopId false (field "Call" "fun")
+        iterAdapterCallRefusal? j <|> argsR <|> bodyRefusal? loopId false (field "Call" "fun")
       | some "Borrow" =>
         let isMut := ((c.getObjVal? "Borrow" >>= (·.getObjVal? "borrow_kind") >>=
           (·.getObjVal? "Mut")).toOption).isSome
@@ -6438,6 +6454,18 @@ def itemIsHaxOpaque (it : Json) : Bool :=
 def fnItemIsHaxOpaque (it : Json) : Bool :=
   (it.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption.isSome && itemIsHaxOpaque it
 
+/-- Whether the function item `it`, whose definition has the emitted name `emitted`, is
+    opaque: it carries `#[hax_lib::opaque]` (`fnItemIsHaxOpaque`), or `opaqueFns` (the
+    names of `haxpipeT --opaque`) holds its emitted name, after the qualification of a
+    colliding name and the self-type prefix of a method, or its Rust name. An opaque
+    function contributes no definition and its body is not parsed; a call of it calls
+    the field of its emitted name of the generated `Deps` class, as a call of a function
+    the export does not define. -/
+def fnItemIsOpaque (opaqueFns : List String) (it : Json) (emitted : String) : Bool :=
+  fnItemIsHaxOpaque it ||
+    (it.getObjVal? "kind" >>= (·.getObjVal? "Fn")).toOption.any fun fd =>
+      opaqueFns.contains emitted || opaqueFns.contains (haxFnItemName it fd [])
+
 /-- The methods every trait `impl` block of the extracted crate defines, as
     `(impl interning id, trait short name, self-type short name, method name)`,
     the self-type short name by `selfTyShortName?` (the trait name for a self type
@@ -7273,12 +7301,14 @@ def distinctDefNames {α β : Type} (parsed : List (String × α × TExpr × β)
     `impl`s of one self type define at distinct type arguments is named by the head
     of the argument (`inherentMethodCollisions`).
 
-    A function under `#[hax_lib::opaque]` (`fnItemIsHaxOpaque`) contributes no
-    definition and its body is not parsed: its calls call the field of its name of
-    the generated `Deps` class. -/
+    A function under `#[hax_lib::opaque]`, or whose emitted or Rust name is in
+    `opaqueFns` (`fnItemIsOpaque`), contributes no definition and its body is not
+    parsed: its calls call the field of its emitted name of the generated `Deps`
+    class. -/
 partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNames := [])
     (resolveTraitImpls : Bool := true) (traitImplConsts : Bool := false)
-    (nominalKrates : List String := []) (keepGoing : Bool := false) :
+    (nominalKrates : List String := []) (keepGoing : Bool := false)
+    (opaqueFns : List String := []) :
     Except String ((ImpExpr × List (String × FnTypeInfo)
                    × List (String × TExpr) × List (String × TExpr))
                    × List (String × String)) := do
@@ -7326,9 +7356,9 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
     let mut srcs : List String := []
     let mut refused : List (String × String) := []
     for item in items do
-      -- A function under `#[hax_lib::opaque]` has no definition; its calls call the
-      -- `Deps` field of its name (`fnItemIsHaxOpaque`).
-      if fnItemIsHaxOpaque item then continue
+      -- An opaque function has no definition; its calls call the `Deps` field of its
+      -- name (`fnItemIsOpaque`).
+      if fnItemIsOpaque opaqueFns item (itemName item) then continue
       let rk ← checkItem item (itemName item)
       unless rk.isEmpty do
         refused := refused ++ rk
@@ -7393,8 +7423,9 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                 match selfName, impl.getObjValAs? (Array Json) "items" with
                 | some sn, .ok implItems =>
                   for implItem in implItems do
-                    if fnItemIsHaxOpaque implItem then continue
                     let iName := itemName implItem
+                    if fnItemIsOpaque opaqueFns implItem s!"{pfx sn iName}_{iName}" then
+                      continue
                     let rk ← checkItem implItem s!"{pfx sn iName}_{iName}"
                     unless rk.isEmpty do
                       refused := refused ++ rk
@@ -7416,8 +7447,10 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                 match implId, impl.getObjValAs? (Array Json) "items" with
                 | some iid, .ok implItems =>
                   for implItem in implItems do
-                    if fnItemIsHaxOpaque implItem then continue
                     let m := itemName implItem
+                    let emitted := ((implMap.traitImplMethods.find? fun p =>
+                      p.1 == iid && p.2.1 == m).map (·.2.2)).getD m
+                    if fnItemIsOpaque opaqueFns implItem emitted then continue
                     let rk ← checkItem implItem m
                     unless rk.isEmpty do
                       refused := refused ++ rk
@@ -7430,9 +7463,7 @@ partial def parseHaxFileWithTExprReport (j : Json) (structFields : StructFieldNa
                     unless !isFnItem || implMap.traitImplMethods.any
                         (fun p => p.1 == iid && p.2.1 == m) do
                       continue
-                    let defName := ((implMap.traitImplMethods.find? fun p =>
-                      p.1 == iid && p.2.1 == m).map (·.2.2)).getD m
-                    let (r?, rf) ← tryItem implItem defName
+                    let (r?, rf) ← tryItem implItem emitted
                     refused := refused ++ rf
                     match r? with
                     | some (mName, raw, proc, ti) =>

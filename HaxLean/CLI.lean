@@ -68,6 +68,10 @@ structure Options where
   help : Bool := false
   name : String := "result"
   filterFns : Option (List String) := none  -- only include these functions
+  /-- The functions of the crate made `Deps` operations (`--opaque`), each named by its
+      emitted name or its Rust name: their bodies are not translated and every call of
+      one calls the `Deps` field of its emitted name (`HaxAdapter.fnItemIsOpaque`). -/
+  opaqueFns : List String := []
   /-- Emit even when a call through `&mut` is left outside the write-back
       rewrite, so that its effect does not reach the caller. Off by default:
       such an extraction misdescribes the source. -/
@@ -144,6 +148,8 @@ where
     | "--name" :: n :: rest, opts => go rest { opts with name := n }
     | "--filter" :: fns :: rest, opts =>
       go rest { opts with filterFns := some (fns.splitOn ",") }
+    | "--opaque" :: fns :: rest, opts =>
+      go rest { opts with opaqueFns := opts.opaqueFns ++ (fns.splitOn "," |>.filter (!·.isEmpty)) }
     | "--allow-dropped-writeback" :: rest, opts =>
       go rest { opts with allowDroppedWriteback := true }
     | "--emit-lowct" :: rest, opts => go rest { opts with emitLowCT := true }
@@ -180,6 +186,13 @@ OPTIONS:
                     their ImpExpr and TExpr literals; required with --hax
   --name NAME       Name of the extraction (default: result)
   --filter FN,FN    Only include matching functions (comma-separated)
+  --opaque FN,FN    With --emit-certified --hax: make the named functions of
+                    the crate Deps operations, as external functions are:
+                    their bodies are not translated, the Deps class has a
+                    field of each called one, typed by its calls, and every
+                    call goes through that field. A name is the emitted name
+                    (Type_method, a qualified colliding name) or the Rust
+                    name; the option may be repeated
   --emit-lowct      With --emit-certified: also emit the ANF-normalised literal
                     and its haxToLowCT lowering per function
   --emit-classes FILE

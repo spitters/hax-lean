@@ -188,10 +188,13 @@ def main (args : List String) : IO UInt32 := do
     let structFields : StructFieldNames :=
       structMeta.map fun (sname, fields) => (sname, fields.map (·.1))
     -- The typed definitions, read again with every trait `impl` opaque when a
-    -- `Deps` name is used at two types (`typedDefsOfExport`).
+    -- `Deps` name is used at two types (`typedDefsOfExport`). The functions named by
+    -- `--opaque` have no definitions; their calls call `Deps` fields.
     let td ← IO.ofExcept (typedDefsOfExport inputJson structMeta structFields newtypes
       (classMode := classMode) (nominalKrates := opts.nominalKrates)
-      (keepGoing := opts.keepGoing))
+      (keepGoing := opts.keepGoing) (opaqueFns := opts.opaqueFns))
+    unless opts.opaqueFns.isEmpty do
+      IO.eprintln s!"INFO opaque={opts.opaqueFns}"
     for (n, msg) in td.refused do
       IO.eprintln s!"REFUSED {n}: {msg}"
     let depTypeConflicts := td.depTypeConflicts

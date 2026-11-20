@@ -4929,6 +4929,67 @@ def assignLet (body : ImpExpr) : ImpExpr :=
 #guard (parseArgs ["--hxa", "--emit-certified", "f.json"]).unknownArgs == ["--hxa"]
 #guard (parseArgs ["--hax", "--emit-certified", "f.json"]).unknownArgs.isEmpty
 
+/-! ### Functions made `Deps` operations, and iterator methods without a translation
+
+`--opaque FN,FN` names functions of the crate, by emitted or Rust name, that contribute no
+definition: every call of one calls the `Deps` field of its emitted name
+(`fnItemIsOpaque`). A call of `core`'s `step_by`, `split_whitespace` or
+`split_ascii_whitespace` is refused (`iterAdapterCallRefusal?`), so that the function
+holding it can be passed to `--opaque`. -/
+
+-- `--opaque` accumulates its comma-separated names over repeated uses.
+#guard
+  let o := parseArgs ["--hax", "--opaque", "f,S_m", "--opaque", "g", "x.json"]
+  o.opaqueFns == ["f", "S_m", "g"] && o.unknownArgs.isEmpty && o.inputFile == some "x.json"
+
+/-- An export of `enc (a : bool)` and of `g x y = enc x y`, neither under an attribute. -/
+def opaqueCliExport : Json :=
+  Json.arr #[fnItemWithParams "enc" #[boolParamJson "a"]
+      (haxVarRefT (Json.mkObj [("value", Json.str "Bool")]) "a"),
+    fnItemWithParams "g" #[boolParamJson "x", boolParamJson "y"] (callTwoJson "enc")]
+
+-- Named by `--opaque`, `enc` has no definition and `g` calls the `Deps` field `enc`.
+#guard match parseHaxFileWithTExprReport opaqueCliExport (opaqueFns := ["enc"]) with
+  | .ok ((_, fnTypes, raw, proc), _) =>
+    raw.map (·.1) == ["g"] &&
+      ((toLeanCertifiedFileTyped raw "Test" [] fnTypes proc).splitOn
+        "class TestDeps where\n  enc ").length == 2
+  | .error _ => false
+#guard match parseHaxFileWithTExprReport opaqueCliExport with
+  | .ok ((_, _, raw, _), _) => raw.map (·.1) == ["enc", "g"]
+  | .error _ => false
+-- A method is named by its emitted name `S_u32_m` or by its Rust name `m`.
+#guard match parseHaxFileWithTExprReport twoImplsExport (opaqueFns := ["S_u32_m"]) with
+  | .ok ((_, _, raw, _), _) => raw.map (·.1) == ["S_bool_m"]
+  | .error _ => false
+#guard match parseHaxFileWithTExprReport twoImplsExport (opaqueFns := ["m"]) with
+  | .ok _ => false
+  | .error e => e == "no functions or constants found in hax export"
+
+/-- `h (x : u32) = <core method f of seg>(x, x)` and `g x = h x`. -/
+def iterMethodExport (seg f : String) : Json :=
+  let ps := #[Json.mkObj [("pat", bindPatJ "x"), ("ty", u32J)]]
+  Json.arr #[
+    fnItemWithParams "h" ps
+      (callJ u32J "core" [("TypeNs", seg), ("ValueNs", f)] [varJ u32J "x", varJ u32J "x"]),
+    fnItemWithParams "g" ps (callJ u32J "k" [("ValueNs", "h")] [varJ u32J "x"])]
+
+-- A call of `step_by` or `split_whitespace` is refused; under `--opaque h` the function
+-- holding it is a `Deps` operation and its caller is kept.
+#guard match parseHaxFileWithTExpr (iterMethodExport "Iterator" "step_by") with
+  | .error e => e.startsWith "unsupported construct: a call of the iterator method `step_by`"
+  | .ok _ => false
+#guard match parseHaxFileWithTExpr (iterMethodExport "str" "split_whitespace") with
+  | .error e =>
+    e.startsWith "unsupported construct: a call of the iterator method `split_whitespace`"
+  | .ok _ => false
+#guard match parseHaxFileWithTExprReport (iterMethodExport "Iterator" "step_by")
+    (opaqueFns := ["h"]) with
+  | .ok ((_, _, raw, _), refused) => raw.map (·.1) == ["g"] && refused.isEmpty
+  | .error _ => false
+-- A `core` method of another name is not refused.
+#guard (parseHaxFileWithTExpr (iterMethodExport "Iterator" "step")).toOption.isSome
+
 end SilentDropRefusals
 
 /-! ## The range decision of the monadic emission
