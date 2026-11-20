@@ -1159,6 +1159,148 @@ def loopInvDefs (name : String) (tparams : List (String × ImpType))
       s!"def {thm}{pStr} :=\n  fun ({sanitizeName v} : Int) {accS} => " ++
       s!"({toLean φ 0 boolNames}) = true\n")
 
+/-! ## Termination measures
+
+A definition whose recursive calls are all calls of itself is printed as a `def` with a
+`termination_by` measure when one parameter moves toward a bound that is fixed across
+the calls, under the tests of the `if` branches enclosing each call
+(`terminationMeasure?`); the `decreasing_by` proof unfolds the runtime's arithmetic,
+comparisons and slices and closes each goal by `omega`. -/
+
+/-- Whether the name `f` occurs in `e`, as a variable or as the head of a call. -/
+partial def occursName (f : String) : ImpExpr → Bool
+  | .var v => v == f
+  | .app g args => g == f || args.any (occursName f)
+  | .letBind _ v b | .seq v b | .whileFold v b | .whileFoldReturn v b
+  | .whileLoop v b => occursName f v || occursName f b
+  | .lam _ b | .proj b _ | .borrow b | .deref b | .assign _ b | .earlyReturn b
+  | .questionMark b | .cfBreak b | .cfContinue b | .cfBreakContinue b
+  | .typeAscription b _ | .break_ (some b) => occursName f b
+  | .tuple es => es.any (occursName f)
+  | .ifThenElse c t e => occursName f c || occursName f t || occursName f e
+  | .match_ s arms => occursName f s || arms.any (occursName f ·.2)
+  | .forLoop _ lo hi b | .forLoopRev _ lo hi b | .forFold _ lo hi b | .forFoldRev _ lo hi b
+  | .forFoldReturn _ lo hi b | .forFoldRevReturn _ lo hi b =>
+    occursName f lo || occursName f hi || occursName f b
+  | .lit _ | .unitVal | .continue_ | .break_ none => false
+
+/-- The test of an enclosing `if` and the branch taken, `true` for the `then` branch. -/
+abbrev BranchTest := ImpExpr × Bool
+
+/-- The calls of `f` in `e`, each as its argument list and the tests of the enclosing
+    `if` branches. The result is `none` when `e` binds a name of `params`, matches on a
+    parameter, names `f` other than as the head of a call, or calls `f` in a closure, a
+    loop, a sequence or the test of an `if`. -/
+partial def selfCalls (f : String) (params : List String) (tests : List BranchTest) :
+    ImpExpr → Option (List (List ImpExpr × List BranchTest))
+  | .app g args => do
+    let inner ← args.foldlM (fun acc a => return acc ++ (← selfCalls f params tests a)) []
+    return (if g == f then [(args, tests)] else []) ++ inner
+  | .letBind n v b =>
+    if params.contains n then none
+    else return (← selfCalls f params tests v) ++ (← selfCalls f params tests b)
+  | .ifThenElse c t e =>
+    if occursName f c then none
+    else return (← selfCalls f params ((c, true) :: tests) t) ++
+      (← selfCalls f params ((c, false) :: tests) e)
+  | .match_ s arms =>
+    let onParam := match s with
+      | .var v | .typeAscription (.var v) _ => params.contains v
+      | _ => false
+    if onParam || arms.any (fun (p, _) => (patBinders p).any params.contains) then none
+    else do
+      let a ← arms.foldlM (fun acc (_, b) => return acc ++ (← selfCalls f params tests b)) []
+      return (← selfCalls f params tests s) ++ a
+  | .tuple es => es.foldlM (fun acc a => return acc ++ (← selfCalls f params tests a)) []
+  | .proj e _ | .typeAscription e _ => selfCalls f params tests e
+  | e => if occursName f e then none else some []
+
+/-- Whether `e` prints as the application of `head` to `args`. -/
+def printsAs (e : ImpExpr) (head : String) (args : List ImpExpr) : Bool :=
+  toLean e 0 == head ++ String.join (args.map fun a => " " ++ parensIf (toLean a 0) (!isAtom a))
+
+/-- The comparisons a test establishes, as `(a, b, strict)` for `a < b` (`strict`) or
+    `a ≤ b`: from a conjunction that holds, a disjunction that fails, a negation, and
+    the four orders of the runtime. -/
+partial def testComparisons : BranchTest → List (ImpExpr × ImpExpr × Bool)
+  | (.typeAscription c _, pos) => testComparisons (c, pos)
+  | (e@(.app _ [a]), pos) =>
+    if printsAs e "Hax.bnot" [a] then testComparisons (a, !pos) else []
+  | (e@(.app g [a, b]), pos) =>
+    let h := runtimeName g
+    if !printsAs e h [a, b] then [] else
+    match h, pos with
+    | "Hax.band", true => testComparisons (a, true) ++ testComparisons (b, true)
+    | "Hax.bor", false => testComparisons (a, false) ++ testComparisons (b, false)
+    | "Hax.lt", true | "Hax.ge", false => [(a, b, true)]
+    | "Hax.lt", false | "Hax.ge", true => [(b, a, false)]
+    | "Hax.gt", true | "Hax.le", false => [(b, a, true)]
+    | "Hax.gt", false | "Hax.le", true => [(a, b, false)]
+    | _, _ => []
+  | _ => []
+
+/-- The value of an integer literal `(c : Int)`. -/
+def intLit? : ImpExpr → Option Int
+  | .lit (.int c) => some c
+  | _ => none
+
+/-- Whether the comparisons `cs` give `0 < e`: a literal `a < e` with `0 ≤ a`, or
+    `a ≤ e` with `1 ≤ a`. -/
+def givesPos (cs : List (ImpExpr × ImpExpr × Bool)) (e : ImpExpr) : Bool :=
+  cs.any fun (x, y, strict) => toLean y 0 == toLean e 0 &&
+    (intLit? x).any fun a => if strict then 0 ≤ a else 1 ≤ a
+
+/-- The `termination_by` measure of the definition `f` with parameters `params` and body
+    `body`, when every recursive call of `f` is in the body and one parameter moves
+    along every call: an index `i` passed as `i + c` (`c` a positive literal) under a
+    test giving `i < n`, measured by `(n - i).toNat`, where `n` names only parameters
+    passed unchanged; a count `i` passed as `i - c` under a test giving `0 < i`,
+    measured by `i.toNat`; or an array `a` passed as `a[c..h]` or `a[c..]` under a
+    test giving `0 < a.len()`, measured by `a.size`. -/
+def terminationMeasure? (f : String) (params : List String) (body : ImpExpr) :
+    Option String := do
+  let calls ← selfCalls f params [] body
+  if calls.isEmpty || calls.any (·.1.length != params.length) then none
+  let cmps := calls.map fun (_, ts) => ts.flatMap testComparisons
+  let argsAt (k : Nat) : List ImpExpr := calls.map fun (args, _) => args.getD k .unitVal
+  let unchanged (q : String) : Bool := match params.idxOf? q with
+    | some k => (argsAt k).all (toLean · 0 == toLean (.var q) 0)
+    | none => false
+  let fixed (n : ImpExpr) : Bool :=
+    !(toLean n 0).contains '\n' && !occursName f n &&
+      (collectFreeVars [] n).all unchanged
+  let stepOf (head : String) (p : String) (a : ImpExpr) : Bool := match a with
+    | .app _ [x, c] => printsAs a head [x, c] && toLean x 0 == toLean (.var p) 0 &&
+        (intLit? c).any (0 < ·)
+    | _ => false
+  let suffixOf (p : String) (a : ImpExpr) : Bool := match a with
+    | .app "index" [.var q, .app "Range" [lo, _]] =>
+      q == p && (intLit? lo).any (0 < ·) && (toLean a 0).startsWith "Hax.slice_range "
+    | .app "index" [.var q, .app "RangeFrom" [lo]] =>
+      q == p && (intLit? lo).any (0 < ·) && (toLean a 0).startsWith "Hax.slice_from "
+    | _ => false
+  params.zipIdx.findSome? fun (p, k) =>
+    let pv := toLean (.var p) 0
+    if pv != sanitizeName p then none
+    else if (argsAt k).all (stepOf "Hax.add" p) then
+      let bounds := (cmps.headD []).filterMap fun (x, n, strict) =>
+        if strict && toLean x 0 == pv && fixed n && !(collectFreeVars [] n).contains p
+        then some n else none
+      bounds.findSome? fun n =>
+        if cmps.all (·.any fun (x, m, s) => s && toLean x 0 == pv && toLean m 0 == toLean n 0)
+        then some s!"({toLean n 0} - {pv}).toNat" else none
+    else if (argsAt k).all (stepOf "Hax.sub" p) && cmps.all (givesPos · (.var p)) then
+      some s!"{pv}.toNat"
+    else if (argsAt k).all (suffixOf p) && cmps.all (givesPos · (.app "len" [.var p])) then
+      some s!"{pv}.size"
+    else none
+
+/-- The `decreasing_by` proof of a measure of `terminationMeasure?`. -/
+def measureDecreasingBy : String :=
+  "decreasing_by\n" ++
+  "  all_goals grind [Hax.add, Hax.sub, Hax.lt, Hax.le, Hax.gt, Hax.ge, Hax.band, Hax.bor,\n" ++
+  "    Hax.bnot, Hax.array_len, Hax.slice_range, Hax.slice_from, Array.size_extract]\n"
+
 /-! ## Typed Definition Generator -/
 
 /-- Generate a Lean 4 definition using types from the raw TExpr for parameter
@@ -1169,14 +1311,17 @@ def loopInvDefs (name : String) (tparams : List (String × ImpType))
     the body as a `RustM` `do` block (`MonadicEmit.renderBody`) and the return type,
     when annotated, as `RustM` of it. A non-monadic `recursive` definition is
     annotated with its return type also when that is `Int`, and is a
-    `partial def` when the annotation is printed. -/
+    `partial def` when the annotation is printed, except that a `selfRecursive` one
+    (on no cycle of the call graph other than its calls of itself) with a measure of
+    `terminationMeasure?` is a `def` with that `termination_by` measure. -/
 def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
     (structLookup : String → Option String := fun _ => none)
     (structMeta : StructMeta := [])
     (allFnTypes : List (String × HaxAdapter.FnTypeInfo) := [])
     (boolNames : List String := [])
     (mutWriteRets : List (String × List String × Bool) := [])
-    (monadic : Option (List String) := none) (recursive : Bool := false) : String :=
+    (monadic : Option (List String) := none) (recursive : Bool := false)
+    (selfRecursive : Bool := false) : String :=
   let (tparams, rawBody) := extractTParams rawTe
   -- Use the pipelined body, but strip leading param bindings (same as extractParams on ImpExpr)
   let rec stripParamBindings : ImpExpr → ImpExpr
@@ -1277,8 +1422,16 @@ def toLeanDefTyped (name : String) (rawTe : TExpr) (pipelinedBody : ImpExpr)
   match monadic with
   | none =>
     let bodyStr := toLean body 1 boolNames
-    let kw := if recursive && !retTyStr.isEmpty then "partial def" else "def"
-    s!"{kw} {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
+    let measure? := if recursive && selfRecursive && !retTyStr.isEmpty then
+        terminationMeasure? name (tparams.map (·.1)) body
+      else none
+    match measure? with
+    | some m =>
+      s!"def {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\ntermination_by {m}\n" ++
+        measureDecreasingBy
+    | none =>
+      let kw := if recursive && !retTyStr.isEmpty then "partial def" else "def"
+      s!"{kw} {sanitizeName name}{paramStr}{retTyStr} :=\n{bodyStr}\n"
   | some cl =>
     -- A monadic definition returns `RustM` of the surface return type; without a
     -- return-type annotation, the `do` block's monad comes from its last element.
@@ -2664,6 +2817,13 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
                 payloadEnums.contains a
               else false
         | none => false
+  -- A function whose every cycle of the call graph is a call of itself: without its
+  -- calls of itself it lies on no cycle.
+  let callEdges : List (String × List String) := defs.map fun (n, e) =>
+    (n, ((collectAppCalls e).map (·.1) ++ collectFreeVars [n] e).filter definedNames.contains)
+  let selfRecursive (n : String) : Bool :=
+    !(MonadicEmit.recursiveFns (callEdges.map fun (m, gs) =>
+      (m, if m == n then gs.filter (· != n) else gs)) [n]).contains n
   let surfaceDefs : List (String × String) := defs.map fun (n, e0) =>
     -- A call of a static trait method names its class and self type
     -- (`ClassHooks.staticCallHeads`); a refused function keeps its calls, and
@@ -2694,7 +2854,7 @@ def toLeanCertifiedFileTyped (rawTdefs : List (String × TExpr))
     let surfaceDef := match rawTdefs.find? (·.1 == n) with
       | some (_, rawTe) => toLeanDefTyped n rawTe e (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes) (boolNames := boolNames) (mutWriteRets := mutWriteRets)
           (monadic := if monadicFns.contains n then some monadicFns else none)
-          (recursive := recursiveSurface.contains n)
+          (recursive := recursiveSurface.contains n) (selfRecursive := selfRecursive n)
       | none => toLeanDef n e (fnTypeInfo := fnTi) (structLookup := structLookup) (structMeta := structMeta) (allFnTypes := fnTypes)
     -- `addBinders` reads the `def <name>` prefix.
     let partialPfx := "partial "

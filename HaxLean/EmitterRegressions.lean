@@ -5844,6 +5844,93 @@ def padlen : TExpr :=
   "partial def padlen (n : Int) : Int :=\npadlen n\n"
 #guard toLeanDefTyped "padlen" padlen (.app "padlen" [.var "n"]) ==
   "def padlen (n : Int) :=\npadlen n\n"
+-- A call of itself that passes its parameter unchanged has no measure.
+#guard toLeanDefTyped "padlen" padlen (.app "padlen" [.var "n"]) (recursive := true)
+    (selfRecursive := true) ==
+  "partial def padlen (n : Int) : Int :=\npadlen n\n"
+
+/-- The signature `fn f(b: &[u8], i: usize) -> usize`, a call of `f` as the body. -/
+def sliceIdxSig (f : String) : TExpr :=
+  .mk (.letBind "b" (.mk (.var "b") (.slice (.uint .w8)))
+    (.mk (.letBind "i" (.mk (.var "i") (.uint .wsize))
+      (.mk (.app f [.mk (.var "b") (.slice (.uint .w8)), .mk (.var "i") (.uint .wsize)])
+        (.uint .wsize))) (.uint .wsize))) (.uint .wsize)
+
+/-- `if i >= b.len() { 0 } else { b[i] + scan(b, i + 1) }`. -/
+def scanBody : ImpExpr :=
+  .ifThenElse (.app "ge" [.var "i", .app "len" [.var "b"]]) (.lit (.int 0))
+    (.app "add" [.app "index" [.var "b", .var "i"],
+      .app "scan" [.var "b", .app "add" [.var "i", .lit (.int 1)]]])
+
+/-- The `decreasing_by` proof printed with a measure. -/
+def decreasingText : String :=
+  "decreasing_by\n" ++
+  "  all_goals grind [Hax.add, Hax.sub, Hax.lt, Hax.le, Hax.gt, Hax.ge, Hax.band, Hax.bor,\n" ++
+  "    Hax.bnot, Hax.array_len, Hax.slice_range, Hax.slice_from, Array.size_extract]\n"
+
+-- An index passed as `i + 1` under the test `i < b.len()` is measured by the distance
+-- to the bound.
+#guard toLeanDefTyped "scan" (sliceIdxSig "scan") scanBody (recursive := true)
+    (selfRecursive := true) ==
+  "def scan (b : Array (Int)) (i : Int) : Int :=\n  if Hax.ge i (Hax.array_len b) then\n" ++
+  "    (0 : Int)\n  else\n    Hax.add (Hax.index b i) (scan b (Hax.add i (1 : Int)))\n" ++
+  "termination_by (Hax.array_len b - i).toNat\n" ++ decreasingText
+-- Without the test, the index has no bound and the definition is a `partial def`.
+#guard toLeanDefTyped "scan" (sliceIdxSig "scan")
+    (.app "scan" [.var "b", .app "add" [.var "i", .lit (.int 1)]]) (recursive := true)
+    (selfRecursive := true) ==
+  "partial def scan (b : Array (Int)) (i : Int) : Int :=\nscan b (Hax.add i (1 : Int))\n"
+-- On a cycle through another function, it is a `partial def`.
+#guard (toLeanDefTyped "scan" (sliceIdxSig "scan") scanBody (recursive := true)).startsWith
+  "partial def scan "
+
+/-- `if b.len() < 4 { 0 } else { drop2(&b[2..b.len()], i) }`. -/
+def drop2Body : ImpExpr :=
+  .ifThenElse (.app "lt" [.app "len" [.var "b"], .lit (.int 4)]) (.lit (.int 0))
+    (.app "drop2" [.app "index" [.var "b", .app "Range" [.lit (.int 2), .app "len" [.var "b"]]],
+      .var "i"])
+
+-- A slice passed as a suffix from a positive literal, under a test giving a nonempty
+-- slice, is measured by its size.
+#guard toLeanDefTyped "drop2" (sliceIdxSig "drop2") drop2Body (recursive := true)
+    (selfRecursive := true) ==
+  "def drop2 (b : Array (Int)) (i : Int) : Int :=\n" ++
+  "  if Hax.lt (Hax.array_len b) (4 : Int) then\n" ++
+  "    (0 : Int)\n  else\n    drop2 (Hax.slice_range b (2 : Int) (Hax.array_len b)) i\n" ++
+  "termination_by b.size\n" ++ decreasingText
+
+/-- The printed `scan`. -/
+def scan (b : Array (Int)) (i : Int) : Int :=
+  if Hax.ge i (Hax.array_len b) then
+    (0 : Int)
+  else
+    Hax.add (Hax.index b i) (scan b (Hax.add i (1 : Int)))
+termination_by (Hax.array_len b - i).toNat
+decreasing_by
+  all_goals grind [Hax.add, Hax.sub, Hax.lt, Hax.le, Hax.gt, Hax.ge, Hax.band, Hax.bor,
+    Hax.bnot, Hax.array_len, Hax.slice_range, Hax.slice_from, Array.size_extract]
+
+/-- The printed `drop2`. -/
+def drop2 (b : Array (Int)) (i : Int) : Int :=
+  if Hax.lt (Hax.array_len b) (4 : Int) then
+    (0 : Int)
+  else
+    drop2 (Hax.slice_range b (2 : Int) (Hax.array_len b)) i
+termination_by b.size
+decreasing_by
+  all_goals grind [Hax.add, Hax.sub, Hax.lt, Hax.le, Hax.gt, Hax.ge, Hax.band, Hax.bor,
+    Hax.bnot, Hax.array_len, Hax.slice_range, Hax.slice_from, Array.size_extract]
+
+/-- The printed form of Bertie's `padlen`, a count passed as `n - 1` under `n > 0`. -/
+def padlenB (b : Array (Int)) (n : Int) : Int :=
+  if Hax.band (Hax.gt n (0 : Int)) (Hax.beq (Hax.index b (Hax.sub n (1 : Int))) (0 : Int)) then
+    Hax.add (1 : Int) (padlenB b (Hax.sub n (1 : Int)))
+  else
+    (0 : Int)
+termination_by n.toNat
+decreasing_by
+  all_goals grind [Hax.add, Hax.sub, Hax.lt, Hax.le, Hax.gt, Hax.ge, Hax.band, Hax.bor,
+    Hax.bnot, Hax.array_len, Hax.slice_range, Hax.slice_from, Array.size_extract]
 
 -- `E` is compared and its payload names `F`; `G` is not compared.
 #guard comparedAdts [("eq", 2, [.adt "E" [], .adt "E" []], .bool)] []
