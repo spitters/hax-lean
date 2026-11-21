@@ -925,8 +925,9 @@ theorem vec_remove_of_lt {α : Type} [Inhabited α] (arr : Array α) (i : Int)
 /-- Check if array is empty (Vec::is_empty). -/
 @[inline] def is_empty {α : Type} (arr : Array α) : Bool := arr.isEmpty
 
-/-- Truncate — identity in untyped extraction. -/
-@[inline] def truncate {α : Type} (arr : Array α) (_n : Int) : Array α := arr
+/-- `Vec::truncate`: the first `n` elements, or the whole array when it has at most `n`. The
+length `n` is a `usize` in Rust, so `n.toNat` is `n` on every extracted call. -/
+@[inline] def truncate {α : Type} (arr : Array α) (n : Int) : Array α := arr.extract 0 n.toNat
 
 /-- Mutable index — element access in untyped extraction.
     Same as `index` (returns element at position). The mutation tracking
@@ -1300,6 +1301,17 @@ theorem wrapping_sub_w_eq_emod {w : Nat} {a b : Int} (h : b ≤ a + 2 ^ w) :
 @[grind =] theorem size_repeat_ {α : Type} (v : α) (n : Int) :
     (repeat_ v n).size = n.toNat := by
   simp [repeat_]
+
+/-- `Hax.truncate a n` has `min n.toNat a.size` entries. -/
+@[grind =] theorem size_truncate {α : Type} (a : Array α) (n : Int) :
+    (truncate a n).size = min n.toNat a.size := by
+  simp [truncate, Array.size_extract]
+
+/-- `Hax.truncate a n` keeps the entries of `a` below `n`. -/
+theorem getElem_truncate {α : Type} (a : Array α) (n : Int) (i : Nat)
+    (h : i < (truncate a n).size) :
+    (truncate a n)[i] = a[i]'(by rw [size_truncate] at h; omega) := by
+  simp [truncate, Array.getElem_extract]
 
 /-- `Hax.array_len` is the size as an integer. -/
 @[grind =] theorem array_len_eq_size {α : Type} (a : Array α) :
